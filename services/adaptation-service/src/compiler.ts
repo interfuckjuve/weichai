@@ -1,6 +1,6 @@
 /**
- * C# 编译校验器
- * 调用 dotnet build 或 csc 检查代码是否能通过编译。
+ * C# / Java 编译校验器
+ * 调用 dotnet build / csc 检查 C# 代码，调用 javac 检查 Java 代码。
  */
 
 import { execFileSync, execSync } from "node:child_process";
@@ -14,6 +14,8 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
+
+export type CompileTarget = "C#" | "Java";
 
 export interface CompileResult {
   success: boolean;
@@ -79,7 +81,9 @@ export function compileIntegrated(
   ) {
     return {
       success: false,
-      errors: [`Target file must stay inside the skeleton project: ${targetFilePath}`],
+      errors: [
+        `Target file must stay inside the skeleton project. target: ${targetFilePath}, skeleton: ${projectRoot}`,
+      ],
       output: "",
     };
   }
@@ -226,14 +230,24 @@ function parseCsErrors(output: string): string[] {
   return errors;
 }
 
+function safeWrapperClassName(code: string, className: string): string {
+  // C# CS0542: 类名和方法名不能相同。检测到冲突时加 _Wrapper 后缀。
+  const conflictPattern = new RegExp(
+    `\\b${escapeRegExp(className)}\\s*\\(`,
+    "i",
+  );
+  return conflictPattern.test(code) ? `${className}_Wrapper` : className;
+}
+
 function buildWrapperSource(code: string, className: string): string {
+  const safeName = safeWrapperClassName(code, className);
   return `using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Globalization;
 using System.Text;
 
-public class ${className} {
+public class ${safeName} {
 ${code}
 }`;
 }
@@ -320,4 +334,194 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+// ---- Java 编译 ----
+
+function findJavac(): string | null {
+  const candidates = [
+    process.env.JAVA_HOME ? join(process.env.JAVA_HOME, "bin", "javac") : null,
+    process.env.JAVA_HOME ? join(process.env.JAVA_HOME, "bin", "javac.exe") : null,
+    "javac",
+    "javac.exe",
+  ].filter((c): c is string => Boolean(c));
+
+  for (const candidate of candidates) {
+    try {
+      execFileSync(candidate, ["-version"], { stdio: "ignore" });
+      return candidate;
+    } catch {
+      // Continue to next candidate.
+    }
+  }
+  return null;
+}
+
+/**
+ * 独立编译一个 Java 方法体，不依赖项目类型定义。
+ * 把翻译后的方法放进一个最小 wrapper class，用 javac 验证。
+ */
+export function compileJavaStandalone(
+  javaCode: string,
+  className: string,
+): CompileResult {
+  const javac = findJavac();
+  if (!javac) {
+    return {
+      success: false,
+      errors: [
+        "JDK not installed. Install a JDK and ensure javac is on PATH, or set JAVA_HOME.",
+      ],
+      output: "",
+    };
+  }
+
+  const dir = mkdtempSync(join(tmpdir(), ".forexplore-java-standalone-"));
+  const fullSource = buildJavaWrapperSource(javaCode, className);
+  const javaFile = join(dir, `${className}.java`);
+  writeFileSync(javaFile, fullSource, "utf-8");
+
+  try {
+    const stdout = execFileSync(javac, [javaFile], {
+      encoding: "utf-8",
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: 30_000,
+      stdio: "pipe",
+    });
+    return { success: true, errors: [], output: stdout };
+  } catch (e: unknown) {
+    const errOutput = collectErrorOutput(e);
+    const errors = parseJavaErrors(errOutput);
+    return { success: false, errors, output: errOutput };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * 集成编译 — 在临时副本中替换目标方法并编译完整 Java skeleton 项目。
+ * 尝试用 javac + classpath 编译，如果项目有 Maven/Gradle 也会尝试。
+ */
+export function compileJavaIntegrated(
+  javaCode: string,
+  skeletonProjectPath: string,
+  targetFilePath: string,
+): CompileResult {
+  const javac = findJavac();
+  if (!javac) {
+    return {
+      success: false,
+      errors: [
+        "JDK not installed. Install a JDK and ensure javac is on PATH, or set JAVA_HOME.",
+      ],
+      output: "",
+    };
+  }
+
+  const projectRoot = resolve(skeletonProjectPath);
+  const sourcePath = resolve(projectRoot, targetFilePath);
+  const relativeTarget = relative(projectRoot, sourcePath);
+  if (
+    !relativeTarget ||
+    relativeTarget === ".." ||
+    relativeTarget.startsWith(`..${sep}`) ||
+    isAbsolute(relativeTarget)
+  ) {
+    return {
+      success: false,
+      errors: [
+        `Target file must stay inside the skeleton project. target: ${targetFilePath}, skeleton: ${projectRoot}`,
+      ],
+      output: "",
+    };
+  }
+  if (!existsSync(sourcePath)) {
+    return {
+      success: false,
+      errors: [`Target file does not exist in the skeleton project: ${targetFilePath}`],
+      output: "",
+    };
+  }
+
+  const temporaryProject = mkdtempSync(
+    join(dirname(projectRoot), ".forexplore-java-integrated-"),
+  );
+  try {
+    cpSync(projectRoot, temporaryProject, {
+      recursive: true,
+      filter: (source) => !["bin", "build", "target", "out"].includes(source.split(/[\\/]/).at(-1) ?? ""),
+    });
+    const temporaryTarget = join(temporaryProject, relativeTarget);
+    const original = readFileSync(temporaryTarget, "utf8");
+    writeFileSync(temporaryTarget, replaceTargetMethod(original, javaCode), "utf8");
+
+    // Collect all .java files under the project for classpath compilation
+    const javaFiles = collectJavaFilesRecursive(temporaryProject);
+    try {
+      const stdout = execFileSync(javac, ["-d", join(temporaryProject, "out"), ...javaFiles], {
+        encoding: "utf-8",
+        maxBuffer: 10 * 1024 * 1024,
+        timeout: 60_000,
+        stdio: "pipe",
+      });
+      return { success: true, errors: [], output: stdout };
+    } catch (e: unknown) {
+      const errOutput = collectErrorOutput(e);
+      const errors = parseJavaErrors(errOutput);
+      return { success: false, errors, output: errOutput };
+    }
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { success: false, errors: [message], output: message };
+  } finally {
+    rmSync(temporaryProject, { recursive: true, force: true });
+  }
+}
+
+function buildJavaWrapperSource(code: string, className: string): string {
+  const safeName = safeWrapperClassName(code, className);
+  return `import java.util.*;
+import java.util.stream.*;
+import java.util.function.*;
+import java.math.*;
+
+public class ${safeName} {
+${code}
+}`;
+}
+
+function collectJavaFilesRecursive(dir: string): string[] {
+  const { readdirSync, statSync } = require("node:fs") as typeof import("node:fs");
+  const results: string[] = [];
+  try {
+    for (const entry of readdirSync(dir)) {
+      const full = join(dir, entry);
+      const stat = statSync(full);
+      if (stat.isDirectory()) {
+        results.push(...collectJavaFilesRecursive(full));
+      } else if (entry.endsWith(".java")) {
+        results.push(full);
+      }
+    }
+  } catch {
+    // Skip unreadable directories.
+  }
+  return results;
+}
+
+function parseJavaErrors(output: string): string[] {
+  // javac errors look like: "File.java:10: error: ..."
+  const regex = /error:\s*(.+)/gi;
+  const matches = output.matchAll(regex);
+  const errors = Array.from(matches, (m) => m[1]?.trim() ?? "").filter(Boolean);
+  if (errors.length === 0) {
+    errors.push(
+      ...output
+        .split("\n")
+        .filter((l) => l.trim())
+        .slice(-5),
+    );
+  }
+  return errors;
+}
+
+export { findJavac as _findJavac };
 export const compilerInternals = { replaceTargetMethod };

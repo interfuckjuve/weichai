@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { loadConfig } from "./config";
 
@@ -20,8 +21,8 @@ describe("adaptation service config", () => {
       ADAPTATION_PROJECT_ROOT: "/tmp/project",
     });
 
-    expect(config.skeletonProjectPath).toBe("/tmp/skeleton");
-    expect(config.projectRoot).toBe("/tmp/project");
+    expect(config.skeletonProjectPath).toBe(resolve("/tmp/skeleton"));
+    expect(config.projectRoot).toBe(resolve("/tmp/project"));
   });
 
   it("accepts the merged branch's skeleton variable as a compatibility alias", () => {
@@ -30,7 +31,7 @@ describe("adaptation service config", () => {
       ADAPTATION_SKELETON_PATH: "/tmp/legacy-skeleton",
     });
 
-    expect(config.skeletonProjectPath).toBe("/tmp/legacy-skeleton");
+    expect(config.skeletonProjectPath).toBe(resolve("/tmp/legacy-skeleton"));
   });
 
   it("reads custom host, port, and CORS origin", () => {

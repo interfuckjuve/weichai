@@ -44,7 +44,7 @@ describe("AdaptationAdapter language gate", () => {
         candidate: { ...javaCandidate, language: "Python" },
       }),
     ).rejects.toThrow(
-      "Unsupported adaptation language pair: Python -> C#. Expected Java -> C#.",
+      "Unsupported adaptation language pair: Python -> C#. Supported: Java <-> C#.",
     );
   });
 
@@ -55,7 +55,7 @@ describe("AdaptationAdapter language gate", () => {
         target: { ...request.target, language: "TypeScript" },
       }),
     ).rejects.toThrow(
-      "Unsupported adaptation language pair: Java -> TypeScript. Expected Java -> C#.",
+      "Unsupported adaptation language pair: Java -> TypeScript. Supported: Java <-> C#.",
     );
   });
 
@@ -63,6 +63,29 @@ describe("AdaptationAdapter language gate", () => {
     await expect(adapter.adapt({ ...request, strategy: "wrap" })).rejects.toThrow(
       'AdaptationAdapter only supports the "translate" strategy; received "wrap".',
     );
+  });
+
+  it("accepts C# -> Java direction at the gate (fails later without API key)", async () => {
+    const csharpCandidate = {
+      ...javaCandidate,
+      language: "C#" as const,
+      preview: "public decimal Calculate() { return 1.0m; }",
+    };
+    const javaTarget = {
+      ...request.target,
+      language: "Java" as const,
+      name: "calculate",
+      signature: "public double calculate()",
+    };
+
+    // 方向校验通过；因为没有有效 API key，会在 LLM 调用阶段抛出异常
+    await expect(
+      adapter.adapt({
+        ...request,
+        candidate: csharpCandidate,
+        target: javaTarget,
+      }),
+    ).rejects.toThrow();
   });
 });
 

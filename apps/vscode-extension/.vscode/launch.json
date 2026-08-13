@@ -6,8 +6,7 @@
       "type": "extensionHost",
       "request": "launch",
       "args": ["--extensionDevelopmentPath=${workspaceFolder}"],
-      "outFiles": ["${workspaceFolder}/dist/extension/**/*.js"],
-      "preLaunchTask": "forexplore: build extension"
+      "outFiles": ["${workspaceFolder}/dist/extension/**/*.js"]
     }
   ]
 }

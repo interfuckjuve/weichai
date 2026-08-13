@@ -2,6 +2,7 @@
  * CodeAdaptationPort 实现 — 核心编排
  *
  * 流程: LLM翻译 → 独立编译 → 自动修复(最多3轮) → 集成编译 → 生成结果
+ * 支持 Java ↔ C# 双向翻译。
  */
 
 import { readFileSync, existsSync } from "node:fs";
@@ -11,12 +12,17 @@ import type {
   AdaptationResult,
   FilePatch,
   InterfaceMapping,
-  Language,
 } from "@forexplore/contracts";
 import type { CodeAdaptationPort } from "@forexplore/workflow-core";
-import { translateJavaToCSharp, fixCompileErrors } from "./translator";
+import {
+  translateJavaToCSharp,
+  translateCSharpToJava,
+  fixCompileErrors,
+} from "./translator";
 import {
   compileIntegrated,
+  compileJavaIntegrated,
+  compileJavaStandalone,
   compileStandalone,
   isCompilerUnavailable,
 } from "./compiler";
@@ -49,24 +55,20 @@ export class AdaptationAdapter implements CodeAdaptationPort {
   ): Promise<AdaptationResult> {
     assertSupportedTranslation(request);
     const matchType = inferMatchType(request);
+    const direction = getDirection(request);
+    const targetLang = request.target.language as "C#" | "Java";
 
     // ===== Step 1: LLM 翻译 =====
-    let csharpCode = await translateJavaToCSharp(
-      {
-        javaSource: request.candidate.preview,
-        csharpSignature: request.target.signature,
-        requirement: request.requirement,
-        matchType,
-      },
-      this.#apiKey,
-      signal,
-    );
+    let generatedCode = await translateCode(request, matchType, direction, this.#apiKey, signal);
 
     // ===== Step 2: 编译 + 自动修复 =====
-    let standaloneResult = compileStandalone(csharpCode, request.target.name);
-    let integratedResult = this.#skeletonProjectPath
-      ? compileIntegrated(csharpCode, this.#skeletonProjectPath, request.target.path)
-      : null;
+    let standaloneResult = compileCode(generatedCode, request.target.name, direction);
+    let integratedResult = compileCodeIntegrated(
+      generatedCode,
+      this.#skeletonProjectPath,
+      request.target.path,
+      direction,
+    );
     let retries = 0;
     let repairResult = integratedResult ?? standaloneResult;
 
@@ -75,41 +77,46 @@ export class AdaptationAdapter implements CodeAdaptationPort {
       !isCompilerUnavailable(repairResult) &&
       retries < MAX_RETRIES
     ) {
-      csharpCode = await fixCompileErrors(
-        csharpCode,
+      generatedCode = await fixCompileErrors(
+        generatedCode,
         repairResult.errors,
         request.target.signature,
         request.requirement,
         this.#apiKey,
+        targetLang,
         signal,
       );
-      standaloneResult = compileStandalone(csharpCode, request.target.name);
-      integratedResult = this.#skeletonProjectPath
-        ? compileIntegrated(csharpCode, this.#skeletonProjectPath, request.target.path)
-        : null;
+      standaloneResult = compileCode(generatedCode, request.target.name, direction);
+      integratedResult = compileCodeIntegrated(
+        generatedCode,
+        this.#skeletonProjectPath,
+        request.target.path,
+        direction,
+      );
       repairResult = integratedResult ?? standaloneResult;
       retries++;
     }
 
     // ===== Step 3: 生成映射 =====
-    const mappings = buildMappings(request.candidate.preview, csharpCode);
+    const mappings = buildMappings(request.candidate.preview, generatedCode, direction);
 
     // ===== Step 4: 生成 FilePatch =====
     const originalContent = readOriginalIfAvailable(
       this.#projectRoot,
+      this.#skeletonProjectPath,
       request.target.path,
     );
     const patch = buildFilePatch(
       request.target.path,
-      csharpCode,
+      generatedCode,
       originalContent,
       request.target.line,
     );
 
     return {
       strategy: request.strategy,
-      targetLanguage: "C#" as Language,
-      generatedCode: csharpCode,
+      targetLanguage: targetLang,
+      generatedCode,
       interfaceMappings: mappings,
       validation: [
         {
@@ -136,18 +143,87 @@ export class AdaptationAdapter implements CodeAdaptationPort {
 
 // ---- helpers ----
 
+type TranslationDirection = "java-to-csharp" | "csharp-to-java";
+
+function getDirection(request: AdaptationRequest): TranslationDirection {
+  const src = request.candidate.language;
+  const tgt = request.target.language;
+  if (src === "Java" && tgt === "C#") return "java-to-csharp";
+  if (src === "C#" && tgt === "Java") return "csharp-to-java";
+  // assertSupportedTranslation 已经保证了方向合法，这里只是兜底
+  throw new Error(`Unsupported direction: ${src} -> ${tgt}`);
+}
+
+async function translateCode(
+  request: AdaptationRequest,
+  matchType: "exact" | "partial" | "different",
+  direction: TranslationDirection,
+  apiKey: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  if (direction === "java-to-csharp") {
+    return translateJavaToCSharp(
+      {
+        javaSource: request.candidate.preview,
+        csharpSignature: request.target.signature,
+        requirement: request.requirement,
+        matchType,
+      },
+      apiKey,
+      signal,
+    );
+  }
+  return translateCSharpToJava(
+    {
+      csharpSource: request.candidate.preview,
+      javaSignature: request.target.signature,
+      requirement: request.requirement,
+      matchType,
+    },
+    apiKey,
+    signal,
+  );
+}
+
+function compileCode(
+  generatedCode: string,
+  name: string,
+  direction: TranslationDirection,
+) {
+  return direction === "java-to-csharp"
+    ? compileStandalone(generatedCode, name)
+    : compileJavaStandalone(generatedCode, name);
+}
+
+function compileCodeIntegrated(
+  generatedCode: string,
+  skeletonProjectPath: string | undefined,
+  targetPath: string,
+  direction: TranslationDirection,
+) {
+  if (!skeletonProjectPath) return null;
+  return direction === "java-to-csharp"
+    ? compileIntegrated(generatedCode, skeletonProjectPath, targetPath)
+    : compileJavaIntegrated(generatedCode, skeletonProjectPath, targetPath);
+}
+
 function assertSupportedTranslation(request: AdaptationRequest): void {
   if (request.strategy !== "translate") {
     throw new Error(
       `AdaptationAdapter only supports the "translate" strategy; received "${request.strategy}".`,
     );
   }
-  if (
-    request.candidate.language !== "Java" ||
-    request.target.language !== "C#"
-  ) {
+  const supportedPairs = [
+    ["Java", "C#"],
+    ["C#", "Java"],
+  ] as const;
+  const isSupported = supportedPairs.some(
+    ([src, tgt]) =>
+      request.candidate.language === src && request.target.language === tgt,
+  );
+  if (!isSupported) {
     throw new Error(
-      `Unsupported adaptation language pair: ${request.candidate.language} -> ${request.target.language}. Expected Java -> C#.`,
+      `Unsupported adaptation language pair: ${request.candidate.language} -> ${request.target.language}. Supported: Java <-> C#.`,
     );
   }
 }
@@ -159,22 +235,33 @@ function inferMatchType(request: AdaptationRequest): "exact" | "partial" | "diff
   return "exact";
 }
 
-/** 从 Java 源码和 C# 代码中推断类型映射 */
+/** 从源码和目标代码中推断类型映射 */
 function buildMappings(
-  _javaSource: string,
-  _csharpCode: string,
+  sourceCode: string,
+  _targetCode: string,
+  direction: TranslationDirection,
 ): InterfaceMapping[] {
-  const rules: Array<[string, string, InterfaceMapping["action"]]> = [
-    ["double", "decimal", "convert"],
-    ["List<", "List<", "preserve"],
-    ["boolean", "bool", "convert"],
-    ["String", "string", "convert"],
-    ["Map<", "Dictionary<", "convert"],
-    ["public class", "public class", "preserve"],
-  ];
+  const rules: Array<[string, string, InterfaceMapping["action"]]> =
+    direction === "java-to-csharp"
+      ? [
+          ["double", "decimal", "convert"],
+          ["List<", "List<", "preserve"],
+          ["boolean", "bool", "convert"],
+          ["String", "string", "convert"],
+          ["Map<", "Dictionary<", "convert"],
+          ["public class", "public class", "preserve"],
+        ]
+      : [
+          ["decimal", "double", "convert"],
+          ["List<", "List<", "preserve"],
+          ["bool", "boolean", "convert"],
+          ["string", "String", "convert"],
+          ["Dictionary<", "Map<", "convert"],
+          ["public class", "public class", "preserve"],
+        ];
 
   return rules
-    .filter(([java]) => _javaSource.includes(java))
+    .filter(([source]) => sourceCode.includes(source))
     .map(([source, target, action]) => ({
       source,
       target,
@@ -200,10 +287,12 @@ function typeMapNote(
 
 function readOriginalIfAvailable(
   projectRoot: string | undefined,
+  skeletonProjectPath: string | undefined,
   filePath: string,
 ): string | null {
-  if (!projectRoot) return null;
-  const fullPath = join(projectRoot, filePath);
+  const root = projectRoot ?? skeletonProjectPath;
+  if (!root) return null;
+  const fullPath = join(root, filePath);
   return existsSync(fullPath) ? readFileSync(fullPath, "utf-8") : null;
 }
 

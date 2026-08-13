@@ -5,6 +5,7 @@
       "label": "forexplore: build extension",
       "type": "npm",
       "script": "build",
+      "runtimeExecutable": "C:\\Program Files\\nodejs\\node.exe",
       "problemMatcher": [],
       "group": "build"
     }
