@@ -6,7 +6,7 @@
  */
 
 import { readFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import type {
   AdaptationRequest,
   AdaptationResult,
@@ -292,7 +292,8 @@ function readOriginalIfAvailable(
 ): string | null {
   const root = projectRoot ?? skeletonProjectPath;
   if (!root) return null;
-  const fullPath = join(root, filePath);
+  // 绝对路径（扩展传来的用户文件路径）直接使用；相对路径才拼在项目根下
+  const fullPath = isAbsolute(filePath) ? filePath : join(root, filePath);
   return existsSync(fullPath) ? readFileSync(fullPath, "utf-8") : null;
 }
 
@@ -327,12 +328,19 @@ function buildFilePatch(
   const originalLines = originalContent.replace(/\r\n/g, "\n").split("\n");
   const startIdx = Math.max(0, targetLine - 1);
 
+  // 向前回溯到方法签名行，让 remove 区包含签名（否则旧签名行残留导致重复）
+  const signatureIdx = findSignatureStart(originalLines, startIdx);
+
   // 找到方法体的闭合大括号
-  const endIdx = findMethodEnd(originalLines, startIdx);
-  const removedLines = originalLines.slice(startIdx, endIdx + 1);
+  const endIdx = findMethodEnd(originalLines, signatureIdx);
+  const removedLines = originalLines.slice(signatureIdx, endIdx + 1);
+
+  // 新代码按原方法首行缩进对齐（LLM 输出通常不带缩进）
+  const baseIndent = removedLines[0]?.match(/^\s*/)?.[0] ?? "";
+  const newLinesAligned = alignIndent(newLines, baseIndent);
 
   // 用原方法签名作为 context 行来定位
-  const contextBefore = startIdx > 0 ? originalLines[startIdx - 1] : null;
+  const contextBefore = signatureIdx > 0 ? originalLines[signatureIdx - 1] : null;
   const contextAfter =
     endIdx < originalLines.length - 1 ? originalLines[endIdx + 1] : null;
 
@@ -349,7 +357,7 @@ function buildFilePatch(
   }
 
   // 新方法所有行标记为 add
-  for (const line of newLines) {
+  for (const line of newLinesAligned) {
     hunkLines.push({ type: "add", content: line });
   }
 
@@ -358,13 +366,48 @@ function buildFilePatch(
     hunkLines.push({ type: "context", content: contextAfter });
   }
 
+  // header 必须覆盖整个 hunk（含 context 行）：起始行 = 第一个 context 行的行号。
+  // 扩展侧 applyHunks 以 header 起始行为锚点逐行执行；若行数不含 context，
+  // 会导致旧签名行残留（双签名）且末尾多删一行（括号丢失）。
+  const hunkStart = signatureIdx + 1 - (contextBefore ? 1 : 0);
+  const oldCount = (contextBefore ? 1 : 0) + removedLines.length + (contextAfter ? 1 : 0);
+  const newCount = (contextBefore ? 1 : 0) + newLinesAligned.length + (contextAfter ? 1 : 0);
+
   return {
     path: filePath,
     status: "modified",
     additions: newLines.length,
     deletions: removedLines.length,
-    hunks: [{ header: `@@ -${startIdx + 1},${removedLines.length} +${startIdx + 1},${newLines.length} @@`, lines: hunkLines }],
+    hunks: [{ header: `@@ -${hunkStart},${oldCount} +${hunkStart},${newCount} @@`, lines: hunkLines }],
   };
+}
+
+/** 把多行代码的公共缩进去掉，再统一加上目标缩进 */
+function alignIndent(lines: string[], indent: string): string[] {
+  const nonEmpty = lines.filter((line) => line.trim());
+  const commonIndent = nonEmpty.length
+    ? Math.min(...nonEmpty.map((line) => line.match(/^\s*/)?.[0].length ?? 0))
+    : 0;
+  return lines.map((line) => `${indent}${line.slice(commonIndent)}`.trimEnd());
+}
+
+/** 从方法体任意行向前回溯，找到方法签名行（0-based）。
+ *  签名行特征：以 `)` 结尾（允许尾部 `{` 的单行开括号风格），含 `(`，
+ *  且不是 if/for/while 等控制流语句。
+ */
+function findSignatureStart(lines: string[], startIdx: number): number {
+  const controlFlow =
+    /^(?:if|for|while|foreach|switch|catch|using|lock|do|else|try|synchronized|return|throw|new)\b/;
+  for (let i = startIdx; i >= 0; i--) {
+    const trimmed = lines[i].trim();
+    if (trimmed === "" || trimmed === "{" || trimmed === "}") continue;
+    const body = trimmed.replace(/\{\s*$/, "").trimEnd();
+    if (body.includes("(") && body.endsWith(")") && !controlFlow.test(body)) {
+      return i;
+    }
+  }
+  // 找不到签名行时回退到原位置（保持原有行为）
+  return startIdx;
 }
 
 /** 从 startIdx 开始，用括号深度匹配找到方法/代码块的结束行（0-based 索引） */

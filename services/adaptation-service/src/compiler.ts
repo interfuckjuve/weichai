@@ -5,14 +5,17 @@
 
 import { execFileSync, execSync } from "node:child_process";
 import {
+  copyFileSync,
   cpSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 
 export type CompileTarget = "C#" | "Java";
@@ -64,6 +67,10 @@ export function compileStandalone(
 
 /**
  * 集成编译 — 在临时副本中替换目标方法并编译完整 C# skeleton。
+ *
+ * 目标文件允许在 skeleton 项目之外（例如用户自己的仓库）：骨架外的目标文件
+ * 会连同其所在目录的 .cs 文件一起复制进临时项目，在保留用户代码上下文的前提下
+ * 替换目标方法并编译，这样翻译自己仓库的文件不再受骨架路径限制。
  */
 export function compileIntegrated(
   csharpCode: string,
@@ -72,25 +79,12 @@ export function compileIntegrated(
 ): CompileResult {
   const projectRoot = resolve(skeletonProjectPath);
   const sourcePath = resolve(projectRoot, targetFilePath);
-  const relativeTarget = relative(projectRoot, sourcePath);
-  if (
-    !relativeTarget ||
-    relativeTarget === ".." ||
-    relativeTarget.startsWith(`..${sep}`) ||
-    isAbsolute(relativeTarget)
-  ) {
-    return {
-      success: false,
-      errors: [
-        `Target file must stay inside the skeleton project. target: ${targetFilePath}, skeleton: ${projectRoot}`,
-      ],
-      output: "",
-    };
-  }
+  const outsideSkeleton = isPathOutside(projectRoot, sourcePath);
+
   if (!existsSync(sourcePath)) {
     return {
       success: false,
-      errors: [`Target file does not exist in the skeleton project: ${targetFilePath}`],
+      errors: [`Target file does not exist: ${targetFilePath}`],
       output: "",
     };
   }
@@ -112,7 +106,9 @@ export function compileIntegrated(
       recursive: true,
       filter: (source) => !["bin", "obj"].includes(source.split(/[\\/]/).at(-1) ?? ""),
     });
-    const temporaryTarget = join(temporaryProject, relativeTarget);
+    const temporaryTarget = outsideSkeleton
+      ? copyUserSourcesInto(temporaryProject, sourcePath, ".cs")
+      : join(temporaryProject, relative(projectRoot, sourcePath));
     const original = readFileSync(temporaryTarget, "utf8");
     writeFileSync(temporaryTarget, replaceTargetMethod(original, csharpCode), "utf8");
     return compileWithDotnet(dotnet, temporaryProject, false);
@@ -418,25 +414,12 @@ export function compileJavaIntegrated(
 
   const projectRoot = resolve(skeletonProjectPath);
   const sourcePath = resolve(projectRoot, targetFilePath);
-  const relativeTarget = relative(projectRoot, sourcePath);
-  if (
-    !relativeTarget ||
-    relativeTarget === ".." ||
-    relativeTarget.startsWith(`..${sep}`) ||
-    isAbsolute(relativeTarget)
-  ) {
-    return {
-      success: false,
-      errors: [
-        `Target file must stay inside the skeleton project. target: ${targetFilePath}, skeleton: ${projectRoot}`,
-      ],
-      output: "",
-    };
-  }
+  const outsideSkeleton = isPathOutside(projectRoot, sourcePath);
+
   if (!existsSync(sourcePath)) {
     return {
       success: false,
-      errors: [`Target file does not exist in the skeleton project: ${targetFilePath}`],
+      errors: [`Target file does not exist: ${targetFilePath}`],
       output: "",
     };
   }
@@ -449,7 +432,9 @@ export function compileJavaIntegrated(
       recursive: true,
       filter: (source) => !["bin", "build", "target", "out"].includes(source.split(/[\\/]/).at(-1) ?? ""),
     });
-    const temporaryTarget = join(temporaryProject, relativeTarget);
+    const temporaryTarget = outsideSkeleton
+      ? copyUserSourcesInto(temporaryProject, sourcePath, ".java")
+      : join(temporaryProject, relative(projectRoot, sourcePath));
     const original = readFileSync(temporaryTarget, "utf8");
     writeFileSync(temporaryTarget, replaceTargetMethod(original, javaCode), "utf8");
 
@@ -474,6 +459,31 @@ export function compileJavaIntegrated(
   } finally {
     rmSync(temporaryProject, { recursive: true, force: true });
   }
+}
+
+/** 判断 candidate 是否在 root 之外（绝对路径或 .. 逃逸） */
+function isPathOutside(root: string, candidate: string): boolean {
+  const rel = relative(root, candidate);
+  return !rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel);
+}
+
+/**
+ * 把骨架外的用户源码复制进临时项目的 __user__ 目录（连同同目录同名语言文件，
+ * 保留用户代码上下文），返回复制后的目标文件路径。
+ */
+function copyUserSourcesInto(
+  temporaryProject: string,
+  sourcePath: string,
+  extension: string,
+): string {
+  const userDir = join(temporaryProject, "__user__");
+  mkdirSync(userDir, { recursive: true });
+  const sourceDir = dirname(sourcePath);
+  for (const name of readdirSync(sourceDir)) {
+    if (!name.endsWith(extension)) continue;
+    copyFileSync(join(sourceDir, name), join(userDir, name));
+  }
+  return join(userDir, basename(sourcePath));
 }
 
 function buildJavaWrapperSource(code: string, className: string): string {

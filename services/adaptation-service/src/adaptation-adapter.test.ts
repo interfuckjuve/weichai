@@ -163,3 +163,87 @@ describe("buildFilePatch", () => {
     expect(types).toEqual(["add"]);
   });
 });
+
+// ---- 端到端回归:模拟扩展侧 applyHunks 应用补丁 ----
+
+function parseHunkHeader(header: string): { oldStart: number } | null {
+  const match = header.match(/^@@ -(\d+)(?:,\d+)? \+/);
+  if (!match?.[1]) return null;
+  return { oldStart: Number(match[1]) };
+}
+
+function applyHunks(content: string, hunks: { header: string; lines: Array<{ type: string; content: string }> }[]): string {
+  const lines = content.split(/\r?\n/);
+  let lineDelta = 0;
+  for (const hunk of hunks) {
+    const parsed = parseHunkHeader(hunk.header);
+    if (!parsed) continue;
+    let cursor = Math.max(0, Math.min(parsed.oldStart - 1 + lineDelta, lines.length));
+    for (const line of hunk.lines) {
+      if (line.type === "remove") {
+        if (cursor < lines.length) {
+          lines.splice(cursor, 1);
+          lineDelta -= 1;
+        }
+      } else if (line.type === "add") {
+        lines.splice(cursor, 0, line.content);
+        cursor += 1;
+        lineDelta += 1;
+      } else {
+        cursor += 1;
+      }
+    }
+  }
+  return lines.join("\n");
+}
+
+describe("backfill patch end-to-end (service patch + extension applyHunks)", () => {
+  const originalMain = [
+    "// npm run dev:retrieval",
+    "// npm run dev:adaptation",
+    "using System;",
+    "",
+    "namespace HelloWorldApp",
+    "{",
+    "    class Program",
+    "    {",
+    "        static void Main(string[] args)",
+    "        {",
+    "        }",
+    "    }",
+    "}",
+  ].join("\n");
+
+  const translatedMethod = [
+    "static void Main(string[] args)",
+    "{",
+    "    var platform = new ForeXplore.ReferencePlatform.ReferencePlatform();",
+    "    Console.WriteLine(platform.Quote(\"EUR\", \"USD\"));",
+    "    Console.WriteLine(platform.Settle());",
+    "    Console.WriteLine(platform.Report());",
+    "}",
+  ].join("\n");
+
+  it("replaces the method when the user selected the signature line", () => {
+    const patch = _buildFilePatch("/Users/x/Main.cs", translatedMethod, originalMain, 9);
+    const next = applyHunks(originalMain, patch.hunks);
+
+    expect(next.match(/static void Main\(string\[\] args\)/g)).toHaveLength(1);
+    expect(next).toContain('new ForeXplore.ReferencePlatform.ReferencePlatform()');
+    expect(next.trimEnd().endsWith("}")).toBe(true);
+    // class 与 namespace 的闭合括号都应保留
+    expect(next.split("\n").filter((l) => l.trim() === "}")).toHaveLength(3);
+    // 新方法体缩进与原方法一致(8 空格)
+    expect(next).toContain("        var platform = new ForeXplore");
+  });
+
+  it("replaces the method when the user selected inside the body", () => {
+    const patch = _buildFilePatch("/Users/x/Main.cs", translatedMethod, originalMain, 10);
+    const next = applyHunks(originalMain, patch.hunks);
+
+    expect(next.match(/static void Main\(string\[\] args\)/g)).toHaveLength(1);
+    expect(next).toContain('Console.WriteLine(platform.Report());');
+    expect(next.trimEnd().endsWith("}")).toBe(true);
+    expect(next.split("\n").filter((l) => l.trim() === "}")).toHaveLength(3);
+  });
+});
