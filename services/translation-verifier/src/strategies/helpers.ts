@@ -10,7 +10,7 @@ import type { TestStrategyJob } from "./types.js";
  * 本包根目录(services/translation-verifier):默认 workspaceRoot = <repoRoot>/test-results。
  * spec §7 新增 .gitignore 忽略 test-results/。
  */
-export const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+export const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 /**
  * runner 的 LLM 配置(比 brief 的三字段多一个可选 spawnClaude,用于测试注入 fake;

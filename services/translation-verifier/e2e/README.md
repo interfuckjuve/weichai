@@ -147,101 +147,98 @@ npm run e2e                                                # 根 package.json �
 
 > **两套管线定位**:`run-e2e.ts`(上方)= schema 管线(legacy,TestMigratorAgent 生成 JSON 描述 →
 > 驱动生成 → 差分 + 黄金双轨校验 + RepairLoop 修复);`run-smoke-e2e.ts`(本节)= **smoke 管线(推荐)**,
-> agent 自主闭环:读源码 → 设计冒烟用例(仅意图,无 expected)→ 写双侧 runner → 真实编译运行 →
-> 机械差分 + LLM 语义裁决 → 不一致时 agent 自己修(propose_target_fix / propose_runner_fix),
-> 全部在 executor 临时目录内完成,不落盘用户源/目标文件。
+> 经统一策略入口 `createTestStrategy("smoke")` 跑**单次 claude 自主会话(黑盒)**:claude 自己读码 →
+> 设计冒烟用例(仅意图,无 expected)→ 写双侧 runner → 真实编译运行 → 机械差分 + LLM 语义裁决 →
+> 不一致时自行修复,最终把 `report.json`(SmokeReport)写入工作目录,由 runner 读取归一化。
 
-## 架构(agent 驱动循环)
+## 架构(单次 claude 自主会话)
 
 ```text
 用户输入(需求 + 源/目标模块目录/文件 + 双侧语言)
         │
         ▼
-┌───────────── SmokeAgent(src/smoke-agent.ts,stateless replay 多轮)─────────────┐
-│ 循环: until action=finish 或 step ≥ maxSteps(默认 40)                          │
-│   1. buildTurnPrompt(系统提示 + 当前阶段指令 + 全量 history) → runClaude(单轮)   │
-│   2. parseAction(LLM stdout)→ SmokeAction;解析失败喂回格式错误重试(≤2)          │
-│   3. dispatch → observation;history += [动作, observation]                      │
-│ 工具(list_files/read_file/plan_smoke/write_runner/compile_runner/run_runner/    │
-│      compare/judge/propose_target_fix/propose_runner_fix/finish)               │
-└─────────────────────────────────────────────────────────────────────────────────┘
-        │ 复用 executor(编译/运行) + parseSideResults + compareCases(纯差分) + logger
-        ▼
-SmokeReport(逐 case:意图/双侧结果/机械 verdict/LLM 裁决/修复后目标文件全文)
+┌──────── createTestStrategy("smoke")(src/strategies/smoke-runner.ts)──────────┐
+│ 1. createWorkspace → 工作目录(<packageRoot>/test-results/smoke-<ts>-<rand>)   │
+│ 2. makeClaudeOptions:cwd=工作目录;addDirs=只读参考目录+工作目录;              │
+│    readOnlyDirs=参考目录;permissionMode=acceptEdits;maxTurns;                │
+│    hooksLogPath=工作目录/claude-steps.jsonl(PostToolUse hook 逐行追加)       │
+│ 3. 单次 runClaude(buildSmokeTaskPrompt):claude 内部完成读码 → plan → 写双侧  │
+│    runner → 编译/运行(javac/java/dotnet 白名单,优先 $JAVA_HOME)→ 机械差分 →  │
+│    语义裁决 → 修复 → 写 report.json → 结束                                    │
+│ 4. readReport(工作目录/report.json)→ 归一化 status(converged→pass/fail)+      │
+│    passRate(机械 pass 占比)                                                    │
+│ 5. keepGeneratedTests=true 时保留工作目录(keptDir),否则 cleanup 删除            │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 要点:
 
-- **一致性 = 机械差分 + LLM 语义裁决**:`compareCases` 不带 expected 调用即纯差分
-  (pass/fail/divergent);agent 结合需求 + 源码裁决 pass / translation-bug / accepted-diff / unclear。
-  两侧一致但都偏离需求时,agent 在 `sourceIssues` 标注源侧疑似缺陷,不机械判 fail。
-- **runner 契约**(agent 写两侧测试程序):Python 入口 `driver.py`;TypeScript 入口 `driver.ts`;
+- **一致性 = 机械差分 + LLM 语义裁决**:claude 用 Bash(javac/java/dotnet 白名单)真实编译运行双侧
+  runner,对比可观察行为;结合需求 + 源码裁决 pass / translation-bug / accepted-diff / unclear。
+  两侧一致但都偏离需求时,在 `sourceIssues` 标注源侧疑似缺陷,不机械判 fail。
+- **runner 契约**(claude 写两侧测试程序):Python 入口 `driver.py`;TypeScript 入口 `driver.ts`;
   C# 入口 `Driver.cs`(含 `public class X` + `X.Main`);Java 入口 `<ClassName>.java`
   (public class + `main`);输出统一 JSON 协议 `{"results":[{caseId,outcome,returnValue|exceptionType,...}]}`。
-- **修复闭环**:`propose_target_fix` 输出完整目标文件 → 控制器自动重编译→重运行→重差分 → 再 judge,
-  `maxRounds`(默认 3)内收敛;测试写错走 `propose_runner_fix`;不修源侧。
+- **修复闭环**:目标侧差分 fail → claude 提出目标修复(完整文件全文)→ 重编译→重运行→重差分 → 再裁决,
+  直到收敛或判定无法收敛;`rounds` 记录修复轮数。
+- **报告契约**:`report.json` 严格匹配 SmokeReport schema(src/smoke/smoke-types.ts);缺失/非法 JSON →
+  runner 返回 status=error 且 summary 带原因(不抛未捕获异常,spec §9)。
+- **步骤日志**:`claude-steps.jsonl` 由 PostToolUse hook 逐行记录每次工具调用(会话 id/路径/cwd/prompt 等),
+  用于审计与重放分析。
 
-## 用法
+## 用法(仅真实 claude 黑盒路径)
 
-### 离线路径(无 key,fixture 化 LLM 应答 + 真实工具链;默认验收)
+自主模式没有离线 ReAct 回放路径(fixture 化应答机制随 SmokeAgent 删除),需要真实 claude:
 
 ```bash
 cd /Users/origin/main/projects/monorepo/weichai
 
-# 默认样例:MimeUtility.DecodeText(C# → Java)
+# 环境变量 DEEPSEEK_API_KEY(或 --api-key);默认样例 MimeUtility.DecodeText(C# → Java)
 npx tsx services/translation-verifier/e2e/run-smoke-e2e.ts
 
-# 显式指定 fixture 目录 / 跳过真实 claude 阶段(即使有 key)
+# 显式指定 fixture 目录 / 加大超时(耗时取决于 agent 步数)
+npx tsx services/translation-verifier/e2e/run-smoke-e2e.ts --fixture-dir services/translation-verifier/e2e/fixtures/smoke-mime-util --timeout-ms 600000
+
+# --offline-only:跳过真实 claude(自主模式无离线路径,仅打印说明后退出)
 npx tsx services/translation-verifier/e2e/run-smoke-e2e.ts --offline-only
-npx tsx services/translation-verifier/e2e/run-smoke-e2e.ts --fixture-dir services/translation-verifier/e2e/fixtures/smoke-mime-util
-```
-
-离线路径验收:阶段 A(真实翻译产物 → agent 全 pass 收敛)→ 阶段 B1(注入 bug → 检出
-`translation-bug`)→ 阶段 B2(修复路径 → 1 轮内收敛)。全部 PASS 退出码 0。
-
-### 有 key 路径(真实 claude 子进程 + 真实工具链)
-
-```bash
-# 环境变量 DEEPSEEK_API_KEY 或 --api-key;耗时取决于 agent 步数,建议 --timeout-ms 加大
-DEEPSEEK_API_KEY=sk-xxx npx tsx services/translation-verifier/e2e/run-smoke-e2e.ts --timeout-ms 600000
 ```
 
 ## 参数表(smoke)
 
 | 参数 | 必填 | 默认 | 说明 |
 | --- | --- | --- | --- |
-| `--fixture-dir <path>` | 否 | `e2e/fixtures/smoke-mime-util` | 离线 LLM 应答序列与 runner fixture 目录 |
-| `--api-key <key>` | 否 | `DEEPSEEK_API_KEY` | 阶段 C(真实 claude 子进程)的 API Key |
-| `--timeout-ms <ms>` | 否 | `300000` | 阶段 C 单次 claude 调用超时 |
-| `--offline-only` | 否 | - | 跳过阶段 C(即使有 key),用于快速离线验收 |
-| `--json` | 否 | - | 输出各阶段 SmokeReport JSON |
+| `--fixture-dir <path>` | 否 | `e2e/fixtures/smoke-mime-util` | 任务输入目录(requirement.txt + 源/目标样例) |
+| `--api-key <key>` | 否 | `DEEPSEEK_API_KEY` | claude 自主会话的 API Key |
+| `--timeout-ms <ms>` | 否 | `300000` | 单次 claude 自主会话超时 |
+| `--offline-only` | 否 | - | 跳过真实 claude(自主模式无离线路径,仅说明后退出) |
+| `--json` | 否 | - | 输出 SmokeReport JSON |
 
 ## fixtures 说明(smoke)
 
 | 文件 | 内容 |
 | --- | --- |
 | `fixtures/smoke-mime-util/requirement.txt` | 需求原文(进入任务简报) |
-| `fixtures/smoke-mime-util/runner-source.cs` | C# 源侧 runner(Driver.cs,调用 MimeUtility.DecodeText) |
-| `fixtures/smoke-mime-util/runner-target.java` | Java 目标侧 runner(SmokeRunner.java,全限定名调用) |
-| `fixtures/smoke-mime-util/buggy-target.java` | 注入 bug 的目标文件(B 分支禁用 → encoded-b 差分 fail) |
-| `fixtures/smoke-mime-util/responses-stage-a.json` | 阶段 A 离线应答序列(占位符 `{{SRC_RUNNER}}`/`{{TGT_RUNNER}}` 由脚本替换) |
-| `fixtures/smoke-mime-util/responses-stage-b-detect.json` | 阶段 B1 应答序列(judge 裁决 translation-bug 后 finish) |
-| `fixtures/smoke-mime-util/responses-stage-b-repair.json` | 阶段 B2 应答序列(propose_target_fix `{{FIXED_TARGET}}` → 收敛) |
+| `fixtures/samples/mime-util-source.cs` | C# 源侧实现(参考目录,只读) |
+| `fixtures/samples/mime-util-target.java` | Java 目标侧翻译产物(参考目录,只读) |
+
+> 注:runner 代码由 claude 自主会话在工作目录内自行编写;`fixtures/smoke-mime-util/runner-*.{cs,java}` 与
+> `responses-stage-*.json` 是 Task 4 删除 ReAct 回放机制前的遗留 fixture,不再参与运行(保留作样例参考)。
 
 ## 退出码(smoke)
 
 | 退出码 | 含义 |
 | --- | --- |
-| `0` | 全部验收 PASS:真实翻译产物收敛、注入 bug 被检出、修复闭环收敛、真实 agent 收敛(有 key 时) |
-| `1` | 验收 FAIL:真实产物未收敛 / 注入 bug 未检出 / 修复未收敛 / 真实 agent 未收敛 |
-| `2` | 参数或运行错误(缺参、工具链缺失、LLM 调用失败等) |
+| `0` | 策略报告生成成功:claude 会话正常结束、`report.json` 有效且 status 非 error(报告如实呈现收敛/检出结果) |
+| `1` | 验收 FAIL:策略返回 status=error(报告缺失/非法/LLM 调用失败等) |
+| `2` | 参数或运行错误(缺 key、未知参数等) |
 
 ## 已知限制(smoke)
 
-- **stateless replay 的 token 线性增长**:observation 全部截断(文件 20KB / stdout 5000 字符 / 差分逐 case
-  摘要),正常冒烟 8~20 步可控;超长场景需升级 claude-client 支持消息数组(开放问题,本期未做)。
-- **runner 质量依赖 LLM**:编译失败由 validator 循环反馈重写(≤3 次/侧),caseId/输出协议不合法由
-  parseSideResults 的 parseErrors 反馈;fixture 离线路径已覆盖该契约的机械正确性。
+- **headless 环境下工具链权限**:`permissionMode=acceptEdits` 不自动放行 Bash 命令;无交互 TTY 时
+  claude 的 javac/java/dotnet 调用可能被权限层拦截("This command requires approval"),只能做静态分析、
+  `converged=false`(2026-08-27 冒烟实测;脚本仍会如实写 report.json,不伪造运行结果)。
+- **runner 质量依赖 LLM**:编译失败由 claude 自主修复重写(提示词约束"仅真实命令输出权威,不伪造
+  编译/运行结果");caseId/输出协议不合法由裁决环节反馈。
 - **修复产物不落盘**:SmokeReport.targetFiles 携带修复后文件全文,由调用方决定是否写回用户目录。
 - **smoke 管线不依赖 description schema**:仅借用 `VerifierLanguage`/`TargetLanguage` 类型;
   test-migrator / repair-loop / driver-codegen 冻结为 legacy,保留给旧管线与既有测试。

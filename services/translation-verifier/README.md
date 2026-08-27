@@ -51,7 +51,38 @@
 | `logger.ts` | 零依赖日志系统(文件 DEBUG 全量 + 控制台分级;默认写 monorepo 根 `logs/`) |
 | `cli.ts` | CLI 编排入口 |
 | `quality/` | **统一测试质量评估框架**(接口 + 五维指标 + 五个生成器适配器 + CLI,见下文) |
+| `strategies/` | **四方向 claude 自主会话统一入口**(工厂 + runner + 工作区 + 提示词,见下) |
 | `e2e/` | E2E 验收脚本 + fixtures(验证机制 / 注入 bug / 修复闭环演示) |
+
+## 四方向自主策略(统一入口 `strategies/`)
+
+spec §5:四个测试方向(smoke / distinct / aid / mitgen)全部改为 **claude 自主会话(黑盒)**——
+单次 claude 调用,由 claude 在隔离工作目录内自行完成读写代码、编译运行、差分分析、修复与
+报告落地,控制器不再逐轮编排(ReAct 遗留代码 Task 4 已删除)。
+
+```
+createTestStrategy(strategy, { llm, keepGeneratedTests, workspaceRoot, claudeSandbox, maxTurns })
+  └─ runner.run(job) → TestStrategyReport
+        ├─ workspace: <packageRoot>/test-results/<strategy>-<ts>-<rand>/(report.json + claude-steps.jsonl)
+        ├─ 沙箱: 参考目录只读(readOnlyDirs)、工作目录可写(cwd)
+        ├─ hooks: PostToolUse 逐行追加工具调用日志 → claude-steps.jsonl
+        └─ 归一化: status = pass / fail / unverified / error(报告缺失/非法 → error + summary 原因);
+           keepGeneratedTests=true 时保留工作目录(keptDir),否则 cleanup 删除
+```
+
+| 方向 | 报告 detail | 说明 |
+| --- | --- | --- |
+| smoke | `SmokeReport` | 冒烟用例 + 机械差分 + LLM 语义裁决 + 目标修复闭环 |
+| distinct | `ConsistencyResult` | 分支清单 + case 级 NLD 三态裁决(augmentation 并入重验) |
+| aid | `AIDVerificationReport` | 变体参考组 + 共识 oracle + 目标差分 |
+| mitgen | `MitGenResult` | 片段级微观测试(打分 + 定向输入 + 源侧实跑验证) |
+
+- 入口 `createTestStrategy`(src/strategies/index.ts)与类型(`TestStrategyJob` / `TestStrategyReport` /
+  `StrategyRunOptions` / `StrategyStatus`)经 `src/index.ts` 统一导出;`ConsistencyResult` 类型保留于
+  `src/distinct/consistency-verifier-types.ts` 并同样从包入口导出;
+- quality 五个生成器适配器已切换到该入口(smoke/distinct/aid/mitgen 四适配器,见下;baseline 保留
+  TestMigratorAgent);真实黑盒验证见 `e2e/README.md`(smoke 管线一节,2026-08-27 冒烟实测);
+- `test-results/` 已加入 .gitignore(默认工作区根 `<packageRoot>/test-results`)。
 
 ## AID 变体轨道(方向 3,LLM + 差分测试)
 
@@ -71,7 +102,7 @@ LLM 单点推理生成的 expected。三步法(论文核心):
    → fail(高置信);目标 ∈ 参考输出集 → disputed(低置信,复用 divergent 枚举 + details 标注);
    k-共识辅助(≥2 参考一致且与目标相悖 → fail,对应论文 DFP 触发)。
 
-### 模块清单(`src/variant/`)
+### 模块清单(`src/aid/`)
 
 | 模块 | 职责 |
 | --- | --- |
@@ -205,8 +236,8 @@ npx tsx services/translation-verifier/src/cli.ts \
 | `dataset.ts` | 数据集加载校验 + `buildTask`(Java 源侧自动收集 maven 项目全部源文件) |
 | `adapters.ts` | 适配器注册表 + `countedClaude`(成本统计) |
 | `adapters/baseline.ts` | `TestMigratorAgent` → 描述 |
-| `adapters/smoke.ts` | `SmokeAgent` 完整循环 → runner + SmokeReport(RecordingExecutor 还原 runner) |
-| `adapters/distinct.ts` | baseline 描述 + `LlmAnalyzer` 分支一致性 → flag-fail 信号 |
+| `adapters/smoke.ts` | `createTestStrategy("smoke")` 自主会话(读码→runner→差分→裁决→修复)→ SmokeReport;产出 runner(取自 detail.targetFiles / keptDir) |
+| `adapters/distinct.ts` | baseline 描述 + `createTestStrategy("distinct")` 分支一致性 → ConsistencyResult → flag-fail 信号 |
 | `adapters/aid.ts` | `verifyWithVariants` 变体轨道 → 冻结 clean oracle；`detectOnTarget` 仅重放注入目标，避免随机变体或输入污染检出率 |
 | `adapters/mitgen.ts` | `MitGenMigratorAgent` 片段级微观生成(源侧实跑录制 expected) |
 | `metrics.ts` | CSR / conformance 三态评审 / 检出率 / 误报率 / 成本 |

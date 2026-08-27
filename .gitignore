@@ -53,3 +53,6 @@ output/
 
 # Git worktrees
 .worktrees/
+
+# Strategy runner 工作目录(spec §7:默认 <packageRoot>/test-results)
+test-results/

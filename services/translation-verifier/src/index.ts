@@ -81,3 +81,17 @@ export { evaluate, sampleEntries, aggregateMetrics, defaultBugKinds } from "./qu
 export type { EvaluateOptions, EvaluationReport } from "./quality/evaluate.js";
 export { parseCliArgs, formatTable, runQualityCli } from "./quality/cli.js";
 export type { CliOptions } from "./quality/cli.js";
+
+// 统一策略入口(spec §5):四个方向(冒烟/分支一致性/变体/片段级)的 claude 自主会话工厂。
+// 消费方经 createTestStrategy(strategy, { llm, ... }) 获取 runner,报告契约见 TestStrategyReport。
+export { createTestStrategy } from "./strategies/index.js";
+export type {
+  StrategyRunOptions,
+  StrategyStatus,
+  TestStrategy,
+  TestStrategyJob,
+  TestStrategyReport,
+  TestStrategyRunner,
+} from "./strategies/index.js";
+// 被删一致性验证编排模块(runConsistencyVerification)保留的类型契约(consistency-verifier.ts 删除后迁移)。
+export type { ConsistencyResult } from "./distinct/consistency-verifier-types.js";
