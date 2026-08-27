@@ -127,7 +127,7 @@ git commit -m "feat(translation-verifier): strategies 类型/工作目录/报告
 
 **Interfaces:**
 - Consumes: Task 1(claude-client 增强)、Task 2(types/workspace/report)、现有 aid/mitgen 模块
-- Produces: `createTestStrategy(strategy, options)`(spec §5.3);smoke/distinct runner 流程:workspace → sandbox 默认注入(source.root+target.root 只读)→ 提示词 → runClaude(hooksLogPath=stepsLogPath)→ readReport → 归一化;aid/mitgen runner 包装现有 `verifyWithVariants`/`MitGenMigratorAgent.generate`(计时/目录/报告归一化)
+- Produces: `createTestStrategy(strategy, options)`(spec §5.3);**四个 runner 全部 claude 自主模式**:workspace → 预处理器(mitgen 先 `extractFragments` 生成片段清单入提示词;aid 先 `VariantGeneratorAgent` 预生成变体文件入工作目录)→ sandbox 默认注入(source.root+target.root 只读)→ 策略专属提示词(内嵌对应报告 schema)→ runClaude(hooksLogPath=stepsLogPath)→ readReport → 归一化;保留的核心方法(consensus/input-generator/fragment-prioritizer/splicer)作为代码模块导出供预处理器与校验复用
 
 - [ ] **Step 1: 写失败测试**(smoke-runner:fake spawnClaude + 预设 report.json 文件断言归一化输出与 durationMs/keptDir)
 
@@ -149,15 +149,16 @@ git commit -m "feat(translation-verifier): 统一策略入口与四方向 runner
 ### Task 4: 删除 ReAct 遗留 + 目录移动 + import 修复 + quality 适配器切换
 
 **Files:**
-- Delete: `src/smoke-tools.ts` `src/smoke-proto.ts` `src/smoke-agent.ts`(+test)、`src/validator.ts` `src/consistency-verifier.ts`(+test)、`src/analyzer.ts` 中 LlmAnalyzer 方法(保留类型,剪为 `src/distinct/analyzer.ts`)
+- Delete: `src/smoke-tools.ts` `src/smoke-proto.ts` `src/smoke-agent.ts`(+test)、`src/validator.ts` `src/consistency-verifier.ts`(+test)、`src/analyzer.ts` 中 LlmAnalyzer 方法(保留类型，剪为 `src/distinct/analyzer.ts`)
 - Move: `src/smoke-types.ts` `src/smoke-prompts.ts` → `src/smoke/`;`src/analyzer.ts` → `src/distinct/`;`src/variant/` → `src/aid/`
-- Modify: `src/quality/adapters/{smoke,distinct}.ts`(改调 createTestStrategy)、`src/quality/adapters/aid.ts`(variant→aid 路径)、`src/quality/types.ts` `src/quality/metrics.ts`(smoke 路径)、`src/index.ts`、`e2e/*.ts`
+- **保留核心方法**(rev.3)：aid 的 `variant-generator.ts`(变体生成)/`variant-filter.ts`/`consensus.ts`/`input-generator.ts` 全部保留;mitgen 全部保留(片段提取/打分/插桩/提示词)
+- Modify: `src/quality/adapters/{smoke,distinct,aid,mitgen}.ts`(四个全部改调 createTestStrategy)、`src/quality/types.ts` `src/quality/metrics.ts`(smoke 路径)、`src/index.ts`、`e2e/*.ts`
 
 **Interfaces:**
 - Consumes: Task 3 的 strategies 完整导出
-- Produces: 新目录布局;`quality/adapters/smoke.ts` 产出 `GeneratedTest`(契约不变);`e2e` 改用新入口或删除
+- Produces: 新目录布局;四个 quality 适配器产出 `GeneratedTest`(契约不变);`e2e` 改用新入口或删除
 
-- [ ] **Step 1: 先改 quality/adapters/smoke.ts、distinct.ts 调用 createTestStrategy(否则删 SmokeAgent 后编译失败)**
+- [ ] **Step 1: 先改 quality/adapters/{smoke,distinct,aid,mitgen}.ts 调用 createTestStrategy(否则删 SmokeAgent 后编译失败)**
 - [ ] **Step 2: git mv + 删除遗留文件**
 - [ ] **Step 3: 修其余 import(quality/types、metrics、index.ts、e2e)**
 - [ ] **Step 4: tsc + 全量测试(被删模块的测试随文件删除)**
@@ -193,6 +194,6 @@ git commit -m "feat(translation-verifier): 包入口导出统一策略 API,忽�
 
 ## Self-Review 记录
 
-- Spec 覆盖:§4 claude-client → Task 1;§5.1/5.2 → Task 2;§5.3/5.4 → Task 3;§3 目录/删除 → Task 4;§6 quality → Task 4;§7 兼容 → Task 4/5;§8 测试 → 各 Task;§9 风险 → Task 5 黑盒冒烟(JDK 路径、报告解析失败兜底)。
+- Spec 覆盖:§4 claude-client → Task 1;§5.1/5.2 → Task 2;§5.3/5.4(四策略提示词+报告 schema)→ Task 3;§3 目录/删除/保留 → Task 4;§6 quality(四适配器)→ Task 4;§7 兼容 → Task 4/5;§8 测试 → 各 Task;§9 风险 → Task 5 黑盒冒烟(JDK 路径、报告解析失败兜底)。
 - 类型一致性:`TestStrategyReport` 字段 Task 2 定义、Task 3/5 消费一致;`createTestStrategy(strategy, options)` Task 3 产出、Task 4/5 消费。
 - 依赖顺序:Task 4 删除前,quality adapters 必须已切到 strategies(Task 3 完成后),否则编译失败——已在 Task 4 Step 1 强制顺序。
