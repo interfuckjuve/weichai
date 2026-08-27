@@ -71,6 +71,8 @@ decode MIME text`;
     expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe("deepseek-v4-flash");
     expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe("deepseek-v4-flash");
     expect(env.CLAUDE_CODE_SUBAGENT_MODEL).toBe("deepseek-v4-flash");
+    // 未知模型名(deepseek)时不因窗口强制警告以非零码退出(2026-08-27 实测坑)。
+    expect(env.CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT).toBe("1");
   });
 
   it("③b 未传 model 时默认 deepseek-v4-flash;未传 timeoutMs 时默认 120_000", async () => {
@@ -140,7 +142,7 @@ describe("spawnClaudeProcess 自主会话参数", () => {
       ["-p", "hello", "--output-format", "text"],
       { ANTHROPIC_AUTH_TOKEN: "k" } as NodeJS.ProcessEnv,
       1000,
-      { cwd: "/tmp/fx", addDirs: ["/refA", "/tmp/fx"], readOnlyDirs: ["/refA"], permissionMode: "acceptEdits", maxTurns: 50, settingsFile: "/tmp/fx/settings.json", spawn: fake },
+      { cwd: "/tmp/fx", addDirs: ["/refA", "/tmp/fx"], readOnlyDirs: ["/refA"], permissionMode: "acceptEdits", maxTurns: 50, allowedTools: ["Bash(javac *)", "Bash(java *)"], settingsFile: "/tmp/fx/settings.json", spawn: fake },
     );
     const a = captured[0].args;
     expect(a).toContain("--add-dir");
@@ -152,6 +154,9 @@ describe("spawnClaudeProcess 自主会话参数", () => {
     expect(a).toContain("acceptEdits");
     expect(a).toContain("--max-turns");
     expect(a).toContain("50");
+    expect(a).toContain("--allowedTools");
+    expect(a.some((x) => x.includes("Bash(javac *)"))).toBe(true);
+    expect(a.some((x) => x.includes("Bash(java *)"))).toBe(true);
     expect(a).toContain("--settings");
     expect(a).toContain("/tmp/fx/settings.json");
     expect(captured[0].opts.cwd).toBe("/tmp/fx");
@@ -183,9 +188,11 @@ describe("runClaude 透传自主选项", () => {
       readOnlyDirs: ["/refA"],
       permissionMode: "acceptEdits",
       maxTurns: 50,
+      allowedTools: ["Bash(javac *)"],
       hooksLogPath: "/tmp/fx/steps.jsonl",
     });
     expect(captured[0].opts?.cwd).toBe("/tmp/fx");
+    expect(captured[0].opts?.allowedTools).toEqual(["Bash(javac *)"]);
     expect(String(captured[0].opts?.settingsFile ?? "")).toContain("hooks");
   });
 });

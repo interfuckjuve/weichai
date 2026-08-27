@@ -47,9 +47,19 @@ export function defaultSandbox(job: TestStrategyJob, writableDir: string): Sandb
  * 组装 claude 自主会话参数(brief Interfaces;Ruling 1 env):
  * - cwd = writableDir;addDirs = 只读参考目录 + 工作目录;readOnlyDirs = 参考目录;
  * - permissionMode acceptEdits;maxTurns;hooksLogPath = stepsLogPath;
+ * - allowedTools 放行 Bash 编译/运行命令(spec §2 实测:headless 下需 --allowedTools
+ *   "Bash(javac *)" 等,否则 claude 的 javac/java/dotnet 调用被权限层拦截);
  * - env 注入 JAVA_HOME(claude 子进程定位 JDK 的坑,已实测);未设置时省略该键
  *   (空串会破坏 $JAVA_HOME/bin/javac 全路径约定;省略后子进程回落 PATH 查找 javac)。
  */
+export const DEFAULT_ALLOWED_TOOLS = [
+  "Bash(javac *)",
+  "Bash(java *)",
+  "Bash(dotnet *)",
+  "Bash(python3 *)",
+  "Bash(tsx *)",
+] as const;
+
 export function makeClaudeOptions(
   llm: StrategyLlmConfig,
   sandbox: SandboxSpec,
@@ -67,6 +77,7 @@ export function makeClaudeOptions(
     permissionMode: "acceptEdits",
     maxTurns,
     hooksLogPath: stepsLogPath,
+    allowedTools: [...DEFAULT_ALLOWED_TOOLS],
     env: process.env.JAVA_HOME ? { JAVA_HOME: process.env.JAVA_HOME } : {},
   };
 }

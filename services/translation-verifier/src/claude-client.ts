@@ -22,6 +22,8 @@ export interface SpawnClaudeOptions {
   addDirs?: string[];
   /** --disallowedTools "Edit(//<resolve(dir)>/**)" ...(只读参考目录)。 */
   readOnlyDirs?: string[];
+  /** --allowedTools <pattern> ...(headless 下放行 Bash 编译/运行命令,如 "Bash(javac *)")。 */
+  allowedTools?: string[];
   /** --permission-mode(仅 acceptEdits 时附加该参数)。 */
   permissionMode?: "manual" | "acceptEdits";
   /** --max-turns <N>。 */
@@ -54,6 +56,8 @@ export interface ClaudeClientOptions {
   addDirs?: string[];
   /** --disallowedTools "Edit(//<resolve(dir)>/**)" ...(只读参考目录)。 */
   readOnlyDirs?: string[];
+  /** --allowedTools <pattern> ...(headless 下放行 Bash 编译/运行命令,如 "Bash(javac *)")。 */
+  allowedTools?: string[];
   /** --permission-mode(仅 acceptEdits 时附加该参数)。 */
   permissionMode?: "manual" | "acceptEdits";
   /** --max-turns <N>。 */
@@ -91,6 +95,9 @@ export async function runClaude(prompt: string, options: ClaudeClientOptions = {
     ANTHROPIC_DEFAULT_SONNET_MODEL: model,
     ANTHROPIC_DEFAULT_HAIKU_MODEL: model,
     CLAUDE_CODE_SUBAGENT_MODEL: model,
+    // deepseek 等未知模型名时,新版 claude CLI 会打窗口强制警告并以退出码 1 结束
+    // (2026-08-27 实测:自主会话被该警告打断,report.json 未及写入)。置 1 恢复旧行为。
+    CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT: "1",
     // 自定义 env(如 JAVA_HOME)置于 ANTHROPIC_* 覆盖之后合并。
     ...options.env,
   };
@@ -102,6 +109,7 @@ export async function runClaude(prompt: string, options: ClaudeClientOptions = {
   if (options.readOnlyDirs) spawnOptions.readOnlyDirs = options.readOnlyDirs;
   if (options.permissionMode) spawnOptions.permissionMode = options.permissionMode;
   if (options.maxTurns !== undefined) spawnOptions.maxTurns = options.maxTurns;
+  if (options.allowedTools) spawnOptions.allowedTools = options.allowedTools;
   let settingsFile: string | undefined;
   if (options.hooksLogPath) {
     // 临时 settings 文件:PostToolUse hook 把每次工具调用 JSON 行追加到 hooksLogPath。
@@ -160,6 +168,11 @@ export async function spawnClaudeProcess(
   }
   if (options.permissionMode === "acceptEdits") fullArgs.push("--permission-mode", "acceptEdits");
   if (options.maxTurns !== undefined) fullArgs.push("--max-turns", String(options.maxTurns));
+  // headless 下放行 Bash 编译/运行命令(如 "Bash(javac *)" "Bash(java *)");
+  // 未配置时不加任何参数,与现状一致(权限保持默认)。
+  if ((options.allowedTools ?? []).length > 0) {
+    fullArgs.push("--allowedTools", ...(options.allowedTools as string[]));
+  }
   if (options.settingsFile) fullArgs.push("--settings", options.settingsFile);
   // 注入的 spawn 实现(测试断言用):直接委托,透传 cwd。
   if (options.spawn) {

@@ -8,6 +8,15 @@ import { makeClaudeOptions, packageRoot, repoRoot } from "./helpers.js";
 const sandbox = { readOnlyDirs: ["/ro/ref"], writableDir: "/ws" };
 
 describe("makeClaudeOptions env", () => {
+  it("默认携带 allowedTools Bash 白名单(放行 javac/java/dotnet/python3/tsx)", () => {
+    const opts = makeClaudeOptions({ apiKey: "k" }, sandbox, "/steps.jsonl", 50);
+    expect(opts.allowedTools).toContain("Bash(javac *)");
+    expect(opts.allowedTools).toContain("Bash(java *)");
+    expect(opts.allowedTools).toContain("Bash(dotnet *)");
+    expect(opts.allowedTools).toContain("Bash(python3 *)");
+    expect(opts.allowedTools).toContain("Bash(tsx *)");
+  });
+
   it("JAVA_HOME 设置时注入该值(供 claude 子进程定位 JDK)", () => {
     const prev = process.env.JAVA_HOME;
     process.env.JAVA_HOME = "/opt/jdk17";
