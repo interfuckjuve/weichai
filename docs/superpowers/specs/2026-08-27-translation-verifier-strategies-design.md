@@ -159,7 +159,10 @@ export interface TestStrategyRunner {
 
 - `smoke-task.md`：冒烟验证任务（读源→写 runner→双侧编译运行→差分比较→judge→必要时修复→写 report.json）；
 - `distinct-task.md`：分支一致性任务（生成测试→试编译修复→分支分析→按需求修正断言→写 report.json）；
-- 每个提示词内嵌：报告 JSON schema（SmokeReport / ConsistencyResult）+ 沙箱约束声明（只读参考目录、仅在工作目录写）+ 工具白名单说明（可用的 Bash 命令）+ 终止条件（写完 report.json 即结束）。
+- `aid-task.md`：变体差分任务（读预生成变体→编译过滤→生成输入→差分→共识判定→写 report.json）；
+- `mitgen-task.md`：片段级测试生成任务（基于预提取片段清单→片段定向生成测试→编译运行验证→写 report.json）；
+- **每个提示词内嵌该策略的报告 JSON schema**（SmokeReport / ConsistencyResult / AIDVerificationReport / MitGenResult 完整字段与示例，要求 claude 严格按 schema 写 report.json）+ 沙箱约束（只读参考目录、仅在工作目录写）+ 工具白名单说明（可用 Bash 命令）+ 终止条件（写完 report.json 即结束）。
+- **报告格式即现有各方向类型**（§5.1 detail 判别联合）：runner 读 report.json 后按对应 schema 校验（复用现有解析器 `parseSmokeReport`/`validateConsistencyReport` 等），失败按 `status: "error"` 记录。
 
 ## 6. quality 评估框架适配
 
