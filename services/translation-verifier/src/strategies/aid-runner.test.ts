@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createAidRunner } from "./aid-runner.js";
 import type { SpawnClaude } from "../claude-client.js";
-import type { AIDVerificationReport } from "../variant/aid-verifier.js";
+import type { AIDVerificationReport } from "../aid/aid-verifier.js";
 import type { TestStrategyJob } from "./types.js";
 
 const job: TestStrategyJob = {

@@ -41,11 +41,12 @@ export interface AdapterContext {
   maxFragments?: number;
   /** mitgen 专属:每片段候选输入数(默认 3)。 */
   casesPerFragment?: number;
-  /** aid 专属:注入的变体/输入生成 agent(测试用 fixture agent;缺省按 llm 构造真实 agent)。 */
-  agents?: {
-    variants?: import("../variant/variant-generator.js").VariantGeneratorAgent;
-    inputs?: import("../variant/input-generator.js").InputGeneratorAgent;
-  };
+  /** 策略 runner 的自主会话轮数上限(默认各 runner 内部默认值 50)。 */
+  maxTurns?: number;
+  /** 策略工作区根目录(默认 <repoRoot>/test-results;单测可注入临时目录)。 */
+  workspaceRoot?: string;
+  /** smoke 专属:策略完成后保留工作目录(keptDir 读取 runner 文件用);默认 false。 */
+  keepGeneratedTests?: boolean;
 }
 
 /** 全部适配器名(CLI --adapters 合法值)。 */
@@ -76,6 +77,10 @@ export function defaultLogger(name: string, ctx: AdapterContext): Logger {
 /**
  * 计数版 spawnClaude 包装:统计 LLM 调用次数(供 meta.llmCalls 成本指标)。
  * reset() 在每次 generateTest 前调用,保证成本 = 单次生成的调用数。
+ *
+ * Task 4 起适配器把本包装经 createTestStrategy 透传给策略 runner(自主会话
+ * 经 makeClaudeOptions 组装 cwd/settingsFile 等第四参数)——包装必须转发全部
+ * 四个参数,否则自主会话参数丢失(Task 1 review Important 项同步扩展)。
  */
 export interface CountedClaude {
   options: ClaudeClientOptions;
@@ -88,11 +93,11 @@ export function countedClaude(base: ClaudeClientOptions): CountedClaude {
   return {
     options: {
       ...base,
-      spawnClaude: async (args, env, timeoutMs) => {
+      spawnClaude: async (args, env, timeoutMs, options) => {
         count += 1;
         // base.spawnClaude 缺省时回退真实子进程 spawn(与 runClaude 内部逻辑一致)。
         const spawn = base.spawnClaude ?? spawnClaudeProcess;
-        return spawn(args, env, timeoutMs);
+        return spawn(args, env, timeoutMs, options);
       },
     },
     calls: () => count,
@@ -100,10 +105,4 @@ export function countedClaude(base: ClaudeClientOptions): CountedClaude {
       count = 0;
     },
   };
-}
-
-/** 供 smoke/aid 适配器测试注入的结构化构造参数(与 e2e fixtureAgents 同构)。 */
-export interface InjectAgents {
-  variants?: import("../variant/variant-generator.js").VariantGeneratorAgent;
-  inputs?: import("../variant/input-generator.js").InputGeneratorAgent;
 }

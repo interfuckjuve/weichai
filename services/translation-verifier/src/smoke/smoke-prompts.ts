@@ -11,8 +11,8 @@
  * 多轮对话采用 stateless replay:history 全量重放,当前阶段指令由控制器
  * (SmokeAgent)按状态派生后经 buildTurnPrompt 组装。
  */
-import type { CaseComparison } from "./comparator.js";
-import type { TargetLanguage, VerifierLanguage } from "./description.js";
+import type { CaseComparison } from "../comparator.js";
+import type { TargetLanguage, VerifierLanguage } from "../description.js";
 import type { SmokeCasePlan, SmokeSide } from "./smoke-types.js";
 
 /** 任务简报:用户输入 + 双侧签名 + 目录结构预览(agent 也可自行 read_file 核实)。 */

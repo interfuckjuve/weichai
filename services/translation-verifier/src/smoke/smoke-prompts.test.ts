@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { CaseComparison } from "./comparator.js";
+import type { CaseComparison } from "../comparator.js";
 import type { SmokeCasePlan } from "./smoke-types.js";
 import {
   SMOKE_SYSTEM_PROMPT,

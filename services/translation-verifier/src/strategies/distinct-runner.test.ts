@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createDistinctRunner } from "./distinct-runner.js";
 import type { SpawnClaude } from "../claude-client.js";
-import type { ConsistencyResult } from "../consistency-verifier.js";
+import type { ConsistencyResult } from "../distinct/consistency-verifier-types.js";
 import type { TestStrategyJob } from "./types.js";
 
 const job: TestStrategyJob = {

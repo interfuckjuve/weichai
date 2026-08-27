@@ -1,7 +1,7 @@
 /**
  * 方向 2「分支一致性验证(DISTINCT)」自主任务提示词(纯函数,可单测)。
  *
- * 报告契约内嵌 ConsistencyResult(src/consistency-verifier.ts)精确字段 + 精简示例 JSON;
+ * 报告契约内嵌 ConsistencyResult(src/distinct/consistency-verifier-types.ts)精确字段 + 精简示例 JSON;
  * claude 自主完成后把报告写入工作目录 report.json,写完即结束。
  */
 import type { VerifierLanguage } from "../../description.js";

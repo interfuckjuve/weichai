@@ -1,34 +1,28 @@
 /**
- * aid 适配器:verifyWithVariants 变体轨道(方向 3)。
+ * aid 适配器:方向 3「变体差分验证(AID)」,经统一策略入口自主执行。
  *
  * 接入方式:
- * 1. TestMigratorAgent 生成 base 描述(需求第一;AID 本身不产出 TestDescription,
- *    base 描述作为其输入契约与 GeneratedTest.description);
- * 2. verifyWithVariants(base 描述, 源侧, 目标侧)跑完整变体轨道:
- *    变体生成 → 过滤 → 输入生成 → 参考组(源+变体)批量执行 → 共识 oracle
- *    → 目标执行 → compareAgainstConsensus → AIDVerificationReport;
+ * 1. createTestStrategy("aid") 自主会话:变体预生成(variants/ 目录)→ 主会话完成参考组
+ *    批量执行 → 共识 oracle → 目标执行 → 共识差分 → report.json(AIDVerificationReport);
+ * 2. GeneratedTest.description 取自 report.detail.baseline.description(自主会话实际使用的
+ *    需求第一描述,契约完整);
  * 3. GeneratedTest.meta.signal = 共识差分结果(consensus 差分 fail 即检出信号);
  * 4. detectOnTarget(扩展方法,非 GeneratorAdapter 接口成员):对注入 bug 的目标
- *    复用 clean 轨道的冻结 oracle，仅重放目标侧；新增 fail case 才算检出，从而把
- *    数据集「需求≠检索代码」导致的合法共识差异(两侧都出现)排除在检出之外。
+ *    复用 clean 轨道的冻结 oracle(meta.aidBaseline),仅重放目标侧;新增 fail case 才算检出,
+ *    从而把数据集「需求≠检索代码」导致的合法共识差异(两侧都出现)排除在检出之外。
  *
- * 成本:base 描述(1+重试)+ 变体(variantCount×尝试)+ 输入生成(1),偏高;评估场景
- * 建议 variantCount=2/inputCount=20(AdapterContext 可配),quick 模式 1 策略。
+ * 成本:aid 自主会话 = 变体生成(variantCount×尝试)+ 主会话 1 次(全部经计数包装统计)。
  */
 import {
   verifyTargetAgainstAIDBaseline,
-  verifyWithVariants,
   type AIDVerificationReport,
-} from "../../variant/aid-verifier.js";
-import { VariantGeneratorAgent } from "../../variant/variant-generator.js";
-import { InputGeneratorAgent } from "../../variant/input-generator.js";
-import { TestMigratorAgent } from "../../test-migrator.js";
+} from "../../aid/aid-verifier.js";
+import { createTestStrategy } from "../../strategies/index.js";
 import type { DriverExecutor } from "../../executor.js";
 import type { QualityTask, GeneratedTest, GeneratorAdapter } from "../types.js";
 import { countedClaude, defaultLogger, type AdapterContext } from "../adapters.js";
-import { alignDescriptionTarget } from "../dataset.js";
-import { toMigrationInput } from "./baseline.js";
 import { buildSourceSide, buildTargetSide } from "./distinct.js";
+import { buildStrategyJob } from "./strategy-job.js";
 
 export interface AidDetectionResult {
   detected: boolean;
@@ -42,17 +36,10 @@ export class AidAdapter implements GeneratorAdapter {
   readonly name = "aid" as const;
   readonly #ctx: AdapterContext;
   readonly #counted: ReturnType<typeof countedClaude>;
-  readonly #migrator: TestMigratorAgent;
-  readonly #variants: VariantGeneratorAgent;
-  readonly #inputs: InputGeneratorAgent;
 
   constructor(ctx: AdapterContext) {
     this.#ctx = ctx;
     this.#counted = countedClaude(ctx.llm);
-    const logger = defaultLogger("aid", ctx);
-    this.#migrator = new TestMigratorAgent({ ...this.#counted.options, logger });
-    this.#variants = ctx.agents?.variants ?? new VariantGeneratorAgent({ ...this.#counted.options, logger });
-    this.#inputs = ctx.agents?.inputs ?? new InputGeneratorAgent({ ...this.#counted.options, logger });
   }
 
   async generateTest(task: QualityTask, signal?: AbortSignal): Promise<GeneratedTest> {
@@ -60,39 +47,40 @@ export class AidAdapter implements GeneratorAdapter {
     this.#counted.reset();
     const logger = defaultLogger("aid", this.#ctx);
 
-    // 1. base 描述(AID 的输入契约,也是产出描述)。
-    const description = alignDescriptionTarget(await this.#migrator.extractDescription(toMigrationInput(task), signal), task.entry);
-
-    // 2. 变体轨道(干净目标)。
-    const sourceSide = buildSourceSide(description, task);
-    const targetSide = buildTargetSide(description, task, task.target.sourceFiles.map((f) => f.content).join("\n"));
-    const report = await verifyWithVariants(
-      {
-        description,
-        source: sourceSide,
-        target: targetSide,
-        options: { variantCount: this.#ctx.variantCount ?? 2, inputCount: this.#ctx.inputCount ?? 20 },
-      },
-      this.#ctx.executor,
-      { variants: this.#variants, inputs: this.#inputs },
-      logger,
-    );
-    const failCases = report.comparisons.filter((c) => c.verdict === "fail").map((c) => c.caseId);
-    if (report.failedCases > 0) {
-      logger.warn(`aid 干净目标上共识差分 fail ${report.failedCases} 个 case(可能为跨语言噪声或需求差异):${failCases.join(", ")}`);
+    // 1. 策略 runner:自主会话完成变体轨道(变体生成 → 过滤 → 输入 → oracle → 目标差分)。
+    const runner = createTestStrategy("aid", {
+      llm: this.#counted.options,
+      maxTurns: this.#ctx.maxTurns,
+      workspaceRoot: this.#ctx.workspaceRoot,
+    });
+    const report = await runner.run(buildStrategyJob(task, this.#ctx.rootDir), signal);
+    if (report.status === "error") {
+      throw new Error(`aid 策略失败(entry=${task.entry.id}): ${report.summary}`);
+    }
+    const detail = report.detail as AIDVerificationReport;
+    const description = detail.baseline?.description;
+    if (!description) {
+      throw new Error(`aid 报告缺少 baseline.description(entry=${task.entry.id}),契约不完整`);
+    }
+    const failCases = detail.comparisons.filter((c) => c.verdict === "fail").map((c) => c.caseId);
+    if (report.status === "unverified") {
+      logger.warn(`aid clean 目标不可用(entry=${task.entry.id}):${detail.baseline.cleanTarget?.note ?? "missing-clean-target-status"}`);
+    }
+    if (detail.failedCases > 0) {
+      logger.warn(`aid 干净目标上共识差分 fail ${detail.failedCases} 个 case(可能为跨语言噪声或需求差异):${failCases.join(", ")}`);
     }
     return {
       kind: "description",
       description,
       meta: {
         llmCalls: this.#counted.calls(),
-        durationMs: Date.now() - started,
+        durationMs: report.durationMs,
         signal: {
           kind: "aid-differential",
           caseIds: failCases,
-          detail: `clean passRate=${report.passRate.toFixed(2)} failed=${report.failedCases} disputed=${report.disputedCases} consensus=${report.oracleSummary.consensusCount} variants=${report.variants.filter((v) => v.passes).length}/${report.variants.length}`,
+          detail: `clean passRate=${detail.passRate.toFixed(2)} failed=${detail.failedCases} disputed=${detail.disputedCases} consensus=${detail.oracleSummary.consensusCount} variants=${detail.variants.filter((v) => v.passes).length}/${detail.variants.length}`,
         },
-        aidBaseline: report.baseline,
+        aidBaseline: detail.baseline,
       },
     };
   }

@@ -3,7 +3,7 @@
  * 读 <workspace>/report.json 归一化 status/passRate/summary。
  */
 import { runClaude } from "../claude-client.js";
-import type { SmokeReport } from "../smoke-types.js";
+import type { SmokeReport } from "../smoke/smoke-types.js";
 import { defaultSandbox, defaultWorkspaceRoot, makeClaudeOptions, type StrategyLlmConfig } from "./helpers.js";
 import { buildSmokeTaskPrompt } from "./prompts/smoke-task.js";
 import { errorSummary, readReport } from "./report.js";

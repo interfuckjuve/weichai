@@ -1,16 +1,14 @@
 /**
  * 统一策略入口的类型契约(spec §5.1)。
  *
- * 注意:SmokeReport / ConsistencyResult / AIDVerificationReport 当前从迁移前的现有位置导入
- * (../smoke-types.js、../consistency-verifier.js、../variant/aid-verifier.js);
- * Task 4 目录迁移后将更新为 ../smoke/smoke-types.js、../distinct/consistency-verifier-types.js、
- * ../aid/aid-verifier.js。
+ * 报告 detail 的类型来自各方向模块(SmokeReport / ConsistencyResult / AIDVerificationReport
+ * / MitGenResult);Task 4 目录迁移后自新位置导入。
  */
 import type { VerifierLanguage } from "../description.js";
 import type { SideFile } from "../executor.js";
-import type { SmokeReport } from "../smoke-types.js";
-import type { ConsistencyResult } from "../consistency-verifier.js";
-import type { AIDVerificationReport } from "../variant/aid-verifier.js";
+import type { SmokeReport } from "../smoke/smoke-types.js";
+import type { ConsistencyResult } from "../distinct/consistency-verifier-types.js";
+import type { AIDVerificationReport } from "../aid/aid-verifier.js";
 import type { MitGenResult } from "../mitgen/types.js";
 
 export type TestStrategy = "smoke" | "distinct" | "aid" | "mitgen";

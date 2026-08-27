@@ -23,10 +23,10 @@ import type { SourceInvocation } from "../src/driver/source-invocation.js";
 import { isToolchainAvailable, RealDriverExecutor, type SideSpec } from "../src/executor.js";
 import { verify, type VerificationJob, type VerificationReport } from "../src/verifier.js";
 import { createLogger, type Logger } from "../src/logger.js";
-import { VariantGeneratorAgent } from "../src/variant/variant-generator.js";
-import { InputGeneratorAgent } from "../src/variant/input-generator.js";
-import { verifyTargetAgainstAIDBaseline, verifyWithVariants, type AIDVerificationReport } from "../src/variant/aid-verifier.js";
-import { DISPUTED_DETAIL_PREFIX } from "../src/variant/consensus.js";
+import { VariantGeneratorAgent } from "../src/aid/variant-generator.js";
+import { InputGeneratorAgent } from "../src/aid/input-generator.js";
+import { verifyTargetAgainstAIDBaseline, verifyWithVariants, type AIDVerificationReport } from "../src/aid/aid-verifier.js";
+import { DISPUTED_DETAIL_PREFIX } from "../src/aid/consensus.js";
 import {
   BUG_KINDS,
   computeDetectionMetrics,

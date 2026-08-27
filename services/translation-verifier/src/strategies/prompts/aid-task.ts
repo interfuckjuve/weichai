@@ -1,10 +1,8 @@
 /**
  * 方向 3「变体差分验证(AID)」自主任务提示词(纯函数,可单测)。
  *
- * 报告契约内嵌 AIDVerificationReport(src/variant/aid-verifier.ts)精确字段 + 精简示例 JSON;
+ * 报告契约内嵌 AIDVerificationReport(src/aid/aid-verifier.ts)精确字段 + 精简示例 JSON;
  * claude 自主完成后把报告写入工作目录 report.json,写完即结束。
- *
- * 注意:aid 模块当前仍在 src/variant/(Ruling 3),Task 4 目录改名后 import 路径需更新。
  */
 import type { VerifierLanguage } from "../../description.js";
 import type { SideFile } from "../../executor.js";

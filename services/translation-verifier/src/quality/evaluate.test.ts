@@ -47,23 +47,44 @@ const DESCRIPTION_JSON = JSON.stringify({
   ],
 });
 
-const INVENTORY_JSON = JSON.stringify({
+const INVENTORY_BRANCHES = {
   methodId: "Source.clamp",
   methodSummary: "clamp 到上限",
   branches: [{ id: "b1", kind: "if", location: "L1", condition: "value > max", semantics: "返回 max", nldConsistent: true }],
-});
+};
 
-const CONSISTENCY_JSON = JSON.stringify([
-  { caseId: "c01", touchedBranches: ["b1"], assertionConsistent: true, nldVerdict: "conforms", recommend: "ok", reasons: [] },
-]);
+/** 策略自主会话的 report.json 夹具(ConsistencyResult;无 flag-fail → 无检出信号)。 */
+const CONSISTENCY_RESULT = {
+  report: {
+    schemaVersion: "1.0",
+    source: { language: "Java", compile: { success: true, errors: [], output: "" }, run: null, results: null },
+    target: { language: "C#", compile: { success: true, errors: [], output: "" }, run: null, results: null },
+    comparisons: [{ caseId: "c01", verdict: "pass", source: null, target: null, details: [] }],
+    passRate: 1,
+    totalCases: 1,
+    passedCases: 1,
+    failedCases: 0,
+    divergentCases: 0,
+  },
+  consistency: {
+    inventory: INVENTORY_BRANCHES,
+    cases: [{ caseId: "c01", touchedBranches: ["b1"], assertionConsistent: true, nldVerdict: "conforms", recommend: "ok", reasons: [] }],
+    coverage: { covered: ["b1"], uncovered: [] },
+    augmentations: [],
+  },
+  augmented: false,
+};
 
 function conformanceSpawn(): SpawnClaude {
-  return async (args) => {
+  return async (args, _env, _timeoutMs, options) => {
+    // 策略自主会话(带 cwd):预写 report.json(ConsistencyResult),runner 读取归一化。
+    if (options?.cwd) {
+      writeFileSync(join(options.cwd, "report.json"), JSON.stringify(CONSISTENCY_RESULT));
+      return { stdout: "done", exitCode: 0 };
+    }
     const prompt = args.slice(1).join(" ");
     let stdout = "{}";
     if (prompt.includes("test migration specialist")) stdout = DESCRIPTION_JSON;
-    else if (prompt.includes("branch-level consistency analyzer") && prompt.includes("Enumerate ALL control-flow branches")) stdout = INVENTORY_JSON;
-    else if (prompt.includes("branch-level consistency analyzer") && prompt.includes("For each case in TEST_DESCRIPTION")) stdout = CONSISTENCY_JSON;
     else if (prompt.includes("test-quality reviewer")) stdout = JSON.stringify({ verdict: "conforms", reasoning: "符合需求" });
     return { stdout, exitCode: 0 };
   };
@@ -221,8 +242,8 @@ describe("evaluate 端到端", () => {
       });
       const distinct = report.adapters.distinct;
       expect(distinct.csr).toBe(1);
-      expect(distinct.perEntry[0]!.signal).toBeUndefined(); // consistency JSON 无 flag-fail
-      expect(distinct.perEntry[0]!.llmCalls).toBe(3); // 描述 + 分支清单 + case 裁决
+      expect(distinct.perEntry[0]!.signal).toBeUndefined(); // consistency 无 flag-fail
+      expect(distinct.perEntry[0]!.llmCalls).toBe(2); // 描述(TestMigratorAgent)+ 自主会话各 1 次
     } finally {
       rmSync(fixture.dir, { recursive: true, force: true });
     }

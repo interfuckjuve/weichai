@@ -4,7 +4,7 @@ export { verify } from "./verifier.js";
 export type { VerificationJob, VerificationReport, SideRunInfo } from "./verifier.js";
 export { TestMigratorAgent } from "./test-migrator.js";
 export type { MigrationInput, TestMigratorOptions } from "./test-migrator.js";
-export { LlmAnalyzer, NoneCoverageProvider } from "./analyzer.js";
+export { NoneCoverageProvider } from "./distinct/analyzer.js";
 export type {
   AnalyzerLike,
   BranchCoverage,
@@ -13,12 +13,7 @@ export type {
   CaseConsistency,
   ConsistencyReport,
   CoverageProvider,
-  LlmAnalyzerOptions,
-} from "./analyzer.js";
-export { DescriptionValidator, buildValidatorFeedbackPrompt, filterDriverErrors } from "./validator.js";
-export type { DescriptionValidatorOptions } from "./validator.js";
-export { runConsistencyVerification } from "./consistency-verifier.js";
-export type { ConsistencyResult, ConsistencyVerifierOptions } from "./consistency-verifier.js";
+} from "./distinct/analyzer.js";
 export { MitGenMigratorAgent } from "./mitgen/mitgen-migrator.js";
 export type { MitGenOptions } from "./mitgen/mitgen-migrator.js";
 export type {
@@ -46,18 +41,16 @@ export type {
 export { generateDriverSource, generateSourceDriverSource } from "./driver/driver-codegen.js";
 export type { SourceInvocation } from "./driver/source-invocation.js";
 export type { TestDescription, TypedValue, VerifierLanguage } from "./description.js";
-export { SmokeAgent } from "./smoke-agent.js";
-export type { SmokeAgentOptions } from "./smoke-agent.js";
 export type {
   SmokeAction,
   SmokeCaseVerdict,
   SmokeReport,
   SmokeDecision,
   SmokeSide,
-} from "./smoke-types.js";
+} from "./smoke/smoke-types.js";
 
 // AID / TrickCatcher 变体轨道(参考组 vs 目标的行为差异差分,oracle 来自共识/行为差异)。
-export * from "./variant/index.js";
+export * from "./aid/index.js";
 
 // 统一测试质量评估框架(接口 + 五维指标 + 五个生成器适配器 + CLI)。
 export * from "./quality/types.js";
@@ -66,7 +59,7 @@ export type { LoadResult, TaskBuildResult } from "./quality/dataset.js";
 export { createAdapter, ADAPTER_NAMES, countedClaude } from "./quality/adapters.js";
 export type { AdapterContext, CountedClaude } from "./quality/adapters.js";
 export { BaselineAdapter } from "./quality/adapters/baseline.js";
-export { SmokeAdapter, RecordingExecutor, splitSideSpec, smokeReportHasBugSignal, smokeReportBugCases } from "./quality/adapters/smoke.js";
+export { SmokeAdapter, smokeReportHasBugSignal, smokeReportBugCases } from "./quality/adapters/smoke.js";
 export { DistinctAdapter, buildSourceSide, buildTargetSide } from "./quality/adapters/distinct.js";
 export { AidAdapter } from "./quality/adapters/aid.js";
 export type { AidDetectionResult } from "./quality/adapters/aid.js";

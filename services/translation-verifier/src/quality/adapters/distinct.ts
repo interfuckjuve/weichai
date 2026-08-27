@@ -1,28 +1,29 @@
 /**
- * distinct 适配器:baseline 描述 + LlmAnalyzer 分支一致性(方向 2)。
+ * distinct 适配器:方向 2「分支一致性验证(DISTINCT)」,经统一策略入口自主执行。
  *
  * 接入方式:
- * 1. TestMigratorAgent 生成 baseline 描述(需求第一);
- * 2. 构造差分 job(描述 → 双侧驱动)并经 verify 产出 VerificationReport;
- * 3. LlmAnalyzer.buildBranchInventory(源方法,需求)→ LLM 分支清单(一次调用);
- * 4. LlmAnalyzer.analyzeCases(描述,报告,清单)→ case 级 NLD 三态裁决(一次调用);
- * 5. flag-fail 即「偏离需求信号」:recommend=flag-fail / nldVerdict=diverges 的 case
- *    汇总进 meta.signal,供报告可观测;描述本体不变(修正语义由 strictNld 选项控制,
- *    默认仅标记,不篡改差分结果)。
+ * 1. TestMigratorAgent 生成 baseline 描述(需求第一)——GeneratedTest.description 契约
+ *    (metrics/evaluate 的 CSR/conformance/差分检出均需 TestDescription);
+ * 2. createTestStrategy("distinct") 自主会话完成:双侧驱动编写 → 差分验证 → 分支清单构建 →
+ *    case 级 NLD 三态裁决 → report.json(ConsistencyResult);
+ * 3. flag-fail 即「偏离需求信号」:report.detail.consistency.cases 中
+ *    recommend=flag-fail / nldVerdict=diverges 的 case 汇总进 meta.signal(可观测);
+ *    描述本体不变(修正语义由 strictNld 选项控制,默认仅标记,不篡改差分结果)。
  *
- * 成本:baseline 描述(1+重试)+ 分支清单(1)+ case 裁决(1),共 3+ 次 LLM 调用。
+ * 成本:baseline 描述(1+重试)+ distinct 自主会话(1 次 claude 调用,内部完成差分与分析)。
  */
-import { LlmAnalyzer } from "../../analyzer.js";
 import { basename } from "node:path";
+import { createTestStrategy } from "../../strategies/index.js";
+import type { ConsistencyResult } from "../../distinct/consistency-verifier-types.js";
 import { generateDriverSource, generateSourceDriverSource } from "../../driver/driver-codegen.js";
 import type { SourceInvocation } from "../../driver/source-invocation.js";
-import { verify } from "../../verifier.js";
 import { TestMigratorAgent } from "../../test-migrator.js";
 import { normalizeSourceSignature } from "../dataset.js";
 import type { SideSpec } from "../../executor.js";
 import type { QualityTask, GeneratedTest, GeneratorAdapter } from "../types.js";
 import { countedClaude, defaultLogger, type AdapterContext } from "../adapters.js";
 import { toMigrationInput } from "./baseline.js";
+import { buildStrategyJob } from "./strategy-job.js";
 
 export class DistinctAdapter implements GeneratorAdapter {
   readonly name = "distinct" as const;
@@ -41,22 +42,24 @@ export class DistinctAdapter implements GeneratorAdapter {
     this.#counted.reset();
     const logger = defaultLogger("distinct", this.#ctx);
 
-    // 1. baseline 描述。
+    // 1. baseline 描述(需求第一;description-kind 契约要求 TestDescription)。
     const description = await this.#migrator.extractDescription(toMigrationInput(task), signal);
 
-    // 2. 双侧驱动 + 差分验证(分支一致性分析需要真实差分报告)。
-    const sourceSide = buildSourceSide(description, task);
-    const targetSide = buildTargetSide(description, task, task.target.sourceFiles.map((f) => f.content).join("\n"));
-    const report = await verify({ description, source: sourceSide, target: targetSide }, this.#ctx.executor, logger);
+    // 2. 策略 runner:自主会话完成差分验证 + 分支一致性分析(内部 LLM 调用经计数包装)。
+    const runner = createTestStrategy("distinct", {
+      llm: this.#counted.options,
+      maxTurns: this.#ctx.maxTurns,
+      workspaceRoot: this.#ctx.workspaceRoot,
+    });
+    const report = await runner.run(buildStrategyJob(task, this.#ctx.rootDir), signal);
+    if (report.status === "error") {
+      // 保持既有失败语义:生成失败抛错,evaluate 层记录 per-entry 失败,不中断评估。
+      throw new Error(`distinct 策略失败(entry=${task.entry.id}): ${report.summary}`);
+    }
+    const detail = report.detail as ConsistencyResult;
 
-    // 3+4. Analyzer 分支清单 + case 一致性(LLM)。
-    const analyzer = new LlmAnalyzer({ ...this.#counted.options, logger });
-    const sourceCode = task.source.sourceFiles.map((f) => f.content).join("\n\n");
-    const inventory = await analyzer.buildBranchInventory(sourceCode, task.entry.requirement, signal);
-    const consistencies = await analyzer.analyzeCases(description, report, inventory, signal);
-
-    // 5. flag-fail 即偏离需求信号。
-    const flagged = consistencies.filter(
+    // 3. flag-fail 即偏离需求信号。
+    const flagged = detail.consistency.cases.filter(
       (c) => c.recommend === "flag-fail" || c.nldVerdict === "diverges",
     );
     const caseIds = flagged.map((c) => c.caseId);
@@ -68,7 +71,7 @@ export class DistinctAdapter implements GeneratorAdapter {
       description,
       meta: {
         llmCalls: this.#counted.calls(),
-        durationMs: Date.now() - started,
+        durationMs: report.durationMs,
         signal:
           caseIds.length > 0
             ? {

@@ -25,7 +25,7 @@
  */
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import { validateDescription, type TestDescription, type VerifierLanguage } from "../src/description.js";
 import { matchingBrace, escapeRegExp } from "../src/code-utils.js";
 import { generateDriverSource, generateSourceDriverSource } from "../src/driver/driver-codegen.js";
@@ -36,8 +36,8 @@ import { formatReport } from "../src/cli-helpers.js";
 import { TestMigratorAgent } from "../src/test-migrator.js";
 import { MitGenMigratorAgent } from "../src/mitgen/mitgen-migrator.js";
 import { RepairAgent, RepairLoop } from "../src/repair-loop.js";
-import { LlmAnalyzer } from "../src/analyzer.js";
-import { runConsistencyVerification } from "../src/consistency-verifier.js";
+import { createTestStrategy } from "../src/strategies/index.js";
+import type { ConsistencyResult } from "../src/distinct/consistency-verifier-types.js";
 import { createLogger, type Logger } from "../src/logger.js";
 
 // ---------------------------------------------------------------------------
@@ -539,63 +539,55 @@ export async function runE2E(argv: string[]): Promise<number> {
     logger.error("阶段[A] 未全 PASS:翻译产物与源侧存在差异(或偏离需求)");
   }
 
-  // 7. 阶段 D(可选,--analyzer):DISTINCT 描述引导的分支一致性分析 —— 双侧共享缺陷演示。
-  //    旧流程预期:缺陷源实现 + 忠实镜像的翻译产物 → 差分两侧一致 → 全 PASS(行为等价率高但漏检);
-  //    Analyzer 以 NLD 为锚:分支清单判定缺陷分支 nldConsistent=false → expected 偏离需求 →
-  //    标记 diverges/flag-fail → 阶段 D 判定检出(对应论文 DDR 提升)。需要 DEEPSEEK_API_KEY。
-  //    演示 job 使用 --fixture 描述(确定性:expected 复制缺陷 → 差分全 PASS → Analyzer 改判检出;
-  //    真实 LLM 描述在增强 prompt 下可能已含正确 expected,阶段 A 即检出,Analyzer 增量不可见)。
+  // 7. 阶段 D(可选,--analyzer):DISTINCT 分支一致性分析 —— 双侧共享缺陷演示(黑盒)。
+  //    Task 4 起 LlmAnalyzer/runConsistencyVerification 删除,改为调 createTestStrategy("distinct")
+  //    自主会话(真实 claude,读源/目标参考目录;报告 detail = ConsistencyResult)。
+  //    演示预期:缺陷源实现 + 忠实镜像的翻译产物 → 差分两侧一致 → 旧流程全 PASS(漏检);
+  //    DISTINCT 以 NLD 为锚标记 diverges/flag-fail → 阶段 D 判定检出(对应论文 DDR 提升)。
   if (parsed.analyzer) {
     if (!apiKey || apiKey.trim() === "") {
       logger.error("阶段[D] 需要 DEEPSEEK_API_KEY(--api-key 可覆盖)");
       console.error("error: --analyzer requires DEEPSEEK_API_KEY (or --api-key).");
       return 2;
     }
-    logger.info("阶段[D]:Analyzer 分支一致性分析(双侧共享缺陷演示,LLM 判定,无插桩)");
-    let stageDDescription: TestDescription = description;
-    try {
-      stageDDescription = validateDescription(JSON.parse(readFileSync(resolve(parsed.fixture), "utf-8")));
-      logger.info(`阶段[D] 使用 fixture 描述(确定性演示):${parsed.fixture}`);
-    } catch (error) {
-      logger.warn(`阶段[D] fixture 描述不可用,回退当前描述:${errorMessage(error)}`);
-    }
-    stageDDescription = {
-      ...stageDDescription,
-      target: {
-        ...stageDDescription.target,
-        language: "Java",
-        className: targetClassName,
-        method: targetMethodName,
-        isStatic: true,
-      },
-      requirement: parsed.requirement,
-    };
-    // 按 stageDDescription 重建双侧驱动(与阶段 A 的 sourceSide/targetSide 分离)。
-    const stageDSourceSide: SideSpec = {
-      language: parsed.sourceLang,
-      driverSource: generateSourceDriverSource(stageDDescription, sourceInvocation),
-      sourceFiles: [{ relativePath: `source.${sourceExtension}`, content: sourceContent }],
-    };
-    const stageDTargetSide = (content: string): SideSpec => ({
-      language: "Java",
-      driverSource: generateDriverSource(stageDDescription),
-      sourceFiles: [{ relativePath: `${targetClassName.split(".").pop()}.java`, content }],
+    logger.info("阶段[D]:DISTINCT 分支一致性分析(自主会话黑盒,真实 claude)");
+    // 参考目录:源/目标文件各自所在目录(只读沙箱;文件内容同时内嵌于 job,双保险)。
+    const distinctRunner = createTestStrategy("distinct", {
+      llm: { apiKey, timeoutMs: parsed.timeoutMs },
+      keepGeneratedTests: true,
+      maxTurns: 50,
     });
-    const analyzer = new LlmAnalyzer({ apiKey, logger, timeoutMs: parsed.timeoutMs });
-    let consistencyResult;
+    let strategyReport;
     try {
-      consistencyResult = await runConsistencyVerification(
-        { description: stageDDescription, source: stageDSourceSide, target: stageDTargetSide(targetContent) },
-        executor,
-        analyzer,
-        { augmentationBudget: 1, logger },
-      );
+      strategyReport = await distinctRunner.run({
+        requirement: parsed.requirement,
+        source: {
+          language: parsed.sourceLang,
+          root: dirname(resolve(parsed.sourceMethod)),
+          files: [{ relativePath: basename(resolve(parsed.sourceMethod)), content: sourceContent }],
+        },
+        target: {
+          language: "Java",
+          className: targetClassName,
+          method: targetMethodName,
+          isStatic: true,
+          file: basename(resolve(parsed.targetFile)),
+          root: dirname(resolve(parsed.targetFile)),
+          files: [{ relativePath: basename(resolve(parsed.targetFile)), content: targetContent }],
+        },
+      });
     } catch (error) {
-      logger.error(`阶段[D] Analyzer 分析失败:${errorMessage(error)}`);
-      console.error(`error: stage D analyzer failed: ${errorMessage(error)}`);
+      logger.error(`阶段[D] distinct 策略运行失败:${errorMessage(error)}`);
+      console.error(`error: stage D distinct strategy failed: ${errorMessage(error)}`);
       return 2;
     }
-    const { consistency } = consistencyResult;
+    if (strategyReport.status === "error") {
+      logger.error(`阶段[D] distinct 策略 error:${strategyReport.summary}`);
+      console.error(`error: stage D distinct strategy returned error status: ${strategyReport.summary}`);
+      return 2;
+    }
+    logger.info(`阶段[D] 自主会话完成:status=${strategyReport.status}${strategyReport.keptDir ? `,keptDir=${strategyReport.keptDir}` : ""}`);
+    const consistency = (strategyReport.detail as ConsistencyResult).consistency;
     const total = consistency.inventory.branches.length;
     const covered = consistency.coverage.covered.length;
     const diverging = consistency.cases.filter((c) => c.nldVerdict === "diverges" || c.recommend === "flag-fail");

@@ -5,10 +5,10 @@
  * 本模块只借用 VerifierLanguage / TargetLanguage 类型,用例设计(plan)只有
  * 自然语言意图描述,不声明 expected 黄金值——一致性判断 = 机械差分 + LLM 语义裁决。
  */
-import type { CaseComparison } from "./comparator.js";
-import type { CaseResult, SideResults } from "./result-capture.js";
-import type { CompileOutcome } from "./executor.js";
-import type { TargetLanguage, VerifierLanguage } from "./description.js";
+import type { CaseComparison } from "../comparator.js";
+import type { CaseResult, SideResults } from "../result-capture.js";
+import type { CompileOutcome } from "../executor.js";
+import type { TargetLanguage, VerifierLanguage } from "../description.js";
 
 /** 冒烟验证的双侧:源侧(参考基准)与目标侧(翻译产物)。 */
 export type SmokeSide = "source" | "target";

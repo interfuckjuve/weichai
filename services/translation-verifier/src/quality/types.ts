@@ -11,9 +11,9 @@
  */
 import type { TestDescription, TypedValue, VerifierLanguage } from "../description.js";
 import type { SideSpec } from "../executor.js";
-import type { SmokeReport } from "../smoke-types.js";
+import type { SmokeReport } from "../smoke/smoke-types.js";
 import type { InjectedBugKind } from "../bug-injection.js";
-import type { AIDReplayBaseline } from "../variant/aid-verifier.js";
+import type { AIDReplayBaseline } from "../aid/aid-verifier.js";
 
 // ---------------------------------------------------------------------------
 // 数据集(数据集 agent 产出,评估框架消费)

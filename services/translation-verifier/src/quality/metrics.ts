@@ -22,7 +22,7 @@ import { compareCases } from "../comparator.js";
 import { generateDriverSource } from "../driver/driver-codegen.js";
 import type { CompileOutcome, DriverExecutor, SideSpec } from "../executor.js";
 import { executeSide, verify, type VerificationReport } from "../verifier.js";
-import { splitDriverEntry } from "../smoke-tools.js";
+import { splitDriverEntry } from "../smoke/driver-entry.js";
 import { injectFineGrainedBug, type InjectedBugKind } from "../bug-injection.js";
 import type { GeneratedTest, QualityTask, ConformanceJudgement, DetectionTrial } from "./types.js";
 import { buildSourceSide, buildTargetSide } from "./adapters/distinct.js";

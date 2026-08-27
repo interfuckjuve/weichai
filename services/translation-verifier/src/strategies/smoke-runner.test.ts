@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createSmokeRunner } from "./smoke-runner.js";
 import type { SpawnClaude } from "../claude-client.js";
-import type { SmokeReport } from "../smoke-types.js";
+import type { SmokeReport } from "../smoke/smoke-types.js";
 import type { TestStrategyJob } from "./types.js";
 
 const job: TestStrategyJob = {

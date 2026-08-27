@@ -3,15 +3,15 @@
  * 预处理器 = VariantGeneratorAgent 生成源语言变体 → 写入工作目录 variants/;
  * 主流程 = claude 自主单次调用,读 <workspace>/report.json(AIDVerificationReport)归一化。
  *
- * 注意(Ruling 3):aid 模块当前仍在 src/variant/,Task 4 目录改名 aid/ 后
- * import 路径 ../variant/aid-verifier.js / ../variant/variant-generator.js 需更新。
+ * 注意(Ruling 3):aid 模块已从 src/variant/ 改名 src/aid/,
+ * import 路径指向新位置。
  */
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { runClaude } from "../claude-client.js";
 import type { VerifierLanguage } from "../description.js";
-import { VariantGeneratorAgent } from "../variant/variant-generator.js";
-import type { AIDVerificationReport } from "../variant/aid-verifier.js";
+import { VariantGeneratorAgent } from "../aid/variant-generator.js";
+import type { AIDVerificationReport } from "../aid/aid-verifier.js";
 import { defaultSandbox, defaultWorkspaceRoot, makeClaudeOptions, type StrategyLlmConfig } from "./helpers.js";
 import { buildAidTaskPrompt } from "./prompts/aid-task.js";
 import { errorSummary, readReport } from "./report.js";

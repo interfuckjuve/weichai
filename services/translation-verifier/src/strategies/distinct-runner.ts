@@ -3,7 +3,7 @@
  * 读 <workspace>/report.json(ConsistencyResult)归一化 status/passRate/summary。
  */
 import { runClaude } from "../claude-client.js";
-import type { ConsistencyResult } from "../consistency-verifier.js";
+import type { ConsistencyResult } from "../distinct/consistency-verifier-types.js";
 import { defaultSandbox, defaultWorkspaceRoot, makeClaudeOptions, type StrategyLlmConfig } from "./helpers.js";
 import { buildDistinctTaskPrompt } from "./prompts/distinct-task.js";
 import { errorSummary, readReport } from "./report.js";
