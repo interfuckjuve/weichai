@@ -1,5 +1,8 @@
+import { readFileSync, rmSync, mkdtempSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { runClaude, type SpawnClaude } from "./claude-client.js";
+import { runClaude, spawnClaudeProcess, buildHooksSettings, type SpawnClaude } from "./claude-client.js";
 
 // ---- 测试辅助 ----
 
@@ -121,5 +124,68 @@ decode MIME text`;
     }) as unknown as FakeSpawn;
 
     await expect(runClaude("p", { apiKey: "test-key", spawnClaude })).rejects.toThrow(/timed out after 120000ms/);
+  });
+});
+
+// ==================== 自主会话参数(rev.2 新增) ====================
+
+describe("spawnClaudeProcess 自主会话参数", () => {
+  it("组装 add-dir/disallowedTools/permission-mode/max-turns/settings 并透传 cwd", async () => {
+    const captured: { args: string[]; opts: Record<string, unknown> }[] = [];
+    const fake: SpawnClaude = async (args, _env, _t, o) => {
+      captured.push({ args, opts: (o ?? {}) as Record<string, unknown> });
+      return { stdout: "ok", exitCode: 0 };
+    };
+    await spawnClaudeProcess(
+      ["-p", "hello", "--output-format", "text"],
+      { ANTHROPIC_AUTH_TOKEN: "k" } as NodeJS.ProcessEnv,
+      1000,
+      { cwd: "/tmp/fx", addDirs: ["/refA", "/tmp/fx"], readOnlyDirs: ["/refA"], permissionMode: "acceptEdits", maxTurns: 50, settingsFile: "/tmp/fx/settings.json", spawn: fake },
+    );
+    const a = captured[0].args;
+    expect(a).toContain("--add-dir");
+    expect(a).toContain("/refA");
+    expect(a).toContain("/tmp/fx");
+    expect(a).toContain("--disallowedTools");
+    expect(a.some((x) => x.includes("Edit(//refA/**)"))).toBe(true);
+    expect(a).toContain("--permission-mode");
+    expect(a).toContain("acceptEdits");
+    expect(a).toContain("--max-turns");
+    expect(a).toContain("50");
+    expect(a).toContain("--settings");
+    expect(a).toContain("/tmp/fx/settings.json");
+    expect(captured[0].opts.cwd).toBe("/tmp/fx");
+  });
+
+  it("无自主选项时 args 与现状一致(不加任何新参数)", async () => {
+    const captured: string[][] = [];
+    const fake: SpawnClaude = async (args) => {
+      captured.push(args);
+      return { stdout: "ok", exitCode: 0 };
+    };
+    await spawnClaudeProcess(["-p", "x", "--output-format", "text"], {} as NodeJS.ProcessEnv, 1000, { spawn: fake });
+    expect(captured[0]).toEqual(["-p", "x", "--output-format", "text"]);
+  });
+});
+
+describe("runClaude 透传自主选项", () => {
+  it("cwd/addDirs/readOnlyDirs/permissionMode/maxTurns/hooksLogPath 传给 spawnClaude 第四参数", async () => {
+    const captured: { opts?: Record<string, unknown> }[] = [];
+    const fake: SpawnClaude = async (args, _env, _t, o) => {
+      captured.push({ opts: (o ?? {}) as Record<string, unknown> });
+      return { stdout: "ok", exitCode: 0 };
+    };
+    await runClaude("p", {
+      apiKey: "k",
+      spawnClaude: fake,
+      cwd: "/tmp/fx",
+      addDirs: ["/refA"],
+      readOnlyDirs: ["/refA"],
+      permissionMode: "acceptEdits",
+      maxTurns: 50,
+      hooksLogPath: "/tmp/fx/steps.jsonl",
+    });
+    expect(captured[0].opts?.cwd).toBe("/tmp/fx");
+    expect(String(captured[0].opts?.settingsFile ?? "")).toContain("hooks");
   });
 });
