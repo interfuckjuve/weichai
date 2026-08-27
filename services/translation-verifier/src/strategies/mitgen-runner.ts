@@ -10,6 +10,7 @@ import type { MitGenResult } from "../mitgen/types.js";
 import { defaultSandbox, defaultWorkspaceRoot, makeClaudeOptions, type StrategyLlmConfig } from "./helpers.js";
 import { buildMitgenTaskPrompt } from "./prompts/mitgen-task.js";
 import { errorSummary, readReport } from "./report.js";
+import { assertMitgenReport } from "./report-schema.js";
 import type { StrategyRunOptions, StrategyStatus, TestStrategyJob, TestStrategyReport, TestStrategyRunner } from "./types.js";
 import { createWorkspace } from "./workspace.js";
 
@@ -36,6 +37,10 @@ export function createMitgenRunner(options: MitgenRunnerOptions): TestStrategyRu
         if (signal?.aborted) throw new Error("策略运行已中止(aborted)");
         // 预处理器:片段提取(纯函数)→ 片段清单进入提示词。
         const sourceCode = (job.source.files ?? []).map((f) => f.content).join("\n");
+        if (!sourceCode.trim()) {
+          // 空 sourceCode 会让 extractFragments 静默产出空片段清单,显式判空给出清晰 error。
+          throw new Error("mitgen 策略需要 source.files 提供源方法代码(当前为空)");
+        }
         const fragments = extractFragments(sourceCode);
 
         const sandbox = options.claudeSandbox ?? defaultSandbox(job, ws.dir);
@@ -43,7 +48,7 @@ export function createMitgenRunner(options: MitgenRunnerOptions): TestStrategyRu
         const llm = makeClaudeOptions(options.llm, { ...sandbox, writableDir: sandbox.writableDir ?? ws.dir }, ws.stepsLogPath, options.maxTurns ?? 50);
         const prompt = buildMitgenTaskPrompt(job, { fragments });
         await runClaude(prompt, llm);
-        const detail = await readReport<MitGenResult>(ws.dir);
+        const detail = await readReport<MitGenResult>(ws.dir, assertMitgenReport);
         // 归一化(brief §3.4):status 恒为 "pass"(生成成功);passRate = undefined。
         const status: StrategyStatus = "pass";
         const summary = `MitGen 片段生成:${detail.fragments.length} 个片段,${detail.description.cases.length} 个用例`;

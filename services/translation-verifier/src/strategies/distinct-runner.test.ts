@@ -111,6 +111,24 @@ describe("createDistinctRunner", () => {
     }
   });
 
+  it("failedCases=0 但 divergentCases>0(全 divergent)→ status=fail,不误判 pass", async () => {
+    const root = tmpRoot();
+    try {
+      const base = distinctResult();
+      const divergent = {
+        ...base,
+        report: { ...base.report, passRate: 0, passedCases: 0, failedCases: 0, divergentCases: 2, totalCases: 2 },
+      };
+      const fake = fakeSpawn(divergent);
+      const runner = createDistinctRunner({ llm: { apiKey: "test-key", spawnClaude: fake.fake as unknown as SpawnClaude }, keepGeneratedTests: true, workspaceRoot: root });
+      const report = await runner.run(job);
+
+      expect(report.status).toBe("fail");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("keep=false:目录已删,keptDir undefined", async () => {
     const root = tmpRoot();
     try {
@@ -134,6 +152,21 @@ describe("createDistinctRunner", () => {
 
       expect(report.status).toBe("error");
       expect(report.summary).toContain("report.json");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("合法 JSON 但缺必填字段(report 对象)→ status=error 且 summary 含 schema 校验原因", async () => {
+    const root = tmpRoot();
+    try {
+      const fake = fakeSpawn({ report: undefined } as unknown as ConsistencyResult);
+      const runner = createDistinctRunner({ llm: { apiKey: "test-key", spawnClaude: fake.fake as unknown as SpawnClaude }, keepGeneratedTests: true, workspaceRoot: root });
+      const report = await runner.run(job);
+
+      expect(report.status).toBe("error");
+      expect(report.summary).toContain("report schema 校验失败");
+      expect(report.summary).toContain("report");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

@@ -142,6 +142,11 @@ export interface SmokeReport {
   cases: SmokeCaseVerdict[];
   /** 修复后的目标文件全文(未采纳不落盘,由调用方决定是否写回用户目录)。 */
   targetFiles: RunnerFile[];
+  /**
+   * 双侧 runner/driver 文件(可选,向后兼容旧报告):收敛无修复的常见路径下
+   * targetFiles 为空,metrics 层依赖本字段获得可编译/可拆分的 runner 文件。
+   */
+  runnerFiles?: { side: SmokeSide; language: VerifierLanguage; files: RunnerFile[] }[];
   /** agent 标注的源侧疑似缺陷。 */
   sourceIssues: string[];
   summary: string;

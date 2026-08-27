@@ -135,4 +135,35 @@ describe("createAidRunner", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it("source.files 为空时预处理器显式报错(status=error,summary 含清晰原因,不触网)", async () => {
+    const root = tmpRoot();
+    try {
+      const fake = fakeSpawn(aidReport());
+      const runner = createAidRunner({ llm: { apiKey: "test-key", spawnClaude: fake as unknown as SpawnClaude }, keepGeneratedTests: true, workspaceRoot: root });
+      const report = await runner.run({ ...job, source: { language: "Java", root: "/tmp/ref-src", files: [] } });
+
+      expect(report.status).toBe("error");
+      expect(report.summary).toContain("aid 策略需要 source.files");
+      // 预处理器在变体生成前短路,LLM 不被调用。
+      expect(fake).not.toHaveBeenCalled();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("合法 JSON 但缺必填字段(baseline)→ status=error 且 summary 含 schema 校验原因", async () => {
+    const root = tmpRoot();
+    try {
+      const fake = fakeSpawn({ ...aidReport(), baseline: undefined as unknown as AIDVerificationReport["baseline"] });
+      const runner = createAidRunner({ llm: { apiKey: "test-key", spawnClaude: fake as unknown as SpawnClaude }, keepGeneratedTests: true, workspaceRoot: root });
+      const report = await runner.run(job);
+
+      expect(report.status).toBe("error");
+      expect(report.summary).toContain("report schema 校验失败");
+      expect(report.summary).toContain("baseline");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

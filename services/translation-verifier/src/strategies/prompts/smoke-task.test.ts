@@ -58,9 +58,20 @@ describe("buildSmokeTaskPrompt", () => {
   it("内嵌 SmokeReport schema 关键字段与 report.json 写入要求", () => {
     const p = buildSmokeTaskPrompt(baseInput);
     expect(p).toContain("report.json");
-    for (const key of ["converged", "steps", "rounds", "cases", "mechanical", "decision", "targetFiles", "sourceIssues", "summary"]) {
+    for (const key of ["converged", "steps", "rounds", "cases", "mechanical", "decision", "targetFiles", "runnerFiles", "sourceIssues", "summary"]) {
       expect(p).toContain(key);
     }
+  });
+
+  it("runnerFiles 契约:双侧 runner 文件 + 约定驱动入口名(driver.py/driver.ts/Driver.cs/含 main 的 Java 类)", () => {
+    const p = buildSmokeTaskPrompt(baseInput);
+    expect(p).toContain("runnerFiles");
+    expect(p).toContain("driver.py");
+    expect(p).toContain("driver.ts");
+    expect(p).toContain("Driver.cs");
+    expect(p).toContain("main");
+    expect(p).toContain('"source"');
+    expect(p).toContain('"target"');
   });
 
   it("包含终止条件(写完 report.json 即结束)", () => {

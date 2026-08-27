@@ -10,7 +10,7 @@ import type { StrategyLlmConfig } from "./helpers.js";
 import type { StrategyRunOptions, TestStrategy, TestStrategyRunner } from "./types.js";
 
 export type { StrategyLlmConfig } from "./helpers.js";
-export { defaultSandbox, makeClaudeOptions, repoRoot } from "./helpers.js";
+export { defaultSandbox, makeClaudeOptions, packageRoot, repoRoot } from "./helpers.js";
 export { createSmokeRunner } from "./smoke-runner.js";
 export { createDistinctRunner } from "./distinct-runner.js";
 export { createAidRunner } from "./aid-runner.js";

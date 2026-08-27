@@ -4,7 +4,7 @@
  * 会话,离线夹具 = fake spawnClaude 把预设 report.json 写入策略工作目录,runner 读取归一化)。
  */
 import { describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakeDriverExecutor, type RunOutcome } from "../executor.js";
@@ -15,6 +15,7 @@ import { SmokeAdapter } from "./adapters/smoke.js";
 import { DistinctAdapter } from "./adapters/distinct.js";
 import { AidAdapter } from "./adapters/aid.js";
 import { MitGenAdapter } from "./adapters/mitgen.js";
+import { splitDriverEntry } from "../smoke/driver-entry.js";
 import type { AdapterContext } from "./adapters.js";
 import type { AIDVerificationReport, AIDReplayBaseline } from "../aid/aid-verifier.js";
 import type { TestDescription, TypedValue } from "../description.js";
@@ -230,6 +231,75 @@ describe("SmokeAdapter", () => {
       expect(test.kind).toBe("runner");
       expect(test.runner?.files.some((f) => f.path === "Runner.java")).toBe(true);
       expect(test.runner?.report?.converged).toBe(true);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("收敛报告携带 runnerFiles(双侧 runner/driver)时 runner.files 非空且可被 splitDriverEntry 拆分", async () => {
+    const spawn = strategySpawn({
+      report: smokeReportFixture({
+        targetFiles: [],
+        runnerFiles: [
+          {
+            side: "source",
+            language: "Java",
+            files: [
+              { path: "SmokeDriver.java", content: "public class SmokeDriver { public static void main(String[] args) {} }" },
+              { path: "Source.java", content: SOURCE_JAVA },
+            ],
+          },
+          {
+            side: "target",
+            language: "C#",
+            files: [
+              { path: "Driver.cs", content: "public class Driver { public static void Main(string[] args) {} }" },
+              { path: "Target.cs", content: TARGET_CS },
+            ],
+          },
+        ],
+      }),
+    });
+    const { ctx: adapterCtx, cleanup } = strategyCtx(spawn);
+    try {
+      const adapter = new SmokeAdapter(adapterCtx);
+      const test = await adapter.generateTest(makeTask());
+      expect(test.kind).toBe("runner");
+      // 双侧合并(目标侧在前):4 个文件全部保留 path/content。
+      expect(test.runner?.files).toHaveLength(4);
+      expect(test.runner?.files.map((f) => f.path)).toEqual(["Driver.cs", "Target.cs", "SmokeDriver.java", "Source.java"]);
+      expect(test.runner?.files.find((f) => f.path === "Target.cs")?.content).toContain("class Target");
+      // Java 入口识别:含 main 的 public class 文件可被拆分(驱动 + 附加文件)。
+      const split = splitDriverEntry("Java", test.runner!.files);
+      expect(split.driverSource).toContain("public static void main");
+      expect(split.extraFiles).toHaveLength(3);
+      expect(test.runner?.report?.converged).toBe(true);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("keptDir 回退读取跳过子目录与二进制(.class 等),不 EISDIR 不产出乱码", async () => {
+    // 自定义 fake:主调用时在工作目录写入 report.json + 文本 Driver.cs + 子目录 bin/ + 二进制 .class。
+    const spawn = async (_args: string[], _env: NodeJS.ProcessEnv, _timeoutMs: number, options?: { cwd?: string }) => {
+      if (options?.cwd) {
+        const cwd = options.cwd;
+        writeFileSync(join(cwd, "report.json"), JSON.stringify(smokeReportFixture({ targetFiles: [], runnerFiles: undefined })));
+        writeFileSync(join(cwd, "Driver.cs"), "public class Driver { public static void Main(string[] args) {} }");
+        mkdirSync(join(cwd, "bin"), { recursive: true });
+        writeFileSync(join(cwd, "bin", "Target.class"), Buffer.from([0xca, 0xfe, 0xba, 0xbe, 0x00, 0x00])); // 魔数非 utf-8
+        writeFileSync(join(cwd, "bin", "Helper.cs"), "public class Helper { }"); // 子目录内文本也不应被读到顶层
+      }
+      return { stdout: "done", exitCode: 0 };
+    };
+    const { ctx: adapterCtx, cleanup } = strategyCtx(spawn as SpawnClaude, { keepGeneratedTests: true });
+    try {
+      const adapter = new SmokeAdapter(adapterCtx);
+      const test = await adapter.generateTest(makeTask());
+      expect(test.kind).toBe("runner");
+      // 只读顶层文本文件:二进制 .class 与子目录 bin/ 均被跳过。
+      expect(test.runner?.files.map((f) => f.path)).toEqual(["Driver.cs"]);
+      expect(test.runner?.files[0]?.content).toContain("class Driver");
     } finally {
       cleanup();
     }

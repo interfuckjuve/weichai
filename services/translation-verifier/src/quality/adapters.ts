@@ -43,7 +43,7 @@ export interface AdapterContext {
   casesPerFragment?: number;
   /** 策略 runner 的自主会话轮数上限(默认各 runner 内部默认值 50)。 */
   maxTurns?: number;
-  /** 策略工作区根目录(默认 <repoRoot>/test-results;单测可注入临时目录)。 */
+  /** 策略工作区根目录(默认 <packageRoot>/test-results;单测可注入临时目录)。 */
   workspaceRoot?: string;
   /** smoke 专属:策略完成后保留工作目录(keptDir 读取 runner 文件用);默认 false。 */
   keepGeneratedTests?: boolean;

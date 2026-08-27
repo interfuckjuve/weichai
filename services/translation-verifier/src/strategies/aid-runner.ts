@@ -15,6 +15,7 @@ import type { AIDVerificationReport } from "../aid/aid-verifier.js";
 import { defaultSandbox, defaultWorkspaceRoot, makeClaudeOptions, type StrategyLlmConfig } from "./helpers.js";
 import { buildAidTaskPrompt } from "./prompts/aid-task.js";
 import { errorSummary, readReport } from "./report.js";
+import { assertAidReport } from "./report-schema.js";
 import type { StrategyRunOptions, StrategyStatus, TestStrategyJob, TestStrategyReport, TestStrategyRunner } from "./types.js";
 import { createWorkspace } from "./workspace.js";
 
@@ -51,6 +52,10 @@ export function createAidRunner(options: AidRunnerOptions): TestStrategyRunner {
         if (signal?.aborted) throw new Error("策略运行已中止(aborted)");
         // 预处理器:变体生成(LLM 基础选项,不含沙箱)→ 写入 ws.dir/variants/。
         const sourceCode = (job.source.files ?? []).map((f) => f.content).join("\n");
+        if (!sourceCode.trim()) {
+          // 空 sourceCode 会让下游 extractJavaClass 抛低质量错误,显式判空给出清晰 error。
+          throw new Error("aid 策略需要 source.files 提供源方法代码(当前为空)");
+        }
         const generator = new VariantGeneratorAgent({
           apiKey: options.llm.apiKey,
           model: options.llm.model,
@@ -79,7 +84,7 @@ export function createAidRunner(options: AidRunnerOptions): TestStrategyRunner {
         const llm = makeClaudeOptions(options.llm, { ...sandbox, writableDir: sandbox.writableDir ?? ws.dir }, ws.stepsLogPath, options.maxTurns ?? 50);
         const prompt = buildAidTaskPrompt(job, { variantsDir });
         await runClaude(prompt, llm);
-        const detail = await readReport<AIDVerificationReport>(ws.dir);
+        const detail = await readReport<AIDVerificationReport>(ws.dir, assertAidReport);
         // 归一化(brief §3.3):AIDVerificationReport 顶层无 cleanTarget 字段,
         // 实际位于 baseline.cleanTarget.usable(字段映射见报告);usable=false → unverified,
         // 否则 failedCases===0 → pass,其余 → fail。passRate 取 detail.passRate。

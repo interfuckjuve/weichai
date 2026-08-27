@@ -158,4 +158,20 @@ describe("createSmokeRunner", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it("合法 JSON 但缺必填字段(converged)→ status=error 且 summary 含 schema 校验原因(不静默落成 fail)", async () => {
+    const root = tmpRoot();
+    try {
+      // converged 置 undefined → JSON.stringify 丢弃该键,模拟 claude 缺字段报告。
+      const h = fakeSpawn(smokeReport({ converged: undefined as unknown as boolean }));
+      const runner = createSmokeRunner({ llm: { apiKey: "test-key", spawnClaude: h.fake as unknown as SpawnClaude }, keepGeneratedTests: true, workspaceRoot: root });
+      const report = await runner.run(job);
+
+      expect(report.status).toBe("error");
+      expect(report.summary).toContain("report schema 校验失败");
+      expect(report.summary).toContain("converged");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

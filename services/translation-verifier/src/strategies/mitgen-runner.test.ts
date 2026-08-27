@@ -145,4 +145,34 @@ describe("createMitgenRunner", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it("source.files 为空时预处理器显式报错(status=error,summary 含清晰原因,不触网)", async () => {
+    const root = tmpRoot();
+    try {
+      const fake = fakeSpawn(mitgenResult());
+      const runner = createMitgenRunner({ llm: { apiKey: "test-key", spawnClaude: fake.fake as unknown as SpawnClaude }, keepGeneratedTests: true, workspaceRoot: root });
+      const report = await runner.run({ ...job, source: { language: "Java", root: "/tmp/ref-src", files: [] } });
+
+      expect(report.status).toBe("error");
+      expect(report.summary).toContain("mitgen 策略需要 source.files");
+      expect(fake.fake).not.toHaveBeenCalled();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("合法 JSON 但缺必填字段(fragments)→ status=error 且 summary 含 schema 校验原因", async () => {
+    const root = tmpRoot();
+    try {
+      const fake = fakeSpawn({ ...mitgenResult(), fragments: undefined as unknown as MitGenResult["fragments"] });
+      const runner = createMitgenRunner({ llm: { apiKey: "test-key", spawnClaude: fake.fake as unknown as SpawnClaude }, keepGeneratedTests: true, workspaceRoot: root });
+      const report = await runner.run(job);
+
+      expect(report.status).toBe("error");
+      expect(report.summary).toContain("report schema 校验失败");
+      expect(report.summary).toContain("fragments");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

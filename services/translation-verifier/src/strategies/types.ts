@@ -27,7 +27,7 @@ export interface TestStrategyJob {
 
 export interface StrategyRunOptions {
   keepGeneratedTests?: boolean; // 默认 false
-  workspaceRoot?: string; // 默认 <repoRoot>/test-results
+  workspaceRoot?: string; // 默认 <packageRoot>/test-results
   claudeSandbox?: { readOnlyDirs: string[]; writableDir?: string };
   maxTurns?: number; // 默认 50
   apiKey?: string;

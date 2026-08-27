@@ -7,6 +7,7 @@ import type { SmokeReport } from "../smoke/smoke-types.js";
 import { defaultSandbox, defaultWorkspaceRoot, makeClaudeOptions, type StrategyLlmConfig } from "./helpers.js";
 import { buildSmokeTaskPrompt } from "./prompts/smoke-task.js";
 import { errorSummary, readReport } from "./report.js";
+import { assertSmokeReport } from "./report-schema.js";
 import type { StrategyRunOptions, StrategyStatus, TestStrategyJob, TestStrategyReport, TestStrategyRunner } from "./types.js";
 import { createWorkspace } from "./workspace.js";
 
@@ -36,7 +37,7 @@ export function createSmokeRunner(options: SmokeRunnerOptions): TestStrategyRunn
         const llm = makeClaudeOptions(options.llm, { ...sandbox, writableDir: sandbox.writableDir ?? ws.dir }, ws.stepsLogPath, options.maxTurns ?? 50);
         const prompt = buildSmokeTaskPrompt(job);
         await runClaude(prompt, llm);
-        const detail = await readReport<SmokeReport>(ws.dir);
+        const detail = await readReport<SmokeReport>(ws.dir, assertSmokeReport);
         // 归一化(brief §3.3):converged → pass/fail;passRate = cases 机械 pass 占比(空数组 undefined)。
         const status: StrategyStatus = detail.converged ? "pass" : "fail";
         const passRate = detail.cases.length === 0 ? undefined : detail.cases.filter((c) => c.mechanical === "pass").length / detail.cases.length;

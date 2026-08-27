@@ -7,10 +7,15 @@ import type { ClaudeClientOptions, SpawnClaude } from "../claude-client.js";
 import type { TestStrategyJob } from "./types.js";
 
 /**
- * 本包根目录(services/translation-verifier):默认 workspaceRoot = <repoRoot>/test-results。
+ * 本包根目录(services/translation-verifier):默认 workspaceRoot = <packageRoot>/test-results。
  * spec §7 新增 .gitignore 忽略 test-results/。
  */
-export const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+export const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+
+/**
+ * 兼容别名(历史导出名 repoRoot 指向包根,保持公共签名;新代码请用 packageRoot)。
+ */
+export const repoRoot = packageRoot;
 
 /**
  * runner 的 LLM 配置(比 brief 的三字段多一个可选 spawnClaude,用于测试注入 fake;
@@ -42,8 +47,8 @@ export function defaultSandbox(job: TestStrategyJob, writableDir: string): Sandb
  * 组装 claude 自主会话参数(brief Interfaces;Ruling 1 env):
  * - cwd = writableDir;addDirs = 只读参考目录 + 工作目录;readOnlyDirs = 参考目录;
  * - permissionMode acceptEdits;maxTurns;hooksLogPath = stepsLogPath;
- * - env 注入 JAVA_HOME(claude 子进程定位 JDK 的坑,已实测);未设置时注入空串(无害,
- *   子进程仅当实际使用 Java 工具时才需要;生产上通常由调用方 export 后生效)。
+ * - env 注入 JAVA_HOME(claude 子进程定位 JDK 的坑,已实测);未设置时省略该键
+ *   (空串会破坏 $JAVA_HOME/bin/javac 全路径约定;省略后子进程回落 PATH 查找 javac)。
  */
 export function makeClaudeOptions(
   llm: StrategyLlmConfig,
@@ -62,11 +67,11 @@ export function makeClaudeOptions(
     permissionMode: "acceptEdits",
     maxTurns,
     hooksLogPath: stepsLogPath,
-    env: { JAVA_HOME: process.env.JAVA_HOME ?? "" },
+    env: process.env.JAVA_HOME ? { JAVA_HOME: process.env.JAVA_HOME } : {},
   };
 }
 
 /** 默认工作区根目录。 */
 export function defaultWorkspaceRoot(): string {
-  return join(repoRoot, "test-results");
+  return join(packageRoot, "test-results");
 }

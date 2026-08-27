@@ -52,7 +52,7 @@ TARGET SIDE (translated artifact under test)
 WORKFLOW
 1. Read the source module and the target translation to understand both implementations.
 2. Design a set of smoke test cases covering normal, boundary and error inputs (intent descriptions only, no golden values).
-3. Write runner code for BOTH sides (a compilable driver that runs each case and prints a results JSON).
+3. Write runner code for BOTH sides (a compilable driver that runs each case and prints a results JSON), and record all runner files in the report (runnerFiles, see REPORT CONTRACT).
 4. Compile and run both sides; if compilation fails, fix the runner (never fabricate compile/run output — only real command output is authoritative).
 5. Diff the two sides' observable behavior case by case (mechanical comparison).
 6. Judge each difference: pass / translation-bug / accepted-diff / unclear, with reasoning.
@@ -87,14 +87,22 @@ Write a single JSON file named report.json in your working directory, strictly m
     }
   ],
   "targetFiles": [ { "path": string, "content": string } ],  // 修复后的目标文件全文(未采纳不落盘)
+  "runnerFiles": [ { "side": "source"|"target", "language": "Java"|"C#"|"Python"|"TypeScript", "files": [ { "path": string, "content": string } ] } ],  // 双侧 runner 文件(必填,含 driver 入口)
   "sourceIssues": [ string ],                 // 源侧疑似缺陷(仅标注,不机械判 fail)
   "summary": string                           // 整体结论(如 "5/5 用例行为一致")
 }
 
+RUNNER FILES CONTRACT
+- Write BOTH sides' complete runner source into runnerFiles (two entries: one per side), including the driver entry.
+- Use conventional driver entry paths: Python = driver.py, TypeScript = driver.ts, C# = Driver.cs, Java = the public class file containing main, named <ClassName>.java.
+- The source side entry path is "source", the target side entry path is "target".
+
 Example (compact):
 {"converged": true, "steps": 18, "rounds": 1,
  "cases": [{"caseId": "c1", "intent": "空串输入", "source": {"caseId": "c1", "outcome": "return", "returnValue": {"type": "string", "value": ""}}, "target": {"caseId": "c1", "outcome": "return", "returnValue": {"type": "string", "value": ""}}, "mechanical": "pass", "decision": "pass", "reasoning": "双侧输出一致"}],
- "targetFiles": [], "sourceIssues": [], "summary": "5/5 用例行为一致"}
+ "targetFiles": [], "sourceIssues": [],
+ "runnerFiles": [{"side": "source", "language": "Java", "files": [{"path": "SmokeDriver.java", "content": "..."}, {"path": "MimeDecoder.java", "content": "..."}]}, {"side": "target", "language": "C#", "files": [{"path": "Driver.cs", "content": "..."}, {"path": "MimeDecoder.cs", "content": "..."}]}],
+ "summary": "5/5 用例行为一致"}
 
 TERMINATION
 Your task is complete once report.json exists in your working directory and is valid JSON matching the schema above. Do not continue working after that. If you cannot complete the verification, still write a report.json with converged=false and an explanatory summary.`;

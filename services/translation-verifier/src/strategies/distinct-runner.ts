@@ -7,6 +7,7 @@ import type { ConsistencyResult } from "../distinct/consistency-verifier-types.j
 import { defaultSandbox, defaultWorkspaceRoot, makeClaudeOptions, type StrategyLlmConfig } from "./helpers.js";
 import { buildDistinctTaskPrompt } from "./prompts/distinct-task.js";
 import { errorSummary, readReport } from "./report.js";
+import { assertDistinctReport } from "./report-schema.js";
 import type { StrategyRunOptions, StrategyStatus, TestStrategyJob, TestStrategyReport, TestStrategyRunner } from "./types.js";
 import { createWorkspace } from "./workspace.js";
 
@@ -36,10 +37,12 @@ export function createDistinctRunner(options: DistinctRunnerOptions): TestStrate
         const llm = makeClaudeOptions(options.llm, { ...sandbox, writableDir: sandbox.writableDir ?? ws.dir }, ws.stepsLogPath, options.maxTurns ?? 50);
         const prompt = buildDistinctTaskPrompt(job);
         await runClaude(prompt, llm);
-        const detail = await readReport<ConsistencyResult>(ws.dir);
+        const detail = await readReport<ConsistencyResult>(ws.dir, assertDistinctReport);
         // 归一化(brief §3.3):ConsistencyResult 无 converged 字段(brief 注明按实际字段调整);
-        // 收敛判据映射为「差分报告无失败用例」→ pass,否则 fail。passRate 取 report.passRate。
-        const status: StrategyStatus = detail.report.failedCases === 0 ? "pass" : "fail";
+        // 收敛判据映射为「差分报告无失败且无未决差异用例」→ pass,否则 fail
+        // (divergent 未决差异按 fail 处理,避免全 divergent 误判 pass)。passRate 取 report.passRate。
+        const status: StrategyStatus =
+          detail.report.failedCases === 0 && detail.report.divergentCases === 0 ? "pass" : "fail";
         const passRate = detail.report.passRate;
         const summary = `差分验证:passRate=${detail.report.passRate.toFixed(3)},pass=${detail.report.passedCases},fail=${detail.report.failedCases},divergent=${detail.report.divergentCases},total=${detail.report.totalCases},augmented=${detail.augmented}`;
         if (!keep) ws.cleanup();
