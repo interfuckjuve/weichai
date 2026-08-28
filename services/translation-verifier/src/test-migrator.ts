@@ -49,7 +49,7 @@ export interface MigrationInput {
 
 export interface TestMigratorOptions extends ClaudeClientOptions {}
 
-const MAX_MIGRATION_RETRIES = 2;
+const MAX_MIGRATION_RETRIES = 0;
 
 export const MIGRATOR_SYSTEM_PROMPT = `You are a test migration specialist. Given a user requirement and a
 candidate implementation (source method plus optional existing tests) retrieved from a codebase, produce

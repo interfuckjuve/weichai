@@ -156,11 +156,11 @@ describe("BaselineAdapter", () => {
     expect(test.meta.llmCalls).toBe(1);
   });
 
-  it("非法 LLM 输出触发重试,成本统计含重试次数", async () => {
+  it("非法 LLM 输出不再重试:失败即抛错,成本只计 1 次调用", async () => {
     const adapter = new BaselineAdapter(ctx(scriptedSpawn(["not json", DESCRIPTION_JSON])));
-    const test = await adapter.generateTest(makeTask());
-    expect(test.description?.cases).toHaveLength(1);
-    expect(test.meta.llmCalls).toBe(2);
+    await expect(adapter.generateTest(makeTask())).rejects.toThrow(
+      /TestMigratorAgent failed to produce a valid test description/,
+    );
   });
 });
 

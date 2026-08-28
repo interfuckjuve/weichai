@@ -143,26 +143,24 @@ describe("TestMigratorAgent.extractDescription", () => {
     await expect(agent.extractDescription(sampleInput())).rejects.toThrow(/schemaVersion must be "1.0"/);
   });
 
-  it("retries when the first response is invalid and the second is valid", async () => {
-    const spawnClaude = fakeSpawn("bad json");
-    spawnClaude.mockResolvedValueOnce({ stdout: "bad json", exitCode: 0 });
-    spawnClaude.mockResolvedValueOnce({ stdout: validDescriptionJson(), exitCode: 0 });
-    const agent = new TestMigratorAgent({ apiKey: "test-key", spawnClaude });
-
-    const result = await agent.extractDescription(sampleInput());
-
-    expect(result.cases).toHaveLength(3);
-    expect(spawnClaude).toHaveBeenCalledTimes(2);
-  });
-
-  it("gives up after 3 consecutive failures (retries <= 2)", async () => {
+  it("fails immediately with a single claude call when the response is invalid (no retry)", async () => {
     const spawnClaude = fakeSpawn("bad json");
     const agent = new TestMigratorAgent({ apiKey: "test-key", spawnClaude });
 
     await expect(agent.extractDescription(sampleInput())).rejects.toThrow(
       /TestMigratorAgent failed to produce a valid test description/,
     );
-    expect(spawnClaude).toHaveBeenCalledTimes(3);
+    expect(spawnClaude).toHaveBeenCalledTimes(1);
+  });
+
+  it("gives up after the first failure (single claude call, no retries)", async () => {
+    const spawnClaude = fakeSpawn("bad json");
+    const agent = new TestMigratorAgent({ apiKey: "test-key", spawnClaude });
+
+    await expect(agent.extractDescription(sampleInput())).rejects.toThrow(
+      /TestMigratorAgent failed to produce a valid test description/,
+    );
+    expect(spawnClaude).toHaveBeenCalledTimes(1);
   });
 
   it("throws without spawning claude when no apiKey is provided", async () => {
