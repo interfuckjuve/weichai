@@ -23,6 +23,8 @@ export interface TestStrategyJob {
   requirement: string;
   source: StrategySide;
   target: StrategySide & { className: string; method: string; isStatic: boolean; file?: string };
+  /** Analyzer 报告 JSON 字符串(供 smoke 等策略读取候选适用性/行为映射;其余策略忽略)。 */
+  analysisReport?: string;
 }
 
 export interface StrategyRunOptions {

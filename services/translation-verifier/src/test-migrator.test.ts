@@ -210,6 +210,33 @@ describe("buildMigrationPrompt(需求第一)", () => {
     expect(prompt).toContain("REFERENCE_IMPLEMENTATION");
   });
 
+  it("includes ANALYSIS_REPORT and TARGET_TRANSLATION sections when provided", () => {
+    const analysisReport = JSON.stringify({
+      schemaVersion: "1.0",
+      applicability: { level: "adapt", confidence: 0.8, reasons: ["similar behavior"] },
+      behaviorMapping: [{ requirement: "decode", status: "covered", candidateEvidence: ["x"], targetAction: "y" }],
+    });
+    const targetCode = "public static String decodeText(String value) { return value; }";
+    const prompt = buildMigrationPrompt({ ...sampleInput(), analysisReport, targetCode });
+
+    // ANALYSIS_REPORT 位于 REQUIREMENT 之后、REFERENCE_IMPLEMENTATION 之前。
+    expect(prompt).toContain("ANALYSIS_REPORT");
+    expect(prompt).toContain('"applicability"');
+    expect(prompt.indexOf("ANALYSIS_REPORT")).toBeGreaterThan(prompt.indexOf("REQUIREMENT"));
+    expect(prompt.indexOf("ANALYSIS_REPORT")).toBeLessThan(prompt.indexOf("REFERENCE_IMPLEMENTATION"));
+    // TARGET_TRANSLATION 位于 SOURCE_METHOD 之后。
+    expect(prompt).toContain("TARGET_TRANSLATION");
+    expect(prompt).toContain(targetCode);
+    expect(prompt.indexOf("TARGET_TRANSLATION")).toBeGreaterThan(prompt.indexOf("SOURCE_METHOD"));
+  });
+
+  it("omits ANALYSIS_REPORT and TARGET_TRANSLATION when absent", () => {
+    const prompt = buildMigrationPrompt(sampleInput());
+
+    expect(prompt).not.toContain("ANALYSIS_REPORT");
+    expect(prompt).not.toContain("TARGET_TRANSLATION");
+  });
+
   it("omits the EXISTING_TESTS section when no tests are provided", () => {
     const prompt = buildMigrationPrompt({ ...sampleInput(), existingTests: undefined });
 

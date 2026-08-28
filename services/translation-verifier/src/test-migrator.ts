@@ -6,8 +6,11 @@ import { createLogger, type Logger } from "./logger.js";
 
 export interface MigrationInput {
   sourceLanguage: string;
-  /** 完整方法体(按 SearchCandidate.path 从语料读取,而非 preview 片段)。 */
-  sourceCode: string;
+  /**
+   * 完整方法体(按 SearchCandidate.path 从语料读取,而非 preview 片段)。
+   * target-only 模式(无源侧参考,Analyzer 判定 reject/reference)时可省略。
+   */
+  sourceCode?: string;
   /** 同仓库锚定的相关测试(参考;上游 code-indexer 不索引测试,须自寻)。 */
   existingTests?: string;
   /** 用户需求,最高优先级(必填)。 */
@@ -25,6 +28,8 @@ export interface MigrationInput {
   targetContext?: string;
   /** 目标侧翻译产物源码(MitGen 片段对应性检查用;其余生成器忽略)。 */
   targetCode?: string;
+  /** Analyzer 报告 JSON 字符串(applicability/行为映射/契约映射/实现计划;供描述生成参考)。 */
+  analysisReport?: string;
   target: {
     language: "Java" | "C#";
     className: string;
@@ -138,10 +143,16 @@ ${input.validationFeedback.trim()}
 `
     : "";
   // 需求第一:REQUIREMENT 段在最前;源码/测试为参考实现。
+  const analysisReport = input.analysisReport?.trim()
+    ? `ANALYSIS_REPORT (Analyzer 对候选适用性的判定,参考;不覆盖需求)
+${input.analysisReport.trim()}
+
+`
+    : "";
   return `REQUIREMENT
 ${input.requirement}
 
-${validationFeedback}REFERENCE_IMPLEMENTATION
+${validationFeedback}${analysisReport}REFERENCE_IMPLEMENTATION
 Source language: ${input.sourceLanguage}${input.repository ? `\nRepository: ${input.repository}` : ""}${input.sourcePath ? `\nPath: ${input.sourcePath}` : ""}
 Target contract:
 - language: ${input.target.language}
@@ -151,10 +162,15 @@ Target contract:
 - signature: ${input.targetSignature ?? "derive from the source method declaration (return type + parameters)"}
 
 SOURCE_METHOD
-\`\`\`
+${input.sourceCode
+    ? `\`\`\`
 ${input.sourceCode}
+\`\`\``
+    : "(target-only 模式:无源侧参考实现。仅依据 REQUIREMENT、ANALYSIS_REPORT 与 TARGET_TRANSLATION 编写测试描述,不要假设源侧行为。)"}${input.targetCode ? `TARGET_TRANSLATION (目标侧翻译产物,参考;帮助对齐描述与目标契约)
 \`\`\`
-${input.targetContext ? `TARGET_CLASS_CONTEXT
+${input.targetCode}
+\`\`\`
+` : ""}${input.targetContext ? `TARGET_CLASS_CONTEXT
 \`\`\`
 ${input.targetContext}
 \`\`\`

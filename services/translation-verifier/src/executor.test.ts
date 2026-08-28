@@ -1,3 +1,6 @@
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { TestDescription, VerifierLanguage } from "./description.js";
 import { generateDriverSource } from "./driver/driver-codegen.js";
@@ -150,6 +153,30 @@ describe.skipIf(!isToolchainAvailable("Java"))("RealDriverExecutor Java 集成",
     const compiled = await executor.compile(side);
     expect(compiled.success).toBe(false);
     expect(compiled.errors.length).toBeGreaterThan(0);
+  });
+
+  it("reuseDir:直接复用已有目录,driver 写入后编译运行,且目录不被删除", async () => {
+    const reuseDir = mkdtempSync(join(tmpdir(), "fx-reuse-test-"));
+    try {
+      writeFileSync(
+        join(reuseDir, "Hello.java"),
+        'public class Hello { public static String greet(String name){ return "hi " + name; } }',
+        "utf8",
+      );
+      const side: SideSpec = { ...javaSide(), projectRoot: reuseDir, reuseDir };
+
+      const compiled = await executor.compile(side);
+      expect(compiled.success).toBe(true);
+
+      const ran = await executor.run(side);
+      expect(ran.exitCode).toBe(0);
+      expect(ran.stdout).toContain("hi pi");
+
+      // 复用目录:不复制、不删除;driver 与编译产物留在原目录。
+      expect(existsSync(reuseDir)).toBe(true);
+    } finally {
+      rmSync(reuseDir, { recursive: true, force: true });
+    }
   });
 
   it("FQN 类名 + 包私有类:驱动同包声明 → 编译运行成功(包私有成员可访问)", async () => {

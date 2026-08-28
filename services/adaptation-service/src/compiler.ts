@@ -21,6 +21,8 @@ export interface CompileResult {
   success: boolean;
   errors: string[];
   output: string;
+  /** 集成编译保留的工作区副本绝对路径(仅集成编译返回;保留供差分验证与调试)。 */
+  workspacePath?: string;
 }
 
 /**
@@ -149,9 +151,9 @@ export function compileIntegrated(
   }
 
   // Keep Windows-hosted SDK builds on the same mounted drive as the skeleton.
-  const temporaryProject = mkdtempSync(
-    join(dirname(projectRoot), ".forexplore-integrated-"),
-  );
+  const temporaryProject = preservedWorkspacePath(projectRoot, "csharp", targetFilePath);
+  // 重建保证与当前生成代码一致;保留目录不随编译结束删除(供差分验证/调试)。
+  rmSync(temporaryProject, { recursive: true, force: true });
   try {
     cpSync(projectRoot, temporaryProject, {
       recursive: true,
@@ -160,12 +162,11 @@ export function compileIntegrated(
     const temporaryTarget = join(temporaryProject, relativeTarget);
     const original = readFileSync(temporaryTarget, "utf8");
     writeFileSync(temporaryTarget, replaceTargetCode(original, csharpCode), "utf8");
-    return compileWithDotnet(dotnet, temporaryProject, false);
+    const result = compileWithDotnet(dotnet, temporaryProject, false);
+    return { ...result, workspacePath: temporaryProject };
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
-    return { success: false, errors: [message], output: message };
-  } finally {
-    rmSync(temporaryProject, { recursive: true, force: true });
+    return { success: false, errors: [message], output: message, workspacePath: temporaryProject };
   }
 }
 
@@ -338,6 +339,16 @@ function isOutsideProject(projectRoot: string, sourcePath: string): boolean {
     relativePath.startsWith(`..${sep}`) ||
     isAbsolute(relativePath)
   );
+}
+
+/**
+ * 集成编译的固定保留目录:<parent>/.forexplore-target-<language>-<basename>/。
+ * 固定名便于调试查看;调用方负责在不需要时清理。
+ */
+function preservedWorkspacePath(projectRoot: string, language: string, targetFilePath: string): string {
+  const base = basename(targetFilePath).replace(/\\.(?:java|cs|ts|tsx|py|go|rs)$/i, "") || "target";
+  const safe = base.replace(/[^A-Za-z0-9_.-]/g, "_");
+  return join(dirname(projectRoot), `.forexplore-target-${language}-${safe}`);
 }
 
 function replaceTargetCode(source: string, generatedCode: string): string {
@@ -621,9 +632,8 @@ export function compileJavaIntegrated(
     };
   }
 
-  const temporaryProject = mkdtempSync(
-    join(dirname(projectRoot), ".forexplore-java-integrated-"),
-  );
+  const temporaryProject = preservedWorkspacePath(projectRoot, "java", targetFilePath);
+  rmSync(temporaryProject, { recursive: true, force: true });
   try {
     cpSync(projectRoot, temporaryProject, {
       recursive: true,
@@ -643,10 +653,10 @@ export function compileJavaIntegrated(
           timeout: 90_000,
           stdio: "pipe",
         });
-        return { success: true, errors: [], output: stdout };
+        return { success: true, errors: [], output: stdout, workspacePath: temporaryProject };
       } catch (error: unknown) {
         const errOutput = collectErrorOutput(error);
-        return { success: false, errors: parseJavaErrors(errOutput), output: errOutput };
+        return { success: false, errors: parseJavaErrors(errOutput), output: errOutput, workspacePath: temporaryProject };
       }
     }
 
@@ -658,17 +668,15 @@ export function compileJavaIntegrated(
         timeout: 60_000,
         stdio: "pipe",
       });
-      return { success: true, errors: [], output: stdout };
+      return { success: true, errors: [], output: stdout, workspacePath: temporaryProject };
     } catch (e: unknown) {
       const errOutput = collectErrorOutput(e);
       const errors = parseJavaErrors(errOutput);
-      return { success: false, errors, output: errOutput };
+      return { success: false, errors, output: errOutput, workspacePath: temporaryProject };
     }
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
-    return { success: false, errors: [message], output: message };
-  } finally {
-    rmSync(temporaryProject, { recursive: true, force: true });
+    return { success: false, errors: [message], output: message, workspacePath: temporaryProject };
   }
 }
 
@@ -828,7 +836,8 @@ function compileIntegratedProject(
   if (!resolvedTarget) {
     return { success: false, errors: [`Target file does not exist in the project: ${targetFilePath}`], output: "" };
   }
-  const temporaryProject = mkdtempSync(join(dirname(projectRoot), `.forexplore-${language}-integrated-`));
+  const temporaryProject = preservedWorkspacePath(projectRoot, language, targetFilePath);
+  rmSync(temporaryProject, { recursive: true, force: true });
   try {
     cpSync(projectRoot, temporaryProject, {
       recursive: true,
@@ -841,12 +850,11 @@ function compileIntegratedProject(
       language === "python" ? replacePythonTargetCode(original, code) : replaceTargetCode(original, code),
       "utf8",
     );
-    return compile(temporaryProject, temporaryTarget);
+    const result = compile(temporaryProject, temporaryTarget);
+    return { ...result, workspacePath: temporaryProject };
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
-    return { success: false, errors: [message], output: message };
-  } finally {
-    rmSync(temporaryProject, { recursive: true, force: true });
+    return { success: false, errors: [message], output: message, workspacePath: temporaryProject };
   }
 }
 

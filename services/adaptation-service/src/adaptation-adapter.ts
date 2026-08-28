@@ -5,7 +5,7 @@
 
 import { createHash } from "node:crypto";
 import { readFileSync, existsSync, realpathSync } from "node:fs";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import type {
   AnalysisReport,
   AnalysisRequest,
@@ -38,6 +38,7 @@ import {
   resolveProjectTargetFile,
   type CompileResult,
 } from "./compiler";
+import { copySourceProject } from "./source-project";
 import type {
   AdaptationVerifier,
   DifferentialVerificationResult,
@@ -53,6 +54,8 @@ export interface AdaptationAdapterOptions {
   skeletonProjectPath?: string;
   /** 目标项目根目录（可选，有则生成定点 context patch 而非全量替换） */
   projectRoot?: string;
+  /** 语料根目录（可选；Analyzer 判定候选 direct/adapt 时用于定位并复制源项目）。 */
+  corpusRoot?: string;
   analyzer?: AdaptationAnalyzer;
   contextCollector?: AdaptationContextCollector;
   translatorRequest?: typeof globalThis.fetch;
@@ -89,6 +92,7 @@ const defaultValidator: AdaptationValidator = {
 export class AdaptationAdapter implements CodeAdaptationPort {
   #skeletonProjectPath?: string;
   #projectRoot?: string;
+  #corpusRoot?: string;
   #analyzer: AdaptationAnalyzer;
   #contextCollector: AdaptationContextCollector;
   #translatorOptions: TranslatorModelOptions;
@@ -98,6 +102,7 @@ export class AdaptationAdapter implements CodeAdaptationPort {
   constructor(options: AdaptationAdapterOptions) {
     this.#skeletonProjectPath = options.skeletonProjectPath;
     this.#projectRoot = options.projectRoot;
+    this.#corpusRoot = options.corpusRoot;
     this.#analyzer = options.analyzer ?? new AnalyzerAgent({ apiKey: options.apiKey });
     this.#contextCollector = options.contextCollector ?? collectTargetContext;
     this.#translatorOptions = options.translatorRequest
@@ -139,6 +144,17 @@ export class AdaptationAdapter implements CodeAdaptationPort {
     const translationReport = referenceFree
       ? referenceFreeAnalysisReport(analysisReport)
       : analysisReport;
+
+    // 候选可用(direct/adapt)时复制源语言项目到目标工程同级,供集成编译后的差分验证与调试。
+    // 复制的目录默认保留,不随请求清理。
+    let sourceProjectRoot: string | undefined;
+    if (!referenceFree && this.#corpusRoot && this.#skeletonProjectPath) {
+      sourceProjectRoot = copySourceProject(
+        request.candidate.repository,
+        this.#corpusRoot,
+        dirname(this.#skeletonProjectPath),
+      )?.root;
+    }
 
     const translationInput: AnalyzeTranslationRequest = {
       candidateSource: referenceFree ? "" : request.candidate.preview,
@@ -205,7 +221,15 @@ export class AdaptationAdapter implements CodeAdaptationPort {
       if (!this.#verifier) break;
       try {
         differentialResult = await this.#verifier.verify(
-          { request, targetContext: collectedContext, generatedCode, projectRoot },
+          {
+            request,
+            targetContext: collectedContext,
+            generatedCode,
+            projectRoot,
+            analysisReport: translationReport,
+            sourceProjectRoot,
+            targetProjectRoot: integratedResult?.workspacePath,
+          },
           signal,
         );
       } catch (error: unknown) {

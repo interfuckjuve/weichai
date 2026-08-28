@@ -10,6 +10,7 @@ const adapter = new AdaptationAdapter({
   apiKey: config.apiKey,
   skeletonProjectPath: config.skeletonProjectPath,
   projectRoot: config.projectRoot,
+  corpusRoot: config.corpusRoot,
   verifier: new TranslationVerifierAdapter({
     apiKey: config.apiKey,
     timeoutMs: Number.parseInt(process.env.VERIFIER_TIMEOUT_MS ?? "", 10) || undefined,

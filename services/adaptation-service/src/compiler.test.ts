@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
@@ -165,6 +167,12 @@ class Unchanged:
 
       expect(result.errors).toEqual([]);
       expect(result.success).toBe(true);
+      // 集成编译保留目录:返回 workspacePath 且保留替换后的目标文件。
+      expect(result.workspacePath).toBeTruthy();
+      expect(existsSync(result.workspacePath!)).toBe(true);
+      expect(
+        existsSync(join(result.workspacePath!, "src/Application/QuoteOrchestrationService.cs")),
+      ).toBe(true);
     },
     30_000,
   );

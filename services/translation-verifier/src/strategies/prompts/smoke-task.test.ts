@@ -29,6 +29,23 @@ describe("buildSmokeTaskPrompt", () => {
     expect(p).toMatch(/fix/i);
   });
 
+  it("analysisReport 存在时输出 ANALYZER REPORT 段(需求之后、源侧之前)", () => {
+    const report = JSON.stringify({
+      schemaVersion: "1.0",
+      applicability: { level: "adapt", confidence: 0.8, reasons: ["similar behavior"] },
+    });
+    const p = buildSmokeTaskPrompt({ ...baseInput, analysisReport: report });
+
+    expect(p).toContain("ANALYZER REPORT");
+    expect(p).toContain('"applicability"');
+    expect(p.indexOf("ANALYZER REPORT")).toBeGreaterThan(p.indexOf("REQUIREMENT"));
+    expect(p.indexOf("ANALYZER REPORT")).toBeLessThan(p.indexOf("SOURCE SIDE"));
+  });
+
+  it("analysisReport 缺省时不输出 ANALYZER REPORT 段", () => {
+    expect(buildSmokeTaskPrompt(baseInput)).not.toContain("ANALYZER REPORT");
+  });
+
   it("包含双侧签名与需求原文", () => {
     const p = buildSmokeTaskPrompt(baseInput);
     expect(p).toContain("decodeMimeText");

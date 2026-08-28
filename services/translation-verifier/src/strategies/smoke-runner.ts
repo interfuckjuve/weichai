@@ -35,7 +35,7 @@ export function createSmokeRunner(options: SmokeRunnerOptions): TestStrategyRunn
         const sandbox = options.claudeSandbox ?? defaultSandbox(job, ws.dir);
         // Ruling 6:strategies 层直接调 runClaude(不经 quality 的 countedClaude 包装)。
         const llm = makeClaudeOptions(options.llm, { ...sandbox, writableDir: sandbox.writableDir ?? ws.dir }, ws.stepsLogPath, options.maxTurns ?? 50);
-        const prompt = buildSmokeTaskPrompt(job);
+        const prompt = buildSmokeTaskPrompt({ ...job, analysisReport: job.analysisReport });
         await runClaude(prompt, llm);
         const detail = await readReport<SmokeReport>(ws.dir, assertSmokeReport);
         // 归一化(brief §3.3):converged → pass/fail;passRate = cases 机械 pass 占比(空数组 undefined)。

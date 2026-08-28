@@ -30,6 +30,8 @@ export interface SideSpec {
   driverSource: string;
   sourceFiles: SideFile[];
   projectRoot?: string;
+  /** 复用已有项目目录(不复制、不删除):driver 与 sourceFiles 直接写入该目录后编译运行。 */
+  reuseDir?: string;
 }
 
 export interface DriverExecutor {
@@ -100,10 +102,11 @@ export class RealDriverExecutor implements DriverExecutor {
   }
 
   async compile(side: SideSpec): Promise<CompileOutcome> {
-    if (side.language === "Java" && side.projectRoot && existsSync(join(side.projectRoot, "pom.xml"))) {
-      return this.#compileJavaProject(side);
+    const reuseDir = side.reuseDir;
+    if (side.language === "Java" && reuseDir && existsSync(join(reuseDir, "pom.xml"))) {
+      return this.#compileJavaProject(side, reuseDir);
     }
-    const dir = mkdtempSync(join(tmpdir(), "forexplore-verifier-"));
+    const dir = reuseDir ?? mkdtempSync(join(tmpdir(), "forexplore-verifier-"));
     try {
       writeSideFiles(dir, side);
       if (side.language === "Java") {
@@ -130,7 +133,7 @@ export class RealDriverExecutor implements DriverExecutor {
       this.#logCompileOutcome(side, outcome);
       return outcome;
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      if (!reuseDir) rmSync(dir, { recursive: true, force: true });
     }
   }
 
@@ -224,10 +227,11 @@ export class RealDriverExecutor implements DriverExecutor {
   }
 
   async run(side: SideSpec): Promise<RunOutcome> {
-    if (side.language === "Java" && side.projectRoot && existsSync(join(side.projectRoot, "pom.xml"))) {
-      return this.#runJavaProject(side);
+    const reuseDir = side.reuseDir;
+    if (side.language === "Java" && reuseDir && existsSync(join(reuseDir, "pom.xml"))) {
+      return this.#runJavaProject(side, reuseDir);
     }
-    const dir = mkdtempSync(join(tmpdir(), "forexplore-verifier-"));
+    const dir = reuseDir ?? mkdtempSync(join(tmpdir(), "forexplore-verifier-"));
     try {
       writeSideFiles(dir, side);
       if (side.language === "Java") {
@@ -285,31 +289,37 @@ export class RealDriverExecutor implements DriverExecutor {
       this.#logger.error(`运行失败(${side.language}):\n${truncate(output, 1000)}`);
       return { exitCode: 1, stdout: "", stderr: output };
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      if (!reuseDir) rmSync(dir, { recursive: true, force: true });
     }
   }
 
-  #compileJavaProject(side: SideSpec): CompileOutcome {
-    const dir = mkdtempSync(join(tmpdir(), "forexplore-verifier-project-"));
+  #compileJavaProject(side: SideSpec, reuseDir?: string): CompileOutcome {
+    const dir = reuseDir ?? mkdtempSync(join(tmpdir(), "forexplore-verifier-project-"));
     try {
-      cpSync(side.projectRoot!, dir, {
-        recursive: true,
-        filter: (source) => !["target", ".git", "node_modules"].includes(source.split(/[\\/]/).at(-1) ?? ""),
-      });
+      if (!reuseDir) {
+        mkdirSync(dir, { recursive: true });
+        cpSync(side.projectRoot!, dir, {
+          recursive: true,
+          filter: (source) => !["target", ".git", "node_modules"].includes(source.split(/[\\/]/).at(-1) ?? ""),
+        });
+      }
       writeSideFiles(dir, side);
       return this.#runMavenCompile(dir);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      if (!reuseDir) rmSync(dir, { recursive: true, force: true });
     }
   }
 
-  async #runJavaProject(side: SideSpec): Promise<RunOutcome> {
-    const dir = mkdtempSync(join(tmpdir(), "forexplore-verifier-project-"));
+  async #runJavaProject(side: SideSpec, reuseDir?: string): Promise<RunOutcome> {
+    const dir = reuseDir ?? mkdtempSync(join(tmpdir(), "forexplore-verifier-project-"));
     try {
-      cpSync(side.projectRoot!, dir, {
-        recursive: true,
-        filter: (source) => !["target", ".git", "node_modules"].includes(source.split(/[\\/]/).at(-1) ?? ""),
-      });
+      if (!reuseDir) {
+        mkdirSync(dir, { recursive: true });
+        cpSync(side.projectRoot!, dir, {
+          recursive: true,
+          filter: (source) => !["target", ".git", "node_modules"].includes(source.split(/[\\/]/).at(-1) ?? ""),
+        });
+      }
       writeSideFiles(dir, side);
       const compile = this.#runMavenCompile(dir);
       if (!compile.success) return { exitCode: 1, stdout: "", stderr: compile.output };
@@ -333,7 +343,7 @@ export class RealDriverExecutor implements DriverExecutor {
     } catch (error) {
       return { exitCode: 1, stdout: "", stderr: errorOutput(error) };
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      if (!reuseDir) rmSync(dir, { recursive: true, force: true });
     }
   }
 

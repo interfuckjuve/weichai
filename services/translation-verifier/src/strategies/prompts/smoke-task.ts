@@ -18,6 +18,8 @@ export interface SmokeTaskInput {
     root?: string;
     file?: string;
   };
+  /** Analyzer 报告 JSON 字符串(参考;不覆盖需求)。 */
+  analysisReport?: string;
 }
 
 export function buildSmokeTaskPrompt(input: SmokeTaskInput): string {
@@ -37,7 +39,10 @@ You verify a translation by running smoke tests against BOTH sides, comparing ob
 REQUIREMENT (highest priority)
 ${input.requirement}
 
-SOURCE SIDE (reference baseline)
+${input.analysisReport ? `ANALYZER REPORT (Analyzer 对候选适用性的判定,参考;不覆盖需求,需求仍是最高优先)
+${input.analysisReport}
+
+` : ""}SOURCE SIDE (reference baseline)
 - language: ${input.source.language}
 - root: ${sourceDesc}
 - files: ${sourceFiles}

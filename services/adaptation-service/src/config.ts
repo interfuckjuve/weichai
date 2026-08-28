@@ -5,6 +5,10 @@ const defaultProjectPath = fileURLToPath(
   new URL("../../../fixtures/target-system/commons-fileupload-java-skeleton", import.meta.url),
 );
 
+const defaultCorpusRoot = fileURLToPath(
+  new URL("../../../fixtures/code-corpus", import.meta.url),
+);
+
 export interface AdaptationServiceConfig {
   host: string;
   port: number;
@@ -13,6 +17,8 @@ export interface AdaptationServiceConfig {
   apiKey: string;
   skeletonProjectPath: string;
   projectRoot: string;
+  /** 语料根目录:用于把 SearchCandidate.repository(fixture/<name>)映射到源项目磁盘路径。 */
+  corpusRoot: string;
 }
 
 function positiveInteger(value: string | undefined, fallback: number, name: string): number {
@@ -42,6 +48,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AdaptationServ
     apiKey,
     skeletonProjectPath,
     projectRoot: resolveConfiguredPath(env.ADAPTATION_PROJECT_ROOT?.trim(), skeletonProjectPath),
+    corpusRoot: resolveConfiguredPath(env.FOREXPLORE_CORPUS_ROOT?.trim(), defaultCorpusRoot),
   };
 }
 

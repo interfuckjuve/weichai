@@ -1,7 +1,10 @@
 export const translationVerifierSchemaVersion = "1.0" as const;
 
 export { verify } from "./verifier.js";
+export { executeSide } from "./verifier.js";
 export type { VerificationJob, VerificationReport, SideRunInfo } from "./verifier.js";
+export { validateAgainstExpected, compareCases } from "./comparator.js";
+export type { CaseComparison, ComparisonOptions } from "./comparator.js";
 export { TestMigratorAgent } from "./test-migrator.js";
 export type { MigrationInput, TestMigratorOptions } from "./test-migrator.js";
 export { NoneCoverageProvider } from "./distinct/analyzer.js";

@@ -26,6 +26,16 @@ import type { SourceInvocation } from "../driver/source-invocation.js";
 import type { DriverExecutor, RunOutcome, SideSpec } from "../executor.js";
 import { coerceTypedValue, extractJson } from "../llm-json.js";
 import { createLogger, type Logger } from "../logger.js";
+
+/** MitGen 内部输入:sourceCode 必填(target-only 不适用片段级生成)。 */
+type MitGenMigrationInput = MigrationInput & { sourceCode: string };
+
+function requireMitGenSource(input: MigrationInput): MitGenMigrationInput {
+  if (!input.sourceCode || !input.sourceCode.trim()) {
+    throw new Error("MitGen 需要源方法源码(sourceCode);target-only 模式不适用。");
+  }
+  return input as MitGenMigrationInput;
+}
 import { parseSideResults, type CaseResult } from "../result-capture.js";
 import type { MigrationInput } from "../test-migrator.js";
 import { extractFragments, locateMethod } from "./fragment-extractor.js";
@@ -162,10 +172,11 @@ export class MitGenMigratorAgent {
    * 汇总为 schema 兼容 TestDescription(直接喂 verify)。executor 用于源侧实跑。
    */
   async generate(input: MigrationInput, executor: DriverExecutor, signal?: AbortSignal): Promise<MitGenResult> {
+    const mi: MitGenMigrationInput = requireMitGenSource(input);
     this.#assertNotAborted(signal);
     this.#logger.info("MitGen.generate 开始");
 
-    const fragments = extractFragments(input.sourceCode, { maxDepth: this.#options.maxDepth, methodName: this.#options.methodName });
+    const fragments = extractFragments(mi.sourceCode, { maxDepth: this.#options.maxDepth, methodName: this.#options.methodName });
     if (fragments.length === 0) {
       throw new Error("MitGen: 无法从源方法提取任何片段(extractFragments 返回空)。");
     }
@@ -175,7 +186,7 @@ export class MitGenMigratorAgent {
     const preFiltered = [...fragments]
       .sort((a, b) => b.heuristicScore - a.heuristicScore || a.id.localeCompare(b.id))
       .slice(0, PRE_FILTER_N);
-    const scores = await this.#scoreFragments(input, preFiltered, signal);
+    const scores = await this.#scoreFragments(mi, preFiltered, signal);
     const selected = rankFragments(preFiltered, scores, this.#options.rankWeights).slice(0, this.#options.maxFragments);
     this.#logger.info(`片段选择:打分 ${scores.length} 条,选中 ${selected.length} 个片段(${selected.map((f) => f.id).join(", ")})`);
 
@@ -184,7 +195,7 @@ export class MitGenMigratorAgent {
     const cases: TestCase[] = [];
     for (let i = 0; i < selected.length; i += 1) {
       this.#assertNotAborted(signal);
-      const report = await this.#generateForFragment(input, executor, selected[i] as CodeFragment, signal);
+      const report = await this.#generateForFragment(mi, executor, selected[i] as CodeFragment, signal);
       reports.push(report);
       cases.push(...report.cases);
     }
@@ -193,7 +204,7 @@ export class MitGenMigratorAgent {
     }
 
     // 目标侧片段对应检查(只进报告,不进 verdict)。
-    const correspondences = await this.#checkCorrespondence(input, selected, signal);
+    const correspondences = await this.#checkCorrespondence(mi, selected, signal);
     for (const report of reports) {
       const c = correspondences.get(report.fragmentId);
       if (c) {
@@ -222,7 +233,7 @@ export class MitGenMigratorAgent {
 
   // -- ② 片段打分 -----------------------------------------------------------
 
-  async #scoreFragments(input: MigrationInput, fragments: CodeFragment[], signal?: AbortSignal): Promise<FragmentScore[]> {
+  async #scoreFragments(input: MitGenMigrationInput, fragments: CodeFragment[], signal?: AbortSignal): Promise<FragmentScore[]> {
     this.#assertNotAborted(signal);
     const prompt = buildScoringPrompt(input, fragments);
     this.#logger.debug(`buildScoringPrompt 输出:\n${prompt}`);
@@ -243,7 +254,7 @@ export class MitGenMigratorAgent {
   // -- ③ 逐片段生成 ---------------------------------------------------------
 
   async #generateForFragment(
-    input: MigrationInput,
+    input: MitGenMigrationInput,
     executor: DriverExecutor,
     fragment: CodeFragment,
     signal?: AbortSignal,
@@ -288,7 +299,7 @@ export class MitGenMigratorAgent {
   }
 
   /** LLM 生成候选整方法输入(受 pathCondition 引导;JSON 收敛为 TypedValue)。 */
-  async #generateCandidateInputs(input: MigrationInput, fragment: CodeFragment, signal?: AbortSignal): Promise<CandidateInput[]> {
+  async #generateCandidateInputs(input: MitGenMigrationInput, fragment: CodeFragment, signal?: AbortSignal): Promise<CandidateInput[]> {
     this.#assertNotAborted(signal);
     const signature = this.#methodSignature(input);
     const prompt = buildInputGenerationPrompt(input, fragment, this.#options.casesPerFragment, signature);
@@ -305,7 +316,7 @@ export class MitGenMigratorAgent {
 
   /** 可达性失败后的反馈重试:重新生成这些输入。 */
   async #retryUnreachedInputs(
-    input: MigrationInput,
+    input: MitGenMigrationInput,
     fragment: CodeFragment,
     failed: CandidateInput[],
     signal?: AbortSignal,
@@ -354,7 +365,7 @@ export class MitGenMigratorAgent {
 
   /** 对每个候选输入:插桩副本实跑,返回可达性(marker 序列)+ 录制结果。 */
   async #runAndVerify(
-    input: MigrationInput,
+    input: MitGenMigrationInput,
     executor: DriverExecutor,
     fragment: CodeFragment,
     candidates: CandidateInput[],
@@ -387,7 +398,7 @@ export class MitGenMigratorAgent {
 
   /** 构造插桩副本并实跑:编译失败/运行失败 → null;否则返回 marker 序列与首个 case 结果。 */
   async #runInstrumented(
-    input: MigrationInput,
+    input: MitGenMigrationInput,
     executor: DriverExecutor,
     fragment: CodeFragment,
     candidate: CandidateInput,
@@ -437,7 +448,7 @@ export class MitGenMigratorAgent {
   // -- 目标侧片段对应检查 ----------------------------------------------------
 
   async #checkCorrespondence(
-    input: MigrationInput,
+    input: MitGenMigrationInput,
     fragments: CodeFragment[],
     signal?: AbortSignal,
   ): Promise<Map<string, { correspondence: Correspondence; note: string }>> {
@@ -475,7 +486,7 @@ export class MitGenMigratorAgent {
   // -- 辅助 ----------------------------------------------------------------
 
   /** 源侧调用元数据:类名/方法名优先从源码定位,缺省回退 target 信息。 */
-  #sourceInvocation(input: MigrationInput, language: VerifierLanguage): SourceInvocation {
+  #sourceInvocation(input: MitGenMigrationInput, language: VerifierLanguage): SourceInvocation {
     const located = locateMethod(input.sourceCode, this.#options.methodName);
     const className = located?.className ?? /(?:public\s+)?class\s+([A-Za-z_$][\w$]*)/.exec(input.sourceCode)?.[1];
     return {
@@ -489,7 +500,7 @@ export class MitGenMigratorAgent {
   }
 
   /** 方法签名文本(供输入生成 prompt 参考)。 */
-  #methodSignature(input: MigrationInput): string | undefined {
+  #methodSignature(input: MitGenMigrationInput): string | undefined {
     const located = locateMethod(input.sourceCode, this.#options.methodName);
     if (!located) return undefined;
     const signature = input.sourceCode.slice(0, located.start).trim();
