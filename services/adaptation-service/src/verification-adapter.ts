@@ -629,7 +629,15 @@ function normalizeClassSource(
   className: string,
   language: "Java" | "C#",
 ): string {
-  if (!extractClassName(preview)) return `public class ${className} {\n${preview}\n}\n`;
+  if (!extractClassName(preview)) {
+    const wrapper = `public class ${className} {\n${preview}\n}\n`;
+    if (language === "Java") return wrapper;
+    // C# 回退包装:方法体可能引用 System.IO 等类型,按需补齐 using。
+    const extra = compilerInternals.csharpRequiredUsings(preview)
+      .map((ns) => `using ${ns};`)
+      .join("\n");
+    return extra ? `${extra}\n${wrapper}` : wrapper;
+  }
   const withoutPackage = language === "Java"
     ? preview.replace(/^\s*package\s+[^;]+;\s*/m, "")
     : preview;

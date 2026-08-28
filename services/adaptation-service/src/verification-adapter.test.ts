@@ -213,6 +213,40 @@ describe("buildSourceSide(源项目真实文件)", () => {
     expect(side.sourceFiles[0]?.relativePath).toBe("SourceDecodeText.java");
     expect(side.reuseDir).toBeUndefined();
   });
+
+  it("源项目副本缺失(C#):回退包装按需补 using System.IO", () => {
+    const description: TestDescription = {
+      schemaVersion: "1.0",
+      requirement: "req",
+      target: {
+        language: "Java",
+        className: "MultipartStream",
+        method: "readBodyData",
+        isStatic: false,
+        constructorArgs: [],
+        entryKind: "method",
+      },
+      cases: [],
+    };
+    const invocation = {
+      language: "C#" as const,
+      module: undefined,
+      className: "SourceReadBodyData",
+      method: "ReadBodyData",
+      isStatic: false,
+      constructorArgs: [],
+    };
+    const side = buildSourceSide(
+      description,
+      invocation,
+      "public int ReadBodyData(Stream? output) { return output == null ? 0 : 1; }",
+    );
+
+    expect(side.sourceFiles.length).toBe(1);
+    const content = side.sourceFiles[0]?.content ?? "";
+    expect(content).toContain("using System.IO;");
+    expect(content).toContain("public class SourceReadBodyData");
+  });
 });
 
 describe.skipIf(!hasJavac())("_verifyTargetOnly(目标侧单测)", () => {
@@ -299,6 +333,7 @@ describe("smokeResult(自主会话结果转换)", () => {
       status: "fail",
       durationMs: 100,
       generatedTestsKept: true,
+      summary: "2/3 用例一致",
       detail: {
         converged: false,
         steps: 20,

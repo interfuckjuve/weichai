@@ -25,6 +25,36 @@ describe("integrated compiler source replacement", () => {
     expect(source).not.toContain("public class AppendAsync");
   });
 
+  it("buildWrapperSource 按需补齐 using System.IO(引用 Stream 时)", () => {
+    const source = compilerInternals.buildWrapperSource(
+      "public int ReadBodyData(Stream? output) { return output == null ? 0 : 1; }",
+      "ForeXploreStandalone",
+    );
+
+    expect(source).toContain("using System.IO;");
+  });
+
+  it("buildWrapperSource 不重复补已有 using 或全限定引用的命名空间", () => {
+    const withUsing = compilerInternals.buildWrapperSource(
+      "using System.IO;\npublic int ReadBodyData(Stream output) { return 0; }",
+      "ForeXploreStandalone",
+    );
+    expect(withUsing.match(/using System\.IO;/g)).toHaveLength(1);
+
+    const fullyQualified = compilerInternals.buildWrapperSource(
+      "public int ReadBodyData(System.IO.Stream output) { return 0; }",
+      "ForeXploreStandalone",
+    );
+    expect(fullyQualified).not.toContain("using System.IO;");
+  });
+
+  it("csharpRequiredUsings 对无 IO 引用的代码不补 System.IO", () => {
+    const usings = compilerInternals.csharpRequiredUsings(
+      "public int Add(int a, int b) { return a + b; }",
+    );
+    expect(usings).not.toContain("System.IO");
+  });
+
   it("resolves paths prefixed by the skeleton project directory", () => {
     const resolved = compilerInternals.resolveProjectTargetFile(
       skeletonProjectPath,

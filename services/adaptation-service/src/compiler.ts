@@ -287,17 +287,45 @@ function safeWrapperClassName(code: string, className: string): string {
 
 function buildWrapperSource(code: string, className: string): string {
   const safeName = safeWrapperClassName(code, className);
-  return `using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Globalization;
-using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
+  const baseUsings = [
+    "using System;",
+    "using System.Collections.Generic;",
+    "using System.Linq;",
+    "using System.Globalization;",
+    "using System.Text;",
+    "using System.Threading;",
+    "using System.Threading.Tasks;",
+  ];
+  const extra = csharpRequiredUsings(code)
+    .map((ns) => `using ${ns};`)
+    .join("\n");
+  return `${baseUsings.join("\n")}${extra ? `\n${extra}` : ""}\n\npublic class ${safeName} {\n${code}\n}`;
+}
 
-public class ${safeName} {
-${code}
-}`;
+/**
+ * 常见 C# 类型 → 命名空间映射(按需 using 检测用)。
+ * 命中简单名且代码中未全限定/未显式 using 时,返回需要补齐的命名空间。
+ */
+const CSHARP_NAMESPACE_TYPES: Array<readonly [namespace: string, types: readonly string[]]> = [
+  ["System.IO", ["Stream", "MemoryStream", "FileStream", "BufferedStream", "StreamReader", "StreamWriter", "StringReader", "StringWriter", "TextReader", "TextWriter", "BinaryReader", "BinaryWriter", "IOException", "File", "FileInfo", "Directory", "DirectoryInfo", "Path"]],
+  ["System.Text", ["Encoding", "StringBuilder", "UTF8Encoding", "UnicodeEncoding", "Decoder", "Encoder"]],
+  ["System.Text.RegularExpressions", ["Regex", "Match", "MatchCollection", "Group", "RegexOptions"]],
+  ["System.Globalization", ["CultureInfo", "NumberFormatInfo", "DateTimeFormatInfo"]],
+  ["System.Net", ["WebRequest", "WebResponse", "WebClient", "HttpWebRequest", "HttpWebResponse"]],
+  ["System.Collections.Specialized", ["NameValueCollection", "StringCollection"]],
+];
+
+/** 按需检测 C# 代码需要补齐的命名空间(已有 using 或全限定引用的跳过)。 */
+export function csharpRequiredUsings(code: string): string[] {
+  const existingUsings = new Set(
+    [...code.matchAll(/^\s*using\s+([A-Za-z0-9_.]+)\s*;/gm)].map((m) => m[1] ?? ""),
+  );
+  const required: string[] = [];
+  for (const [ns, types] of CSHARP_NAMESPACE_TYPES) {
+    if (existingUsings.has(ns) || code.includes(`${ns}.`)) continue;
+    if (types.some((t) => new RegExp(`\\b${t}\\b`).test(code))) required.push(ns);
+  }
+  return required;
 }
 
 /**
@@ -981,6 +1009,7 @@ function replacePythonTargetMethod(source: string, generatedCode: string): strin
 export const compilerInternals = {
   buildWrapperSource,
   buildJavaWrapperSource,
+  csharpRequiredUsings,
   replaceTargetMethod,
   replaceTargetCode,
   replaceTargetClass,
