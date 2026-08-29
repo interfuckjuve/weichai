@@ -89,7 +89,7 @@ function RequirementPanel({
             </div>
             <div>
               <dt>scope</dt>
-              <dd>catalog://configured-repositories/*</dd>
+              <dd>server://authorized-repositories</dd>
             </div>
             <div>
               <dt>language</dt>
@@ -128,11 +128,11 @@ function RequirementPanel({
         <section className="repository-scope">
           <h3>代码仓范围</h3>
           <label>
-            <input type="checkbox" defaultChecked /> 已配置仓库
-            <span>3 repositories</span>
+            <input type="checkbox" defaultChecked disabled /> 服务端授权仓库
+            <span>由检索服务 allow-list 决定</span>
           </label>
           <label>
-            <input type="checkbox" defaultChecked /> 开源样例目录
+            <input type="checkbox" defaultChecked disabled /> 当前检索语料
             <span>{searchProvider === 'SeekDB' ? 'SeekDB code corpus' : 'Mock catalog'}</span>
           </label>
         </section>
@@ -343,7 +343,6 @@ export default function App({
         target: state.target,
         requirement: state.requirement.trim(),
         topK: state.topK,
-        repositoryScopes: ['configured-repositories', 'mock-catalog'],
         candidateLanguages: adaptationProvider === 'Mock' ? undefined : ['Java'],
       });
       dispatch({ type: 'SEARCH_SUCCESS', candidates });

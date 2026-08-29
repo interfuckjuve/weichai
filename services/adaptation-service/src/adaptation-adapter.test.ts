@@ -227,6 +227,11 @@ describe("AdaptationAdapter implementation boundary", () => {
     );
     expect(result.validation.find((record) => record.id === "standalone-compile"))
       .toMatchObject({ status: "pass", command: "javac" });
+    expect(result.validation).toContainEqual(expect.objectContaining({
+      id: "differential-verification",
+      status: "unverified",
+      required: true,
+    }));
     expect(result.files).toHaveLength(1);
   });
 
@@ -485,5 +490,81 @@ describe("buildFilePatch", () => {
     expect(added).toContain("public class Factory {");
     expect(added).toContain("    private final int threshold = 3;");
     expect(patch.hunks[0].lines.some((line) => line.type === "remove" && line.content.includes("threshold = 1"))).toBe(true);
+  });
+
+  it("does not let braces in strings or comments consume the next member", () => {
+    const original = [
+      "public sealed class Service",
+      "{",
+      "    public string Target()",
+      "    {",
+      "        var literal = \"{ not a block \";",
+      "        // } also not a block",
+      "        return literal;",
+      "    }",
+      "",
+      "    public void Keep() { }",
+      "}",
+    ].join("\n");
+
+    const patch = _buildFilePatch(
+      "src/Service.cs",
+      ["public string Target()", "{", "    return \"updated\";", "}"].join("\n"),
+      original,
+      3,
+      "C#",
+    );
+    const removed = patch.hunks[0].lines
+      .filter((line) => line.type === "remove")
+      .map((line) => line.content)
+      .join("\n");
+
+    expect(removed).toContain("var literal");
+    expect(removed).not.toContain("Keep()");
+  });
+
+  it("refuses an unterminated declaration instead of replacing the rest of the file", () => {
+    const incomplete = [
+      "public sealed class Service",
+      "{",
+      "    public void Target()",
+      "    {",
+      "        if (true) {",
+      "            return;",
+      "    }",
+      "",
+      "    public void Keep() { }",
+      "}",
+    ].join("\n");
+
+    expect(() => _buildFilePatch(
+      "src/Service.cs",
+      ["public void Target()", "{", "}"].join("\n"),
+      incomplete,
+      3,
+      "C#",
+    )).toThrow("safe patch");
+  });
+
+  it("refuses to treat an enclosing type brace as the method closing brace", () => {
+    const incomplete = [
+      "public sealed class Service",
+      "{",
+      "    public void Target()",
+      "    {",
+      "        if (true)",
+      "        {",
+      "            return;",
+      "        }",
+      "}",
+    ].join("\n");
+
+    expect(() => _buildFilePatch(
+      "src/Service.cs",
+      ["public void Target()", "{", "}"].join("\n"),
+      incomplete,
+      3,
+      "C#",
+    )).toThrow("safe patch");
   });
 });

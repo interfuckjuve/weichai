@@ -41,7 +41,10 @@ describe('SeekDbCodeSearchAdapter', () => {
       'http://127.0.0.1:8787/v1/search',
       expect.objectContaining({
         method: 'POST',
-        body: JSON.stringify(request),
+        body: JSON.stringify({
+          ...request,
+          repositoryScopes: undefined,
+        }),
       }),
     );
   });

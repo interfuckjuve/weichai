@@ -269,7 +269,7 @@ interface SearchRequest {
   target: ModuleTarget;
   requirement: string;
   topK: number;
-  repositoryScopes: string[];
+  repositoryScopes?: string[];
   candidateLanguages?: Language[];
 }
 ```
@@ -280,6 +280,8 @@ interface SearchRequest {
 - `topK` 必须是 `1` 到 `50` 的整数。
 - `target.kind` 只能是 `class` 或 `function`。
 - `candidateLanguages` 如存在必须是非空、已支持语言数组。
+- 所有检索都必须命中服务端 `RETRIEVAL_ALLOWED_REPOSITORIES`；未配置允许仓库时，服务以 `503` 拒绝检索而不是搜索全库。
+- 客户端若显式传递 `repositoryScopes`，必须是非空、格式合法且完全属于该服务端允许列表；否则返回 `400` 或 `403`。
 - 请求体最大 1 MiB。
 - 无效 JSON 返回 `400`。
 - 超大请求返回 `413`。
@@ -488,18 +490,16 @@ forexplore.code_symbols
 
 ### 9.2 Repository Scope
 
-`repositoryScopes` 中：
-
-- `repo:owner/name` 会转换为 `owner/name`。
-- `owner/name` 会作为显式仓库过滤。
-- UI 标签 `configured-repositories`、`mock-catalog` 会被忽略。
-- 包含 `*` 的值目前不会生成 SQL 过滤。
-
-如要给前端实现真实的仓库筛选器，应传递索引中实际保存的 repository 值，例如：
+仓库范围是服务端授权边界，不是 UI 标签。`RETRIEVAL_ALLOWED_REPOSITORIES`
+以逗号分隔、精确匹配索引中的 repository ID，例如：
 
 ```text
-fixture/settlement-queue-py
+RETRIEVAL_ALLOWED_REPOSITORIES=forexplore-reference-java,settlement-queue-py
 ```
+
+UI 客户端通常省略 `repositoryScopes`，服务端会注入上述允许列表。若调用方
+需要请求其子集，则只能传递该列表中的非空精确 ID；`repo:` 前缀、UI 标签、
+通配符和未授权 ID 都会被拒绝，绝不会降级为无仓库过滤。
 
 ### 9.3 Candidate Language
 
@@ -668,7 +668,6 @@ $body = @{
   }
   requirement = "批量结算，保证幂等并处理失败重试"
   topK = 5
-  repositoryScopes = @("configured-repositories")
   candidateLanguages = @("Java")
 } | ConvertTo-Json -Depth 5
 

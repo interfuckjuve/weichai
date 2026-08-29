@@ -17,6 +17,7 @@ import {
   validateAgainstExpected,
   verify,
   type CaseComparison,
+  type DriverExecutor,
   type SideFile,
   type SideSpec,
   type SourceInvocation,
@@ -71,20 +72,76 @@ interface ClassEntryPoint {
   isStatic: boolean;
 }
 
+/**
+ * The service must not execute retrieved code in its own process.  An
+ * integration that has provisioned a separate sandbox can inject an executor
+ * which carries this explicit boundary attestation.  This is intentionally a
+ * narrow interface: {@link RealDriverExecutor} is not an implementation of it.
+ */
+export interface IsolatedDriverExecutor extends DriverExecutor {
+  readonly isolation: {
+    /** The executor process is outside the adaptation-service host process. */
+    processBoundary: "external";
+    /** Candidate code cannot make network requests. */
+    network: "disabled";
+    /** Service environment variables, including model credentials, are absent. */
+    hostCredentials: "unavailable";
+    /** The host workspace is not mounted into the execution environment. */
+    hostWorkspace: "unmounted";
+  };
+}
+
+export type TranslationVerifierExecution = "disabled" | "trusted-isolated";
+
+export interface TranslationVerifierAdapterOptions {
+  apiKey: string;
+  timeoutMs?: number;
+  /**
+   * Disabled by default.  The production HTTP server deliberately never
+   * enables execution because it does not provision an isolated runner.
+   */
+  execution?: TranslationVerifierExecution;
+  /** Required only for the explicit, externally-isolated execution path. */
+  executor?: IsolatedDriverExecutor;
+}
+
 /** Runs the verifier only after the adaptation compiler has accepted the code. */
 export class TranslationVerifierAdapter implements AdaptationVerifier {
   readonly #apiKey: string;
   readonly #timeoutMs?: number;
+  readonly #execution: TranslationVerifierExecution;
+  readonly #executor?: IsolatedDriverExecutor;
 
-  constructor(options: { apiKey: string; timeoutMs?: number }) {
+  constructor(options: TranslationVerifierAdapterOptions) {
     this.#apiKey = options.apiKey;
     this.#timeoutMs = options.timeoutMs;
+    this.#execution = options.execution ?? "disabled";
+
+    if (this.#execution === "trusted-isolated") {
+      this.#executor = requireIsolatedExecutor(options.executor);
+      return;
+    }
+    if (options.executor) {
+      throw new Error("A verifier executor cannot be configured while execution is disabled.");
+    }
+    this.#executor = undefined;
   }
 
   async verify(
     input: DifferentialVerificationInput,
     signal?: AbortSignal,
   ): Promise<DifferentialVerificationResult> {
+    // This guard intentionally precedes plan construction: plan construction
+    // sends candidate preview to the test migrator and later turns it into
+    // executable files.  A normal adaptation-service process has neither a
+    // sandbox nor authority to run retrieved code, so report required
+    // unverified evidence rather than silently running it on the host.
+    if (this.#execution === "disabled") {
+      return unverified(
+        "安全策略已禁用差分执行：适配服务未配置外部隔离执行器，未运行候选或生成代码。",
+      );
+    }
+
     const differential = useDifferential(input);
     const unsupported = unsupportedReason(input.request, input.targetContext, differential);
     if (unsupported) return unverified(unsupported);
@@ -255,6 +312,22 @@ export class TranslationVerifierAdapter implements AdaptationVerifier {
 
     return { description, buildTarget };
   }
+}
+
+function requireIsolatedExecutor(
+  executor: IsolatedDriverExecutor | undefined,
+): IsolatedDriverExecutor {
+  const isolation = executor?.isolation;
+  if (!executor || !isolation ||
+    isolation.processBoundary !== "external" ||
+    isolation.network !== "disabled" ||
+    isolation.hostCredentials !== "unavailable" ||
+    isolation.hostWorkspace !== "unmounted") {
+    throw new Error(
+      "Differential verification requires an executor with an external, credential-free, network-disabled workspace boundary.",
+    );
+  }
+  return executor;
 }
 
 function reportResult(report: VerificationReport, label = "差分验证"): DifferentialVerificationResult {

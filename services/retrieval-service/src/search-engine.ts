@@ -12,15 +12,14 @@ import type {
   SearchStore,
 } from './types.js';
 import { expandedSearchText, overlap } from './text-analysis.js';
+import { requireRepositoryScopes } from './repository-scope.js';
 
 function clamp(value: number): number {
   return Math.max(0, Math.min(1, value));
 }
 
-function repositoryScopes(values: string[]): string[] {
-  return values
-    .map((value) => value.replace(/^repo:/, '').trim())
-    .filter((value) => value.includes('/') && !value.includes('*'));
+function repositoryScopes(values: string[] | undefined): string[] {
+  return requireRepositoryScopes(values);
 }
 
 function candidateLanguages(values: Language[] | undefined): Language[] {

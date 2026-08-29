@@ -15,6 +15,13 @@ import {
 } from '@forexplore/workflow-core';
 import { WorkspaceBackfill } from './backfill';
 import { canonicalWorkspacePath } from './diff-apply';
+import {
+  ModuleMigrationHost,
+  ModuleMigrationPreviewProvider,
+  moduleMigrationPreviewScheme,
+} from './module-migration-host';
+import type { ModuleWaveExecutionPort } from './module-wave-execution-host';
+import type { ModuleMigrationWaveRecoveryPort } from './module-migration-recovery';
 import { TranslationPanel } from './panel';
 import type {
   HostToWebviewMessage,
@@ -25,6 +32,18 @@ import { decorateRepositoryStatuses } from './repository-status';
 import { ServiceManager } from './service-manager';
 import { buildModuleTarget } from './target-builder';
 import type { RepositoryStatus } from './ui-types';
+
+// Keep the transaction implementation bundled by esbuild without making the
+// extension's strict typecheck re-check the service's broader source tree.
+const GitWaveTransaction = require('@forexplore/adaptation-service/git-wave-transaction').GitWaveTransaction as {
+  new (): ModuleMigrationWaveRecoveryPort;
+};
+
+// The narrow service entrypoint keeps the trusted wave coordinator available
+// to the extension without bundling the HTTP/model service composition.
+const ModuleWaveExecutionCoordinator = require('@forexplore/adaptation-service/module-wave-execution').ModuleWaveExecutionCoordinator as {
+  new (): ModuleWaveExecutionPort;
+};
 
 interface ExtensionHost {
   context: vscode.ExtensionContext;
@@ -58,10 +77,23 @@ export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel('ForeXplore');
   const services = new ServiceManager(output);
   const health = new RepositoryHealthCheck();
+  const moduleMigrationPreviews = new ModuleMigrationPreviewProvider();
+  const moduleMigration = new ModuleMigrationHost({
+    context,
+    services,
+    output,
+    previews: moduleMigrationPreviews,
+    waveRecovery: new GitWaveTransaction(),
+    waveExecution: new ModuleWaveExecutionCoordinator(),
+  });
 
   context.subscriptions.push(
     output,
     services,
+    vscode.workspace.registerTextDocumentContentProvider(
+      moduleMigrationPreviewScheme,
+      moduleMigrationPreviews,
+    ),
     vscode.commands.registerCommand('forexplore.startTranslation', () =>
       startTranslation(context, services, health),
     ),
@@ -85,6 +117,24 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.commands.registerCommand('forexplore.restoreLastCheckpoint', () =>
       restoreLastCheckpoint(context),
+    ),
+    vscode.commands.registerCommand('forexplore.indexModuleMigrationRepository', () =>
+      moduleMigration.indexRepository(),
+    ),
+    vscode.commands.registerCommand('forexplore.reviewModuleMigrationPlan', () =>
+      moduleMigration.reviewPlan(),
+    ),
+    vscode.commands.registerCommand('forexplore.reviewModuleMigrationWave', () =>
+      moduleMigration.reviewNextWave(),
+    ),
+    vscode.commands.registerCommand('forexplore.prepareModuleMigrationWave', () =>
+      moduleMigration.prepareNextWaveFromLocalBundle(),
+    ),
+    vscode.commands.registerCommand('forexplore.approveModuleMigrationWave', () =>
+      moduleMigration.approveAndCommitPreparedWave(),
+    ),
+    vscode.commands.registerCommand('forexplore.recoverModuleMigrationReview', () =>
+      moduleMigration.recoverReviewState(),
     ),
   );
 

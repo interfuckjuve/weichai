@@ -4,15 +4,25 @@ import {
   collectTargetContext,
   compileTargetIntegrated,
   compileTargetStandalone,
+  ArchitectAgent,
+  FileStaticAnalysisSnapshotStore,
   projectTargetContext,
   repairTranslation,
+  TranslationVerifierAdapter,
   translateWithAnalysis,
   type AdaptationAnalyzer,
   type AdaptationVerifier,
   type AdaptationValidator,
+  type StaticAnalysisSnapshotStore,
+  type RepositoryArchitecturePort,
   type TranslatorModelOptions,
 } from "@forexplore/adaptation-service";
-import { validateRerankContract, type ModuleTarget } from "@forexplore/contracts";
+import {
+  moduleMigrationSchemaVersion,
+  validateRerankContract,
+  type ModuleTarget,
+  type RepositoryArchitectureRequest,
+} from "@forexplore/contracts";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
 
@@ -128,6 +138,11 @@ const rerankResultSchema = z.object({
 export interface AdaptationMcpServerOptions {
   apiKey: string;
   projectRoot: string;
+  /** Server-owned analysis artifact directory for the read-only module planner. */
+  analysisRoot?: string;
+  /** Optional injected architecture port and snapshot store for tests/hosts. */
+  architecturePort?: RepositoryArchitecturePort;
+  staticAnalysisSnapshots?: StaticAnalysisSnapshotStore;
   skeletonProjectPath?: string;
   analyzer?: AdaptationAnalyzer;
   translatorRequest?: typeof globalThis.fetch;
@@ -157,8 +172,25 @@ export function createAdaptationMcpServer(
     analyzer,
     translatorRequest: options.translatorRequest,
     validator: options.validator,
-    verifier: options.verifier,
+    // Keep even direct programmatic MCP construction fail-closed.  Callers
+    // that own a real isolated runner may inject its verifier explicitly.
+    verifier: options.verifier ?? new TranslationVerifierAdapter({ apiKey: options.apiKey }),
   });
+
+  // Module planning is read-only and is exposed only when the host has both
+  // an architecture port and a server-owned immutable snapshot store. The
+  // MCP client can therefore select a snapshot but cannot upload source,
+  // paths, or a browser-created analysis graph.
+  const architecturePort = options.architecturePort ?? (
+    options.analysisRoot
+      ? new ArchitectAgent({ apiKey: options.apiKey })
+      : undefined
+  );
+  const staticAnalysisSnapshots = options.staticAnalysisSnapshots ?? (
+    options.analysisRoot
+      ? new FileStaticAnalysisSnapshotStore({ analysisRoot: options.analysisRoot })
+      : undefined
+  );
 
   const collect = (target: ModuleTarget, signal: AbortSignal) => collectTargetContext({
     projectRoot: options.projectRoot,
@@ -209,6 +241,34 @@ export function createAdaptationMcpServer(
       text: JSON.stringify(validateRerankContract(candidateIds, results), null, 2),
     }],
   }));
+
+  if (architecturePort && staticAnalysisSnapshots) {
+    server.registerTool("forexplore_propose_module_plan", {
+      title: "Propose Module Migration Plan",
+      description: "Use a server-owned static-analysis snapshot to propose functional modules. The result is an untrusted read-only proposal; it does not schedule, approve, or write files.",
+      inputSchema: z.object({
+        snapshotId: z.string().trim().min(1).max(256),
+        objective: z.string().trim().min(1).max(16_000),
+        immutableConstraints: z.array(z.string().trim().min(1).max(2_000)).max(64).optional(),
+      }).strict(),
+      annotations: { readOnlyHint: true, destructiveHint: false },
+    }, async ({ snapshotId, objective, immutableConstraints }, extra) => runTool(async () => {
+      const analysis = await staticAnalysisSnapshots.getSnapshot(snapshotId, extra.signal);
+      if (!analysis) {
+        throw new Error("Static analysis snapshot was not found.");
+      }
+      if (analysis.snapshotId !== snapshotId) {
+        throw new Error("Static analysis snapshot store returned a mismatched snapshot ID.");
+      }
+      const request: RepositoryArchitectureRequest = {
+        schemaVersion: moduleMigrationSchemaVersion,
+        analysis,
+        objective,
+        ...(immutableConstraints === undefined ? {} : { immutableConstraints }),
+      };
+      return architecturePort.proposeModulePlan(request, extra.signal);
+    }));
+  }
 
   server.registerTool("forexplore_generate_translation", {
     title: "Generate Translation",

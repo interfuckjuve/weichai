@@ -11,6 +11,7 @@ describe("adaptation service config", () => {
     expect(config.apiKey).toBe("demo-key");
     expect(config.skeletonProjectPath).toMatch(/commons-fileupload-java-skeleton$/);
     expect(config.projectRoot).toBe(config.skeletonProjectPath);
+    expect(config.verifierExecution).toBe("disabled");
   });
 
   it("reads explicit skeleton and backfill roots", () => {
@@ -22,6 +23,16 @@ describe("adaptation service config", () => {
 
     expect(config.skeletonProjectPath).toBe("/tmp/skeleton");
     expect(config.projectRoot).toBe("/tmp/project");
+  });
+
+  it("keeps the module planning snapshot store server-owned and configurable", () => {
+    const config = loadConfig({
+      DEEPSEEK_API_KEY: "sk-test",
+      ADAPTATION_PROJECT_ROOT: "/tmp/project",
+      ADAPTATION_ANALYSIS_ROOT: "/tmp/workspace/.forexplore/analysis",
+    });
+
+    expect(config.analysisRoot).toBe("/tmp/workspace/.forexplore/analysis");
   });
 
   it("accepts the merged branch's skeleton variable as a compatibility alias", () => {
@@ -56,5 +67,12 @@ describe("adaptation service config", () => {
         loadConfig({ DEEPSEEK_API_KEY: "sk-test", ADAPTATION_PORT: port }),
       ).toThrow("ADAPTATION_PORT must be a positive integer.");
     }
+  });
+
+  it("does not allow the HTTP service to opt into host-side candidate execution", () => {
+    expect(() => loadConfig({
+      DEEPSEEK_API_KEY: "sk-test",
+      ADAPTATION_VERIFIER_EXECUTION: "trusted-isolated",
+    })).toThrow(/only supports "disabled"/);
   });
 });

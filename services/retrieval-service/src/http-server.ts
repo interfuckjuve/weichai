@@ -1,11 +1,14 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { Language, SearchRequest } from '@forexplore/contracts';
+import { RepositoryScopeError, requireRepositoryScopes } from './repository-scope.js';
 import type { SearchEngine, SearchStore } from './types.js';
 
 export interface HttpServerOptions {
   engine: SearchEngine;
   store: SearchStore;
   corsOrigin: string;
+  /** Deployment-owned allow-list. Never derive this from a client request. */
+  allowedRepositories: readonly string[];
 }
 
 class HttpError extends Error {
@@ -72,8 +75,9 @@ function isSearchRequest(value: unknown): value is SearchRequest {
     Number.isInteger(body.topK) &&
     Number(body.topK) >= 1 &&
     Number(body.topK) <= 50 &&
-    Array.isArray(body.repositoryScopes) &&
-    body.repositoryScopes.every((scope) => typeof scope === 'string') &&
+    (body.repositoryScopes === undefined ||
+      (Array.isArray(body.repositoryScopes) &&
+        body.repositoryScopes.every((scope) => typeof scope === 'string'))) &&
     (body.rerank === undefined || typeof body.rerank === 'boolean') &&
     (body.candidateLanguages === undefined ||
       (Array.isArray(body.candidateLanguages) &&
@@ -93,6 +97,47 @@ function isSearchRequest(value: unknown): value is SearchRequest {
     typeof target.language === 'string' &&
     languages.has(target.language as Language)
   );
+}
+
+function authorizedRequest(
+  request: SearchRequest,
+  configuredRepositories: readonly string[],
+): SearchRequest {
+  let allowedRepositories: string[];
+  try {
+    allowedRepositories = requireRepositoryScopes(
+      configuredRepositories,
+      'Retrieval service allowed repositories',
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'No repositories are authorized.';
+    throw new HttpError(503, message);
+  }
+
+  if (request.repositoryScopes === undefined) {
+    return { ...request, repositoryScopes: allowedRepositories };
+  }
+
+  let requestedRepositories: string[];
+  try {
+    requestedRepositories = requireRepositoryScopes(
+      request.repositoryScopes,
+      'Search request repository scopes',
+    );
+  } catch (error) {
+    const message = error instanceof RepositoryScopeError
+      ? error.message
+      : 'Invalid repository scope.';
+    throw new HttpError(400, message);
+  }
+
+  const allowed = new Set(allowedRepositories);
+  const unauthorized = requestedRepositories.find((repository) => !allowed.has(repository));
+  if (unauthorized) {
+    throw new HttpError(403, `Repository is not authorized for this retrieval service: ${unauthorized}.`);
+  }
+
+  return { ...request, repositoryScopes: requestedRepositories };
 }
 
 export function createHttpServer(options: HttpServerOptions): Server {
@@ -115,7 +160,9 @@ export function createHttpServer(options: HttpServerOptions): Server {
           json(response, 400, { error: 'Invalid SearchRequest payload.' }, options.corsOrigin);
           return;
         }
-        const candidates = await options.engine.search(body);
+        const candidates = await options.engine.search(
+          authorizedRequest(body, options.allowedRepositories),
+        );
         json(response, 200, { candidates }, options.corsOrigin);
         return;
       }

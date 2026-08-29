@@ -34,7 +34,7 @@ const request: SearchRequest = {
   },
   requirement: 'add ttl cache and stale fallback',
   topK: 2,
-  repositoryScopes: ['configured-repositories', 'repo:demo/cache'],
+  repositoryScopes: ['demo/cache'],
 };
 
 function fakeStore(): SearchStore {
@@ -153,19 +153,42 @@ describe('SeekDbSearchEngine', () => {
     );
     expect(store.textSearch).toHaveBeenCalledWith(expect.any(String), expect.anything(), 20);
   });
+
+  it('refuses an unscoped request before embedding or querying storage', async () => {
+    const store = fakeStore();
+    const localEmbeddings: EmbeddingProvider = {
+      dimension: 3,
+      embed: vi.fn(async () => [[1, 0, 0]]),
+    };
+    const engine = new SeekDbSearchEngine(store, localEmbeddings);
+
+    await expect(engine.search({ ...request, repositoryScopes: [] })).rejects.toThrow(
+      'Repository scope must contain at least one repository.',
+    );
+    expect(localEmbeddings.embed).not.toHaveBeenCalled();
+    expect(store.semanticSearch).not.toHaveBeenCalled();
+    expect(store.textSearch).not.toHaveBeenCalled();
+  });
 });
 
 describe('search internals', () => {
-  it('ignores UI labels while preserving explicit repository scopes', () => {
-    expect(
-      searchInternals.repositoryScopes([
-        'configured-repositories',
-        'mock-catalog',
-        'repo:oceanbase/seekdb',
-        'chiparon/weichai',
-        'org/*',
-      ]),
-    ).toEqual(['oceanbase/seekdb', 'chiparon/weichai']);
+  it('fails closed for missing, UI-label, wildcard, or malformed repository scopes', () => {
+    for (const scopes of [
+      undefined,
+      [],
+      ['configured-repositories'],
+      ['repo:oceanbase/seekdb'],
+      ['org/*'],
+    ]) {
+      expect(() => searchInternals.repositoryScopes(scopes)).toThrow(
+        'Repository scope',
+      );
+    }
+  });
+
+  it('preserves only exact repository identifiers', () => {
+    expect(searchInternals.repositoryScopes(['oceanbase/seekdb', 'chiparon/weichai']))
+      .toEqual(['oceanbase/seekdb', 'chiparon/weichai']);
   });
 
   it('expands camel-case symbols and target paths into searchable domain terms', () => {

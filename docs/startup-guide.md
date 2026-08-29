@@ -23,6 +23,7 @@ npm run dev:retrieval
 ```sh
 DEEPSEEK_API_KEY="sk-xxx" \
 ADAPTATION_PROJECT_ROOT="/绝对路径/fixtures/target-system/forexplore-csharp-workspace" \
+ADAPTATION_ANALYSIS_ROOT="/绝对路径/目标仓库/.forexplore/analysis" \
 npm run dev:adaptation
 ```
 

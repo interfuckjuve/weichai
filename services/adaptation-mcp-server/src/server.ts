@@ -18,8 +18,15 @@ async function main(): Promise<void> {
   const server = createAdaptationMcpServer({
     apiKey: config.apiKey,
     projectRoot: config.projectRoot,
+    analysisRoot: config.analysisRoot,
     skeletonProjectPath: config.skeletonProjectPath,
-    verifier: new TranslationVerifierAdapter({ apiKey: config.apiKey }),
+    // The local MCP host has the same credential/workspace exposure as HTTP;
+    // it must not execute retrieved code unless an external isolated runner is
+    // deliberately wired by a different integration.
+    verifier: new TranslationVerifierAdapter({
+      apiKey: config.apiKey,
+      execution: config.verifierExecution,
+    }),
   });
   await server.connect(new StdioServerTransport());
   console.error("ForeXplore adaptation MCP server is running on stdio.");

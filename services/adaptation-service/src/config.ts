@@ -1,5 +1,5 @@
 import { fileURLToPath } from "node:url";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 
 const defaultProjectPath = fileURLToPath(
   new URL("../../../fixtures/target-system/commons-fileupload-java-skeleton", import.meta.url),
@@ -19,6 +19,14 @@ export interface AdaptationServiceConfig {
   projectRoot: string;
   /** 语料根目录:用于把 SearchCandidate.repository(fixture/<name>)映射到源项目磁盘路径。 */
   corpusRoot: string;
+  /** Server-owned analysis snapshot location used by the read-only planner. */
+  analysisRoot: string;
+  /**
+   * Production HTTP deliberately does not execute retrieved code.  An
+   * externally isolated executor must be wired by a separate deployment
+   * integration before this can ever change.
+   */
+  verifierExecution: "disabled";
 }
 
 function positiveInteger(value: string | undefined, fallback: number, name: string): number {
@@ -41,14 +49,32 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AdaptationServ
     defaultProjectPath,
   );
 
+  const projectRoot = resolveConfiguredPath(
+    env.ADAPTATION_PROJECT_ROOT?.trim(),
+    skeletonProjectPath,
+  );
+
+  const configuredVerifierExecution = env.ADAPTATION_VERIFIER_EXECUTION?.trim();
+  if (configuredVerifierExecution && configuredVerifierExecution !== "disabled") {
+    throw new Error(
+      "ADAPTATION_VERIFIER_EXECUTION only supports \"disabled\" in the HTTP service. " +
+      "Use a separately deployed, externally isolated executor integration for differential execution.",
+    );
+  }
+
   return {
     host: env.ADAPTATION_HOST?.trim() || "127.0.0.1",
     port: positiveInteger(env.ADAPTATION_PORT, 8788, "ADAPTATION_PORT"),
     corsOrigin: env.ADAPTATION_CORS_ORIGIN?.trim() || undefined,
     apiKey,
     skeletonProjectPath,
-    projectRoot: resolveConfiguredPath(env.ADAPTATION_PROJECT_ROOT?.trim(), skeletonProjectPath),
+    projectRoot,
     corpusRoot: resolveConfiguredPath(env.FOREXPLORE_CORPUS_ROOT?.trim(), defaultCorpusRoot),
+    analysisRoot: resolveConfiguredPath(
+      env.ADAPTATION_ANALYSIS_ROOT?.trim(),
+      join(projectRoot, ".forexplore", "analysis"),
+    ),
+    verifierExecution: "disabled",
   };
 }
 

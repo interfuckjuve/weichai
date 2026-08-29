@@ -40,6 +40,12 @@ const javaMethod = `public double calculateTotal(List<Double> amounts, double di
 describe("bidirectional compile (Java <-> C#)", () => {
   it("java-to-csharp: 翻译出的 C# 方法能通过 dotnet 独立编译", () => {
     const result = compileStandalone(csharpMethod, "OrderService");
+
+    if (isCompilerUnavailable(result)) {
+      expect(result.errors[0]).toMatch(/\.NET SDK not installed/i);
+      return;
+    }
+
     expect(result.success).toBe(true);
     expect(result.errors).toEqual([]);
   }, 30_000);

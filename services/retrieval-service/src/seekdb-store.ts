@@ -12,6 +12,7 @@ import type {
   SearchStore,
 } from './types.js';
 import { expandedSearchText } from './text-analysis.js';
+import { requireRepositoryScopes } from './repository-scope.js';
 
 interface CodeSymbolRow extends RowDataPacket {
   id: string | Buffer;
@@ -80,10 +81,9 @@ function mapRow(row: CodeSymbolRow): RetrievedCodeDocument {
 function filterSql(filters: SearchFilters): { sql: string; parameters: string[] } {
   const clauses: string[] = [];
   const parameters: string[] = [];
-  if (filters.repositories.length > 0) {
-    clauses.push(`repository IN (${filters.repositories.map(() => '?').join(', ')})`);
-    parameters.push(...filters.repositories);
-  }
+  const repositories = requireRepositoryScopes(filters.repositories);
+  clauses.push(`repository IN (${repositories.map(() => '?').join(', ')})`);
+  parameters.push(...repositories);
   if (filters.languages.length > 0) {
     clauses.push(`language IN (${filters.languages.map(() => '?').join(', ')})`);
     parameters.push(...filters.languages);

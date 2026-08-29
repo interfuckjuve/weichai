@@ -2,11 +2,20 @@ import type { AddressInfo } from 'node:net';
 import type {
   AdaptationRequest,
   AdaptationResult,
+  ModuleMigrationProposal,
+  RepositoryArchitectureRequest,
+  RepositoryStaticAnalysis,
   SearchCandidate,
 } from '@forexplore/contracts';
-import type { CodeAdaptationPort } from '@forexplore/workflow-core';
+import type {
+  CodeAdaptationPort,
+  RepositoryArchitecturePort,
+} from '@forexplore/workflow-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createHttpServer } from './http-server';
+import {
+  createHttpServer,
+  type StaticAnalysisSnapshotStore,
+} from './http-server';
 
 const servers: ReturnType<typeof createHttpServer>[] = [];
 
@@ -21,9 +30,16 @@ afterEach(async () => {
   );
 });
 
-async function listen(adapter: CodeAdaptationPort): Promise<string> {
+async function listen(
+  adapter: CodeAdaptationPort,
+  options: {
+    architecturePort?: RepositoryArchitecturePort;
+    staticAnalysisSnapshots?: StaticAnalysisSnapshotStore;
+  } = {},
+): Promise<string> {
   const server = createHttpServer({
     adapter,
+    ...options,
     corsOrigin: 'http://localhost:4173',
   });
   servers.push(server);
@@ -99,6 +115,52 @@ const adaptationResult: AdaptationResult = {
   ],
 };
 
+const staticAnalysis: RepositoryStaticAnalysis = {
+  schemaVersion: '1.0',
+  snapshotId: 'snapshot-http-1',
+  contentHash: 'a'.repeat(64),
+  analyzerVersion: 'code-indexer/1.0',
+  createdAt: '2026-08-26T00:00:00.000Z',
+  repository: { revision: 'abc123' },
+  files: [{
+    path: 'src/Quote.java',
+    sha256: 'b'.repeat(64),
+    role: 'source',
+    language: 'Java',
+  }],
+  symbols: [{
+    id: 'quote-symbol',
+    name: 'Quote',
+    qualifiedName: 'example.Quote',
+    kind: 'class',
+    language: 'Java',
+    path: 'src/Quote.java',
+  }],
+  dependencies: [],
+  diagnostics: [],
+};
+
+const modulePlan: ModuleMigrationProposal = {
+  schemaVersion: '1.0',
+  snapshotId: staticAnalysis.snapshotId,
+  objective: 'Plan quote migration modules.',
+  modules: [{
+    id: 'quote',
+    name: 'Quote',
+    kind: 'feature',
+    description: 'Quote feature.',
+    sourceFiles: ['src/Quote.java'],
+    symbolIds: ['quote-symbol'],
+    dependsOn: [],
+    writeSet: ['src/Quote.java'],
+    resourceLocks: [],
+    evidenceIds: ['quote-symbol'],
+  }],
+  fileAssignments: [{ path: 'src/Quote.java', kind: 'module', moduleId: 'quote' }],
+  dependencies: [],
+  risks: [],
+};
+
 describe('adaptation HTTP API', () => {
   it('serves health check', async () => {
     const adapter: CodeAdaptationPort = { adapt: vi.fn() };
@@ -130,6 +192,98 @@ describe('adaptation HTTP API', () => {
     expect(response.headers.get('access-control-allow-origin')).toBe(
       'http://localhost:4173',
     );
+  });
+
+  it('plans modules from a server-owned snapshot without accepting repository source', async () => {
+    const adapter: CodeAdaptationPort = { adapt: vi.fn() };
+    const architecturePort: RepositoryArchitecturePort = {
+      proposeModulePlan: vi.fn(async () => modulePlan),
+    };
+    const staticAnalysisSnapshots: StaticAnalysisSnapshotStore = {
+      getSnapshot: vi.fn(async (snapshotId) => (
+        snapshotId === staticAnalysis.snapshotId ? staticAnalysis : null
+      )),
+    };
+    const url = await listen(adapter, { architecturePort, staticAnalysisSnapshots });
+
+    const response = await fetch(`${url}/v1/module-plan`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        snapshotId: staticAnalysis.snapshotId,
+        objective: modulePlan.objective,
+        immutableConstraints: ['Keep the public contract stable.'],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(staticAnalysisSnapshots.getSnapshot).toHaveBeenCalledWith(
+      staticAnalysis.snapshotId,
+      expect.any(AbortSignal),
+    );
+    expect(architecturePort.proposeModulePlan).toHaveBeenCalledWith(
+      {
+        schemaVersion: '1.0',
+        analysis: staticAnalysis,
+        objective: modulePlan.objective,
+        immutableConstraints: ['Keep the public contract stable.'],
+      } satisfies RepositoryArchitectureRequest,
+      expect.any(AbortSignal),
+    );
+    expect(await response.json()).toEqual(modulePlan);
+    expect(adapter.adapt).not.toHaveBeenCalled();
+  });
+
+  it('rejects module-plan bodies that try to upload analysis, source, or paths', async () => {
+    const adapter: CodeAdaptationPort = { adapt: vi.fn() };
+    const architecturePort: RepositoryArchitecturePort = { proposeModulePlan: vi.fn() };
+    const staticAnalysisSnapshots: StaticAnalysisSnapshotStore = { getSnapshot: vi.fn() };
+    const url = await listen(adapter, { architecturePort, staticAnalysisSnapshots });
+
+    for (const body of [
+      { snapshotId: staticAnalysis.snapshotId, objective: modulePlan.objective, analysis: staticAnalysis },
+      { snapshotId: staticAnalysis.snapshotId, objective: modulePlan.objective, source: 'class Secret {}' },
+      { snapshotId: staticAnalysis.snapshotId, objective: modulePlan.objective, path: 'src/Secret.java' },
+    ]) {
+      const response = await fetch(`${url}/v1/module-plan`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      expect(response.status).toBe(400);
+    }
+    expect(staticAnalysisSnapshots.getSnapshot).not.toHaveBeenCalled();
+    expect(architecturePort.proposeModulePlan).not.toHaveBeenCalled();
+  });
+
+  it('does not expose module planning when the read-only host port is absent', async () => {
+    const adapter: CodeAdaptationPort = { adapt: vi.fn() };
+    const url = await listen(adapter);
+
+    const response = await fetch(`${url}/v1/module-plan`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ snapshotId: staticAnalysis.snapshotId, objective: modulePlan.objective }),
+    });
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: 'Module planning is not configured.' });
+  });
+
+  it('returns 404 when the requested server-owned snapshot does not exist', async () => {
+    const adapter: CodeAdaptationPort = { adapt: vi.fn() };
+    const architecturePort: RepositoryArchitecturePort = { proposeModulePlan: vi.fn() };
+    const staticAnalysisSnapshots: StaticAnalysisSnapshotStore = { getSnapshot: vi.fn(async () => null) };
+    const url = await listen(adapter, { architecturePort, staticAnalysisSnapshots });
+
+    const response = await fetch(`${url}/v1/module-plan`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ snapshotId: 'unknown', objective: modulePlan.objective }),
+    });
+
+    expect(response.status).toBe(404);
+    expect(architecturePort.proposeModulePlan).not.toHaveBeenCalled();
   });
 
   it('disables bare HTTP write-back', async () => {

@@ -41,6 +41,17 @@ export interface WorkspaceCheckpoint {
   files: CheckpointFile[];
 }
 
+/**
+ * Durable state for a multi-file write transaction. A filesystem cannot make
+ * several renames visible as one operation, so an interrupted commit is
+ * recovered from the checkpoint before another migration may proceed.
+ */
+export type BackfillTransactionState =
+  | 'prepared'
+  | 'committing'
+  | 'committed'
+  | 'rolled-back';
+
 export interface ApplyResult {
   appliedFiles: string[];
   checkpointId: string;

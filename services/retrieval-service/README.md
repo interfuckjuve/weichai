@@ -160,7 +160,7 @@ searchable on supported SeekDB versions.
 | `target` | `ModuleTarget` | The module to find candidates for; its `kind` is a mandatory candidate-kind filter. |
 | `requirement` | `string` | Natural-language context; `""` searches by target metadata. |
 | `topK` | `number` | Desired result count (1–50). Internally expanded for recall. |
-| `repositoryScopes` | `string[]` | `"owner/repo"` filters; empty = all indexed repos. |
+| `repositoryScopes` | `string[]?` | Optional exact subset request. The HTTP service accepts it only when it is a non-empty subset of `RETRIEVAL_ALLOWED_REPOSITORIES`; UI clients normally omit it. |
 | `candidateLanguages` | `Language[]?` | Hard source-language constraint. |
 | `rerank` | `boolean?` | Set to `false` to skip LLM reranking for this request. |
 
@@ -178,6 +178,14 @@ wants to narrow retrieval. The constraint is applied in SeekDB and checked
 again before candidates are returned. The language-neutral adaptation workflow
 normally omits it so Analyzer can evaluate candidates across all indexed
 languages.
+
+Every HTTP search is constrained by the deployment-owned,
+comma-separated `RETRIEVAL_ALLOWED_REPOSITORIES` setting. It defaults to an
+empty list, so an unconfigured service returns an error instead of querying
+every indexed repository. Configure exact IDs such as
+`forexplore-reference-java,swift-cache-ts` for local development. Empty,
+wildcard, malformed, or unauthorized request scopes are rejected; they never
+fall back to an unscoped query.
 
 Set `VITE_RETRIEVAL_API_URL` in the web app to activate the real adapter. If the
 variable is absent, the original mock search adapter remains active.

@@ -122,6 +122,42 @@ describe("isToolchainAvailable", () => {
   });
 });
 
+describe("RealDriverExecutor side-file boundary", () => {
+  const executor = new RealDriverExecutor();
+  const traversalSide = makeSide("TypeScript", "console.log('driver');", [
+    { relativePath: "../outside.ts", content: "export const escaped = true;" },
+  ]);
+
+  it("rejects traversal paths before invoking the compiler", async () => {
+    const result = await executor.compile(traversalSide);
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("escapes the execution directory");
+  });
+
+  it("rejects traversal paths before invoking the runtime", async () => {
+    const result = await executor.run(traversalSide);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("escapes the execution directory");
+  });
+
+  it.each([
+    "/tmp/outside.ts",
+    "C:\\outside.ts",
+    "\\\\server\\share\\outside.ts",
+    "safe/../../outside.ts",
+    "safe/\u0000outside.ts",
+  ])("rejects non-contained source path %j", async (relativePath) => {
+    const result = await executor.compile(makeSide("TypeScript", "console.log('driver');", [
+      { relativePath, content: "export const escaped = true;" },
+    ]));
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("Invalid verifier side specification");
+  });
+});
+
 describe.skipIf(!isToolchainAvailable("Java"))("RealDriverExecutor Java 集成", () => {
   const executor = new RealDriverExecutor();
 

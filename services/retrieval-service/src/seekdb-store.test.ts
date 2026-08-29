@@ -18,4 +18,14 @@ describe('SeekDB SQL helpers', () => {
       parameters: ['demo/cache', 'demo/runtime', 'TypeScript', 'Java', 'class'],
     });
   });
+
+  it('refuses to build an unscoped SQL query', () => {
+    expect(() =>
+      seekDbInternals.filterSql({
+        repositories: [],
+        languages: ['TypeScript'],
+        kinds: ['class'],
+      }),
+    ).toThrow('Repository scope must contain at least one repository.');
+  });
 });

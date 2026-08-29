@@ -16,6 +16,7 @@ DeepSeek. The server never writes workspace files.
 | `forexplore_repair_translation` | Repair one method or complete class from structured validation feedback. |
 | `forexplore_validate_translation` | Run language-selected standalone or temporary integrated compilation. |
 | `forexplore_adapt_translation` | Run context collection through patch preview in one call. |
+| `forexplore_propose_module_plan` | Use a server-owned static-analysis snapshot to propose functional modules (read-only). |
 
 `apply` and checkpoint restore are deliberately absent. The VS Code extension
 remains the only component that can obtain user confirmation and perform a
@@ -67,7 +68,7 @@ The project MCP configuration is:
 ```
 
 The MCP process inherits `DEEPSEEK_API_KEY`, `DEEPSEEK_MODEL`,
-`ADAPTATION_PROJECT_ROOT`, and optional `ADAPTATION_SKELETON_PROJECT_PATH`
+`ADAPTATION_PROJECT_ROOT`, `ADAPTATION_ANALYSIS_ROOT`, and optional `ADAPTATION_SKELETON_PROJECT_PATH`
 from its environment or `services/adaptation-mcp-server/.env`. When the MCP
 file is absent, it falls back to the sibling `adaptation-service/.env` so the
 HTTP service, Claude Code, and MCP path use the same local credentials.

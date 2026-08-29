@@ -1,8 +1,8 @@
 import { execFile, execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { delimiter, dirname, join } from "node:path";
+import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { VerifierLanguage } from "./description.js";
 import { createLogger, type Logger } from "./logger.js";
 
@@ -102,9 +102,19 @@ export class RealDriverExecutor implements DriverExecutor {
   }
 
   async compile(side: SideSpec): Promise<CompileOutcome> {
+    try {
+      validateSideSpec(side);
+    } catch (error) {
+      const output = `Invalid verifier side specification: ${errorOutput(error)}`;
+      this.#logger.error(output);
+      return { success: false, errors: [output], output };
+    }
     const reuseDir = side.reuseDir;
     if (side.language === "Java" && reuseDir && existsSync(join(reuseDir, "pom.xml"))) {
       return this.#compileJavaProject(side, reuseDir);
+    }
+    if (side.language === "Java" && side.projectRoot && existsSync(join(side.projectRoot, "pom.xml"))) {
+      return this.#compileJavaProject(side);
     }
     const dir = reuseDir ?? mkdtempSync(join(tmpdir(), "forexplore-verifier-"));
     try {
@@ -227,9 +237,19 @@ export class RealDriverExecutor implements DriverExecutor {
   }
 
   async run(side: SideSpec): Promise<RunOutcome> {
+    try {
+      validateSideSpec(side);
+    } catch (error) {
+      const output = `Invalid verifier side specification: ${errorOutput(error)}`;
+      this.#logger.error(output);
+      return { exitCode: 1, stdout: "", stderr: output };
+    }
     const reuseDir = side.reuseDir;
     if (side.language === "Java" && reuseDir && existsSync(join(reuseDir, "pom.xml"))) {
       return this.#runJavaProject(side, reuseDir);
+    }
+    if (side.language === "Java" && side.projectRoot && existsSync(join(side.projectRoot, "pom.xml"))) {
+      return this.#runJavaProject(side);
     }
     const dir = reuseDir ?? mkdtempSync(join(tmpdir(), "forexplore-verifier-"));
     try {
@@ -305,6 +325,9 @@ export class RealDriverExecutor implements DriverExecutor {
       }
       writeSideFiles(dir, side);
       return this.#runMavenCompile(dir);
+    } catch (error) {
+      const output = errorOutput(error);
+      return { success: false, errors: [output], output };
     } finally {
       if (!reuseDir) rmSync(dir, { recursive: true, force: true });
     }
@@ -387,11 +410,112 @@ function truncate(text: string, max: number): string {
   return `${text.slice(0, max)}...[truncated ${text.length - max} chars]`;
 }
 
+/**
+ * A `SideSpec` can originate from a model or retrieved candidate.  File names
+ * must therefore be treated as hostile even though their contents are written
+ * only to a temporary directory.  In particular, do not let `../`, drive/UNC
+ * paths, or a symlink inherited from a copied project escape that directory.
+ */
+function validateSideSpec(side: SideSpec): void {
+  const extension = sourceExtensionFor(side.language);
+  const seen = new Set<string>();
+  for (const file of side.sourceFiles) {
+    if (typeof file.relativePath !== "string" || typeof file.content !== "string") {
+      throw new Error("Verifier source files must have string paths and content.");
+    }
+    const canonical = canonicalRelativeSidePath(file.relativePath);
+    if (!canonical.endsWith(extension)) {
+      throw new Error(`Verifier ${side.language} source file must end with ${extension}: ${file.relativePath}`);
+    }
+    if (seen.has(canonical)) {
+      throw new Error(`Verifier side contains duplicate source file path: ${file.relativePath}`);
+    }
+    seen.add(canonical);
+  }
+}
+
+function sourceExtensionFor(language: VerifierLanguage): string {
+  switch (language) {
+    case "Java": return ".java";
+    case "C#": return ".cs";
+    case "Python": return ".py";
+    case "TypeScript": return ".ts";
+  }
+}
+
+function canonicalRelativeSidePath(filePath: string): string {
+  if (!filePath || filePath.includes("\0")) {
+    throw new Error("Verifier source file paths must be non-empty and cannot contain NUL.");
+  }
+  const portablePath = filePath.replaceAll("\\", "/");
+  if (
+    portablePath.startsWith("/") ||
+    isAbsolute(filePath) ||
+    /^[A-Za-z]:/.test(portablePath)
+  ) {
+    throw new Error(`Verifier source file path must be relative: ${filePath}`);
+  }
+  const segments = portablePath.split("/").filter((segment) => segment && segment !== ".");
+  if (
+    segments.length === 0 ||
+    segments.some((segment) => segment === ".." || segment.includes(":"))
+  ) {
+    throw new Error(`Verifier source file path escapes the execution directory: ${filePath}`);
+  }
+  return segments.join("/");
+}
+
+function resolveSideFilePath(root: string, filePath: string): string {
+  const canonical = canonicalRelativeSidePath(filePath);
+  const fullPath = resolve(root, ...canonical.split("/"));
+  const relativePath = relative(root, fullPath);
+  if (
+    !relativePath ||
+    relativePath === ".." ||
+    relativePath.startsWith(`..${sep}`) ||
+    isAbsolute(relativePath)
+  ) {
+    throw new Error(`Verifier source file path escapes the execution directory: ${filePath}`);
+  }
+  return fullPath;
+}
+
+function ensureSafeParentDirectory(root: string, fullPath: string): void {
+  const parent = dirname(fullPath);
+  const relativeParent = relative(root, parent);
+  if (!relativeParent || relativeParent === ".") return;
+  let current = root;
+  for (const segment of relativeParent.split(sep)) {
+    if (!segment || segment === ".") continue;
+    current = join(current, segment);
+    const entry = lstatIfPresent(current);
+    if (entry) {
+      if (entry.isSymbolicLink() || !entry.isDirectory()) {
+        throw new Error(`Verifier source file parent is not a safe directory: ${relative(root, current)}`);
+      }
+      continue;
+    }
+    mkdirSync(current);
+  }
+}
+
+function lstatIfPresent(filePath: string) {
+  try {
+    return lstatSync(filePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
 /** 把 sourceFiles 与 driver 写入临时目录;sourceFiles 保持相对路径并建父目录。 */
 function writeSideFiles(dir: string, side: SideSpec): void {
   for (const file of side.sourceFiles) {
-    const fullPath = join(dir, file.relativePath);
-    mkdirSync(dirname(fullPath), { recursive: true });
+    const fullPath = resolveSideFilePath(dir, file.relativePath);
+    ensureSafeParentDirectory(dir, fullPath);
+    if (lstatIfPresent(fullPath)?.isSymbolicLink()) {
+      throw new Error(`Verifier source file path resolves through a symbolic link: ${file.relativePath}`);
+    }
     writeFileSync(fullPath, file.content, "utf-8");
   }
   // Java requires a public class name match; dynamic-language drivers use a stable script name.

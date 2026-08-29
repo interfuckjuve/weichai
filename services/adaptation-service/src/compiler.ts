@@ -2,7 +2,7 @@
  * Language-registry compiler validation helpers.
  */
 
-import { execFileSync, execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import {
   cpSync,
   existsSync,
@@ -96,8 +96,9 @@ export function compileStandalone(
     if (dotnet) {
       return compileWithDotnet(dotnet, dir, true);
     }
-    if (hasCsc()) {
-      return compileWithCsc(dir, csFile);
+    const csc = findCsc();
+    if (csc) {
+      return compileWithCsc(csc, dir, csFile);
     }
     return {
       success: false,
@@ -181,8 +182,14 @@ function findDotnet(): string | null {
 
   for (const candidate of candidates) {
     try {
-      execFileSync(candidate, ["--version"], { stdio: "ignore" });
-      return candidate;
+      // A runtime-only installation answers `--version` but cannot build a
+      // temporary project. Treat it as unavailable evidence instead of a
+      // compiler failure with an empty diagnostic stream.
+      const sdks = execFileSync(candidate, ["--list-sdks"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      if (sdks.trim()) return candidate;
     } catch {
       // Continue to the next known installation location.
     }
@@ -196,12 +203,12 @@ export function isCompilerUnavailable(result: CompileResult): boolean {
   );
 }
 
-function hasCsc(): boolean {
+function findCsc(): string | null {
   const paths = [
     join(process.env.SystemRoot ?? "C:\\Windows", "Microsoft.NET", "Framework64", "v4.0.30319", "csc.exe"),
     join(process.env.SystemRoot ?? "C:\\Windows", "Microsoft.NET", "Framework", "v4.0.30319", "csc.exe"),
   ];
-  return paths.some((p) => existsSync(p));
+  return paths.find((candidate) => existsSync(candidate)) ?? null;
 }
 
 function compileWithDotnet(
@@ -237,11 +244,12 @@ function compileWithDotnet(
   }
 }
 
-function compileWithCsc(dir: string, csFile: string): CompileResult {
+function compileWithCsc(csc: string, dir: string, csFile: string): CompileResult {
   const dllPath = join(dir, "test.dll");
   try {
-    const stdout = execSync(
-      `csc /target:library /out:"${dllPath}" /nologo "${csFile}"`,
+    const stdout = execFileSync(
+      csc,
+      ["/target:library", `/out:${dllPath}`, "/nologo", csFile],
       { encoding: "utf-8", maxBuffer: 10 * 1024 * 1024, timeout: 30_000, stdio: "pipe" },
     );
     return { success: true, errors: [], output: stdout };
@@ -255,7 +263,11 @@ function compileWithCsc(dir: string, csFile: string): CompileResult {
 function collectErrorOutput(e: unknown): string {
   if (e && typeof e === "object") {
     const obj = e as Record<string, unknown>;
-    return String(obj.stdout ?? obj.stderr ?? obj.message ?? String(e));
+    const output = [obj.stdout, obj.stderr]
+      .map((value) => value === undefined || value === null ? "" : String(value))
+      .filter((value) => value.trim());
+    if (output.length > 0) return output.join("\n");
+    return String(obj.message ?? String(e));
   }
   return String(e);
 }

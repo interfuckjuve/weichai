@@ -14,6 +14,15 @@ function searchEndpoint(baseUrl: string): string {
   return `${baseUrl.replace(/\/+$/, '')}/v1/search`;
 }
 
+/**
+ * Repository authorization belongs to the retrieval service. UI callers must
+ * not send display labels or a client-controlled allow-list as a search scope.
+ */
+function serverScopedRequest(request: SearchRequest): SearchRequest {
+  const { repositoryScopes: _repositoryScopes, ...serverManagedRequest } = request;
+  return serverManagedRequest;
+}
+
 function isSearchResponse(value: unknown): value is SearchResponse {
   if (typeof value !== 'object' || value === null) return false;
   const candidates = (value as { candidates?: unknown }).candidates;
@@ -58,7 +67,7 @@ export class SeekDbCodeSearchAdapter implements CodeSearchPort {
       response = await this.request(this.endpoint, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(request),
+        body: JSON.stringify(serverScopedRequest(request)),
         signal,
       });
     } catch (error) {

@@ -23,7 +23,13 @@
     "onCommand:forexplore.showPanel",
     "onCommand:forexplore.checkRepositories",
     "onCommand:forexplore.reindex",
-    "onCommand:forexplore.restoreLastCheckpoint"
+    "onCommand:forexplore.restoreLastCheckpoint",
+    "onCommand:forexplore.indexModuleMigrationRepository",
+    "onCommand:forexplore.reviewModuleMigrationPlan",
+    "onCommand:forexplore.reviewModuleMigrationWave",
+    "onCommand:forexplore.prepareModuleMigrationWave",
+    "onCommand:forexplore.approveModuleMigrationWave",
+    "onCommand:forexplore.recoverModuleMigrationReview"
   ],
   "contributes": {
     "commands": [
@@ -46,6 +52,30 @@
       {
         "command": "forexplore.restoreLastCheckpoint",
         "title": "ForeXplore: 恢复最近一次回填"
+      },
+      {
+        "command": "forexplore.indexModuleMigrationRepository",
+        "title": "ForeXplore: 索引模块迁移仓库"
+      },
+      {
+        "command": "forexplore.reviewModuleMigrationPlan",
+        "title": "ForeXplore: 审阅模块迁移计划"
+      },
+      {
+        "command": "forexplore.reviewModuleMigrationWave",
+        "title": "ForeXplore: 审阅下一迁移波次"
+      },
+      {
+        "command": "forexplore.prepareModuleMigrationWave",
+        "title": "ForeXplore: 导入并准备下一迁移波次"
+      },
+      {
+        "command": "forexplore.approveModuleMigrationWave",
+        "title": "ForeXplore: 审批并提交已准备迁移波次"
+      },
+      {
+        "command": "forexplore.recoverModuleMigrationReview",
+        "title": "ForeXplore: 恢复模块迁移审阅状态"
       }
     ],
     "menus": {
@@ -83,6 +113,26 @@
           "type": "string",
           "default": "http://127.0.0.1:8788",
           "description": "语言无关翻译服务地址。"
+        },
+        "forexplore.moduleWaveValidationCommands": {
+          "type": "array",
+          "scope": "machine",
+          "default": [],
+          "description": "仅由本地 VS Code 宿主在隔离波次 worktree 中执行的联合验证命令。未配置时模块波次准备会被阻止。",
+          "items": {
+            "type": "object",
+            "required": ["id", "label", "executable"],
+            "properties": {
+              "id": { "type": "string" },
+              "label": { "type": "string" },
+              "executable": { "type": "string" },
+              "args": { "type": "array", "items": { "type": "string" } },
+              "cwd": { "type": "string" },
+              "required": { "type": "boolean" },
+              "timeoutMs": { "type": "number" }
+            },
+            "additionalProperties": false
+          }
         }
       }
     }
@@ -97,7 +147,9 @@
     "package": "vsce package --no-dependencies --allow-missing-repository"
   },
   "dependencies": {
+    "@forexplore/adaptation-service": "0.1.0",
     "@forexplore/adaptation-http-adapter": "0.1.0",
+    "@forexplore/code-indexer": "0.1.0",
     "@forexplore/contracts": "0.1.0",
     "@forexplore/seekdb-adapter": "0.1.0",
     "@forexplore/workflow-core": "0.1.0",

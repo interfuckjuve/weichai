@@ -59,6 +59,101 @@ describe("BackfillAdapter", () => {
     expect(await readFile(path.join(root, "src", "Service.cs"), "utf8")).toBe(original);
   });
 
+  it("records a caller-owned wave transaction id and commits its durable state", async () => {
+    const original = "old implementation";
+    await writeFile(path.join(root, "src", "Service.cs"), original);
+
+    const result = await adapter.applyTransaction(
+      [modified("src/Service.cs", original, "new implementation")],
+      { transactionId: "wave-01" },
+    );
+
+    expect(result.checkpointId).toBe("checkpoint-wave-01");
+    const checkpoint = JSON.parse(
+      await readFile(
+        path.join(root, ".forexplore", "checkpoints", "checkpoint-wave-01.json"),
+        "utf8",
+      ),
+    ) as { state: string };
+    expect(checkpoint.state).toBe("committed");
+  });
+
+  it("recovers an interrupted committing transaction before another wave starts", async () => {
+    const original = "old implementation";
+    const replacement = "new implementation";
+    const target = path.join(root, "src", "Service.cs");
+    await writeFile(target, replacement);
+    const checkpointRoot = path.join(root, ".forexplore", "checkpoints");
+    await mkdir(checkpointRoot, { recursive: true });
+    await writeFile(
+      path.join(checkpointRoot, "checkpoint-interrupted-wave.json"),
+      JSON.stringify({
+        id: "checkpoint-interrupted-wave",
+        createdAt: new Date().toISOString(),
+        recoverable: true,
+        state: "committing",
+        files: [{
+          path: "src/Service.cs",
+          status: "modified",
+          beforeSha256: hash(original),
+          afterSha256: hash(replacement),
+          beforeContentBase64: Buffer.from(original).toString("base64"),
+        }],
+      }),
+      "utf8",
+    );
+
+    expect(adapter.recoverIncompleteTransactions()).toEqual([
+      { checkpointId: "checkpoint-interrupted-wave", state: "rolled-back" },
+    ]);
+    expect(await readFile(target, "utf8")).toBe(original);
+  });
+
+  it("does not let recovery roll back a transaction while another process holds the workspace lease", async () => {
+    const original = "old implementation";
+    const replacement = "new implementation";
+    const target = path.join(root, "src", "Service.cs");
+    await writeFile(target, replacement);
+    const checkpointRoot = path.join(root, ".forexplore", "checkpoints");
+    await mkdir(checkpointRoot, { recursive: true });
+    await writeFile(
+      path.join(checkpointRoot, "checkpoint-active-wave.json"),
+      JSON.stringify({
+        id: "checkpoint-active-wave",
+        createdAt: new Date().toISOString(),
+        recoverable: true,
+        state: "committing",
+        files: [{
+          path: "src/Service.cs",
+          status: "modified",
+          beforeSha256: hash(original),
+          afterSha256: hash(replacement),
+          beforeContentBase64: Buffer.from(original).toString("base64"),
+        }],
+      }),
+      "utf8",
+    );
+    const lock = path.join(root, ".forexplore", "locks", "backfill.lock");
+    await mkdir(lock, { recursive: true });
+    await writeFile(path.join(lock, "owner"), "another-process", "utf8");
+
+    expect(() => adapter.recoverIncompleteTransactions()).toThrow("backfill transaction is active");
+    expect(await readFile(target, "utf8")).toBe(replacement);
+  });
+
+  it("refuses a write-back while another process holds the workspace lease", async () => {
+    const original = "old implementation";
+    const target = path.join(root, "src", "Service.cs");
+    await writeFile(target, original);
+    const lock = path.join(root, ".forexplore", "locks", "backfill.lock");
+    await mkdir(lock, { recursive: true });
+    await writeFile(path.join(lock, "owner"), "another-process", "utf8");
+
+    await expect(adapter.apply([modified("src/Service.cs", original, "new implementation")]))
+      .rejects.toThrow("backfill transaction is active");
+    expect(await readFile(target, "utf8")).toBe(original);
+  });
+
   it("rejects an empty write-back transaction", async () => {
     await expect(adapter.apply([])).rejects.toThrow("at least one patch");
   });

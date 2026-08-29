@@ -14,6 +14,26 @@ import type { SymbolMatch } from './extractor.js';
 
 export type { CorpusManifest } from './discover.js';
 export type { SymbolMatch } from './extractor.js';
+export type {
+  AnalyzeRepositoryRequest,
+  CompilerProbe,
+  CompilerProbeDiagnostic,
+  CompilerProbeRequest,
+  CompilerProbeResult,
+  CompilerProbeStatus,
+  SemanticDependencyBinding,
+} from './repository-analysis.js';
+export {
+  analyzeRepository,
+  readRepositoryAnalysisArtifact,
+  repositoryAnalysisContentHash,
+  repositoryAnalysisArtifactDirectory,
+  repositoryAnalysisArtifactPath,
+  repositoryAnalysisSnapshotId,
+  repositoryAnalysisVersion,
+  verifyRepositoryStaticAnalysis,
+  writeRepositoryAnalysisArtifact,
+} from './repository-analysis.js';
 
 async function sourceFiles(root: string): Promise<string[]> {
   const files: string[] = [];

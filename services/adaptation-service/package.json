@@ -10,10 +10,13 @@
     "test": "vitest run src"
   },
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./git-wave-transaction": "./src/git-wave-transaction.ts",
+    "./module-wave-execution": "./src/module-wave-execution.ts"
   },
   "types": "./src/index.ts",
   "dependencies": {
+    "@forexplore/code-indexer": "0.1.0",
     "@forexplore/contracts": "0.1.0",
     "@forexplore/translation-verifier": "0.1.0",
     "@forexplore/workflow-core": "0.1.0",

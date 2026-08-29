@@ -4,14 +4,29 @@ import {
   type Server,
   type ServerResponse,
 } from "node:http";
-import type {
-  AdaptationRequest,
-  Language,
+import {
+  moduleMigrationSchemaVersion,
+  type AdaptationRequest,
+  type Language,
+  type RepositoryArchitectureRequest,
+  type RepositoryStaticAnalysis,
 } from "@forexplore/contracts";
-import type { CodeAdaptationPort } from "@forexplore/workflow-core";
+import type {
+  CodeAdaptationPort,
+  RepositoryArchitecturePort,
+} from "@forexplore/workflow-core";
+
+export interface StaticAnalysisSnapshotStore {
+  /** Returns only a server-persisted snapshot; HTTP never supplies source or paths. */
+  getSnapshot(snapshotId: string, signal?: AbortSignal): Promise<RepositoryStaticAnalysis | null>;
+}
 
 export interface HttpServerOptions {
   adapter: CodeAdaptationPort;
+  /** Optional read-only module-planning endpoint. It has no write-back path. */
+  architecturePort?: RepositoryArchitecturePort;
+  /** Server-owned static-analysis snapshots addressed by their immutable ID. */
+  staticAnalysisSnapshots?: StaticAnalysisSnapshotStore;
   /** Browser CORS is opt-in; the VS Code extension host uses local HTTP directly. */
   corsOrigin?: string;
 }
@@ -125,6 +140,45 @@ function isAdaptationRequest(value: unknown): value is AdaptationRequest {
   );
 }
 
+interface ModulePlanHttpRequest {
+  snapshotId: string;
+  objective: string;
+  immutableConstraints?: string[];
+}
+
+const maxPlanningObjectiveChars = 16_000;
+const maxPlanningConstraints = 64;
+const maxPlanningConstraintChars = 2_000;
+
+/**
+ * Deliberately accept a small, exact shape. In particular, analysis/source/
+ * path/files fields are rejected so a browser cannot supply a repository for
+ * the model to inspect; it can only select an already persisted snapshot.
+ */
+function isModulePlanHttpRequest(value: unknown): value is ModulePlanHttpRequest {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const body = value as Record<string, unknown>;
+  const allowedKeys = new Set(["snapshotId", "objective", "immutableConstraints"]);
+  if (Object.keys(body).some((key) => !allowedKeys.has(key))) return false;
+  if (
+    typeof body.snapshotId !== "string" ||
+    !body.snapshotId.trim() ||
+    typeof body.objective !== "string" ||
+    !body.objective.trim() ||
+    body.objective.length > maxPlanningObjectiveChars
+  ) {
+    return false;
+  }
+  if (body.immutableConstraints === undefined) return true;
+  return (
+    isStringArray(body.immutableConstraints) &&
+    body.immutableConstraints.length <= maxPlanningConstraints &&
+    body.immutableConstraints.every(
+      (constraint) => constraint.trim() && constraint.length <= maxPlanningConstraintChars,
+    )
+  );
+}
+
 function requireJson(request: IncomingMessage): void {
   const contentType = request.headers["content-type"] ?? "";
   if (!contentType.toLowerCase().startsWith("application/json")) {
@@ -173,6 +227,49 @@ export function createHttpServer(options: HttpServerOptions): Server {
         return;
       }
 
+      if (request.method === "POST" && request.url === "/v1/module-plan") {
+        if (!options.architecturePort || !options.staticAnalysisSnapshots) {
+          json(
+            response,
+            404,
+            { error: "Module planning is not configured." },
+            options.corsOrigin,
+          );
+          return;
+        }
+        requireJson(request);
+        const body = await readBody(request);
+        if (!isModulePlanHttpRequest(body)) {
+          json(
+            response,
+            400,
+            { error: "Invalid module planning payload. Submit only snapshotId, objective, and immutableConstraints." },
+            options.corsOrigin,
+          );
+          return;
+        }
+
+        const signal = requestSignal(request);
+        const analysis = await options.staticAnalysisSnapshots.getSnapshot(body.snapshotId, signal);
+        if (!analysis) {
+          json(response, 404, { error: "Static analysis snapshot was not found." }, options.corsOrigin);
+          return;
+        }
+        if (analysis.snapshotId !== body.snapshotId) {
+          throw new Error("Static analysis snapshot store returned a mismatched snapshot ID.");
+        }
+
+        const architectureRequest: RepositoryArchitectureRequest = {
+          schemaVersion: moduleMigrationSchemaVersion,
+          analysis,
+          objective: body.objective,
+          immutableConstraints: body.immutableConstraints,
+        };
+        const result = await options.architecturePort.proposeModulePlan(architectureRequest, signal);
+        json(response, 200, result, options.corsOrigin);
+        return;
+      }
+
       if (request.method === "POST" && request.url === "/v1/backfill") {
         // A bare HTTP client is not an approval authority. Until this service
         // has a server-owned run manifest and authorization layer, write-back
@@ -195,3 +292,5 @@ export function createHttpServer(options: HttpServerOptions): Server {
     }
   });
 }
+
+export type { ModulePlanHttpRequest };

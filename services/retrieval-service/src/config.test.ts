@@ -2,6 +2,21 @@ import { describe, expect, it } from 'vitest';
 import { loadConfig } from './config.js';
 
 describe('loadConfig', () => {
+  it('defaults to no authorized repositories and parses an explicit allow-list', () => {
+    expect(loadConfig({}).allowedRepositories).toEqual([]);
+    expect(
+      loadConfig({
+        RETRIEVAL_ALLOWED_REPOSITORIES: 'demo/cache, demo/runtime, demo/cache',
+      }).allowedRepositories,
+    ).toEqual(['demo/cache', 'demo/runtime']);
+  });
+
+  it('rejects malformed repository allow-list entries', () => {
+    expect(() =>
+      loadConfig({ RETRIEVAL_ALLOWED_REPOSITORIES: 'demo/cache, configured-repositories' }),
+    ).toThrow('RETRIEVAL_ALLOWED_REPOSITORIES contains an invalid repository identifier');
+  });
+
   it('requests dimensions by default for the default OpenAI embedding model', () => {
     const config = loadConfig({
       SEEKDB_EMBEDDING_PROVIDER: 'openai',

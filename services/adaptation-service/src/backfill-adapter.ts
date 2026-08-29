@@ -12,6 +12,7 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   renameSync,
@@ -22,6 +23,7 @@ import {
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type {
   ApplyResult,
+  BackfillTransactionState,
   FilePatch,
   WorkspaceCheckpoint,
 } from "@forexplore/contracts";
@@ -33,6 +35,20 @@ export interface BackfillAdapterOptions {
   projectRoot: string;
   /** Durable checkpoint location. Defaults to <projectRoot>/.forexplore/checkpoints. */
   checkpointRoot?: string;
+}
+
+/**
+ * A caller-owned identifier lets a higher-level wave manifest refer to the
+ * durable checkpoint before it writes the managed summary file.
+ */
+export interface BackfillTransactionOptions {
+  transactionId?: string;
+  signal?: AbortSignal;
+}
+
+export interface BackfillRecoveryResult {
+  checkpointId: string;
+  state: "rolled-back";
 }
 
 interface PreparedFile {
@@ -52,6 +68,7 @@ interface StoredCheckpointFile {
 }
 
 interface StoredCheckpoint extends Omit<WorkspaceCheckpoint, "files"> {
+  state: BackfillTransactionState;
   files: StoredCheckpointFile[];
 }
 
@@ -61,9 +78,15 @@ interface RestoreFile {
   shouldRestore: boolean;
 }
 
+interface WorkspaceLock {
+  path: string;
+  token: string;
+}
+
 export class BackfillAdapter implements CodeBackfillPort {
   #projectRoot: string;
   #checkpointRoot: string;
+  #lockRoot: string;
 
   constructor(options: BackfillAdapterOptions) {
     const configuredRoot = resolve(options.projectRoot);
@@ -77,33 +100,62 @@ export class BackfillAdapter implements CodeBackfillPort {
     if (!isInsideRoot(this.#projectRoot, this.#checkpointRoot)) {
       throw new Error("Checkpoint root must stay inside the configured project root.");
     }
+    this.#lockRoot = resolve(this.#projectRoot, ".forexplore", "locks");
+    if (!isInsideRoot(this.#projectRoot, this.#lockRoot)) {
+      throw new Error("Backfill lock root must stay inside the configured project root.");
+    }
   }
 
   async apply(files: FilePatch[], signal?: AbortSignal): Promise<ApplyResult> {
+    return this.applyTransaction(files, { signal });
+  }
+
+  async applyTransaction(
+    files: FilePatch[],
+    options: BackfillTransactionOptions = {},
+  ): Promise<ApplyResult> {
+    const lock = this.acquireWorkspaceLock();
+    try {
+      return this.applyTransactionLocked(files, options);
+    } finally {
+      this.releaseWorkspaceLock(lock);
+    }
+  }
+
+  private applyTransactionLocked(
+    files: FilePatch[],
+    options: BackfillTransactionOptions,
+  ): ApplyResult {
+    const { signal } = options;
     throwIfAborted(signal);
     if (files.length === 0) throw new Error("A backfill transaction must contain at least one patch.");
     const prepared = files.map((file) => this.prepare(file));
     assertDistinctPaths(prepared);
     throwIfAborted(signal);
 
-    const checkpoint = this.writeCheckpoint(prepared);
+    const checkpoint = this.writeCheckpoint(prepared, options.transactionId);
     const temporaryPaths: string[] = [];
     try {
       // Write every temporary file before replacing a single target. A failure
       // here leaves the project untouched.
       for (const file of prepared) {
         const temporaryPath = temporarySibling(file.fullPath, checkpoint.id);
-        writeFileSync(temporaryPath, file.nextContent, { mode: 0o600 });
+        writeFileSync(temporaryPath, file.nextContent, { mode: 0o600, flag: "wx" });
         temporaryPaths.push(temporaryPath);
       }
 
       throwIfAborted(signal);
+      this.assertPreparedFilesStillCurrent(prepared);
+      this.setCheckpointState(checkpoint, "committing");
       for (let index = 0; index < prepared.length; index += 1) {
         const file = prepared[index];
         const temporaryPath = temporaryPaths[index];
         if (!file || !temporaryPath) throw new Error("Backfill transaction state is incomplete.");
+        this.assertPreparedFileStillCurrent(file);
         renameSync(temporaryPath, file.fullPath);
       }
+
+      this.setCheckpointState(checkpoint, "committed");
 
       return {
         appliedFiles: prepared.map((file) => file.patch.path),
@@ -114,6 +166,7 @@ export class BackfillAdapter implements CodeBackfillPort {
       for (const temporaryPath of temporaryPaths) rmSync(temporaryPath, { force: true });
       try {
         this.restoreStoredCheckpoint(checkpoint, false);
+        this.setCheckpointState(checkpoint, "rolled-back");
       } catch (restoreError) {
         const detail = restoreError instanceof Error ? restoreError.message : String(restoreError);
         throw new Error(
@@ -125,15 +178,47 @@ export class BackfillAdapter implements CodeBackfillPort {
     }
   }
 
+  /**
+   * Restores durable transactions that were interrupted after their checkpoint
+   * had been written but before every replacement was committed. It is safe to
+   * call before starting a new wave and deliberately fails rather than hiding
+   * a concurrent user edit.
+   */
+  recoverIncompleteTransactions(): BackfillRecoveryResult[] {
+    const lock = this.acquireWorkspaceLock();
+    try {
+      if (!existsSync(this.#checkpointRoot)) return [];
+      const recovered: BackfillRecoveryResult[] = [];
+      for (const entry of readdirSync(this.#checkpointRoot, { withFileTypes: true })) {
+        if (!entry.isFile() || !/^checkpoint-[0-9A-Za-z-]+\.json$/.test(entry.name)) continue;
+        const checkpointId = entry.name.slice(0, -".json".length);
+        const checkpoint = this.readCheckpoint(checkpointId);
+        if (checkpoint.state !== "prepared" && checkpoint.state !== "committing") continue;
+        this.restoreStoredCheckpoint(checkpoint, false);
+        this.setCheckpointState(checkpoint, "rolled-back");
+        recovered.push({ checkpointId, state: "rolled-back" });
+      }
+      return recovered;
+    } finally {
+      this.releaseWorkspaceLock(lock);
+    }
+  }
+
   /** Restores a durable checkpoint after checking no later user edit is lost. */
   async restore(checkpointId: string): Promise<ApplyResult> {
-    const checkpoint = this.readCheckpoint(checkpointId);
-    this.restoreStoredCheckpoint(checkpoint, true);
-    return {
-      appliedFiles: checkpoint.files.map((file) => file.path),
-      checkpointId,
-      rollbackAvailable: false,
-    };
+    const lock = this.acquireWorkspaceLock();
+    try {
+      const checkpoint = this.readCheckpoint(checkpointId);
+      this.restoreStoredCheckpoint(checkpoint, true);
+      this.setCheckpointState(checkpoint, "rolled-back");
+      return {
+        appliedFiles: checkpoint.files.map((file) => file.path),
+        checkpointId,
+        rollbackAvailable: false,
+      };
+    } finally {
+      this.releaseWorkspaceLock(lock);
+    }
   }
 
   private prepare(patch: FilePatch): PreparedFile {
@@ -206,17 +291,44 @@ export class BackfillAdapter implements CodeBackfillPort {
     return realFile;
   }
 
-  private writeCheckpoint(prepared: PreparedFile[]): StoredCheckpoint {
+  private assertPreparedFilesStillCurrent(files: PreparedFile[]): void {
+    for (const file of files) this.assertPreparedFileStillCurrent(file);
+  }
+
+  private assertPreparedFileStillCurrent(file: PreparedFile): void {
+    if (file.patch.status === "created") {
+      if (existsSync(file.fullPath)) {
+        throw new Error(`Cannot create "${file.patch.path}": the file appeared during this transaction.`);
+      }
+      return;
+    }
+    if (!existsSync(file.fullPath) || realpathSync(file.fullPath) !== file.fullPath) {
+      throw new Error(`Target file changed during this migration run: "${file.patch.path}".`);
+    }
+    const expected = file.beforeContent;
+    if (!expected || sha256(readFileSync(file.fullPath)) !== sha256(expected)) {
+      throw new Error(`Target file changed during this migration run: "${file.patch.path}".`);
+    }
+  }
+
+  private writeCheckpoint(
+    prepared: PreparedFile[],
+    transactionId: string | undefined,
+  ): StoredCheckpoint {
     mkdirSync(this.#checkpointRoot, { recursive: true, mode: 0o700 });
     const realCheckpointRoot = realpathSync(this.#checkpointRoot);
     if (!isInsideRoot(this.#projectRoot, realCheckpointRoot)) {
       throw new Error("Checkpoint directory resolves outside the configured project root.");
     }
-    const id = `checkpoint-${randomUUID()}`;
+    const id = checkpointId(transactionId);
+    if (existsSync(this.checkpointPath(id))) {
+      throw new Error(`Checkpoint already exists: ${id}`);
+    }
     const checkpoint: StoredCheckpoint = {
       id,
       createdAt: new Date().toISOString(),
       recoverable: true,
+      state: "prepared",
       files: prepared.map((file) => ({
         path: file.patch.path,
         status: file.patch.status,
@@ -225,26 +337,85 @@ export class BackfillAdapter implements CodeBackfillPort {
         beforeContentBase64: file.beforeContent?.toString("base64") ?? null,
       })),
     };
-    writeFileSync(this.checkpointPath(id), JSON.stringify(checkpoint, null, 2), {
-      encoding: "utf8",
-      mode: 0o600,
-    });
+    this.persistCheckpoint(checkpoint);
     return checkpoint;
   }
 
   private readCheckpoint(checkpointId: string): StoredCheckpoint {
-    if (!/^checkpoint-[0-9a-f-]+$/i.test(checkpointId)) {
+    if (!/^checkpoint-[0-9A-Za-z-]+$/.test(checkpointId)) {
       throw new Error("Invalid checkpoint id.");
     }
     const path = this.checkpointPath(checkpointId);
     if (!existsSync(path)) throw new Error(`Checkpoint not found: ${checkpointId}`);
     const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
     if (!isStoredCheckpoint(parsed)) throw new Error(`Checkpoint is malformed: ${checkpointId}`);
-    return parsed;
+    return {
+      ...parsed,
+      // Checkpoints created before durable transaction states were introduced
+      // have already returned successfully, so treat them as committed.
+      state: parsed.state ?? "committed",
+    };
   }
 
   private checkpointPath(checkpointId: string): string {
     return join(this.#checkpointRoot, `${checkpointId}.json`);
+  }
+
+  private setCheckpointState(
+    checkpoint: StoredCheckpoint,
+    state: BackfillTransactionState,
+  ): void {
+    checkpoint.state = state;
+    this.persistCheckpoint(checkpoint);
+  }
+
+  private persistCheckpoint(checkpoint: StoredCheckpoint): void {
+    writeFileSync(this.checkpointPath(checkpoint.id), JSON.stringify(checkpoint, null, 2), {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+  }
+
+  private acquireWorkspaceLock(): WorkspaceLock {
+    mkdirSync(this.#lockRoot, { recursive: true, mode: 0o700 });
+    const realLockRoot = realpathSync(this.#lockRoot);
+    if (!isInsideRoot(this.#projectRoot, realLockRoot)) {
+      throw new Error("Backfill lock directory resolves outside the configured project root.");
+    }
+    const path = join(realLockRoot, "backfill.lock");
+    const token = randomUUID();
+    let created = false;
+    try {
+      mkdirSync(path, { mode: 0o700 });
+      created = true;
+      writeFileSync(join(path, "owner"), token, { encoding: "utf8", mode: 0o600, flag: "wx" });
+      return { path, token };
+    } catch (error) {
+      // If creating the marker failed after mkdir, the empty directory is ours
+      // and can be cleaned safely. A non-empty/existing lock belongs to another
+      // process and must remain untouched.
+      const ownerPath = join(path, "owner");
+      if (created && existsSync(path) && !existsSync(ownerPath)) {
+        try {
+          rmSync(path, { force: true, recursive: true });
+        } catch {
+          // Preserve the lock when its ownership cannot be established.
+        }
+      }
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`Another backfill transaction is active or its lock is unavailable: ${detail}`);
+    }
+  }
+
+  private releaseWorkspaceLock(lock: WorkspaceLock): void {
+    const ownerPath = join(lock.path, "owner");
+    try {
+      if (!existsSync(ownerPath) || readFileSync(ownerPath, "utf8") !== lock.token) return;
+      rmSync(lock.path, { force: true, recursive: true });
+    } catch {
+      // Keeping an uncertain lock is safer than deleting another process's
+      // lease. An operator can inspect the durable checkpoint before recovery.
+    }
   }
 
   private restoreStoredCheckpoint(checkpoint: StoredCheckpoint, verifyAfterHash: boolean): void {
@@ -342,6 +513,14 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) throw new DOMException("Operation aborted", "AbortError");
 }
 
+function checkpointId(transactionId: string | undefined): string {
+  if (!transactionId) return `checkpoint-${randomUUID()}`;
+  if (!/^[A-Za-z0-9][A-Za-z0-9-]{0,127}$/.test(transactionId)) {
+    throw new Error("Transaction id must contain only letters, digits, and hyphens.");
+  }
+  return `checkpoint-${transactionId}`;
+}
+
 function isStoredCheckpoint(value: unknown): value is StoredCheckpoint {
   if (typeof value !== "object" || value === null) return false;
   const checkpoint = value as Partial<StoredCheckpoint>;
@@ -349,6 +528,11 @@ function isStoredCheckpoint(value: unknown): value is StoredCheckpoint {
     typeof checkpoint.id === "string" &&
     typeof checkpoint.createdAt === "string" &&
     typeof checkpoint.recoverable === "boolean" &&
+    (checkpoint.state === undefined ||
+      checkpoint.state === "prepared" ||
+      checkpoint.state === "committing" ||
+      checkpoint.state === "committed" ||
+      checkpoint.state === "rolled-back") &&
     Array.isArray(checkpoint.files) &&
     checkpoint.files.length > 0 &&
     checkpoint.files.every(

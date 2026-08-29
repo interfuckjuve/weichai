@@ -14,6 +14,7 @@ const server = createHttpServer({
   engine,
   store,
   corsOrigin: config.corsOrigin,
+  allowedRepositories: config.allowedRepositories,
 });
 
 server.listen(config.port, config.host, () => {

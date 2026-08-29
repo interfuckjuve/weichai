@@ -43,6 +43,7 @@ import type {
   AdaptationVerifier,
   DifferentialVerificationResult,
 } from "./verification-adapter";
+import { TranslationVerifierAdapter } from "./verification-adapter";
 
 const MAX_RETRIES = 3;
 const STANDALONE_CLASS_NAME = "ForeXploreStandalone";
@@ -60,7 +61,7 @@ export interface AdaptationAdapterOptions {
   contextCollector?: AdaptationContextCollector;
   translatorRequest?: typeof globalThis.fetch;
   validator?: AdaptationValidator;
-  /** Optional behavioral verifier; production servers provide it explicitly. */
+  /** Optional override; the default verifier is fail-closed and never runs candidate code on-host. */
   verifier?: AdaptationVerifier;
 }
 
@@ -109,7 +110,7 @@ export class AdaptationAdapter implements CodeAdaptationPort {
       ? { apiKey: options.apiKey, request: options.translatorRequest }
       : { apiKey: options.apiKey };
     this.#validator = options.validator ?? defaultValidator;
-    this.#verifier = options.verifier;
+    this.#verifier = options.verifier ?? new TranslationVerifierAdapter({ apiKey: options.apiKey });
   }
 
   async adapt(
@@ -523,7 +524,7 @@ function buildFilePatch(
   // 找到方法体的闭合大括号
   const endIdx = language === "Python"
     ? findPythonMethodEnd(originalLines, startIdx)
-    : findMethodEnd(originalLines, startIdx);
+    : findMethodEnd(originalLines, startIdx, language);
   const removedLines = originalLines.slice(startIdx, endIdx + 1);
   if (removedLines.length === 0) {
     throw new Error("Cannot build a patch because the selected target method is empty.");
@@ -676,25 +677,196 @@ function sha256(content: string): string {
   return createHash("sha256").update(content, "utf8").digest("hex");
 }
 
-/** 从 startIdx 开始，用括号深度匹配找到方法/代码块的结束行（0-based 索引） */
-function findMethodEnd(lines: string[], startIdx: number): number {
+/**
+ * Finds the closing brace for a Java/C#/TypeScript/Go/Rust declaration.
+ *
+ * This intentionally is not a substitute for a compiler AST. It is the
+ * fail-closed fallback used before making a destructive patch: braces in
+ * comments and string literals must never influence the selected range, and
+ * an incomplete declaration must reject the patch rather than consume the
+ * remainder of the file.
+ */
+function findMethodEnd(lines: string[], startIdx: number, language: Language): number {
   let depth = 0;
   let started = false;
-  for (let i = startIdx; i < lines.length; i++) {
-    for (const ch of lines[i]) {
-      if (ch === "{") {
-        depth++;
+  let state: LexicalState = "code";
+  let rawQuoteCount = 0;
+  const declarationIndentation = lines[startIdx]?.match(/^\s*/)?.[0].length ?? 0;
+
+  for (let lineIndex = startIdx; lineIndex < lines.length; lineIndex += 1) {
+    const line = lines[lineIndex] ?? "";
+    const lineIndentation = line.match(/^\s*/)?.[0].length ?? 0;
+    if (
+      started &&
+      depth === 1 &&
+      state === "code" &&
+      lineIndex > startIdx &&
+      isLikelySiblingDeclaration(line, declarationIndentation, language)
+    ) {
+      throw new Error(
+        "Cannot build a safe patch because a sibling declaration appears before the target declaration closes.",
+      );
+    }
+    for (let charIndex = 0; charIndex < line.length; charIndex += 1) {
+      const character = line[charIndex] ?? "";
+      const next = line[charIndex + 1] ?? "";
+
+      if (state === "block-comment") {
+        if (character === "*" && next === "/") {
+          state = "code";
+          charIndex += 1;
+        }
+        continue;
+      }
+
+      if (state === "single-quoted") {
+        if (character === "\\") {
+          charIndex += 1;
+        } else if (character === "'") {
+          state = "code";
+        }
+        continue;
+      }
+
+      if (state === "double-quoted" || state === "backtick") {
+        const terminator = state === "double-quoted" ? '"' : "`";
+        if (character === "\\") {
+          charIndex += 1;
+        } else if (character === terminator) {
+          state = "code";
+        }
+        continue;
+      }
+
+      if (state === "verbatim-csharp") {
+        if (character === '"' && next === '"') {
+          charIndex += 1;
+        } else if (character === '"') {
+          state = "code";
+        }
+        continue;
+      }
+
+      if (state === "raw-quoted") {
+        if (character === '"') {
+          const quoteCount = countRepeatedCharacter(line, charIndex, '"');
+          if (quoteCount >= rawQuoteCount) {
+            charIndex += rawQuoteCount - 1;
+            state = "code";
+            rawQuoteCount = 0;
+          } else {
+            charIndex += quoteCount - 1;
+          }
+        }
+        continue;
+      }
+
+      // code state
+      if (character === "/" && next === "/") {
+        break;
+      }
+      if (character === "/" && next === "*") {
+        state = "block-comment";
+        charIndex += 1;
+        continue;
+      }
+      if (character === "'") {
+        state = "single-quoted";
+        continue;
+      }
+      if (character === "`") {
+        state = "backtick";
+        continue;
+      }
+      if (character === "@" && next === '"' && language === "C#") {
+        state = "verbatim-csharp";
+        charIndex += 1;
+        continue;
+      }
+      if (
+        character === "@" &&
+        next === "$" &&
+        line[charIndex + 2] === '"' &&
+        language === "C#"
+      ) {
+        state = "verbatim-csharp";
+        charIndex += 2;
+        continue;
+      }
+      if (
+        character === "$" &&
+        next === "@" &&
+        line[charIndex + 2] === '"' &&
+        language === "C#"
+      ) {
+        state = "verbatim-csharp";
+        charIndex += 2;
+        continue;
+      }
+      if (character === '"') {
+        const quoteCount = countRepeatedCharacter(line, charIndex, '"');
+        if (quoteCount >= 3) {
+          state = "raw-quoted";
+          rawQuoteCount = quoteCount;
+          charIndex += quoteCount - 1;
+        } else {
+          state = "double-quoted";
+        }
+        continue;
+      }
+      if (character === "{") {
+        depth += 1;
         started = true;
-      } else if (ch === "}") {
-        depth--;
+      } else if (character === "}") {
+        if (!started || depth <= 0) {
+          throw new Error("Cannot build a safe patch because the target declaration has unbalanced braces.");
+        }
+        if (depth === 1 && lineIndentation < declarationIndentation) {
+          throw new Error(
+            "Cannot build a safe patch because the closing brace is outside the target declaration indentation.",
+          );
+        }
+        depth -= 1;
+        if (depth === 0) return lineIndex;
       }
     }
-    if (started && depth === 0) {
-      return i;
-    }
   }
-  // 未找到匹配括号时回退到文件末尾
-  return lines.length - 1;
+
+  throw new Error("Cannot build a safe patch because the target declaration has no matching closing brace.");
+}
+
+type LexicalState =
+  | "code"
+  | "block-comment"
+  | "single-quoted"
+  | "double-quoted"
+  | "backtick"
+  | "verbatim-csharp"
+  | "raw-quoted";
+
+function countRepeatedCharacter(value: string, startIndex: number, character: string): number {
+  let index = startIndex;
+  while (value[index] === character) index += 1;
+  return index - startIndex;
+}
+
+function isLikelySiblingDeclaration(
+  line: string,
+  declarationIndentation: number,
+  language: Language,
+): boolean {
+  const indentation = line.match(/^\s*/)?.[0].length ?? 0;
+  if (indentation > declarationIndentation) return false;
+  const trimmed = line.trim();
+  if (!trimmed || trimmed.startsWith("//") || trimmed.startsWith("/*") || trimmed.startsWith("*")) return false;
+  if (isMethodStart(line) || isClassStart(line, language)) return true;
+  if (/^(if|for|foreach|while|switch|catch|using|return|throw|new|else|do|try|finally)\b/.test(trimmed)) {
+    return false;
+  }
+  // Covers fields/properties at the same declaration nesting level. This is
+  // intentionally conservative: refusing an ambiguous patch is safer than
+  // silently deleting a sibling member.
+  return /^(?:(?:public|private|protected|internal|static|readonly|final|const|volatile|abstract|virtual|override|sealed|async|partial|export|pub)\s+)*(?:[A-Za-z_][\w<>,.?\[\]]*\s+)+[A-Za-z_][\w]*(?:\s*[=;{])/.test(trimmed);
 }
 
 function findPythonMethodEnd(lines: string[], startIdx: number): number {

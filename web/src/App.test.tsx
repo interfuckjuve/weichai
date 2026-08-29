@@ -38,6 +38,7 @@ describe('ForeXplore vertical workflow', () => {
         screen.queryByRole('button', { name: '使用此方案并生成适配' }),
       ).toBeNull();
     });
+    expect(search.mock.calls[0]?.[0]).not.toHaveProperty('repositoryScopes');
 
     fireEvent.click(screen.getByRole('button', { name: /QuoteCache\.getOrLoad/ }));
     await waitFor(() => {

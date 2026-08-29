@@ -1,3 +1,5 @@
+import { requireRepositoryScopes } from './repository-scope.js';
+
 export type RerankingConfig =
   | { provider: 'none' }
   | {
@@ -14,6 +16,12 @@ export interface RetrievalConfig {
   host: string;
   port: number;
   corsOrigin: string;
+  /**
+   * Deployment-owned authorization boundary for every retrieval query. An
+   * empty list deliberately leaves search unavailable rather than exposing the
+   * full index during local setup or a misconfigured deployment.
+   */
+  allowedRepositories: string[];
   autoMigrate: boolean;
   seekdb: {
     host: string;
@@ -64,6 +72,14 @@ function identifier(value: string | undefined, fallback: string, name: string): 
 function boolean(value: string | undefined, fallback: boolean): boolean {
   if (value === undefined) return fallback;
   return !['0', 'false', 'no', 'off'].includes(value.toLowerCase());
+}
+
+function allowedRepositories(value: string | undefined): string[] {
+  if (value === undefined || !value.trim()) return [];
+  return requireRepositoryScopes(
+    value.split(',').map((repository) => repository.trim()),
+    'RETRIEVAL_ALLOWED_REPOSITORIES',
+  );
 }
 
 function deepSeekChatCompletionsUrl(env: NodeJS.ProcessEnv): string {
@@ -136,6 +152,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RetrievalConfi
     host: env.RETRIEVAL_HOST?.trim() || '127.0.0.1',
     port: positiveInteger(env.RETRIEVAL_PORT, 8787, 'RETRIEVAL_PORT'),
     corsOrigin: env.RETRIEVAL_CORS_ORIGIN?.trim() || '*',
+    allowedRepositories: allowedRepositories(env.RETRIEVAL_ALLOWED_REPOSITORIES),
     autoMigrate: boolean(env.SEEKDB_AUTO_MIGRATE, true),
     seekdb: {
       host: env.SEEKDB_HOST?.trim() || '127.0.0.1',

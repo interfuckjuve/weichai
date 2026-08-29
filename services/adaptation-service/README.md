@@ -3,14 +3,15 @@
 Language-neutral code adaptation: Analyzer report → Translator generation →
 target-language compilation → protected patch generation.
 
-Production HTTP and MCP entry points also attach `TranslationVerifierAdapter`:
-after compilation, function- and class-level translations select an executable
-entry (a public member or constructor) and run language-neutral cases against
-source and target sides. A failed comparison becomes a bounded
-`modificationPlan` and a behavior feedback item for the existing Translator
-repair loop. Only compilation plus differential verification can produce a
-passing behavioral validation; unsupported or unavailable verifier inputs are
-reported as required `unverified` checks and cannot be written back.
+Production HTTP and MCP entry points attach `TranslationVerifierAdapter` in
+**fail-closed mode**. The service does not execute retrieved candidate preview
+or generated code on the host: it has model credentials and access to the
+developer workspace, but does not provision a safe execution sandbox. It
+therefore returns a required `unverified` behavioral-validation record and
+write-back remains blocked. Differential execution is available only to a
+separate deployment integration that injects an external executor with no
+network, host credentials, or mounted workspace; `RealDriverExecutor` is not
+accepted by the service adapter for that path.
 
 ## Analyzer-driven Translator Agent
 

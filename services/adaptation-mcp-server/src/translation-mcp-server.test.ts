@@ -1,5 +1,19 @@
 import { fileURLToPath } from "node:url";
-import type { AnalysisReport, SearchCandidate } from "@forexplore/contracts";
+import {
+  moduleMigrationSchemaVersion,
+  type AnalysisReport,
+  type ModuleMigrationProposal,
+  type RepositoryArchitectureRequest,
+  type RepositoryStaticAnalysis,
+  type SearchCandidate,
+} from "@forexplore/contracts";
+import type {
+  RepositoryArchitecturePort,
+  StaticAnalysisSnapshotStore,
+} from "@forexplore/adaptation-service";
+import type {
+  AdaptationMcpServerOptions,
+} from "./translation-mcp-server";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -73,13 +87,46 @@ const analysisReport: AnalysisReport = {
 
 const generatedCode = `public async ${target.signature}\n{\n    throw new NotImplementedException();\n}`;
 
+const staticAnalysis: RepositoryStaticAnalysis = {
+  schemaVersion: moduleMigrationSchemaVersion,
+  snapshotId: "snapshot-module-mcp",
+  contentHash: "sha256:module-mcp",
+  analyzerVersion: "test",
+  createdAt: "2026-08-27T00:00:00.000Z",
+  repository: { revision: "0123456789012345678901234567890123456789" },
+  files: [{
+    path: "src/QuoteRouter.java",
+    sha256: "sha256:file",
+    role: "source",
+    language: "Java",
+  }],
+  symbols: [],
+  dependencies: [],
+  diagnostics: [],
+};
+
+const moduleProposal: ModuleMigrationProposal = {
+  schemaVersion: moduleMigrationSchemaVersion,
+  snapshotId: staticAnalysis.snapshotId,
+  objective: "Group quote routing modules",
+  modules: [],
+  fileAssignments: [{
+    path: "src/QuoteRouter.java",
+    kind: "excluded",
+    reason: "Fixture proposal only",
+  }],
+  dependencies: [],
+};
+
 const transports: Array<InMemoryTransport> = [];
 
 afterEach(async () => {
   await Promise.all(transports.splice(0).map((transport) => transport.close()));
 });
 
-async function connectedClient() {
+async function connectedClient(
+  extraOptions: Partial<AdaptationMcpServerOptions> = {},
+) {
   const analyzer = { analyze: vi.fn(async () => analysisReport) };
   const translatorRequest = vi.fn(async () => new Response(JSON.stringify({
     choices: [{ message: { content: JSON.stringify({
@@ -101,6 +148,7 @@ async function connectedClient() {
     analyzer,
     translatorRequest,
     validator,
+    ...extraOptions,
   });
   const client = new Client({ name: "forexplore-test-client", version: "0.1.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -148,6 +196,69 @@ describe("ForeXplore adaptation MCP server", () => {
     expect(tools.tools.map((tool) => tool.name)).not.toContain("forexplore_apply_patch");
   });
 
+  it("exposes module planning only with a server-owned snapshot and architecture port", async () => {
+    const proposeModulePlan = vi.fn(async (
+      _request: RepositoryArchitectureRequest,
+      _signal?: AbortSignal,
+    ) => moduleProposal);
+    const architecturePort: RepositoryArchitecturePort = {
+      proposeModulePlan,
+    };
+    const staticAnalysisSnapshots: StaticAnalysisSnapshotStore = {
+      getSnapshot: vi.fn(async (snapshotId) => (
+        snapshotId === staticAnalysis.snapshotId ? staticAnalysis : null
+      )),
+    };
+    const { client } = await connectedClient({ architecturePort, staticAnalysisSnapshots });
+
+    const tools = await client.listTools();
+    expect(tools.tools.map((tool) => tool.name)).toContain("forexplore_propose_module_plan");
+
+    const result = await client.callTool({
+      name: "forexplore_propose_module_plan",
+      arguments: {
+        snapshotId: staticAnalysis.snapshotId,
+        objective: moduleProposal.objective,
+        immutableConstraints: ["Keep public interfaces stable."],
+      },
+    });
+
+    expect(isToolError(result)).toBe(false);
+    expect(JSON.parse(contentText(result))).toEqual(moduleProposal);
+    expect(staticAnalysisSnapshots.getSnapshot).toHaveBeenCalledWith(
+      staticAnalysis.snapshotId,
+      expect.any(AbortSignal),
+    );
+    expect(proposeModulePlan).toHaveBeenCalledWith(
+      expect.objectContaining({
+        schemaVersion: moduleMigrationSchemaVersion,
+        analysis: staticAnalysis,
+        objective: moduleProposal.objective,
+        immutableConstraints: ["Keep public interfaces stable."],
+      }),
+      expect.any(AbortSignal),
+    );
+    const request = proposeModulePlan.mock.calls[0]?.[0] as unknown as Record<string, unknown>;
+    expect(request).not.toHaveProperty("source");
+  });
+
+  it("returns a read-only module planning error when a snapshot is missing", async () => {
+    const architecturePort: RepositoryArchitecturePort = { proposeModulePlan: vi.fn() };
+    const staticAnalysisSnapshots: StaticAnalysisSnapshotStore = {
+      getSnapshot: vi.fn(async () => null),
+    };
+    const { client } = await connectedClient({ architecturePort, staticAnalysisSnapshots });
+
+    const result = await client.callTool({
+      name: "forexplore_propose_module_plan",
+      arguments: { snapshotId: "missing", objective: "Group modules" },
+    });
+
+    expect(isToolError(result)).toBe(true);
+    expect(contentText(result)).toContain("Static analysis snapshot was not found");
+    expect(architecturePort.proposeModulePlan).not.toHaveBeenCalled();
+  });
+
   it("collects bounded target context and runs the full adaptation workflow", async () => {
     const { analyzer, client } = await connectedClient();
 
@@ -170,6 +281,30 @@ describe("ForeXplore adaptation MCP server", () => {
     expect(adaptation.generatedCode).toBe(generatedCode);
     expect(adaptation.files).toHaveLength(1);
     expect(analyzer.analyze).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses a required unverified verifier gate when no isolated verifier is injected", async () => {
+    const { client } = await connectedClient({
+      validator: {
+        compileStandalone: () => ({ success: true, errors: [], output: "" }),
+        compileIntegrated: () => ({ success: true, errors: [], output: "" }),
+        isUnavailable: () => false,
+      },
+    });
+
+    const result = await client.callTool({
+      name: "forexplore_adapt_translation",
+      arguments: { target, candidate, requirement, decisionNotes: "" },
+    });
+    const adaptation = JSON.parse(contentText(result)) as {
+      validation: Array<{ id: string; status: string; required: boolean }>;
+    };
+
+    expect(adaptation.validation).toContainEqual(expect.objectContaining({
+      id: "differential-verification",
+      status: "unverified",
+      required: true,
+    }));
   });
 
   it("returns an MCP tool error for a target path outside the configured project root", async () => {
