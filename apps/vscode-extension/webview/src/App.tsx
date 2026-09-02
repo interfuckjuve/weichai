@@ -1,8 +1,15 @@
 import { useEffect, useMemo, useReducer, useRef, useState } from 'react';
-import { ChevronDown, ChevronRight, RefreshCw, Search } from 'lucide-react';
-import type { RepositoryStatus, ServiceStatus } from '../../src/ui-types';
+import { ChevronDown, ChevronRight, RefreshCw, Search, Settings2 } from 'lucide-react';
+import type {
+  ModuleExplorerMode,
+  ModuleExplorerNode,
+  ModuleWorkspaceAction,
+  RepositoryStatus,
+  ServiceStatus,
+} from '../../src/ui-types';
 import type {
   PanelInitPayload,
+  PanelSettingsPresentation,
   TargetWorkspaceImplementationState,
   TargetWorkspaceInvalidation,
   TargetWorkspaceMigrationRouteOption,
@@ -17,6 +24,8 @@ import { FooterStatus } from './components/FooterStatus';
 import { PatchStage } from './components/PatchStage';
 import { RequirementStage } from './components/RequirementStage';
 import { StepRail } from './components/StepRail';
+import { ModuleWorkspace } from './components/ModuleWorkspace';
+import { SettingsPanel } from './components/SettingsPanel';
 import { errorEvent } from './errors';
 import { createMessageBus, type MessageBus } from './vscode-api';
 import {
@@ -651,12 +660,130 @@ function TargetWorkspaceBrowser({
   );
 }
 
+function TargetWorkspaceSelectionPanel({
+  snapshot,
+  selectedNode,
+  refreshing,
+  invalidation,
+  onStart,
+}: {
+  snapshot: TargetWorkspaceSnapshot | null;
+  selectedNode: TargetWorkspaceTreeNode | null;
+  refreshing: boolean;
+  invalidation: TargetWorkspaceInvalidation | null;
+  onStart(node: TargetWorkspaceTreeNode): void;
+}) {
+  if (!snapshot) {
+    return (
+      <section className="target-workspace-waiting">
+        <strong>目标目录尚未可选</strong>
+        <p>先通过上方动作完成 01B 分析和模块边界人审；目标工程不会发布到历史检索库。</p>
+      </section>
+    );
+  }
+  if (!selectedNode) {
+    return (
+      <div className="stage-stack">
+        <section className="target-workspace-waiting">
+          <strong>从左侧选择目标实体</strong>
+          <p>文件与类型用于浏览；只有当前快照中具备实现证据和精确路线的 callable 才能开始迁移。</p>
+        </section>
+        <RuntimeCapabilityMatrix snapshot={snapshot} />
+      </div>
+    );
+  }
+  const stale = snapshot.freshness !== 'current' || invalidation !== null;
+  const eligible = selectedNode.kind === 'callable' &&
+    selectedNode.migrationEligibility.status === 'eligible' && !stale;
+  return (
+    <div className="stage-stack">
+    <section className="card target-selection-panel">
+      <div className="card-heading">
+        <span>当前 01B 选择</span>
+        <span className="card-heading-meta">{nodeKindLabel(selectedNode)}</span>
+      </div>
+      <h1>{selectedNode.name}</h1>
+      <p>{selectedNode.qualifiedName ?? selectedNode.path ?? selectedNode.entityId}</p>
+      {selectedNode.signature ? <code>{selectedNode.signature}</code> : null}
+      <div className="target-selection-facts">
+        <span>{selectedNode.languageId ?? '语言待确认'}</span>
+        <span>{implementationStateLabels[implementationState(selectedNode)]}</span>
+        <span>{selectedNode.migrationEligibility.routeOptions.length} 条精确路线</span>
+      </div>
+      {selectedNode.migrationEligibility.summary ? (
+        <p className="muted-copy">{selectedNode.migrationEligibility.summary}</p>
+      ) : null}
+      {selectedNode.assessment?.reasonCodes.length ? (
+        <ul className="target-reason-list">
+          {selectedNode.assessment.reasonCodes.map((reason) => <li key={reason}>{reason}</li>)}
+        </ul>
+      ) : null}
+      {selectedNode.assessment?.evidenceRefs.length ? (
+        <ul className="target-evidence-list">
+          {selectedNode.assessment.evidenceRefs.map((evidence) => (
+            <li key={evidence.id}>{evidence.summary ?? evidence.id}</li>
+          ))}
+        </ul>
+      ) : null}
+      <p className="target-status-disclaimer">
+        实现状态只来自静态证据，不证明业务行为、并发、顺序或错误语义正确。
+      </p>
+      <button
+        type="button"
+        className="primary-action target-start-action"
+        disabled={!eligible || refreshing}
+        onClick={() => onStart(selectedNode)}
+      >
+        {refreshing ? <span className="spinner" /> : null}
+        开始迁移
+      </button>
+      {!eligible ? (
+        <p className="target-ineligible-reason">
+          {stale
+            ? `目标工作区快照已失效：${invalidation?.reason ?? snapshot.staleReason ?? '请刷新后重试。'}`
+            : selectedNode.migrationEligibility.summary ?? '该节点当前没有可执行迁移路线。'}
+        </p>
+      ) : null}
+    </section>
+    <RuntimeCapabilityMatrix snapshot={snapshot} />
+    </div>
+  );
+}
+
+function RuntimeCapabilityMatrix({ snapshot }: { snapshot: TargetWorkspaceSnapshot }) {
+  const routes = snapshot.runtimeCapabilitySnapshot?.routes ?? [];
+  if (routes.length === 0) return null;
+  return (
+    <section className="card" aria-label="运行时迁移能力">
+      <div className="card-heading"><span>精确迁移路线</span><small>{routes.length}</small></div>
+      <ul className="target-reason-list">
+        {routes.map((route) => (
+          <li key={`${route.id}:${route.version}`}>
+            <code>{route.sourceLanguageId} → {route.targetLanguageId}</code>
+            <span>{route.strategy} · {route.availability.status}</span>
+            {route.availability.reasonCodes.map((reason) => <small key={reason}>{reason}</small>)}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 export default function App() {
   const bus: MessageBus = useMemo(() => createMessageBus(), []);
   const [state, dispatch] = useReducer(workflowReducerV2, initialWorkflowStateV2);
   const [payload, setPayload] = useState<PanelInitPayload | null>(null);
   const [repositoryStatuses, setRepositoryStatuses] = useState<RepositoryStatus[]>([]);
   const [serviceStatus, setServiceStatus] = useState<ServiceStatus | null>(null);
+  const [moduleExplorer, setModuleExplorer] = useState<PanelInitPayload['moduleExplorer'] | null>(null);
+  const [explorerMode, setExplorerMode] = useState<ModuleExplorerMode>('target');
+  const [historyId, setHistoryId] = useState<string | null>(null);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [refreshingExplorer, setRefreshingExplorer] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  const [pickedRepositoryPath, setPickedRepositoryPath] =
+    useState<{ path: string; token: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [targetWorkspace, setTargetWorkspace] = useState<TargetWorkspaceSnapshot | null>(null);
   const [targetWorkspaceRefreshing, setTargetWorkspaceRefreshing] = useState(false);
@@ -669,6 +796,9 @@ export default function App() {
   const targetWorkspaceRef = useRef<TargetWorkspaceSnapshot | null>(null);
   const invalidationRef = useRef<TargetWorkspaceInvalidation | null>(null);
   const refreshingRef = useRef(false);
+  const settingsRef = useRef<PanelSettingsPresentation>({ repositoryPaths: [], topK: 4 });
+  const settingsSavingRef = useRef(false);
+  const pickedRepositoryPathTokenRef = useRef(0);
   pendingRef.current = state.pending;
   targetWorkspaceRef.current = targetWorkspace;
   invalidationRef.current = targetWorkspaceInvalidation;
@@ -685,8 +815,17 @@ export default function App() {
             ? initialTargetWorkspace
             : null;
           setPayload(message.payload);
+          settingsRef.current = message.payload.settings;
           setRepositoryStatuses(message.payload.repositoryStatuses);
           setServiceStatus(message.payload.serviceStatus);
+          setModuleExplorer(message.payload.moduleExplorer);
+          setHistoryId((current) =>
+            message.payload.moduleExplorer.history.some((repository) => repository.id === current)
+              ? current
+              : message.payload.moduleExplorer.history[0]?.id ?? null,
+          );
+          setRefreshingExplorer(false);
+          setSettingsSaving(false);
           setError(
             initialTargetWorkspace && !acceptedTargetWorkspace
               ? '宿主提供的目标工作区快照标识与规范制品不一致，已拒绝载入。'
@@ -705,6 +844,7 @@ export default function App() {
           } else {
             dispatch({ type: 'RESET' });
           }
+          dispatch({ type: 'SET_TOP_K', value: message.payload.settings.topK });
           break;
         }
         case 'TARGET_WORKSPACE_SNAPSHOT': {
@@ -753,9 +893,12 @@ export default function App() {
             };
             setTargetWorkspaceInvalidation(message.invalidation);
             setTargetWorkspace(staleSnapshot);
+            setRefreshingExplorer(false);
             setMigrationSelection(null);
+            setTargetWorkspaceRefreshing(false);
             invalidationRef.current = message.invalidation;
             targetWorkspaceRef.current = staleSnapshot;
+            refreshingRef.current = false;
           }
           break;
         }
@@ -781,10 +924,14 @@ export default function App() {
             break;
           }
           setSelectedTargetNodeId(selected.nodeId);
+          setSelectedNodeId(selected.nodeId);
           setMigrationSelection(message.migrationSelection);
           setError(null);
           if (message.activateWorkflow) {
             dispatch({ type: 'SELECT_TARGET', target: message.target });
+            dispatch({ type: 'SET_TOP_K', value: settingsRef.current.topK });
+            setExplorerMode('target');
+            setSettingsOpen(false);
           }
           break;
         }
@@ -810,9 +957,50 @@ export default function App() {
         case 'SERVICE_STATUS':
           setServiceStatus(message.status);
           break;
+        case 'MODULE_EXPLORER':
+          setModuleExplorer(message.explorer);
+          setSelectedNodeId(null);
+          setHistoryId((current) =>
+            message.explorer.history.some((repository) => repository.id === current)
+              ? current
+              : message.explorer.history[0]?.id ?? null,
+          );
+          setRefreshingExplorer(false);
+          break;
+        case 'SETTINGS_UPDATED':
+          settingsRef.current = message.settings;
+          setPayload((current) => current ? { ...current, settings: message.settings } : current);
+          dispatch({ type: 'SET_TOP_K', value: message.settings.topK });
+          if (settingsSavingRef.current) setSettingsOpen(false);
+          settingsSavingRef.current = false;
+          setSettingsSaving(false);
+          setPickedRepositoryPath(null);
+          break;
+        case 'REPOSITORY_PATH_PICKED':
+          pickedRepositoryPathTokenRef.current += 1;
+          setPickedRepositoryPath({
+            path: message.path,
+            token: pickedRepositoryPathTokenRef.current,
+          });
+          break;
+        case 'HISTORY_REPOSITORY_SELECTED':
+          setHistoryId(message.repositoryRegistrationId);
+          setExplorerMode('history');
+          setSelectedNodeId(null);
+          break;
+        case 'HISTORY_MODULE_SELECTED':
+          setHistoryId(message.selection.repositoryRegistrationId);
+          setExplorerMode('history');
+          setSelectedNodeId(
+            `catalog:${message.selection.catalogId}:module:${message.selection.moduleId}`,
+          );
+          break;
         case 'ERROR': {
           setError(message.message);
           setTargetWorkspaceRefreshing(false);
+          setRefreshingExplorer(false);
+          setSettingsSaving(false);
+          settingsSavingRef.current = false;
           refreshingRef.current = false;
           const event = errorEvent(pendingRef.current, message.message);
           if (event) dispatch(event);
@@ -893,7 +1081,8 @@ export default function App() {
     setTargetWorkspaceRefreshing(true);
     refreshingRef.current = true;
     if (!targetWorkspace) {
-      bus.post({ type: 'REFRESH_TARGET_WORKSPACE' });
+      setRefreshingExplorer(true);
+      bus.post({ type: 'REFRESH_MODULE_EXPLORER' });
       return;
     }
     bus.post({
@@ -901,6 +1090,58 @@ export default function App() {
       expectedSnapshotId: targetWorkspace.snapshotId,
       expectedContentHash: targetWorkspace.contentHash,
     });
+  }
+
+  function handleRefreshExplorer(): void {
+    setError(null);
+    setRefreshingExplorer(true);
+    if (explorerMode === 'target' && targetWorkspace?.freshness === 'current') {
+      handleRefreshTargetWorkspace();
+      return;
+    }
+    bus.post({ type: 'REFRESH_MODULE_EXPLORER' });
+  }
+
+  function handleModuleNodeSelect(node: ModuleExplorerNode): void {
+    setSettingsOpen(false);
+    setError(null);
+    if (explorerMode === 'history') {
+      setSelectedNodeId(node.id);
+      if (node.historyModule) bus.post({ type: 'SELECT_HISTORY_MODULE', ...node.historyModule });
+      return;
+    }
+    if (state.stage !== 'target') {
+      setError('当前迁移已经绑定目标实体；如需更换目标，请完成或重新打开一个迁移运行。');
+      return;
+    }
+    setSelectedNodeId(node.id);
+    if (!targetWorkspace) return;
+    const targetNode = findTargetWorkspaceNode(targetWorkspace.root, node.id);
+    if (targetNode) handleSelectTargetWorkspaceNode(targetNode);
+  }
+
+  function handleHistoryChange(repositoryRegistrationId: string): void {
+    setSelectedNodeId(null);
+    setError(null);
+    bus.post({ type: 'SELECT_HISTORY_REPOSITORY', repositoryRegistrationId });
+  }
+
+  function handleWorkspaceAction(workspaceId: string, action: ModuleWorkspaceAction): void {
+    setError(null);
+    setRefreshingExplorer(true);
+    bus.post({ type: 'RUN_MODULE_WORKSPACE_ACTION', workspaceId, action });
+  }
+
+  function handleSaveSettings(settings: PanelSettingsPresentation): void {
+    setError(null);
+    setSettingsSaving(true);
+    settingsSavingRef.current = true;
+    bus.post({ type: 'SAVE_SETTINGS', settings });
+  }
+
+  function handlePickRepositoryPath(): void {
+    setError(null);
+    bus.post({ type: 'PICK_REPOSITORY_PATH' });
   }
 
   function handleSelectTargetWorkspaceNode(node: TargetWorkspaceTreeNode): void {
@@ -934,7 +1175,7 @@ export default function App() {
     bus.post({ type: 'START_TARGET_TRANSLATION', ...selectionIdentity(targetWorkspace, node) });
   }
 
-  if (!payload) {
+  if (!payload || !moduleExplorer) {
     return (
       <div className="app">
         <div className="loading-state">正在初始化 ForeXplore 迁移面板…</div>
@@ -944,6 +1185,9 @@ export default function App() {
 
   const candidate = selectedCandidateV2(state);
   const targetWorkspaceStage = state.stage === 'target';
+  const selectedTargetNode = targetWorkspace && selectedTargetNodeId
+    ? findTargetWorkspaceNode(targetWorkspace.root, selectedTargetNodeId)
+    : null;
 
   return (
     <div className="app">
@@ -955,88 +1199,113 @@ export default function App() {
         {targetWorkspaceStage ? (
           <div className="target-workspace-title">
             <strong>01B 目标工作区模块划分</strong>
-            <span>识别模块、文件、容器与可调用实体的可追溯实现状态</span>
+            <span>模块边界、实现状态和迁移路线均由 Host 快照约束</span>
           </div>
         ) : <StepRail stage={state.stage} />}
+        <button
+          type="button"
+          className={`header-settings-button${settingsOpen ? ' is-active' : ''}`}
+          onClick={() => {
+            if (settingsOpen) setPickedRepositoryPath(null);
+            setSettingsOpen(!settingsOpen);
+          }}
+          aria-pressed={settingsOpen}
+        >
+          <Settings2 size={14} /> 设置
+        </button>
       </header>
 
-      {error ? (
-        <div className="error-banner" role="alert">
-          {error}
-        </div>
-      ) : null}
-
-      <main className={`stage-body ${targetWorkspaceStage ? 'is-target-workspace' : ''}`}>
-        {targetWorkspaceStage && targetWorkspace ? (
-          <TargetWorkspaceBrowser
-            snapshot={targetWorkspace}
-            selectedNodeId={selectedTargetNodeId}
-            refreshing={targetWorkspaceRefreshing}
-            invalidation={targetWorkspaceInvalidation}
-            onRefresh={handleRefreshTargetWorkspace}
-            onSelect={handleSelectTargetWorkspaceNode}
-            onStartMigration={handleStartTargetMigration}
-          />
-        ) : null}
-
-        {targetWorkspaceStage && !targetWorkspace ? (
-          <div className="target-workspace-waiting">
-            <strong>等待目标工作区快照</strong>
-            <p>宿主尚未提供经过模块边界审阅的目标快照。刷新不会把目标工程发布到 SeekDB。</p>
-            <button
-              type="button"
-              className="secondary-action"
-              disabled={targetWorkspaceRefreshing}
-              onClick={handleRefreshTargetWorkspace}
-            >
-              <RefreshCw size={14} className={targetWorkspaceRefreshing ? 'is-spinning' : ''} />
-              {targetWorkspaceRefreshing ? '刷新中…' : '刷新目标工作区'}
-            </button>
-          </div>
-        ) : null}
-
-        {state.stage === 'requirement' && state.target ? (
-          <RequirementStage
-            state={state}
-            target={state.target}
-            dispatch={dispatch}
+      <ModuleWorkspace
+        explorer={moduleExplorer}
+        mode={explorerMode}
+        historyId={historyId}
+        currentTargetId={selectedTargetNodeId}
+        selectedNodeId={selectedNodeId}
+        refreshing={refreshingExplorer || targetWorkspaceRefreshing}
+        onModeChange={(mode) => {
+          setExplorerMode(mode);
+          setSettingsOpen(false);
+          setSelectedNodeId(null);
+        }}
+        onHistoryChange={handleHistoryChange}
+        onNodeSelect={handleModuleNodeSelect}
+        onRefresh={handleRefreshExplorer}
+        onOpenSettings={() => setSettingsOpen(true)}
+        onWorkspaceAction={handleWorkspaceAction}
+        settingsOpen={settingsOpen}
+        notice={error ? <div className="error-banner" role="alert">{error}</div> : null}
+      >
+        {settingsOpen ? (
+          <SettingsPanel
+            topK={payload.settings.topK}
+            repositoryPaths={payload.settings.repositoryPaths}
             repositoryStatuses={repositoryStatuses}
-            onSearch={handleSearch}
+            saving={settingsSaving}
+            pickedRepositoryPath={pickedRepositoryPath}
+            onPickRepositoryPath={handlePickRepositoryPath}
             onCheckRepositories={handleCheckRepositories}
+            onSave={handleSaveSettings}
+            onCancel={() => {
+              setPickedRepositoryPath(null);
+              setSettingsOpen(false);
+            }}
           />
-        ) : null}
+        ) : (
+          <main className={`stage-body ${targetWorkspaceStage ? 'is-target-workspace' : ''}`}>
+            {targetWorkspaceStage ? (
+              <TargetWorkspaceSelectionPanel
+                snapshot={targetWorkspace}
+                selectedNode={selectedTargetNode}
+                refreshing={targetWorkspaceRefreshing}
+                invalidation={targetWorkspaceInvalidation}
+                onStart={handleStartTargetMigration}
+              />
+            ) : null}
 
-        {state.stage === 'candidates' ? (
-          <CandidatesStage
-            state={state}
-            dispatch={dispatch}
-            adaptationProvider={payload.adaptationProvider}
-            migrationSelection={migrationSelection}
-            onSelectCandidate={handleSelectCandidate}
-            onAdapt={handleAdapt}
-          />
-        ) : null}
+            {state.stage === 'requirement' && state.target ? (
+              <RequirementStage
+                state={state}
+                target={state.target}
+                dispatch={dispatch}
+                repositoryStatuses={repositoryStatuses}
+                onSearch={handleSearch}
+                onCheckRepositories={handleCheckRepositories}
+              />
+            ) : null}
 
-        {state.stage === 'adaptation' ? (
-          <AdaptationStage
-            state={state}
-            candidate={candidate}
-            routeOption={routeForCandidate(
-              migrationSelection,
-              candidate?.candidate.entity.languageId,
-            )}
-          />
-        ) : null}
+            {state.stage === 'candidates' ? (
+              <CandidatesStage
+                state={state}
+                dispatch={dispatch}
+                adaptationProvider={payload.adaptationProvider}
+                migrationSelection={migrationSelection}
+                onSelectCandidate={handleSelectCandidate}
+                onAdapt={handleAdapt}
+              />
+            ) : null}
 
-        {(state.stage === 'patch' || state.stage === 'complete') && state.adaptation ? (
-          <PatchStage
-            state={state}
-            onApply={handleApply}
-            onBack={() => dispatch({ type: 'RETURN_TO_CANDIDATES' })}
-            onOpenTarget={handleOpenTarget}
-          />
-        ) : null}
-      </main>
+            {state.stage === 'adaptation' ? (
+              <AdaptationStage
+                state={state}
+                candidate={candidate}
+                routeOption={routeForCandidate(
+                  migrationSelection,
+                  candidate?.candidate.entity.languageId,
+                )}
+              />
+            ) : null}
+
+            {(state.stage === 'patch' || state.stage === 'complete') && state.adaptation ? (
+              <PatchStage
+                state={state}
+                onApply={handleApply}
+                onBack={() => dispatch({ type: 'RETURN_TO_CANDIDATES' })}
+                onOpenTarget={handleOpenTarget}
+              />
+            ) : null}
+          </main>
+        )}
+      </ModuleWorkspace>
 
       <FooterStatus
         serviceStatus={serviceStatus}

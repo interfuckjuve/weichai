@@ -30,10 +30,9 @@ The production HTTP composition is deliberately **fail closed**. It does not
 own repository analysis, workspace apply/rollback, or an externally isolated
 behavior executor, and its normal server does not configure the authoritative
 V2 artifact store required by `POST /v2/adapt`. Differential execution is
-available only to a deployment integration that injects an external executor
-with no network, host credentials, or mounted workspace. `RealDriverExecutor`
-and the controlled local test-fixture drivers are not production isolation
-evidence.
+available only to a deployment integration that injects a route-bound verifier
+with no network, host credentials, or mounted workspace. The removed legacy
+translation-verifier package is not part of the production service boundary.
 
 Comprehensive multi-language development is the current engineering direction;
 it is not a claim that every language pair is available. Unknown routes,
@@ -49,8 +48,6 @@ them, and their successful use is not evidence that a current exact route is
 available.
 
 The legacy Translator has a structured member-C entry point:
-
-The Translator now has a structured member-C entry point:
 
 ```ts
 const result = await translateWithAnalysis(
@@ -212,7 +209,7 @@ code-indexer (module 1) → retrieval-service (module 2) → adaptation-service 
 | `src/adaptation-adapter-v2.ts` | Formal V2 port: validates full source/context lineage, runs route-owned agents, delegates patching to the target adapter and materializes `AdaptationResultV2` |
 | `src/http-server.ts` | V2 capability/adaptation endpoints, authoritative artifact lookup, Host composition validation and structured fail-closed responses |
 | `src/adaptation-adapter.ts` | Deprecated V1 compatibility adapter; V2 never calls it |
-| `src/verification-adapter.ts` | Bridges TestMigrator, dual-side verifier execution, and behavior modification plans |
+| `src/adaptation-adapter-v2.ts` verifier port | Accepts an independently deployed, route-bound behavior verifier; the default HTTP composition leaves it unavailable |
 | `src/backfill-adapter.ts` | Backfill results into corpus |
 | `poc/translate_poc.py` | Standalone POC with 5 test cases |
 | `poc/e2e_pipeline.py` | End-to-end: calls retrieval-service /v1/search |

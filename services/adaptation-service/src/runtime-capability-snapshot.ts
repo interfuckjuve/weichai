@@ -2,7 +2,6 @@ import {
   migrationRouteSchemaVersion,
   normalizeLanguageId,
   validationPolicySchemaVersion,
-  type Language,
   type LanguageId,
   type MaterializedMigrationRouteDescriptor,
   type MigrationRouteAvailability,
@@ -26,13 +25,9 @@ import {
   type TargetEngineeringAdapterRegistry,
   type TargetEngineeringCapabilityDescriptor,
 } from "./context-collector";
-import {
-  resolveTranslationVerifierRoute,
-  type TranslationVerifierExecution,
-} from "./verification-adapter";
-
 export type WorkspaceMutationExecution = "disabled" | "trusted-host";
 export type RepositoryAnalysisExecution = "disabled" | "trusted-host";
+export type BehaviorVerifierExecution = "disabled" | "trusted-isolated";
 
 export const adaptationServiceOwnedRouteStages = [
   "context-collection",
@@ -58,7 +53,7 @@ const adaptationServiceOwnedStageSet = new Set<MigrationRouteStage>(
 export interface AdaptationRuntimeCapabilitySnapshotOptions {
   createdAt: string;
   analysisExecution: RepositoryAnalysisExecution;
-  verifierExecution: TranslationVerifierExecution;
+  verifierExecution: BehaviorVerifierExecution;
   workspaceMutationExecution: WorkspaceMutationExecution;
   targetEngineeringRegistry?: TargetEngineeringAdapterRegistry;
   compilerRegistry?: CompilerRouteRegistry;
@@ -78,8 +73,11 @@ export interface ExactTranslationRouteRegistration {
   sourceDisplayName: string;
   targetLanguageId: LanguageId;
   targetDisplayName: string;
-  /** Optional compatibility mapping for the legacy verifier protocol. */
-  legacyVerifier?: { sourceLanguage: Language; targetLanguage: Language };
+  /** Explicit behavior-verifier contract for this exact route. */
+  behaviorVerifier?: {
+    providerId: string;
+    providerVersion: string;
+  };
 }
 
 /**
@@ -95,7 +93,10 @@ const DEFAULT_EXACT_TRANSLATION_ROUTES: readonly ExactTranslationRouteRegistrati
     sourceDisplayName: "Java",
     targetLanguageId: "csharp",
     targetDisplayName: "C#",
-    legacyVerifier: { sourceLanguage: "Java", targetLanguage: "C#" },
+    behaviorVerifier: {
+      providerId: "forexplore.translation-verifier.differential",
+      providerVersion: "1.0.0",
+    },
   },
   {
     id: "forexplore.translate.typescript-to-python",
@@ -105,7 +106,10 @@ const DEFAULT_EXACT_TRANSLATION_ROUTES: readonly ExactTranslationRouteRegistrati
     sourceDisplayName: "TypeScript",
     targetLanguageId: "python",
     targetDisplayName: "Python",
-    legacyVerifier: { sourceLanguage: "TypeScript", targetLanguage: "Python" },
+    behaviorVerifier: {
+      providerId: "forexplore.translation-verifier.differential",
+      providerVersion: "1.0.0",
+    },
   },
   {
     id: "forexplore.translate.python-to-typescript",
@@ -115,7 +119,10 @@ const DEFAULT_EXACT_TRANSLATION_ROUTES: readonly ExactTranslationRouteRegistrati
     sourceDisplayName: "Python",
     targetLanguageId: "typescript",
     targetDisplayName: "TypeScript",
-    legacyVerifier: { sourceLanguage: "Python", targetLanguage: "TypeScript" },
+    behaviorVerifier: {
+      providerId: "forexplore.translation-verifier.differential",
+      providerVersion: "1.0.0",
+    },
   },
 ];
 
@@ -216,13 +223,7 @@ function buildRoute(
         "target-compiler-capability-unavailable",
         `No compiler route is available for ${route.targetLanguageId}.`,
       );
-  const verifierRoute = route.legacyVerifier
-    ? resolveTranslationVerifierRoute(
-        route.legacyVerifier.sourceLanguage,
-        route.legacyVerifier.targetLanguage,
-      )
-    : undefined;
-  const behaviorAvailability = !verifierRoute
+  const behaviorAvailability = !route.behaviorVerifier
     ? unavailable(
         "behavior-verifier-route-unavailable",
         `No differential verifier route is registered for ${route.sourceLanguageId} to ${route.targetLanguageId}.`,
@@ -308,8 +309,8 @@ function buildRoute(
     ),
     stage(
       "behavior-validation",
-      "forexplore.translation-verifier.differential",
-      "1.0.0",
+      route.behaviorVerifier?.providerId ?? "forexplore.behavior-verifier.unavailable",
+      route.behaviorVerifier?.providerVersion ?? "0.0.0",
       ["migration-validation"],
       behaviorAvailability,
     ),
@@ -351,8 +352,8 @@ function buildRoute(
           label: "Independent differential behavior validation",
           phase: "behavior",
           required: true,
-          verifierId: "forexplore.translation-verifier.differential",
-          verifierVersion: "1.0.0",
+          verifierId: route.behaviorVerifier?.providerId ?? "forexplore.behavior-verifier.unavailable",
+          verifierVersion: route.behaviorVerifier?.providerVersion ?? "0.0.0",
           reason: "Compilation alone does not establish migration behavior.",
         },
         {

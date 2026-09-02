@@ -132,7 +132,7 @@ export interface TranslatorModelOptions {
 /**
  * Independent implementation agent. Its model calls are deliberately
  * stateless: Analyzer history is never retained or injected into this agent.
- * The validated AnalysisReport is the only Analyzer-produced handoff.
+ * The advisory AnalysisReport is the only Analyzer-produced handoff.
  */
 export class TranslatorAgent {
   readonly #options: TranslatorModelOptions;
@@ -145,10 +145,7 @@ export class TranslatorAgent {
     request: AnalyzeTranslationRequest,
     signal?: AbortSignal,
   ): Promise<TranslationResult> {
-    assertAnalysisAllowsTranslation(
-      request.analysisReport,
-      request.referencePolicy === "target-only",
-    );
+    assertAnalysisReportPresent(request.analysisReport);
     const raw = await callModel(
       TRANSLATOR_SYSTEM_PROMPT,
       buildTranslationPrompt(request),
@@ -163,10 +160,7 @@ export class TranslatorAgent {
     request: RepairTranslationRequest,
     signal?: AbortSignal,
   ): Promise<TranslationResult> {
-    assertAnalysisAllowsTranslation(
-      request.analysisReport,
-      request.referencePolicy === "target-only",
-    );
+    assertAnalysisReportPresent(request.analysisReport);
     if (request.validationFeedback.status === "pass") {
       return validateTranslationResult(request.previousResult, request);
     }
@@ -465,41 +459,9 @@ function cleanGeneratedCode(code: string): string {
   return (fenced?.[1] ?? trimmed).trim();
 }
 
-function assertAnalysisAllowsTranslation(
-  report: TranslatorAnalysisReport,
-  allowReferenceFreeGeneration = false,
-): void {
-  if (report.schemaVersion !== "1.0") {
-    throw new Error(`Unsupported AnalysisReport schema: ${String(report.schemaVersion)}`);
-  }
-  if (
-    !Number.isFinite(report.applicability.confidence) ||
-    report.applicability.confidence < 0 ||
-    report.applicability.confidence > 1
-  ) {
-    throw new Error("AnalysisReport applicability confidence must be between 0 and 1.");
-  }
-  if (report.applicability.level === "reject" && !allowReferenceFreeGeneration) {
-    throw new Error(
-      `Analyzer rejected candidate: ${report.applicability.reasons.join("; ") || "no reason provided"}`,
-    );
-  }
-  const unresolvedDependencies = report.dependencyPlan
-    .filter((item) => item.action === "unresolved")
-    .map((item) => item.sourceDependency);
-  const unmappedDependencies = report.dependencyPlan
-    .filter(
-      (item) =>
-        (item.action === "reuse-existing" || item.action === "adapt") &&
-        !item.targetDependency?.trim(),
-    )
-    .map((item) => `${item.sourceDependency} has no target dependency`);
-  const blockers = [...unresolvedDependencies, ...unmappedDependencies];
-  if (blockers.length > 0) {
-    throw new Error(`AnalysisReport contains blocking unresolved items: ${blockers.join("; ")}`);
-  }
-  if (report.implementationPlan.length === 0) {
-    throw new Error("AnalysisReport implementationPlan must not be empty.");
+function assertAnalysisReportPresent(report: TranslatorAnalysisReport): void {
+  if (typeof report !== "object" || report === null) {
+    throw new Error("AnalysisReport must be present.");
   }
 }
 
@@ -534,7 +496,10 @@ function validateTranslationResult(
     );
   }
 
-  const missingSteps = request.analysisReport.implementationPlan.filter(
+  const implementationPlan = Array.isArray(request.analysisReport.implementationPlan)
+    ? request.analysisReport.implementationPlan
+    : [];
+  const missingSteps = implementationPlan.filter(
     (step) => !result.completedSteps.includes(step),
   );
   if (missingSteps.length > 0) {

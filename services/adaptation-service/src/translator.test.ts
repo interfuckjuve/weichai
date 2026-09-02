@@ -83,17 +83,18 @@ describe("Translator Agent", () => {
     expect(transcript).not.toContain("[RETRIEVED CANDIDATE]");
   });
 
-  it("stops before generation when Analyzer rejects the candidate", async () => {
+  it("treats an Analyzer rejection as advisory context", async () => {
     const request = fixture("translator-reject");
-    const fetchMock = vi.fn();
+    const calls: Array<Record<string, unknown>> = [];
+    const expected = resultFor(request);
 
     await expect(
       translateWithAnalysis(request, {
         apiKey: "test-key",
-        request: fetchMock as unknown as typeof globalThis.fetch,
+        request: modelRequest(expected, calls),
       }),
-    ).rejects.toThrow("Analyzer rejected candidate");
-    expect(fetchMock).not.toHaveBeenCalled();
+    ).resolves.toEqual(expected);
+    expect(calls).toHaveLength(1);
   });
 
   it("generates from the target context when the adapter explicitly drops a rejected candidate", async () => {
@@ -120,25 +121,28 @@ describe("Translator Agent", () => {
     expect(prompt).not.toContain("database.truncate");
   });
 
-  it("stops for unresolved dependencies instead of inventing a target dependency", async () => {
+  it("passes unresolved and unmapped dependencies to the Translator as context", async () => {
     const request = fixture("translator-adapt");
     request.analysisReport.dependencyPlan.push({
       sourceDependency: "unknown-library",
       action: "unresolved",
     });
-
-    await expect(
-      translateWithAnalysis(request, { apiKey: "test-key", request: vi.fn() as never }),
-    ).rejects.toThrow("unknown-library");
-
-    const unmapped = fixture("translator-adapt");
-    unmapped.analysisReport.dependencyPlan[0] = {
+    request.analysisReport.dependencyPlan[0] = {
       sourceDependency: "gateway",
       action: "adapt",
     };
+    const calls: Array<Record<string, unknown>> = [];
+    const expected = resultFor(request);
+
     await expect(
-      translateWithAnalysis(unmapped, { apiKey: "test-key", request: vi.fn() as never }),
-    ).rejects.toThrow("gateway has no target dependency");
+      translateWithAnalysis(request, {
+        apiKey: "test-key",
+        request: modelRequest(expected, calls),
+      }),
+    ).resolves.toEqual(expected);
+    const prompt = (calls[0]?.messages as Array<{ content: string }>)[1]?.content ?? "";
+    expect(prompt).toContain("unknown-library");
+    expect(prompt).toContain("gateway");
   });
 
   it("continues when the Analyzer reports a non-blocking open question", async () => {

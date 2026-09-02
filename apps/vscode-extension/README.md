@@ -165,18 +165,17 @@ npm run dev:adaptation
   "forexplore.executionMode": "real",
   "forexplore.retrievalApiUrl": "http://127.0.0.1:8787",
   "forexplore.adaptationApiUrl": "http://127.0.0.1:8788",
+  "forexplore.topK": 4,
   "forexplore.repositoryKnowledgeChannel": "branch:main",
-  "forexplore.repositoryPaths": [
-    "E:/CS/devsys/weichai/fixtures/code-corpus"
-  ]
+  "forexplore.repositoryPaths": []
 }
 ```
 
-该目录包含 `fixtures/code-corpus` 下的全部语料仓库。`forexplore.repositoryPaths` 仅检查本地目录是否可读；它不等于服务端“已经索引”。真实检索范围由检索服务的已授权索引决定。
+前端设置页的“添加路径”由扩展 Host 打开本地文件夹选择器，Host 只把规范化后的选择返回设置草稿；只有点击“保存设置”才会持久化路径和 Top K，“取消”不会保留草稿。保存后，每个绝对路径成为一个稳定的历史仓注册项，并可在左侧单独选择。添加或删除路径只改变本地注册，不会自动执行知识入库、发布或撤回；这些操作必须通过历史仓生命周期按钮分别触发。`forexplore.repositoryPaths` 也不等于服务端“已经索引”，真实检索范围仍由检索服务的已授权索引决定。
 
 ## 写回保护
 
-- Webview 只能发送“检索、选择候选、生成、应用”的意图，不能提交路径、候选对象或补丁。
+- Webview 只能发送受限意图；设置页可以提交本地历史仓配置，但不能提交迁移目标路径、写回路径、候选对象或补丁。
 - 扩展宿主保存当前运行的目标语言、候选、原始文件 SHA-256 和适配结果；候选必须由用户明确选择。
 - 仅接受 route-owned allowed write set 内的非重复相对路径；路径遍历、绝对路径和经符号链接逃逸都会被拒绝。
 - 所有文件在任何写入前统一完成原始 SHA-256、缺失前置条件、dirty buffer、realpath 和 hunk 预检。
@@ -204,8 +203,10 @@ npm run test:integration --workspace forexplore-vscode
 
 ## 消息协议
 
-Webview → 宿主：`READY`、`REFRESH_TARGET_WORKSPACE`、`SELECT_TARGET_ENTITY`、`START_TARGET_TRANSLATION`、`START_SEARCH`、`SELECT_CANDIDATE`、`START_ADAPT`、`APPLY_CURRENT_RUN`、`CHECK_REPOSITORIES`、`OPEN_TARGET`。
+Webview → 宿主：`READY`、`REFRESH_MODULE_EXPLORER`、`PICK_REPOSITORY_PATH`、`SAVE_SETTINGS`、`SELECT_HISTORY_REPOSITORY`、`SELECT_HISTORY_MODULE`、`RUN_MODULE_WORKSPACE_ACTION`、`REFRESH_TARGET_WORKSPACE`、`SELECT_TARGET_ENTITY`、`START_TARGET_TRANSLATION`、`START_SEARCH`、`SELECT_CANDIDATE`、`START_ADAPT`、`APPLY_CURRENT_RUN`、`CHECK_REPOSITORIES`、`COPY_TARGET_PATH`、`REVEAL_TARGET_IN_EXPLORER`、`OPEN_TARGET`。
 
-宿主 → Webview：`INIT`、`TARGET_WORKSPACE_SNAPSHOT`、`TARGET_WORKSPACE_REFRESHING`、`TARGET_WORKSPACE_INVALIDATED`、`TARGET_ENTITY_SELECTED`、`SEARCH_RESULT`、`ADAPT_RESULT`、`APPLY_RESULT`、`REPOSITORY_STATUS`、`SERVICE_STATUS`、`ERROR`。
+宿主 → Webview：`INIT`、`MODULE_EXPLORER`、`SETTINGS_UPDATED`、`REPOSITORY_PATH_PICKED`、`HISTORY_REPOSITORY_SELECTED`、`HISTORY_MODULE_SELECTED`、`TARGET_WORKSPACE_SNAPSHOT`、`TARGET_WORKSPACE_REFRESHING`、`TARGET_WORKSPACE_INVALIDATED`、`TARGET_ENTITY_SELECTED`、`SEARCH_RESULT`、`CANDIDATE_SELECTED`、`ADAPT_RESULT`、`APPLY_RESULT`、`REPOSITORY_STATUS`、`SERVICE_STATUS`、`ERROR`。
+
+历史模块选择消息绑定 `repositoryRegistrationId + repositoryId + catalogId + catalogHash + moduleId`。Host 在确认选择以及绑定目标时都会重新检查当前快照、ready 发布和 active catalog；草稿、已撤回或 hash 已变化的目录只能浏览。该选择只能收窄已有且已审的跨目录 mapping/Overlay，不会自行创建映射；真正的检索范围仍来自最终绑定的 mapping。目标实体同样继续绑定 01B snapshot/hash，前端展示状态不是授权依据。
 
 共享类型和状态机在 monorepo 的 `@forexplore/contracts`、`@forexplore/workflow-core` 中维护；打包时 Webview 与扩展宿主会将所需代码纳入 VSIX 构建产物。

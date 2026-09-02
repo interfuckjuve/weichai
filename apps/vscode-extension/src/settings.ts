@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import path from 'node:path';
 import type { ExecutionMode } from './ui-types';
 import {
   parseModuleWaveValidationCommands,
@@ -13,6 +14,7 @@ export const MODULE_INDEX_WRITER_TOKEN_ENV = 'FOREXPLORE_MODULE_INDEX_WRITER_TOK
 export interface ExtensionSettings {
   executionMode: ExecutionMode;
   repositoryPaths: string[];
+  topK: number;
   retrievalApiUrl: string;
   adaptationApiUrl: string;
   repositoryKnowledgeChannel: string;
@@ -23,6 +25,7 @@ export function loadSettings(): ExtensionSettings {
   return {
     executionMode: 'real',
     repositoryPaths: config.get<string[]>('repositoryPaths', []),
+    topK: boundedTopK(config.get<number>('topK', 4)),
     retrievalApiUrl:
       config.get<string>('retrievalApiUrl', DEFAULT_RETRIEVAL_API_URL).trim() ||
       DEFAULT_RETRIEVAL_API_URL,
@@ -33,6 +36,41 @@ export function loadSettings(): ExtensionSettings {
       config.get<string>('repositoryKnowledgeChannel', DEFAULT_REPOSITORY_KNOWLEDGE_CHANNEL).trim() ||
       DEFAULT_REPOSITORY_KNOWLEDGE_CHANNEL,
   };
+}
+
+export async function savePanelSettings(input: {
+  repositoryPaths: string[];
+  topK: number;
+}): Promise<Pick<ExtensionSettings, 'repositoryPaths' | 'topK'>> {
+  if (input.repositoryPaths.length > 20) {
+    throw new Error('历史仓路径最多配置 20 项。');
+  }
+  if (input.repositoryPaths.some((value) => value.length > 1_000)) {
+    throw new Error('单个历史仓路径不能超过 1000 个字符。');
+  }
+  const repositoryPaths = normalizeRepositoryPaths(input.repositoryPaths);
+  const topK = boundedTopK(input.topK);
+  const config = vscode.workspace.getConfiguration('forexplore');
+  await config.update('repositoryPaths', repositoryPaths, vscode.ConfigurationTarget.Global);
+  await config.update('topK', topK, vscode.ConfigurationTarget.Global);
+  return { repositoryPaths, topK };
+}
+
+export function normalizeRepositoryPaths(values: readonly string[]): string[] {
+  const normalized = new Map<string, string>();
+  for (const value of values) {
+    const trimmed = value.trim();
+    if (!trimmed) continue;
+    const absolute = path.normalize(path.resolve(trimmed));
+    const key = process.platform === 'win32' ? absolute.toLowerCase() : absolute;
+    if (!normalized.has(key)) normalized.set(key, absolute);
+  }
+  return [...normalized.values()];
+}
+
+function boundedTopK(value: number): number {
+  if (!Number.isInteger(value)) return 4;
+  return Math.min(10, Math.max(1, value));
 }
 
 /**

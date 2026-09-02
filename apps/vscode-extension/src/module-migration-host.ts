@@ -136,6 +136,14 @@ export interface ModuleMigrationHostState {
   waveId?: string;
 }
 
+/** Read-only 01A projection input. It never grants an action authority to the Webview. */
+export interface RepositoryModuleHostInspection {
+  analysisSnapshotId: string;
+  manifest?: RepositoryIngestionManifest;
+  ir?: UnifiedRepositoryIR;
+  catalog?: RepositoryModuleCatalog;
+}
+
 interface ModuleMigrationReviewSession {
   workspaceFolder: vscode.WorkspaceFolder;
   analysis: RepositoryStaticAnalysis;
@@ -293,10 +301,38 @@ export class ModuleMigrationHost {
     };
   }
 
-  async indexRepository(): Promise<void> {
+  async inspectRepository(
+    workspaceFolder: vscode.WorkspaceFolder,
+  ): Promise<RepositoryModuleHostInspection> {
+    const session = await this.loadSession(workspaceFolder);
+    const ingestion = session.repositoryIngestion;
+    if (!ingestion) return { analysisSnapshotId: session.analysis.snapshotId };
+    const manifest = await requireRepositoryIngestionManifest(
+      workspaceFolder.uri.fsPath,
+      ingestion.ingestionId,
+    );
+    const irRef = manifest.artifacts.unifiedRepositoryIr;
+    const catalogRef = manifest.artifacts.activeModuleCatalog ?? manifest.artifacts.moduleCatalog;
+    const [ir, catalog] = await Promise.all([
+      irRef
+        ? readManifestJson<UnifiedRepositoryIR>(workspaceFolder.uri.fsPath, manifest, irRef)
+        : Promise.resolve(undefined),
+      catalogRef
+        ? readManifestJson<RepositoryModuleCatalog>(workspaceFolder.uri.fsPath, manifest, catalogRef)
+        : Promise.resolve(undefined),
+    ]);
+    return {
+      analysisSnapshotId: session.analysis.snapshotId,
+      manifest,
+      ...(ir ? { ir } : {}),
+      ...(catalog ? { catalog } : {}),
+    };
+  }
+
+  async indexRepository(workspaceFolderInput?: vscode.WorkspaceFolder): Promise<void> {
     let session: ModuleMigrationReviewSession | undefined;
     try {
-      const workspaceFolder = await selectWorkspaceFolder();
+      const workspaceFolder = workspaceFolderInput ?? await selectWorkspaceFolder();
       if (!workspaceFolder) return;
       this.setState({ stage: 'indexing', workspaceFolder });
       const analysis: RepositoryStaticAnalysis = await vscode.window.withProgress<RepositoryStaticAnalysis>(
@@ -408,9 +444,11 @@ export class ModuleMigrationHost {
   }
 
   /** First human gate: accept only the proposed module ownership/boundaries. */
-  async reviewRepositoryModuleBoundaries(): Promise<void> {
+  async reviewRepositoryModuleBoundaries(
+    workspaceFolderInput?: vscode.WorkspaceFolder,
+  ): Promise<void> {
     try {
-      const workspaceFolder = await selectWorkspaceFolder();
+      const workspaceFolder = workspaceFolderInput ?? await selectWorkspaceFolder();
       if (!workspaceFolder) return;
       const session = await this.loadSession(workspaceFolder);
       const ingestion = requireRepositoryIngestion(session);
@@ -487,9 +525,11 @@ export class ModuleMigrationHost {
   }
 
   /** Retryable Agent stage; it always stops at the independent summary gate. */
-  async generateRepositoryModuleSummaries(): Promise<void> {
+  async generateRepositoryModuleSummaries(
+    workspaceFolderInput?: vscode.WorkspaceFolder,
+  ): Promise<void> {
     try {
-      const workspaceFolder = await selectWorkspaceFolder();
+      const workspaceFolder = workspaceFolderInput ?? await selectWorkspaceFolder();
       if (!workspaceFolder) return;
       const session = await this.loadSession(workspaceFolder);
       await this.runRepositoryModuleSummaryGeneration(session);
@@ -499,9 +539,11 @@ export class ModuleMigrationHost {
   }
 
   /** Second human gate followed by immutable staging and dual-head activation. */
-  async reviewRepositoryModuleKnowledge(): Promise<void> {
+  async reviewRepositoryModuleKnowledge(
+    workspaceFolderInput?: vscode.WorkspaceFolder,
+  ): Promise<void> {
     try {
-      const workspaceFolder = await selectWorkspaceFolder();
+      const workspaceFolder = workspaceFolderInput ?? await selectWorkspaceFolder();
       if (!workspaceFolder) return;
       const session = await this.loadSession(workspaceFolder);
       const ingestion = requireRepositoryIngestion(session);
@@ -596,9 +638,11 @@ export class ModuleMigrationHost {
   }
 
   /** Explicit logical revocation; history is retained and the predecessor is restored when available. */
-  async withdrawRepositoryModuleKnowledge(): Promise<void> {
+  async withdrawRepositoryModuleKnowledge(
+    workspaceFolderInput?: vscode.WorkspaceFolder,
+  ): Promise<void> {
     try {
-      const workspaceFolder = await selectWorkspaceFolder();
+      const workspaceFolder = workspaceFolderInput ?? await selectWorkspaceFolder();
       if (!workspaceFolder) return;
       const session = await this.loadSession(workspaceFolder);
       const ingestion = requireRepositoryIngestion(session);

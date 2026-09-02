@@ -283,28 +283,28 @@ describe("ForeXplore adaptation MCP server", () => {
     expect(analyzer.analyze).toHaveBeenCalledTimes(1);
   });
 
-  it("uses a required unverified verifier gate when no isolated verifier is injected", async () => {
-    const { client } = await connectedClient({
-      validator: {
-        compileStandalone: () => ({ success: true, errors: [], output: "" }),
-        compileIntegrated: () => ({ success: true, errors: [], output: "" }),
-        isUnavailable: () => false,
+  it("accepts sparse advisory reports with unknown action terminology", async () => {
+    const { client } = await connectedClient();
+
+    const result = await client.callTool({
+      name: "forexplore_generate_translation",
+      arguments: {
+        target,
+        candidateSource: candidate.preview,
+        requirement,
+        analysisReport: {
+          schemaVersion: "1.0",
+          contractMapping: [{
+            source: "route",
+            target: "GetQuoteAsync",
+            action: "compose-through-port",
+          }],
+        },
       },
     });
 
-    const result = await client.callTool({
-      name: "forexplore_adapt_translation",
-      arguments: { target, candidate, requirement, decisionNotes: "" },
-    });
-    const adaptation = JSON.parse(contentText(result)) as {
-      validation: Array<{ id: string; status: string; required: boolean }>;
-    };
-
-    expect(adaptation.validation).toContainEqual(expect.objectContaining({
-      id: "differential-verification",
-      status: "unverified",
-      required: true,
-    }));
+    expect(isToolError(result)).toBe(false);
+    expect(JSON.parse(contentText(result))).toMatchObject({ generatedCode });
   });
 
   it("returns an MCP tool error for a target path outside the configured project root", async () => {

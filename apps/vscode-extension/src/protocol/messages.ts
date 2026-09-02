@@ -16,7 +16,13 @@ import type {
   TargetWorkspaceModuleSnapshot,
   TargetWorkspaceSnapshotFreshness,
 } from '@forexplore/contracts';
-import type { RepositoryStatus, ServiceStatus } from '../ui-types';
+import type {
+  HistoryModuleSelectionIdentity,
+  ModuleExplorerPresentation,
+  ModuleWorkspaceAction,
+  RepositoryStatus,
+  ServiceStatus,
+} from '../ui-types';
 
 /**
  * A presentation-only projection of the reviewed target-workspace module
@@ -176,10 +182,17 @@ export interface PanelInitPayload {
   /** Optional first 01B snapshot; later refreshes use TARGET_WORKSPACE_SNAPSHOT. */
   targetWorkspace?: TargetWorkspaceSnapshot;
   workspaceRoot: string;
+  settings: PanelSettingsPresentation;
+  moduleExplorer: ModuleExplorerPresentation;
   repositoryStatuses: RepositoryStatus[];
   serviceStatus: ServiceStatus;
   searchProvider: 'SeekDB';
   adaptationProvider: 'DeepSeek';
+}
+
+export interface PanelSettingsPresentation {
+  repositoryPaths: string[];
+  topK: number;
 }
 
 /** Messages the extension host posts into the Webview. */
@@ -210,6 +223,11 @@ export type HostToWebviewMessage =
   | { type: 'APPLY_RESULT'; result: ApplyResult; manifest: MigrationRunManifestV2 }
   | { type: 'REPOSITORY_STATUS'; statuses: RepositoryStatus[] }
   | { type: 'SERVICE_STATUS'; status: ServiceStatus }
+  | { type: 'MODULE_EXPLORER'; explorer: ModuleExplorerPresentation }
+  | { type: 'SETTINGS_UPDATED'; settings: PanelSettingsPresentation }
+  | { type: 'REPOSITORY_PATH_PICKED'; path: string }
+  | { type: 'HISTORY_REPOSITORY_SELECTED'; repositoryRegistrationId: string }
+  | { type: 'HISTORY_MODULE_SELECTED'; selection: HistoryModuleSelectionIdentity }
   | { type: 'ERROR'; message: string };
 
 /**
@@ -234,6 +252,14 @@ export type WebviewToHostMessage =
   | { type: 'START_ADAPT'; decisionNotes: string }
   | { type: 'APPLY_CURRENT_RUN' }
   | { type: 'CHECK_REPOSITORIES' }
+  | { type: 'REFRESH_MODULE_EXPLORER' }
+  | { type: 'PICK_REPOSITORY_PATH' }
+  | { type: 'SAVE_SETTINGS'; settings: PanelSettingsPresentation }
+  | { type: 'SELECT_HISTORY_REPOSITORY'; repositoryRegistrationId: string }
+  | ({ type: 'SELECT_HISTORY_MODULE' } & HistoryModuleSelectionIdentity)
+  | { type: 'RUN_MODULE_WORKSPACE_ACTION'; workspaceId: string; action: ModuleWorkspaceAction }
+  | { type: 'COPY_TARGET_PATH' }
+  | { type: 'REVEAL_TARGET_IN_EXPLORER' }
   | { type: 'OPEN_TARGET' };
 
 const hostMessageTypes = new Set<string>([
@@ -248,7 +274,24 @@ const hostMessageTypes = new Set<string>([
   'APPLY_RESULT',
   'REPOSITORY_STATUS',
   'SERVICE_STATUS',
+  'MODULE_EXPLORER',
+  'SETTINGS_UPDATED',
+  'REPOSITORY_PATH_PICKED',
+  'HISTORY_REPOSITORY_SELECTED',
+  'HISTORY_MODULE_SELECTED',
   'ERROR',
+]);
+
+const moduleWorkspaceActions = new Set<ModuleWorkspaceAction>([
+  'initialize-target',
+  'review-target-boundaries',
+  'retry-target-inventory',
+  'rebase-target',
+  'import-history',
+  'review-history-boundaries',
+  'generate-history-summaries',
+  'review-history-knowledge',
+  'withdraw-history-publication',
 ]);
 
 /** Strictly validates every Webview payload before it enters the host. */
@@ -259,8 +302,42 @@ export function isWebviewToHostMessage(value: unknown): value is WebviewToHostMe
     case 'READY':
     case 'APPLY_CURRENT_RUN':
     case 'CHECK_REPOSITORIES':
+    case 'REFRESH_MODULE_EXPLORER':
+    case 'PICK_REPOSITORY_PATH':
+    case 'COPY_TARGET_PATH':
+    case 'REVEAL_TARGET_IN_EXPLORER':
     case 'OPEN_TARGET':
       return hasOnlyKeys(message, ['type']);
+    case 'SAVE_SETTINGS':
+      return hasOnlyKeys(message, ['type', 'settings']) && isPanelSettings(message.settings);
+    case 'SELECT_HISTORY_REPOSITORY':
+      return (
+        hasOnlyKeys(message, ['type', 'repositoryRegistrationId']) &&
+        isBoundedOpaqueId(message.repositoryRegistrationId, 256)
+      );
+    case 'SELECT_HISTORY_MODULE':
+      return (
+        hasOnlyKeys(message, [
+          'type',
+          'repositoryRegistrationId',
+          'repositoryId',
+          'catalogId',
+          'catalogHash',
+          'moduleId',
+        ]) &&
+        isBoundedOpaqueId(message.repositoryRegistrationId, 256) &&
+        isBoundedOpaqueId(message.repositoryId, 512) &&
+        isBoundedOpaqueId(message.catalogId, 512) &&
+        isContentHash(message.catalogHash) &&
+        isBoundedOpaqueId(message.moduleId, 512)
+      );
+    case 'RUN_MODULE_WORKSPACE_ACTION':
+      return (
+        hasOnlyKeys(message, ['type', 'workspaceId', 'action']) &&
+        isBoundedOpaqueId(message.workspaceId, 512) &&
+        typeof message.action === 'string' &&
+        moduleWorkspaceActions.has(message.action as ModuleWorkspaceAction)
+      );
     case 'REFRESH_TARGET_WORKSPACE': {
       if (hasOnlyKeys(message, ['type'])) return true;
       return (
@@ -304,6 +381,21 @@ export function isWebviewToHostMessage(value: unknown): value is WebviewToHostMe
     default:
       return false;
   }
+}
+
+function isPanelSettings(value: unknown): value is PanelSettingsPresentation {
+  if (!isRecord(value)) return false;
+  return (
+    hasOnlyKeys(value, ['repositoryPaths', 'topK']) &&
+    Array.isArray(value.repositoryPaths) &&
+    value.repositoryPaths.length <= 20 &&
+    value.repositoryPaths.every((item) =>
+      typeof item === 'string' && item.trim().length > 0 && item.length <= 1_000) &&
+    typeof value.topK === 'number' &&
+    Number.isInteger(value.topK) &&
+    value.topK >= 1 &&
+    value.topK <= 10
+  );
 }
 
 function hasOnlyKeys(value: Record<string, unknown>, keys: string[]): boolean {

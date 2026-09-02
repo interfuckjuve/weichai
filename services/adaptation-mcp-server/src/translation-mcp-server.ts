@@ -8,10 +8,8 @@ import {
   FileStaticAnalysisSnapshotStore,
   projectTargetContext,
   repairTranslation,
-  TranslationVerifierAdapter,
   translateWithAnalysis,
   type AdaptationAnalyzer,
-  type AdaptationVerifier,
   type AdaptationValidator,
   type StaticAnalysisSnapshotStore,
   type RepositoryArchitecturePort,
@@ -76,34 +74,34 @@ const candidateSchema = z.object({
 });
 
 const analysisReportSchema = z.object({
-  schemaVersion: z.literal("1.0"),
+  schemaVersion: z.literal("1.0").optional().default("1.0"),
   applicability: z.object({
-    level: z.enum(["direct", "adapt", "reference", "reject"]),
-    confidence: z.number().min(0).max(1),
-    reasons: z.array(z.string().min(1).max(8_000)).min(1),
-  }),
+    level: z.string().max(256).optional().default("reference"),
+    confidence: z.number().optional().default(0),
+    reasons: z.array(z.string().max(8_000)).optional().default([]),
+  }).passthrough().optional().default({ level: "reference", confidence: 0, reasons: [] }),
   behaviorMapping: z.array(z.object({
-    requirement: z.string().min(1).max(8_000),
-    status: z.enum(["covered", "partial", "missing", "conflict"]),
-    candidateEvidence: z.array(z.string().max(8_000)),
-    targetAction: z.string().min(1).max(8_000),
-  })),
+    requirement: z.string().max(8_000).optional().default(""),
+    status: z.string().max(256).optional().default("unknown"),
+    candidateEvidence: z.array(z.string().max(8_000)).optional().default([]),
+    targetAction: z.string().max(8_000).optional().default(""),
+  }).passthrough()).optional().default([]),
   contractMapping: z.array(z.object({
-    source: z.string().min(1).max(8_000),
-    target: z.string().min(1).max(8_000),
-    action: z.enum(["preserve", "rename", "convert", "inject", "replace", "adapt", "map", "delegate", "wrap"]),
-    note: z.string().min(1).max(8_000),
-  })),
+    source: z.string().max(8_000).optional().default(""),
+    target: z.string().max(8_000).optional().default(""),
+    action: z.string().max(256).optional().default("unspecified"),
+    note: z.string().max(8_000).optional().default(""),
+  }).passthrough()).optional().default([]),
   dependencyPlan: z.array(z.object({
-    sourceDependency: z.string().min(1).max(8_000),
-    targetDependency: z.string().min(1).max(8_000).optional(),
-    action: z.enum(["reuse-existing", "adapt", "inline", "unresolved"]),
-  })),
-  implementationPlan: z.array(z.string().min(1).max(8_000)).min(1),
-  risks: z.array(z.string().max(8_000)),
-  assumptions: z.array(z.string().max(8_000)),
-  unresolved: z.array(z.string().max(8_000)),
-});
+    sourceDependency: z.string().max(8_000).optional().default(""),
+    targetDependency: z.string().max(8_000).optional(),
+    action: z.string().max(256).optional().default("unspecified"),
+  }).passthrough()).optional().default([]),
+  implementationPlan: z.array(z.string().max(8_000)).optional().default([]),
+  risks: z.array(z.string().max(8_000)).optional().default([]),
+  assumptions: z.array(z.string().max(8_000)).optional().default([]),
+  unresolved: z.array(z.string().max(8_000)).optional().default([]),
+}).passthrough();
 
 const translationResultSchema = z.object({
   schemaVersion: z.literal("1.0"),
@@ -111,7 +109,7 @@ const translationResultSchema = z.object({
   interfaceMappings: z.array(z.object({
     source: z.string().min(1).max(8_000),
     target: z.string().min(1).max(8_000),
-    action: z.enum(["preserve", "rename", "convert", "inject", "replace", "adapt", "map", "delegate", "wrap"]),
+    action: z.string().max(256),
     note: z.string().min(1).max(8_000),
   })).optional().default([]),
   completedSteps: z.array(z.string().min(1).max(8_000)),
@@ -147,7 +145,6 @@ export interface AdaptationMcpServerOptions {
   analyzer?: AdaptationAnalyzer;
   translatorRequest?: typeof globalThis.fetch;
   validator?: AdaptationValidator;
-  verifier?: AdaptationVerifier;
 }
 
 /**
@@ -172,9 +169,6 @@ export function createAdaptationMcpServer(
     analyzer,
     translatorRequest: options.translatorRequest,
     validator: options.validator,
-    // Keep even direct programmatic MCP construction fail-closed.  Callers
-    // that own a real isolated runner may inject its verifier explicitly.
-    verifier: options.verifier ?? new TranslationVerifierAdapter({ apiKey: options.apiKey }),
   });
 
   // Module planning is read-only and is exposed only when the host has both
@@ -272,7 +266,7 @@ export function createAdaptationMcpServer(
 
   server.registerTool("forexplore_generate_translation", {
     title: "Generate Translation",
-    description: "Generate one target method or complete target class from source code and a validated AnalysisReport; it does not write files.",
+    description: "Generate one target method or complete target class using an Analyzer report as advisory context; it does not write files.",
     inputSchema: {
       target: targetSchema,
       candidateSource: z.string().min(1).max(MAX_CODE_CHARS),

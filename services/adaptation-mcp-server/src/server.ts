@@ -3,7 +3,6 @@ import { config as loadEnv } from "dotenv";
 import { loadConfig } from "@forexplore/adaptation-service";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createAdaptationMcpServer } from "./translation-mcp-server.js";
-import { TranslationVerifierAdapter } from "@forexplore/adaptation-service";
 
 const mcpEnvPath = fileURLToPath(new URL("../.env", import.meta.url));
 const adaptationEnvPath = fileURLToPath(new URL("../../adaptation-service/.env", import.meta.url));
@@ -20,13 +19,6 @@ async function main(): Promise<void> {
     projectRoot: config.projectRoot,
     analysisRoot: config.analysisRoot,
     skeletonProjectPath: config.skeletonProjectPath,
-    // The local MCP host has the same credential/workspace exposure as HTTP;
-    // it must not execute retrieved code unless an external isolated runner is
-    // deliberately wired by a different integration.
-    verifier: new TranslationVerifierAdapter({
-      apiKey: config.apiKey,
-      execution: config.verifierExecution,
-    }),
   });
   await server.connect(new StdioServerTransport());
   console.error("ForeXplore adaptation MCP server is running on stdio.");

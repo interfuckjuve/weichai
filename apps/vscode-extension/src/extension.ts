@@ -35,6 +35,14 @@ import {
   moduleMigrationPreviewScheme,
 } from './module-migration-host';
 import {
+  createModuleExplorerPresentation,
+  emptyTargetWorkspace,
+  projectHistoryRepository,
+  projectReviewedTargetWorkspace,
+  projectTargetWorkspaceRecord,
+  type HistoryRepositoryInspection,
+} from './module-explorer';
+import {
   ModuleMappingHost,
   type ModuleMappingHostRecord,
   type ModuleMappingRouteProvider,
@@ -55,7 +63,7 @@ import {
   combineHostRuntimeCapabilities,
   runtimeCapabilityView,
 } from './runtime-capability-host';
-import { loadSettings } from './settings';
+import { loadSettings, savePanelSettings } from './settings';
 import {
   TargetWorkspaceHost,
   type TargetWorkspaceHostRecord,
@@ -83,7 +91,12 @@ import type {
   TargetWorkspaceMigrationSelection,
   TargetWorkspaceSnapshot,
 } from './protocol/messages';
-import type { RepositoryStatus } from './ui-types';
+import type {
+  HistoryModuleSelectionIdentity,
+  ModuleExplorerPresentation,
+  ModuleWorkspaceAction,
+  RepositoryStatus,
+} from './ui-types';
 
 // Keep the transaction implementation bundled by esbuild without making the
 // extension's strict typecheck re-check the service's broader source tree.
@@ -103,6 +116,8 @@ interface ExtensionHost {
   health: RepositoryHealthCheck;
   targetWorkspaces: TargetWorkspaceHost;
   moduleMappings: ModuleMappingHost;
+  moduleMigration: ModuleMigrationHost;
+  previews: ModuleMigrationPreviewProvider;
   repositoryAnalyzer: HostOwnedRepositoryAnalyzer;
 }
 
@@ -129,9 +144,18 @@ interface LastCheckpoint {
   manifestPath: string;
 }
 
+interface ActiveHistoryModuleBinding {
+  selection: HistoryModuleSelectionIdentity;
+  sourceWorkspaceId: string;
+}
+
 let activeRun: ActiveMigrationRun | null = null;
 let activeTargetWorkspacePanel: ActiveTargetWorkspacePanel | null = null;
+let panelWorkspaceFolder: vscode.WorkspaceFolder | null = null;
+let activeHistoryRepositoryId: string | null = null;
+let activeHistoryModuleSelection: ActiveHistoryModuleBinding | null = null;
 let targetSelectionEpoch = 0;
+let repositoryPathPickerOpen = false;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const output = vscode.window.createOutputChannel('ForeXplore');
@@ -192,9 +216,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     store: new VSCodeModuleMappingHostStore(context.workspaceState),
     catalogs: {
       async load(side, workspaceId) {
-        const workspaceFolder = vscode.workspace.workspaceFolders?.find(
-          (folder) => folder.uri.toString() === workspaceId,
-        );
+        const workspaceFolder = [
+          ...(vscode.workspace.workspaceFolders ?? []),
+          ...historyWorkspaceFolders().map(({ folder }) => folder),
+        ].find((folder) => folder.uri.toString() === workspaceId);
         if (!workspaceFolder) return null;
         if (side === 'source') {
           try {
@@ -232,6 +257,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     health,
     targetWorkspaces,
     moduleMappings,
+    moduleMigration,
+    previews: moduleMigrationPreviews,
     repositoryAnalyzer,
   };
   // Recovery completes before mutation commands become reachable. This avoids
@@ -365,6 +392,9 @@ export function deactivate(): void {
   targetSelectionEpoch += 1;
   activeRun = null;
   activeTargetWorkspacePanel = null;
+  panelWorkspaceFolder = null;
+  activeHistoryRepositoryId = null;
+  activeHistoryModuleSelection = null;
 }
 
 interface ModuleMappingImportDocument {
@@ -530,24 +560,40 @@ async function selectModuleMappingWorkspacePair(): Promise<{
   source: vscode.WorkspaceFolder;
   target: vscode.WorkspaceFolder;
 } | undefined> {
-  const folders = vscode.workspace.workspaceFolders ?? [];
-  if (folders.length < 2) {
-    void vscode.window.showInformationMessage('请同时打开不同的历史源仓库与目标仓库工作区。');
+  const targetFolders = vscode.workspace.workspaceFolders ?? [];
+  const sourceByUri = new Map<string, vscode.WorkspaceFolder>();
+  for (const folder of [
+    ...historyWorkspaceFolders().map(({ folder }) => folder),
+    ...targetFolders,
+  ]) sourceByUri.set(folder.uri.toString(), folder);
+  const sourceFolders = [...sourceByUri.values()];
+  if (sourceFolders.length === 0 || targetFolders.length === 0) {
+    void vscode.window.showInformationMessage('请打开目标工作区，并在设置中注册至少一个历史源仓。');
     return undefined;
   }
-  const items = folders.map((folder) => ({
+  const sourceItems = sourceFolders.map((folder) => ({
     label: folder.name,
     description: folder.uri.fsPath,
     folder,
   }));
-  const source = await vscode.window.showQuickPick(items, {
+  const source = await vscode.window.showQuickPick(sourceItems, {
     title: '选择已发布模块目录的历史源仓库',
   });
   if (!source) return undefined;
-  const target = await vscode.window.showQuickPick(
-    items.filter((item) => item.folder.uri.toString() !== source.folder.uri.toString()),
-    { title: '选择已审模块目录的目标仓库' },
-  );
+  const targetItems = targetFolders
+    .filter((folder) => folder.uri.toString() !== source.folder.uri.toString())
+    .map((folder) => ({
+      label: folder.name,
+      description: folder.uri.fsPath,
+      folder,
+    }));
+  if (targetItems.length === 0) {
+    void vscode.window.showInformationMessage('历史源仓与目标工作区必须是不同目录。');
+    return undefined;
+  }
+  const target = await vscode.window.showQuickPick(targetItems, {
+    title: '选择已审模块目录的目标仓库',
+  });
   return target ? { source: source.folder, target: target.folder } : undefined;
 }
 
@@ -592,7 +638,7 @@ async function startLegacyTranslation(): Promise<void> {
 async function showPanel(
   host: ExtensionHost,
 ): Promise<void> {
-  if (TranslationPanel.current && activeRun) {
+  if (TranslationPanel.current) {
     TranslationPanel.current.panel.reveal(vscode.ViewColumn.Beside);
     return;
   }
@@ -600,15 +646,25 @@ async function showPanel(
     await showTargetWorkspacePanel(host, activeTargetWorkspacePanel);
     return;
   }
-  void vscode.window.showInformationMessage('请先从已审目标工作区选择待实现实体。');
+  const workspaceFolder = await selectTargetWorkspaceFolder(false);
+  panelWorkspaceFolder = workspaceFolder ?? null;
+  if (workspaceFolder) {
+    const record = await host.targetWorkspaces.get(workspaceFolder.uri.toString());
+    if (record?.stage === 'reviewed' && record.accepted?.snapshot) {
+      await openReviewedTargetWorkspace(host, workspaceFolder, record);
+      return;
+    }
+  }
+  await showWorkspacePanel(host, workspaceFolder);
 }
 
 async function initializeTargetWorkspace(
   host: ExtensionHost,
   previews: ModuleMigrationPreviewProvider,
+  workspaceFolderInput?: vscode.WorkspaceFolder,
 ): Promise<void> {
   try {
-    const workspaceFolder = await selectTargetWorkspaceFolder();
+    const workspaceFolder = workspaceFolderInput ?? await selectTargetWorkspaceFolder();
     if (!workspaceFolder) return;
     const workspaceId = workspaceFolder.uri.toString();
     const record = await vscode.window.withProgress<TargetWorkspaceHostRecord>(
@@ -665,9 +721,10 @@ async function initializeTargetWorkspace(
 async function reviewTargetWorkspaceModules(
   host: ExtensionHost,
   previews: ModuleMigrationPreviewProvider,
+  workspaceFolderInput?: vscode.WorkspaceFolder,
 ): Promise<void> {
   try {
-    const workspaceFolder = await selectTargetWorkspaceFolder();
+    const workspaceFolder = workspaceFolderInput ?? await selectTargetWorkspaceFolder();
     if (!workspaceFolder) return;
     const workspaceId = workspaceFolder.uri.toString();
     const record = await host.targetWorkspaces.get(workspaceId);
@@ -756,9 +813,12 @@ async function openTargetWorkspace(host: ExtensionHost): Promise<void> {
   }
 }
 
-async function retryTargetWorkspaceInventory(host: ExtensionHost): Promise<void> {
+async function retryTargetWorkspaceInventory(
+  host: ExtensionHost,
+  workspaceFolderInput?: vscode.WorkspaceFolder,
+): Promise<void> {
   try {
-    const workspaceFolder = await selectTargetWorkspaceFolder();
+    const workspaceFolder = workspaceFolderInput ?? await selectTargetWorkspaceFolder();
     if (!workspaceFolder) return;
     const workspaceId = workspaceFolder.uri.toString();
     const stored = await host.targetWorkspaces.get(workspaceId);
@@ -785,9 +845,10 @@ async function retryTargetWorkspaceInventory(host: ExtensionHost): Promise<void>
 async function rebaseTargetWorkspaceBodyOnly(
   host: ExtensionHost,
   previews: ModuleMigrationPreviewProvider,
+  workspaceFolderInput?: vscode.WorkspaceFolder,
 ): Promise<void> {
   try {
-    const workspaceFolder = await selectTargetWorkspaceFolder();
+    const workspaceFolder = workspaceFolderInput ?? await selectTargetWorkspaceFolder();
     if (!workspaceFolder) return;
     const workspaceId = workspaceFolder.uri.toString();
     const existing = await host.targetWorkspaces.get(workspaceId);
@@ -855,6 +916,7 @@ async function openReviewedTargetWorkspace(
   });
   const panelState = { workspaceFolder, projection };
   activeTargetWorkspacePanel = panelState;
+  panelWorkspaceFolder = workspaceFolder;
   activeRun = null;
   await showTargetWorkspacePanel(host, panelState);
 }
@@ -904,6 +966,116 @@ function routeResolutionKey(resolution: MigrationRouteResolution): string {
   ]);
 }
 
+async function showWorkspacePanel(
+  host: ExtensionHost,
+  workspaceFolder: vscode.WorkspaceFolder | undefined,
+): Promise<void> {
+  activeRun = null;
+  activeTargetWorkspacePanel = null;
+  const [repositoryStatuses, moduleExplorer] = await Promise.all([
+    refreshRepositoryStatus(host.services, host.health),
+    buildModuleExplorerPresentation(host, workspaceFolder),
+  ]);
+  const settings = loadSettings();
+  const runtime = host.services.getRuntimePresentation();
+  await TranslationPanel.createOrShow(
+    host.context,
+    {
+      workspaceRoot: workspaceFolder?.uri.fsPath ?? '',
+      settings: { repositoryPaths: settings.repositoryPaths, topK: settings.topK },
+      repositoryStatuses,
+      serviceStatus: host.services.serviceStatus,
+      moduleExplorer,
+      searchProvider: runtime.searchProvider,
+      adaptationProvider: runtime.adaptationProvider,
+    },
+    { onMessage: (message) => void handlePanelMessage(host, message) },
+  );
+}
+
+async function buildModuleExplorerPresentation(
+  host: ExtensionHost,
+  workspaceFolder: vscode.WorkspaceFolder | undefined,
+  targetProjection?: TargetWorkspaceSnapshot,
+): Promise<ModuleExplorerPresentation> {
+  let target;
+  if (targetProjection && workspaceFolder) {
+    target = projectReviewedTargetWorkspace(targetProjection, workspaceFolder.uri.fsPath);
+  } else if (workspaceFolder) {
+    const record = await host.targetWorkspaces.get(workspaceFolder.uri.toString());
+    target = projectTargetWorkspaceRecord(
+      record,
+      workspaceFolder.name,
+      workspaceFolder.uri.fsPath,
+      workspaceFolder.uri.toString(),
+    );
+  } else {
+    target = emptyTargetWorkspace(
+      '未打开目标工作区',
+      '请先在 VS Code 中打开一个工作区',
+      false,
+    );
+  }
+  const history = await Promise.all(historyWorkspaceFolders().map(async ({ registrationId, folder }) => {
+    const base = {
+      registrationId,
+      root: folder.uri.fsPath,
+      name: folder.name,
+    };
+    try {
+      const inspection = await host.moduleMigration.inspectRepository(folder);
+      return { ...base, ...inspection } satisfies HistoryRepositoryInspection;
+    } catch (error) {
+      return {
+        ...base,
+        error: error instanceof Error ? error.message : String(error),
+      } satisfies HistoryRepositoryInspection;
+    }
+  }));
+  return createModuleExplorerPresentation({ target, history });
+}
+
+function historyWorkspaceFolders(): Array<{
+  registrationId: string;
+  folder: vscode.WorkspaceFolder;
+}> {
+  return loadSettings().repositoryPaths.map((root, index) => {
+    const uri = vscode.Uri.file(path.resolve(root));
+    return {
+      registrationId: historyRepositoryRegistrationId(uri),
+      folder: {
+        uri,
+        name: path.basename(uri.fsPath) || uri.fsPath,
+        index,
+      },
+    };
+  });
+}
+
+function historyRepositoryRegistrationId(uri: vscode.Uri): string {
+  const canonicalUri = process.platform === 'win32'
+    ? uri.toString().toLowerCase()
+    : uri.toString();
+  return `history:${sha256(Buffer.from(canonicalUri, 'utf8')).slice(0, 32)}`;
+}
+
+function requireHistoryWorkspaceFolder(registrationId: string): vscode.WorkspaceFolder {
+  const registration = historyWorkspaceFolders().find(
+    (candidate) => candidate.registrationId === registrationId,
+  );
+  if (!registration) throw new Error('该历史仓注册不属于当前 Host 设置。');
+  return registration.folder;
+}
+
+async function publishModuleExplorer(host: ExtensionHost): Promise<void> {
+  const explorer = await buildModuleExplorerPresentation(
+    host,
+    panelWorkspaceFolder ?? undefined,
+    activeTargetWorkspacePanel?.projection,
+  );
+  publish({ type: 'MODULE_EXPLORER', explorer });
+}
+
 async function showTargetWorkspacePanel(
   host: ExtensionHost,
   panelState: ActiveTargetWorkspacePanel,
@@ -911,11 +1083,19 @@ async function showTargetWorkspacePanel(
   const serviceStatus = host.services.serviceStatus;
   const repositoryStatuses = await refreshRepositoryStatus(host.services, host.health);
   const runtime = host.services.getRuntimePresentation();
+  const settings = loadSettings();
+  const moduleExplorer = await buildModuleExplorerPresentation(
+    host,
+    panelState.workspaceFolder,
+    panelState.projection,
+  );
   await TranslationPanel.createOrShow(
     host.context,
     {
       targetWorkspace: panelState.projection,
       workspaceRoot: panelState.workspaceFolder.uri.fsPath,
+      settings: { repositoryPaths: settings.repositoryPaths, topK: settings.topK },
+      moduleExplorer,
       repositoryStatuses,
       serviceStatus,
       searchProvider: runtime.searchProvider,
@@ -956,12 +1136,15 @@ async function refreshTargetWorkspace(
       });
       activeTargetWorkspacePanel = { ...panelState, projection };
       publish({ type: 'TARGET_WORKSPACE_SNAPSHOT', snapshot: projection });
+      await publishModuleExplorer(host);
       return;
     }
     const reason = refreshed.freshness?.reasonCodes.join('、') ||
       refreshed.failure ||
       `目标工作区处于 ${refreshed.stage}`;
     publishTargetWorkspaceInvalidation(panelState.projection, reason);
+    activeTargetWorkspacePanel = null;
+    await publishModuleExplorer(host);
   } catch (error) {
     publishError(errorMessage(error, '刷新 01B 目标工作区失败'));
   }
@@ -975,6 +1158,10 @@ async function selectTargetWorkspaceEntity(
   activateWorkflow: boolean,
 ): Promise<void> {
   const requestEpoch = ++targetSelectionEpoch;
+  if (!activateWorkflow && activeRun) {
+    publishError('当前迁移已经绑定目标实体；请勿在运行中切换 01B 目标。');
+    return;
+  }
   if (activateWorkflow) activeRun = null;
   try {
     const panelState = activeTargetWorkspacePanel;
@@ -999,11 +1186,21 @@ async function selectTargetWorkspaceEntity(
     if (!selectedNode.moduleId) {
       throw new Error('目标实体没有已审模块归属，不能绑定模块映射。');
     }
+    const selectedSource = activeHistoryModuleSelection
+      ? await assertHistoryModuleBindingCurrent(host, activeHistoryModuleSelection)
+      : null;
     const moduleMapping = await host.moduleMappings.bindTarget({
       targetWorkspaceId: panelState.projection.workspaceId,
       targetModuleId: selectedNode.moduleId,
       targetEntityId: selectedNode.entityId,
       allowedRouteIds: selectedNode.migrationEligibility.routeOptions.map(({ route }) => route.id),
+      ...(selectedSource ? {
+        sourceWorkspaceId: selectedSource.sourceWorkspaceId,
+        sourceRepositoryId: selectedSource.selection.repositoryId,
+        sourceCatalogId: selectedSource.selection.catalogId,
+        sourceCatalogHash: selectedSource.selection.catalogHash,
+        sourceModuleId: selectedSource.selection.moduleId,
+      } : {}),
     });
     const boundRouteOptions = selectedNode.migrationEligibility.routeOptions.filter(({ route }) =>
       route.id === moduleMapping.route.routeId &&
@@ -1057,10 +1254,12 @@ async function selectTargetWorkspaceEntity(
   }
 }
 
-async function selectTargetWorkspaceFolder(): Promise<vscode.WorkspaceFolder | undefined> {
+async function selectTargetWorkspaceFolder(
+  notifyWhenMissing = true,
+): Promise<vscode.WorkspaceFolder | undefined> {
   const folders = vscode.workspace.workspaceFolders ?? [];
   if (folders.length === 0) {
-    void vscode.window.showInformationMessage('请先打开目标工作区。');
+    if (notifyWhenMissing) void vscode.window.showInformationMessage('请先打开目标工作区。');
     return undefined;
   }
   if (folders.length === 1) return folders[0];
@@ -1106,9 +1305,215 @@ async function handlePanelMessage(
     case 'CHECK_REPOSITORIES':
       await refreshPanelStatus(host);
       return;
+    case 'REFRESH_MODULE_EXPLORER':
+      await publishModuleExplorer(host).catch((error) =>
+        publishError(errorMessage(error, '刷新模块工作区失败')));
+      return;
+    case 'PICK_REPOSITORY_PATH':
+      await pickRepositoryPath();
+      return;
+    case 'SAVE_SETTINGS':
+      await updatePanelSettings(host, message.settings);
+      return;
+    case 'SELECT_HISTORY_REPOSITORY':
+      await selectHistoryRepository(message.repositoryRegistrationId);
+      return;
+    case 'SELECT_HISTORY_MODULE':
+      await selectHistoryModule(host, message);
+      return;
+    case 'RUN_MODULE_WORKSPACE_ACTION':
+      await runModuleWorkspaceAction(host, message.workspaceId, message.action);
+      return;
+    case 'COPY_TARGET_PATH':
+      await copyTargetPath();
+      return;
+    case 'REVEAL_TARGET_IN_EXPLORER':
+      await revealTargetInExplorer();
+      return;
     case 'OPEN_TARGET':
       await openTarget();
       return;
+  }
+}
+
+async function pickRepositoryPath(): Promise<void> {
+  if (repositoryPathPickerOpen) return;
+  repositoryPathPickerOpen = true;
+  try {
+    const picked = await vscode.window.showOpenDialog({
+      canSelectFiles: false,
+      canSelectFolders: true,
+      canSelectMany: false,
+      title: '选择要注册为 01A 历史仓的本地目录',
+      openLabel: '添加历史仓路径',
+    });
+    const uri = picked?.[0];
+    if (!uri) return;
+    if (uri.scheme !== 'file') throw new Error('历史仓必须是本地 file 目录。');
+    const stat = await vscode.workspace.fs.stat(uri);
+    if ((stat.type & vscode.FileType.Directory) === 0) throw new Error('请选择目录而不是文件。');
+    publish({ type: 'REPOSITORY_PATH_PICKED', path: path.normalize(path.resolve(uri.fsPath)) });
+  } catch (error) {
+    publishError(errorMessage(error, '添加历史仓路径失败'));
+  } finally {
+    repositoryPathPickerOpen = false;
+  }
+}
+
+async function updatePanelSettings(
+  host: ExtensionHost,
+  settings: Extract<WebviewToHostMessage, { type: 'SAVE_SETTINGS' }>['settings'],
+): Promise<void> {
+  try {
+    const saved = await savePanelSettings(settings);
+    const configuredIds = new Set(historyWorkspaceFolders().map((item) => item.registrationId));
+    if (activeHistoryRepositoryId && !configuredIds.has(activeHistoryRepositoryId)) {
+      activeHistoryRepositoryId = null;
+      activeHistoryModuleSelection = null;
+    }
+    publish({ type: 'SETTINGS_UPDATED', settings: saved });
+    await Promise.all([
+      refreshPanelStatus(host),
+      publishModuleExplorer(host),
+    ]);
+  } catch (error) {
+    publishError(errorMessage(error, '保存设置失败'));
+  }
+}
+
+async function selectHistoryRepository(registrationId: string): Promise<void> {
+  try {
+    requireHistoryWorkspaceFolder(registrationId);
+    activeHistoryRepositoryId = registrationId;
+    activeHistoryModuleSelection = null;
+    publish({ type: 'HISTORY_REPOSITORY_SELECTED', repositoryRegistrationId: registrationId });
+  } catch (error) {
+    publishError(errorMessage(error, '历史仓选择无效'));
+  }
+}
+
+async function selectHistoryModule(
+  host: ExtensionHost,
+  selection: Extract<WebviewToHostMessage, { type: 'SELECT_HISTORY_MODULE' }>,
+): Promise<void> {
+  try {
+    const folder = requireHistoryWorkspaceFolder(selection.repositoryRegistrationId);
+    const binding: ActiveHistoryModuleBinding = {
+      sourceWorkspaceId: folder.uri.toString(),
+      selection: {
+        repositoryRegistrationId: selection.repositoryRegistrationId,
+        repositoryId: selection.repositoryId,
+        catalogId: selection.catalogId,
+        catalogHash: selection.catalogHash,
+        moduleId: selection.moduleId,
+      },
+    };
+    await assertHistoryModuleBindingCurrent(host, binding);
+    activeHistoryRepositoryId = selection.repositoryRegistrationId;
+    activeHistoryModuleSelection = binding;
+    publish({ type: 'HISTORY_MODULE_SELECTED', selection: activeHistoryModuleSelection.selection });
+  } catch (error) {
+    publishError(errorMessage(error, '历史模块选择无效'));
+  }
+}
+
+async function assertHistoryModuleBindingCurrent(
+  host: ExtensionHost,
+  binding: ActiveHistoryModuleBinding,
+): Promise<ActiveHistoryModuleBinding> {
+  const folder = requireHistoryWorkspaceFolder(binding.selection.repositoryRegistrationId);
+  if (folder.uri.toString() !== binding.sourceWorkspaceId) {
+    throw new Error('历史仓注册已经指向不同的 Host 工作区。');
+  }
+  const inspection = await host.moduleMigration.inspectRepository(folder);
+  if (inspection.manifest?.status !== 'ready') {
+    throw new Error('该历史仓没有当前有效的模块知识发布。');
+  }
+  // This re-analyzes the repository and rejects a catalog whose source
+  // snapshot is no longer current; the cached Webview projection is never an
+  // authorization source.
+  const catalog = (await host.moduleMigration.getReviewedCatalogHead(folder)).catalog;
+  const selection = binding.selection;
+  if (
+    catalog.status !== 'active' ||
+    !catalog.reviewId ||
+    !catalog.reviewHash ||
+    catalog.repositoryId !== selection.repositoryId ||
+    catalog.id !== selection.catalogId ||
+    catalog.contentHash !== selection.catalogHash ||
+    !catalog.modules.some((module) => module.id === selection.moduleId)
+  ) {
+    throw new Error('模块选择不属于当前已审且已发布的 active catalog。');
+  }
+  return binding;
+}
+
+async function runModuleWorkspaceAction(
+  host: ExtensionHost,
+  workspaceId: string,
+  action: ModuleWorkspaceAction,
+): Promise<void> {
+  try {
+    if (action.endsWith('-target') || action.startsWith('review-target') ||
+        action.startsWith('retry-target') || action.startsWith('rebase-target')) {
+      const folder = panelWorkspaceFolder;
+      if (!folder || folder.uri.toString() !== workspaceId) {
+        throw new Error('目标工作区操作不属于当前 Host 面板。');
+      }
+      switch (action) {
+        case 'initialize-target':
+          await initializeTargetWorkspace(host, host.previews, folder);
+          break;
+        case 'review-target-boundaries':
+          await reviewTargetWorkspaceModules(host, host.previews, folder);
+          break;
+        case 'retry-target-inventory':
+          await retryTargetWorkspaceInventory(host, folder);
+          break;
+        case 'rebase-target':
+          await rebaseTargetWorkspaceBodyOnly(host, host.previews, folder);
+          break;
+        default:
+          throw new Error('该操作不是目标工作区动作。');
+      }
+      if (TranslationPanel.current) await publishModuleExplorer(host);
+      return;
+    }
+
+    const folder = requireHistoryWorkspaceFolder(workspaceId);
+    const inspection = await host.moduleMigration.inspectRepository(folder).catch(() => undefined);
+    const projected = projectHistoryRepository({
+      registrationId: workspaceId,
+      root: folder.uri.fsPath,
+      name: folder.name,
+      ...(inspection ?? {}),
+    });
+    if (projected.lifecycle.nextAction !== action) {
+      throw new Error(`历史仓状态已变化；当前动作应为 ${projected.lifecycle.nextAction ?? 'none'}。`);
+    }
+    switch (action) {
+      case 'import-history':
+        await host.moduleMigration.indexRepository(folder);
+        break;
+      case 'review-history-boundaries':
+        await host.moduleMigration.reviewRepositoryModuleBoundaries(folder);
+        break;
+      case 'generate-history-summaries':
+        await host.moduleMigration.generateRepositoryModuleSummaries(folder);
+        break;
+      case 'review-history-knowledge':
+        await host.moduleMigration.reviewRepositoryModuleKnowledge(folder);
+        break;
+      case 'withdraw-history-publication':
+        await host.moduleMigration.withdrawRepositoryModuleKnowledge(folder);
+        break;
+      default:
+        throw new Error('该操作不是历史仓动作。');
+    }
+    if (activeHistoryRepositoryId === workspaceId) activeHistoryModuleSelection = null;
+    await publishModuleExplorer(host);
+  } catch (error) {
+    publishError(errorMessage(error, '模块工作区操作失败'));
   }
 }
 
@@ -1521,6 +1926,24 @@ async function openTarget(): Promise<void> {
   }
 }
 
+async function copyTargetPath(): Promise<void> {
+  try {
+    const run = requireActiveRun();
+    await vscode.env.clipboard.writeText(run.targetUri.fsPath);
+  } catch (error) {
+    publishError(errorMessage(error, '无法复制当前目标路径'));
+  }
+}
+
+async function revealTargetInExplorer(): Promise<void> {
+  try {
+    const run = requireActiveRun();
+    await vscode.commands.executeCommand('revealInExplorer', run.targetUri);
+  } catch (error) {
+    publishError(errorMessage(error, '无法在资源管理器中定位当前目标'));
+  }
+}
+
 function validateHostOwnedPatch(
   run: ActiveMigrationRun,
   result: AdaptationResultV2,
@@ -1785,6 +2208,8 @@ async function refreshTargetWorkspaceBinding(
     panelState.projection.contentHash === selection.contentHash
   ) {
     publishTargetWorkspaceInvalidation(panelState.projection, reason);
+    activeTargetWorkspacePanel = null;
+    await publishModuleExplorer(host);
   }
   throw new Error(reason);
 }
@@ -1836,6 +2261,8 @@ async function invalidateTargetWorkspaceAfterMutation(
   }
   try {
     await host.targetWorkspaces.refresh(selection.workspaceId);
+    activeTargetWorkspacePanel = null;
+    await publishModuleExplorer(host);
   } catch (error) {
     // The write/restore already succeeded. Keep the UI fail-closed and report
     // refresh failure separately instead of misreporting the mutation itself.

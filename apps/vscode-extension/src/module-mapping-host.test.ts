@@ -342,6 +342,34 @@ describe('ModuleMappingHost canonical mainline', () => {
     })).rejects.toThrow(/Target workspace has no active reviewed/);
   });
 
+  it('narrows target binding to an explicit reviewed 01A repository, catalog, and module', async () => {
+    const { host } = await readyHost();
+    const binding = await host.bindTarget({
+      targetWorkspaceId: target.workspaceId,
+      targetModuleId: 't3',
+      targetEntityId: 'target-entity-t3',
+      allowedRouteIds: ['route:python-to-rust'],
+      sourceWorkspaceId: source.workspaceId,
+      sourceRepositoryId: source.catalog.repositoryId,
+      sourceCatalogId: source.catalog.id,
+      sourceCatalogHash: source.catalog.contentHash,
+      sourceModuleId: 's2',
+    });
+
+    expect(binding.sourceModuleIds).toEqual(['s2', 's3']);
+    await expect(host.bindTarget({
+      targetWorkspaceId: target.workspaceId,
+      targetModuleId: 't3',
+      targetEntityId: 'target-entity-t3',
+      allowedRouteIds: ['route:python-to-rust'],
+      sourceWorkspaceId: source.workspaceId,
+      sourceRepositoryId: source.catalog.repositoryId,
+      sourceCatalogId: source.catalog.id,
+      sourceCatalogHash: source.catalog.contentHash,
+      sourceModuleId: 's1',
+    })).rejects.toThrow(/No current accepted module mapping/);
+  });
+
   it('marks the mapping stale as soon as a catalog/IR/review head changes', async () => {
     const { host, heads, record } = await readyHost();
     const changed = structuredClone(target);

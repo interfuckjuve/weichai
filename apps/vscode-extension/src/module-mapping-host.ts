@@ -132,6 +132,12 @@ export interface BindModuleMappingTargetInput {
   targetModuleId: string;
   targetEntityId: string;
   allowedRouteIds: string[];
+  /** Optional explicit 01A browser selection; when present it narrows, never creates, an accepted mapping. */
+  sourceWorkspaceId?: string;
+  sourceRepositoryId?: string;
+  sourceCatalogId?: string;
+  sourceCatalogHash?: string;
+  sourceModuleId?: string;
 }
 
 export class ModuleMappingHost {
@@ -319,17 +325,24 @@ export class ModuleMappingHost {
     const candidates: Array<{ record: ModuleMappingHostRecord; groupIndexes: number[] }> = [];
     for (const stored of (await this.#state()).records) {
       if (stored.targetWorkspaceId !== input.targetWorkspaceId || stored.stage !== 'ready') continue;
+      if (input.sourceWorkspaceId && stored.sourceWorkspaceId !== input.sourceWorkspaceId) continue;
       const record = await this.#refresh(stored);
       if (
         record.stage !== 'ready' || !record.overlay || !record.review ||
         !record.routeResolution || !record.runtimeCapabilitySnapshot || !record.routeSnapshot
       ) continue;
       if (!allowedRouteIds.has(record.overlay.routeId)) continue;
+      if (
+        (input.sourceRepositoryId && record.overlay.sourceCatalog.repositoryId !== input.sourceRepositoryId) ||
+        (input.sourceCatalogId && record.overlay.sourceCatalog.moduleCatalogId !== input.sourceCatalogId) ||
+        (input.sourceCatalogHash && record.overlay.sourceCatalog.moduleCatalogHash !== input.sourceCatalogHash)
+      ) continue;
       const groupIndexes = record.overlay.groups
         .map((group, index) => ({ group, index }))
         .filter(({ group }) =>
           group.targetModuleIds.includes(input.targetModuleId) &&
-          (group.targetEntityIds.length === 0 || group.targetEntityIds.includes(input.targetEntityId)),
+          (group.targetEntityIds.length === 0 || group.targetEntityIds.includes(input.targetEntityId)) &&
+          (!input.sourceModuleId || group.sourceModuleIds.includes(input.sourceModuleId)),
         )
         .map(({ index }) => index);
       if (groupIndexes.length > 0) candidates.push({ record, groupIndexes });

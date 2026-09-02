@@ -37,24 +37,6 @@ export type {
   MigrationValidationEvidenceV2,
 } from "./adaptation-adapter-v2";
 
-export {
-  listTranslationVerifierRuntimeCapabilities,
-  resolveTranslationVerifierRoute,
-  TranslationVerifierAdapter,
-} from "./verification-adapter";
-export type {
-  AdaptationVerifier,
-  DifferentialVerificationInput,
-  DifferentialVerificationResult,
-  IsolatedDriverExecutor,
-  TranslationVerifierRouteCapability,
-  TranslationVerifierRuntimeCapability,
-  TranslationVerifierAdapterOptions,
-  TranslationVerifierExecution,
-  VerificationUnsupportedCode,
-  VerificationUnsupportedReason,
-} from "./verification-adapter";
-
 export { BackfillAdapter } from "./backfill-adapter";
 export type {
   BackfillAdapterOptions,
@@ -213,6 +195,7 @@ export {
 } from "./runtime-capability-snapshot";
 export type {
   AdaptationRuntimeCapabilitySnapshotOptions,
+  BehaviorVerifierExecution,
   ExactTranslationRouteRegistration,
   RepositoryAnalysisExecution,
   WorkspaceMutationExecution,

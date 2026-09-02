@@ -482,13 +482,136 @@ function migrationSelection(snapshot: TargetWorkspaceSnapshot): TargetWorkspaceM
 }
 
 function initPayload(input: Partial<PanelInitPayload> = {}): PanelInitPayload {
+  const targetWorkspace = input.targetWorkspace;
   return {
     workspaceRoot: 'E:/target-workspace',
+    settings: { repositoryPaths: [], topK: 4 },
+    moduleExplorer: {
+      generatedAt: '2026-09-02T00:00:00.000Z',
+      target: {
+        id: 'target-workspace',
+        mode: 'target',
+        name: 'Target Workspace',
+        rootLabel: 'E:/target-workspace',
+        lifecycle: {
+          stage: 'reviewed',
+          label: '已审目标目录',
+          message: 'ready',
+          ready: true,
+          publicationActive: false,
+        },
+        ...(targetWorkspace
+          ? {
+              id: targetWorkspace.workspaceId,
+              name: targetWorkspace.workspaceName,
+              snapshotId: targetWorkspace.snapshotId,
+              stats: {
+                modules: targetWorkspace.root.children.filter((node) => node.kind === 'module').length,
+                files: 1,
+                types: 1,
+                methods: targetWorkspace.moduleSnapshot.workspaceCounts.eligible,
+                implemented: targetWorkspace.moduleSnapshot.workspaceCounts.implemented,
+                unimplemented: targetWorkspace.moduleSnapshot.workspaceCounts.unimplemented,
+                partial: targetWorkspace.moduleSnapshot.workspaceCounts.partial,
+                unknown: targetWorkspace.moduleSnapshot.workspaceCounts.unknown,
+                notApplicable: targetWorkspace.moduleSnapshot.workspaceCounts.notApplicable,
+                dependencies: 0,
+              },
+              tree: targetWorkspace.root.children.map(testExplorerNode),
+            }
+          : {
+              stats: {
+                modules: 0,
+                files: 0,
+                types: 0,
+                methods: 0,
+                implemented: 0,
+                unimplemented: 0,
+                partial: 0,
+                unknown: 0,
+                notApplicable: 0,
+                dependencies: 0,
+              },
+              tree: [],
+            }),
+        summary: { exists: false, path: '.forexplore/target-workspaces' },
+      },
+      history: [],
+    },
     repositoryStatuses: [],
     serviceStatus: { retrieval: 'connected', adaptation: 'connected', executionMode: 'real' },
     searchProvider: 'SeekDB',
     adaptationProvider: 'DeepSeek',
     ...input,
+  };
+}
+
+function testExplorerNode(node: TargetWorkspaceTreeNode): import('../../src/ui-types').ModuleExplorerNode {
+  const state = node.assessment?.state ?? node.rollup?.state;
+  return {
+    id: node.nodeId,
+    name: node.name,
+    kind: node.kind === 'module' || node.kind === 'file'
+      ? node.kind
+      : node.kind === 'callable' ? 'method' : 'class',
+    ...(node.path ? { path: node.path } : {}),
+    ...(node.languageId ? { language: node.languageId } : {}),
+    ...(node.signature ? { signature: node.signature } : {}),
+    ...(node.kind === 'callable'
+      ? {
+          targetId: node.nodeId,
+          implementationStatus: state === 'implemented' || state === 'unimplemented'
+            ? state
+            : 'unknown',
+        }
+      : {}),
+    children: node.children.map(testExplorerNode),
+  };
+}
+
+function historyWorkspace(id: string, name: string): import('../../src/ui-types').ModuleWorkspacePresentation {
+  const catalogId = `catalog:${id}`;
+  return {
+    id,
+    mode: 'history',
+    name,
+    rootLabel: `E:/history/${name}`,
+    lifecycle: {
+      stage: 'ready',
+      label: '模块知识已发布',
+      message: 'ready',
+      ready: true,
+      publicationActive: true,
+      nextAction: 'withdraw-history-publication',
+      nextActionLabel: '撤回检索发布',
+    },
+    catalog: { id: catalogId, contentHash: artifactHash, status: 'active' },
+    stats: {
+      modules: 1,
+      files: 0,
+      types: 0,
+      methods: 0,
+      implemented: 0,
+      unimplemented: 0,
+      partial: 0,
+      unknown: 0,
+      notApplicable: 0,
+      dependencies: 0,
+    },
+    summary: { exists: true, path: '.forexplore/ingestion', approvalsCurrent: true, moduleCount: 1 },
+    tree: [{
+      id: `${catalogId}:module:payments`,
+      name: `${name} Payments`,
+      kind: 'module',
+      historyModule: {
+        repositoryRegistrationId: id,
+        repositoryId: `repository:${id}`,
+        catalogId,
+        catalogHash: artifactHash,
+        moduleId: 'payments',
+      },
+      children: [],
+    }],
   };
 }
 
@@ -565,15 +688,15 @@ describe('01B target workspace Webview', () => {
 
     expect(container.textContent).toContain('01B 目标工作区模块划分');
     expect(container.textContent).toContain('支付模块');
-    expect(container.textContent).toContain('待实现 1');
-    expect(container.querySelector('[data-node-id="node:module:payments"]')?.textContent)
-      .toContain('1/2');
-    expect(container.textContent).toContain('不适用 1');
+    expect(container.querySelector('.status-mark.is-unimplemented')).not.toBeNull();
+    expect(container.querySelector('[data-node-id="node:module:payments"]')).not.toBeNull();
 
-    await click(container.querySelector('[aria-label="展开 PaymentService.cs"]'));
     await click(container.querySelector('[aria-label="展开 PaymentService"]'));
-    await click(container.querySelector('[data-node-id="node:callable:pay"] .target-workspace-tree-main'));
+    const beforeSelection = posted.length;
+    await click(container.querySelector('[data-node-id="node:callable:pay"] .tree-select'));
 
+    expect(posted.slice(beforeSelection).filter((message) => message.type === 'SELECT_TARGET_ENTITY'))
+      .toHaveLength(1);
     expect(posted.at(-1)).toEqual({
       type: 'SELECT_TARGET_ENTITY',
       snapshotId: snapshot.snapshotId,
@@ -592,7 +715,7 @@ describe('01B target workspace Webview', () => {
       contentHash: snapshot.contentHash,
     });
 
-    await click(container.querySelector('.target-refresh-action'));
+    await click(container.querySelector('[aria-label="刷新 Host 模块状态"]'));
     expect(posted.at(-1)).toEqual({
       type: 'REFRESH_TARGET_WORKSPACE',
       expectedSnapshotId: snapshot.snapshotId,
@@ -616,15 +739,19 @@ describe('01B target workspace Webview', () => {
   it('does not emit selection/start intents for an ineligible node or a stale snapshot', async () => {
     const snapshot = targetWorkspaceSnapshot();
     await send({ type: 'INIT', payload: initPayload({ targetWorkspace: snapshot }) });
-    await click(container.querySelector('[aria-label="展开 PaymentService.cs"]'));
     await click(container.querySelector('[aria-label="展开 PaymentService"]'));
 
     const beforeIneligible = posted.length;
-    await click(container.querySelector('[data-node-id="node:callable:contract"] .target-workspace-tree-main'));
+    await click(container.querySelector('[data-node-id="node:callable:contract"] .tree-select'));
     expect(posted).toHaveLength(beforeIneligible);
     expect((container.querySelector('.target-start-action') as HTMLButtonElement).disabled).toBe(true);
 
-    await click(container.querySelector('[data-node-id="node:callable:pay"] .target-workspace-tree-main'));
+    await click(container.querySelector('[data-node-id="node:callable:pay"] .tree-select'));
+    await send({
+      type: 'TARGET_WORKSPACE_REFRESHING',
+      previousSnapshotId: snapshot.snapshotId,
+      previousContentHash: snapshot.contentHash,
+    });
     await send({
       type: 'TARGET_WORKSPACE_INVALIDATED',
       invalidation: {
@@ -639,6 +766,10 @@ describe('01B target workspace Webview', () => {
     expect((container.querySelector('.target-start-action') as HTMLButtonElement).disabled).toBe(true);
     await click(container.querySelector('.target-start-action'));
     expect(posted).toHaveLength(beforeStaleStart);
+    const refreshButton = container.querySelector('[aria-label="刷新 Host 模块状态"]') as HTMLButtonElement;
+    expect(refreshButton.disabled).toBe(false);
+    await click(refreshButton);
+    expect(posted.at(-1)).toEqual({ type: 'REFRESH_MODULE_EXPLORER' });
   });
 
   it('accepts a host-resolved eligible target only for the current snapshot', async () => {
@@ -667,6 +798,70 @@ describe('01B target workspace Webview', () => {
 
     expect(container.textContent).toContain('检索相似实现');
     expect(container.textContent).not.toContain('目标工作区模块划分');
+
+    const beforeReselect = posted.length;
+    await click(container.querySelector('[aria-label="展开 PaymentService"]'));
+    await click(container.querySelector('[data-node-id="node:callable:refund"] .tree-select'));
+    expect(posted).toHaveLength(beforeReselect);
+    expect(container.textContent).toContain('当前迁移已经绑定目标实体');
+  });
+
+  it('keeps a picked repository path in the settings draft until explicit save', async () => {
+    await send({ type: 'INIT', payload: initPayload() });
+    await click([...container.querySelectorAll('button')]
+      .find((button) => button.textContent?.includes('设置')) ?? null);
+    await click([...container.querySelectorAll('button')]
+      .find((button) => button.textContent?.includes('添加第一个路径')) ?? null);
+    expect(posted.at(-1)).toEqual({ type: 'PICK_REPOSITORY_PATH' });
+
+    await send({ type: 'REPOSITORY_PATH_PICKED', path: 'E:/history/orders' });
+    expect((container.querySelector('.repository-path-row input') as HTMLInputElement).value)
+      .toBe('E:/history/orders');
+    expect(posted.some((message) => message.type === 'SAVE_SETTINGS')).toBe(false);
+
+    await click([...container.querySelectorAll('button')]
+      .find((button) => button.textContent?.includes('保存设置')) ?? null);
+    expect(posted.at(-1)).toEqual({
+      type: 'SAVE_SETTINGS',
+      settings: { repositoryPaths: ['E:/history/orders'], topK: 4 },
+    });
+  });
+
+  it('wires history repository, module, and lifecycle actions to Host intents', async () => {
+    const payload = initPayload();
+    payload.moduleExplorer.history = [
+      historyWorkspace('history:orders', 'Orders'),
+      historyWorkspace('history:billing', 'Billing'),
+    ];
+    await send({ type: 'INIT', payload });
+    await click(container.querySelector('.workspace-switch button:nth-child(2)'));
+
+    const picker = container.querySelector('.history-picker select') as HTMLSelectElement;
+    picker.value = 'history:billing';
+    await act(async () => picker.dispatchEvent(new Event('change', { bubbles: true })));
+    expect(posted.at(-1)).toEqual({
+      type: 'SELECT_HISTORY_REPOSITORY',
+      repositoryRegistrationId: 'history:billing',
+    });
+    await send({
+      type: 'HISTORY_REPOSITORY_SELECTED',
+      repositoryRegistrationId: 'history:billing',
+    });
+
+    await click(container.querySelector('.history-module-card'));
+    expect(posted.at(-1)).toMatchObject({
+      type: 'SELECT_HISTORY_MODULE',
+      repositoryRegistrationId: 'history:billing',
+      moduleId: 'payments',
+    });
+
+    await click([...container.querySelectorAll('button')]
+      .find((button) => button.textContent?.includes('撤回检索发布')) ?? null);
+    expect(posted.at(-1)).toEqual({
+      type: 'RUN_MODULE_WORKSPACE_ACTION',
+      workspaceId: 'history:billing',
+      action: 'withdraw-history-publication',
+    });
   });
 
   it('shows the exact candidate route and blocks an undeclared source language', async () => {

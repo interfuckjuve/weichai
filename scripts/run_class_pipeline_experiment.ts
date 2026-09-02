@@ -36,9 +36,6 @@ interface PipelineRecord {
   adaptationStatus: "pass" | "fail" | "skipped";
   isolatedCompile: "pass" | "fail" | "unverified" | "unknown";
   cumulativeCompile: "accepted" | "rejected" | "skipped";
-  differentialVerification?: "pass" | "fail" | "unverified" | "not-run";
-  modificationPlanCount?: number;
-  differentialSummary?: string;
   reason?: string;
 }
 
@@ -221,14 +218,6 @@ async function main(): Promise<void> {
     });
     const result = adaptation.value as Partial<AdaptationResult> & { error?: string };
     record.adaptationStatus = adaptation.status === 200 ? "pass" : "fail";
-    const differential = Array.isArray(result.validation)
-      ? result.validation.find((item) => item.id === "differential-verification")
-      : undefined;
-    record.differentialVerification = differential?.status ?? "not-run";
-    record.differentialSummary = differential?.summary;
-    record.modificationPlanCount = Array.isArray(result.modificationPlan)
-      ? result.modificationPlan.length
-      : 0;
     record.isolatedCompile = adaptation.status === 200 && Array.isArray(result.validation)
       ? isolatedCompileStatus(result as AdaptationResult)
       : "unknown";

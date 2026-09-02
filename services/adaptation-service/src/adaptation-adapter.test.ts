@@ -9,7 +9,6 @@ import type {
 import { describe, expect, it } from "vitest";
 import { AdaptationAdapter, _buildFilePatch } from "./adaptation-adapter";
 import type { CompileResult } from "./compiler";
-import type { AdaptationVerifier } from "./verification-adapter";
 
 const javaCandidate: SearchCandidate = {
   id: "java-candidate",
@@ -227,11 +226,8 @@ describe("AdaptationAdapter implementation boundary", () => {
     );
     expect(result.validation.find((record) => record.id === "standalone-compile"))
       .toMatchObject({ status: "pass", command: "javac" });
-    expect(result.validation).toContainEqual(expect.objectContaining({
-      id: "differential-verification",
-      status: "unverified",
-      required: true,
-    }));
+    expect(result.validation.find((record) => record.id === "behavior-verification-unavailable"))
+      .toMatchObject({ status: "unverified", required: true });
     expect(result.files).toHaveLength(1);
   });
 
@@ -294,59 +290,6 @@ describe("AdaptationAdapter implementation boundary", () => {
     expect(prompt).not.toContain(javaCandidate.preview);
   });
 
-  it("runs differential verification after compile and feeds its plan to Translator repair", async () => {
-    const compilerSuccess: CompileResult = { success: true, errors: [], output: "" };
-    const modelBodies: Array<{ messages: Array<{ content: string }> }> = [];
-    const verifierCalls: string[] = [];
-    const verifier: AdaptationVerifier = {
-      async verify(input) {
-        verifierCalls.push(input.generatedCode);
-        return {
-          status: "fail",
-          summary: "差分验证未通过：0/1 个 case 通过，1 个 case 需要修复。",
-          modificationPlan: ["修复 case wrong-return：目标返回值与需求不一致。"],
-          reason: "behavioral-divergence",
-        };
-      },
-    };
-    const generatedCode = "public static final boolean isMultipartContent(RequestContext ctx) { return true; }";
-    const adapter = new AdaptationAdapter({
-      apiKey: "test-key",
-      projectRoot: javaProjectRoot,
-      contextCollector: () => targetContext,
-      verifier,
-      analyzer: { async analyze() { return analysisReport; } },
-      translatorRequest: (async (_input: URL | RequestInfo, init?: RequestInit) => {
-        modelBodies.push(JSON.parse(String(init?.body)) as { messages: Array<{ content: string }> });
-        return new Response(JSON.stringify({
-          choices: [{ message: { content: JSON.stringify({
-            schemaVersion: "1.0",
-            generatedCode,
-            completedSteps: analysisReport.implementationPlan,
-            unresolved: [],
-          }) } }],
-        }), { status: 200 });
-      }) as typeof globalThis.fetch,
-      validator: {
-        compileStandalone: () => compilerSuccess,
-        compileIntegrated: () => compilerSuccess,
-        isUnavailable: () => false,
-      },
-    });
-
-    const result = await adapter.adapt(request);
-
-    expect(verifierCalls).toHaveLength(4);
-    expect(modelBodies).toHaveLength(4);
-    expect(modelBodies[1]?.messages.map((message) => message.content).join("\n"))
-      .toContain("修复 case wrong-return");
-    expect(result.modificationPlan).toEqual(["修复 case wrong-return：目标返回值与需求不一致。"]);
-    expect(result.validation).toContainEqual(expect.objectContaining({
-      id: "differential-verification",
-      status: "fail",
-      required: true,
-    }));
-  });
 });
 
 describe("buildFilePatch", () => {

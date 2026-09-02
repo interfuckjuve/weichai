@@ -168,70 +168,54 @@ export function parseAnalysisReport(raw: string): AnalysisReport {
     throw new Error("Analyzer returned an empty response.");
   }
 
-  const jsonText = extractJsonObject(raw);
-  let value: unknown;
   try {
-    value = JSON.parse(jsonText) as unknown;
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    throw new Error(`Analyzer returned invalid JSON: ${detail}`);
+    const value = JSON.parse(extractJsonObject(raw)) as unknown;
+    if (isRecord(value)) return normalizeAnalysisReport(value);
+  } catch {
+    // Analyzer output is advisory context. Preserve narrative output instead
+    // of turning report formatting into a workflow gate.
   }
 
-  validateAnalysisReport(value);
-  return value;
+  return normalizeAnalysisReport({ assumptions: [raw.trim()] });
 }
 
 export function validateAnalysisReport(value: unknown): asserts value is AnalysisReport {
   if (!isRecord(value)) throw new Error("AnalysisReport must be a JSON object.");
-  if (value.schemaVersion !== analysisSchemaVersion) {
-    throw new Error(`AnalysisReport.schemaVersion must be ${analysisSchemaVersion}.`);
-  }
+}
 
-  const applicability = value.applicability;
-  if (!isRecord(applicability)) throw new Error("AnalysisReport.applicability is required.");
-  assertEnum(applicability.level, ["direct", "adapt", "reference", "reject"], "applicability.level");
-  assertConfidence(applicability.confidence, "applicability.confidence");
-  assertNonEmptyStringArray(applicability.reasons, "applicability.reasons");
-
-  assertArray(value.behaviorMapping, "behaviorMapping");
-  for (const [index, item] of value.behaviorMapping.entries()) {
-    assertRecord(item, `behaviorMapping[${index}]`);
-    assertNonEmptyString(item.requirement, `behaviorMapping[${index}].requirement`);
-    assertEnum(item.status, ["covered", "partial", "missing", "conflict"], `behaviorMapping[${index}].status`);
-    assertStringArray(item.candidateEvidence, `behaviorMapping[${index}].candidateEvidence`);
-    if (item.status !== "missing" && item.candidateEvidence.length === 0) {
-      throw new Error(`behaviorMapping[${index}].candidateEvidence is required unless status is missing.`);
-    }
-    assertNonEmptyString(item.targetAction, `behaviorMapping[${index}].targetAction`);
-  }
-
-  assertArray(value.contractMapping, "contractMapping");
-  for (const [index, item] of value.contractMapping.entries()) {
-    assertRecord(item, `contractMapping[${index}]`);
-    assertNonEmptyString(item.source, `contractMapping[${index}].source`);
-    assertNonEmptyString(item.target, `contractMapping[${index}].target`);
-    assertEnum(
-      item.action,
-      ["preserve", "rename", "convert", "inject", "replace", "adapt", "map", "delegate", "wrap"],
-      `contractMapping[${index}].action`,
-    );
-    assertNonEmptyString(item.note, `contractMapping[${index}].note`);
-  }
-
-  assertArray(value.dependencyPlan, "dependencyPlan");
-  for (const [index, item] of value.dependencyPlan.entries()) {
-    assertRecord(item, `dependencyPlan[${index}]`);
-    assertNonEmptyString(item.sourceDependency, `dependencyPlan[${index}].sourceDependency`);
-    if (item.targetDependency !== undefined) {
-      assertNonEmptyString(item.targetDependency, `dependencyPlan[${index}].targetDependency`);
-    }
-    assertEnum(item.action, ["reuse-existing", "adapt", "inline", "unresolved"], `dependencyPlan[${index}].action`);
-  }
-
-  assertNonEmptyStringArray(value.implementationPlan, "implementationPlan");
-  assertStringArray(value.risks, "risks");
-  assertStringArray(value.assumptions, "assumptions");
-  assertStringArray(value.unresolved, "unresolved");
+function normalizeAnalysisReport(value: Record<string, any>): AnalysisReport {
+  const applicability = isRecord(value.applicability) ? value.applicability : {};
+  return {
+    schemaVersion: analysisSchemaVersion,
+    applicability: {
+      level: stringValue(applicability.level, "reference"),
+      confidence: numberValue(applicability.confidence, 0),
+      reasons: stringArrayValue(applicability.reasons),
+    },
+    behaviorMapping: recordArray(value.behaviorMapping).map((item) => ({
+      requirement: stringValue(item.requirement),
+      status: stringValue(item.status, "unknown"),
+      candidateEvidence: stringArrayValue(item.candidateEvidence),
+      targetAction: stringValue(item.targetAction),
+    })),
+    contractMapping: recordArray(value.contractMapping).map((item) => ({
+      source: stringValue(item.source),
+      target: stringValue(item.target),
+      action: stringValue(item.action, "unspecified"),
+      note: stringValue(item.note),
+    })),
+    dependencyPlan: recordArray(value.dependencyPlan).map((item) => ({
+      sourceDependency: stringValue(item.sourceDependency),
+      ...(typeof item.targetDependency === "string"
+        ? { targetDependency: item.targetDependency }
+        : {}),
+      action: stringValue(item.action, "unspecified"),
+    })),
+    implementationPlan: stringArrayValue(value.implementationPlan),
+    risks: stringArrayValue(value.risks),
+    assumptions: stringArrayValue(value.assumptions),
+    unresolved: stringArrayValue(value.unresolved),
+  };
 }
 
 function createDeepSeekAnalyzerClient(
@@ -288,10 +272,6 @@ function isRecord(value: unknown): value is Record<string, any> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function assertRecord(value: unknown, name: string): asserts value is Record<string, any> {
-  if (!isRecord(value)) throw new Error(`${name} must be an object.`);
-}
-
 function assertArray(value: unknown, name: string): asserts value is unknown[] {
   if (!Array.isArray(value)) throw new Error(`${name} must be an array.`);
 }
@@ -301,25 +281,20 @@ function assertStringArray(value: unknown, name: string): asserts value is strin
   if (!value.every((item) => typeof item === "string")) throw new Error(`${name} must contain only strings.`);
 }
 
-function assertNonEmptyStringArray(value: unknown, name: string): asserts value is string[] {
-  assertStringArray(value, name);
-  if (value.length === 0 || value.some((item) => !item.trim())) throw new Error(`${name} must contain non-empty strings.`);
+function recordArray(value: unknown): Array<Record<string, any>> {
+  return Array.isArray(value) ? value.filter(isRecord) : [];
 }
 
-function assertNonEmptyString(value: unknown, name: string): asserts value is string {
-  if (typeof value !== "string" || !value.trim()) throw new Error(`${name} must be a non-empty string.`);
+function stringArrayValue(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
-function assertConfidence(value: unknown, name: string): asserts value is number {
-  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1) {
-    throw new Error(`${name} must be a number between 0 and 1.`);
-  }
+function stringValue(value: unknown, fallback = ""): string {
+  return typeof value === "string" ? value : fallback;
 }
 
-function assertEnum<T extends string>(value: unknown, values: readonly T[], name: string): asserts value is T {
-  if (typeof value !== "string" || !values.includes(value as T)) {
-    throw new Error(`${name} must be one of: ${values.join(", ")}.`);
-  }
+function numberValue(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
 export type { ApplicabilityLevel, BehaviorStatus, ContractAction, DependencyAction };

@@ -1,6 +1,6 @@
 /**
  * CodeAdaptationPort orchestration:
- * collect context -> analyze -> translate -> compile -> verify/repair -> patch preview.
+ * collect context -> analyze -> translate -> compile/repair -> patch preview.
  */
 
 import { createHash } from "node:crypto";
@@ -42,11 +42,6 @@ import {
   resolveProjectTargetFile,
   type CompileResult,
 } from "./compiler";
-import type {
-  AdaptationVerifier,
-  DifferentialVerificationResult,
-} from "./verification-adapter";
-import { TranslationVerifierAdapter } from "./verification-adapter";
 
 const MAX_RETRIES = 3;
 const STANDALONE_CLASS_NAME = "ForeXploreStandalone";
@@ -64,8 +59,6 @@ export interface AdaptationAdapterOptions {
   targetEngineeringRegistry?: TargetEngineeringAdapterRegistry;
   translatorRequest?: typeof globalThis.fetch;
   validator?: AdaptationValidator;
-  /** Optional override; the default verifier is fail-closed and never runs candidate code on-host. */
-  verifier?: AdaptationVerifier;
 }
 
 export interface AdaptationAnalyzer {
@@ -101,7 +94,6 @@ export class AdaptationAdapter implements CodeAdaptationPort {
   #targetEngineeringRegistry: TargetEngineeringAdapterRegistry;
   #translatorOptions: TranslatorModelOptions;
   #validator: AdaptationValidator;
-  #verifier?: AdaptationVerifier;
 
   constructor(options: AdaptationAdapterOptions) {
     this.#skeletonProjectPath = options.skeletonProjectPath;
@@ -117,7 +109,6 @@ export class AdaptationAdapter implements CodeAdaptationPort {
       ? { apiKey: options.apiKey, request: options.translatorRequest }
       : { apiKey: options.apiKey };
     this.#validator = options.validator ?? defaultValidator;
-    this.#verifier = options.verifier ?? new TranslationVerifierAdapter({ apiKey: options.apiKey });
   }
 
   async adapt(
@@ -182,60 +173,13 @@ export class AdaptationAdapter implements CodeAdaptationPort {
       : null;
     let retries = 0;
     let repairResult = integratedResult ?? standaloneResult;
-    let differentialResult: DifferentialVerificationResult | undefined;
-
-    while (true) {
-      if (!repairResult.success) {
-        if (this.#validator.isUnavailable(repairResult) || retries >= MAX_RETRIES) break;
-        translationResult = await repairTranslation(
-          {
-            ...translationInput,
-            previousResult: translationResult,
-            validationFeedback: compilerFeedback(repairResult.errors),
-          },
-          this.#translatorOptions,
-          signal,
-        );
-        generatedCode = translationResult.generatedCode;
-        standaloneResult = this.#validator.compileStandalone(
-          request.target.language,
-          generatedCode,
-          STANDALONE_CLASS_NAME,
-        );
-        integratedResult = this.#skeletonProjectPath
-          ? this.#validator.compileIntegrated(
-              request.target.language,
-              generatedCode,
-              this.#skeletonProjectPath,
-              request.target.path,
-            )
-          : null;
-        repairResult = integratedResult ?? standaloneResult;
-        retries++;
-        continue;
-      }
-
-      if (!this.#verifier) break;
-      try {
-        differentialResult = await this.#verifier.verify(
-          { request, targetContext: collectedContext, generatedCode, projectRoot },
-          signal,
-        );
-      } catch (error: unknown) {
-        differentialResult = {
-          status: "unverified",
-          summary: `差分验证未执行：${error instanceof Error ? error.message : String(error)}`,
-          modificationPlan: [],
-          reason: "verifier-error",
-        };
-      }
-      if (differentialResult.status !== "fail" || retries >= MAX_RETRIES) break;
-
+    while (!repairResult.success) {
+      if (this.#validator.isUnavailable(repairResult) || retries >= MAX_RETRIES) break;
       translationResult = await repairTranslation(
         {
           ...translationInput,
           previousResult: translationResult,
-          validationFeedback: differentialFeedback(differentialResult),
+          validationFeedback: compilerFeedback(repairResult.errors),
         },
         this.#translatorOptions,
         signal,
@@ -281,7 +225,7 @@ export class AdaptationAdapter implements CodeAdaptationPort {
       targetLanguage: request.target.language,
       generatedCode,
       interfaceMappings: [],
-      modificationPlan: differentialResult?.modificationPlan ?? [],
+      modificationPlan: [],
       validation: [
         ...(referenceFree
           ? [{
@@ -330,7 +274,6 @@ export class AdaptationAdapter implements CodeAdaptationPort {
               summary: "No target skeleton project was configured, so integrated compilation was not run.",
               failureReason: "skeleton-project-not-configured",
             },
-        ...(differentialResult ? [differentialValidation(differentialResult)] : []),
         {
           id: "target-context-snapshot",
           label: "Target file snapshot",
@@ -342,11 +285,12 @@ export class AdaptationAdapter implements CodeAdaptationPort {
           failureReason: canBuildPatch ? undefined : "target-context-unavailable",
         },
         {
-          id: "behavioral-semantics",
-          label: "Behavioral validation",
+          id: "behavior-verification-unavailable",
+          label: "Independent behavioral verification",
           status: "unverified",
-          required: false,
-          summary: "Compilation validates syntax only; behavioral semantics still require target-project tests.",
+          required: true,
+          summary: "No independent behavior verifier is attached to the deprecated V1 route; compilation alone cannot authorize write-back.",
+          failureReason: "independent-behavior-verifier-unavailable",
         },
       ],
       files: patch ? [patch] : [],
@@ -400,30 +344,6 @@ function compilerFeedback(errors: string[]): {
     issues: (errors.length > 0 ? errors : ["Compiler failed without diagnostics."]).map(
       (message) => ({ category: "syntax" as const, message }),
     ),
-  };
-}
-
-function differentialFeedback(result: DifferentialVerificationResult): {
-  status: "fail";
-  issues: Array<{ category: "behavior"; message: string }>;
-} {
-  const plan = result.modificationPlan.length > 0
-    ? result.modificationPlan
-    : [result.summary];
-  return {
-    status: "fail",
-    issues: plan.map((message) => ({ category: "behavior" as const, message })),
-  };
-}
-
-function differentialValidation(result: DifferentialVerificationResult): ValidationRecord {
-  return {
-    id: "differential-verification",
-    label: "Differential behavioral verification",
-    status: result.status === "pass" ? "pass" : result.status === "fail" ? "fail" : "unverified",
-    required: true,
-    summary: result.summary,
-    failureReason: result.status === "pass" ? undefined : result.reason,
   };
 }
 

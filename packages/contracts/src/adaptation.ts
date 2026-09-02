@@ -36,14 +36,13 @@ export interface AdaptationResult {
 /** Stable schema version shared by Analyzer and Translator. */
 export const analysisSchemaVersion = '1.0' as const;
 
-export type ApplicabilityLevel = 'direct' | 'adapt' | 'reference' | 'reject';
-export type BehaviorStatus = 'covered' | 'partial' | 'missing' | 'conflict';
-/**
- * How a candidate contract element is represented by the target contract.
- * The last four actions cover common model terminology for an intentional
- * compatibility layer rather than silently coercing one action into another.
- */
-export type ContractAction =
+type SuggestedValue<T extends string> = T | (string & {});
+
+/** Suggested Analyzer terminology. Unknown model-produced values remain valid context. */
+export type ApplicabilityLevel = SuggestedValue<'direct' | 'adapt' | 'reference' | 'reject'>;
+export type BehaviorStatus = SuggestedValue<'covered' | 'partial' | 'missing' | 'conflict'>;
+/** Suggested ways to represent a candidate contract element in the target. */
+export type ContractAction = SuggestedValue<
   | 'preserve'
   | 'rename'
   | 'convert'
@@ -52,8 +51,9 @@ export type ContractAction =
   | 'adapt'
   | 'map'
   | 'delegate'
-  | 'wrap';
-export type DependencyAction = 'reuse-existing' | 'adapt' | 'inline' | 'unresolved';
+  | 'wrap'
+>;
+export type DependencyAction = SuggestedValue<'reuse-existing' | 'adapt' | 'inline' | 'unresolved'>;
 
 export interface TargetDependencyContext {
   name: string;

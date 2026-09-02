@@ -6,7 +6,6 @@ import { ArchitectAgent } from './architect-agent.js';
 import { FileStaticAnalysisSnapshotStore } from './analysis-snapshot-store.js';
 import { ModuleDiscoveryAgent } from './module-discovery-agent.js';
 import { ModuleSummaryAgent } from './module-summary-agent.js';
-import { TranslationVerifierAdapter } from './verification-adapter.js';
 import { createDefaultTargetEngineeringAdapterRegistry } from './context-collector.js';
 import { createAdaptationRuntimeCapabilitySnapshot } from './runtime-capability-snapshot.js';
 import {
@@ -24,20 +23,12 @@ const adapter = new AdaptationAdapter({
   skeletonProjectPath: config.skeletonProjectPath,
   projectRoot: config.projectRoot,
   targetEngineeringRegistry,
-  verifier: new TranslationVerifierAdapter({
-    apiKey: config.apiKey,
-    timeoutMs: Number.parseInt(process.env.VERIFIER_TIMEOUT_MS ?? "", 10) || undefined,
-    // A normal HTTP service has model credentials and the developer's
-    // workspace available.  It must fail closed until a different deployment
-    // injects an externally isolated executor.
-    execution: config.verifierExecution,
-  }),
 });
 
 const runtimeCapabilitySnapshot = createAdaptationRuntimeCapabilitySnapshot({
   createdAt: new Date().toISOString(),
   analysisExecution: 'disabled',
-  verifierExecution: config.verifierExecution,
+  verifierExecution: 'disabled',
   workspaceMutationExecution: 'disabled',
   targetEngineeringRegistry,
 });
@@ -68,7 +59,7 @@ server.listen(config.port, config.host, () => {
   console.log(`Target project: ${config.projectRoot}`);
   console.log(`Static analysis snapshots: ${config.analysisRoot}`);
   console.log(`Runtime capability snapshot: ${runtimeCapabilitySnapshot.id}`);
-  console.log("Differential execution: disabled (no isolated executor configured)");
+  console.log('Behavior verification: disabled (no isolated executor configured)');
 });
 
 async function shutdown(): Promise<void> {

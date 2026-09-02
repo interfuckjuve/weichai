@@ -15,12 +15,6 @@ export interface AdaptationServiceConfig {
   projectRoot: string;
   /** Server-owned analysis snapshot location used by the read-only planner. */
   analysisRoot: string;
-  /**
-   * Production HTTP deliberately does not execute retrieved code.  An
-   * externally isolated executor must be wired by a separate deployment
-   * integration before this can ever change.
-   */
-  verifierExecution: "disabled";
 }
 
 function positiveInteger(value: string | undefined, fallback: number, name: string): number {
@@ -48,14 +42,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AdaptationServ
     skeletonProjectPath,
   );
 
-  const configuredVerifierExecution = env.ADAPTATION_VERIFIER_EXECUTION?.trim();
-  if (configuredVerifierExecution && configuredVerifierExecution !== "disabled") {
-    throw new Error(
-      "ADAPTATION_VERIFIER_EXECUTION only supports \"disabled\" in the HTTP service. " +
-      "Use a separately deployed, externally isolated executor integration for differential execution.",
-    );
-  }
-
   return {
     host: env.ADAPTATION_HOST?.trim() || "127.0.0.1",
     port: positiveInteger(env.ADAPTATION_PORT, 8788, "ADAPTATION_PORT"),
@@ -67,7 +53,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AdaptationServ
       env.ADAPTATION_ANALYSIS_ROOT?.trim(),
       join(projectRoot, ".forexplore", "analysis"),
     ),
-    verifierExecution: "disabled",
   };
 }
 

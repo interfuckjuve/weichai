@@ -130,32 +130,23 @@ describe("AnalyzerAgent", () => {
     expect(parseAnalysisReport(`Here is the report:\n\n\`\`\`json\n${JSON.stringify(value)}\n\`\`\``)).toEqual(value);
   });
 
-  it("feeds schema validation feedback back to the Analyzer before failing", async () => {
-    const invalid = report("adapt", "partial");
-    invalid.contractMapping.push({
+  it("passes unknown contract actions through without a repair call", async () => {
+    const advisory = report("adapt", "partial");
+    advisory.contractMapping.push({
       source: "Audit record",
       target: "IAuditJournal",
-      action: "unsupported" as never,
+      action: "compose-through-port",
       note: "Use the target journal dependency.",
     });
-    const corrected = report("adapt", "partial");
     const calls: Array<readonly AnalyzerMessage[]> = [];
     const complete: AnalyzerModelClient["complete"] = async (messages) => {
       calls.push(messages);
-      return JSON.stringify(calls.length === 1 ? invalid : corrected);
+      return JSON.stringify(advisory);
     };
     const agent = new AnalyzerAgent({ client: { complete } });
 
-    await expect(agent.analyze(request(cases[0]))).resolves.toEqual(corrected);
-    expect(calls).toHaveLength(2);
-
-    const repairMessages = calls[1] ?? [];
-    expect(repairMessages.map((message) => message.role)).toEqual(["system", "user", "user"]);
-    expect(repairMessages[2]?.content).toContain("contractMapping[1].action");
-    expect(repairMessages[2]?.content).toContain(
-      "preserve | rename | convert | inject | replace | adapt | map | delegate | wrap",
-    );
-    expect(repairMessages[2]?.content).toContain('"action":"unsupported"');
+    await expect(agent.analyze(request(cases[0]))).resolves.toEqual(advisory);
+    expect(calls).toHaveLength(1);
   });
 
   it("accepts common contract action terminology", () => {
@@ -166,25 +157,35 @@ describe("AnalyzerAgent", () => {
     }
   });
 
-  it("stops after two failed schema repairs", async () => {
-    const invalid = report("adapt", "partial");
-    invalid.contractMapping[0].action = "unsupported" as never;
-    const complete = vi.fn(async () => JSON.stringify(invalid));
+  it("accepts arbitrary Analyzer terminology without schema repairs", async () => {
+    const advisory = report("adapt", "partial");
+    advisory.applicability.level = "candidate-with-caveats";
+    advisory.behaviorMapping[0]!.status = "mostly-covered";
+    advisory.contractMapping[0]!.action = "compose-through-port";
+    advisory.dependencyPlan[0]!.action = "provided-by-runtime";
+    const complete = vi.fn(async () => JSON.stringify(advisory));
     const agent = new AnalyzerAgent({ client: { complete } });
 
-    await expect(agent.analyze(request(cases[0]))).rejects.toThrow(
-      "contractMapping[0].action must be one of",
-    );
-    expect(complete).toHaveBeenCalledTimes(3);
+    await expect(agent.analyze(request(cases[0]))).resolves.toEqual(advisory);
+    expect(complete).toHaveBeenCalledTimes(1);
   });
 
-  it("rejects malformed and structurally invalid reports", () => {
-    expect(() => parseAnalysisReport("not json")).toThrow("does not contain a JSON object");
-    expect(() => parseAnalysisReport(JSON.stringify({ schemaVersion: "1.0" }))).toThrow("applicability");
-
-    const invalid = report("direct", "covered");
-    invalid.applicability.confidence = 2;
-    expect(() => parseAnalysisReport(JSON.stringify(invalid))).toThrow("between 0 and 1");
+  it("preserves narrative output and fills omitted report sections", () => {
+    expect(parseAnalysisReport("Candidate is usable with a compatibility wrapper.")).toMatchObject({
+      schemaVersion: "1.0",
+      assumptions: ["Candidate is usable with a compatibility wrapper."],
+    });
+    expect(parseAnalysisReport(JSON.stringify({ schemaVersion: "future" }))).toEqual({
+      schemaVersion: "1.0",
+      applicability: { level: "reference", confidence: 0, reasons: [] },
+      behaviorMapping: [],
+      contractMapping: [],
+      dependencyPlan: [],
+      implementationPlan: [],
+      risks: [],
+      assumptions: [],
+      unresolved: [],
+    });
   });
 
   it("requires a non-empty requirement before making a model call", async () => {

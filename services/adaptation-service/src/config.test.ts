@@ -11,7 +11,6 @@ describe("adaptation service config", () => {
     expect(config.apiKey).toBe("demo-key");
     expect(config.skeletonProjectPath).toMatch(/commons-fileupload-java-skeleton$/);
     expect(config.projectRoot).toBe(config.skeletonProjectPath);
-    expect(config.verifierExecution).toBe("disabled");
   });
 
   it("reads explicit skeleton and backfill roots", () => {
@@ -69,10 +68,4 @@ describe("adaptation service config", () => {
     }
   });
 
-  it("does not allow the HTTP service to opt into host-side candidate execution", () => {
-    expect(() => loadConfig({
-      DEEPSEEK_API_KEY: "sk-test",
-      ADAPTATION_VERIFIER_EXECUTION: "trusted-isolated",
-    })).toThrow(/only supports "disabled"/);
-  });
 });
