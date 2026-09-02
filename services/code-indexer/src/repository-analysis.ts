@@ -621,6 +621,43 @@ function maskCommentsAndLiterals(source: string): string {
       index = stop;
       continue;
     }
+    if (current === '\'' && next === '\'' && third === '\'') {
+      const end = source.indexOf("'''", index + 3);
+      const stop = end === -1 ? source.length : end + 3;
+      mask(index, stop);
+      index = stop;
+      continue;
+    }
+    if (current === '`') {
+      let cursor = index + 1;
+      while (cursor < source.length) {
+        if (source[cursor] === '\\') {
+          cursor += 2;
+          continue;
+        }
+        if (source[cursor] === '`') {
+          cursor += 1;
+          break;
+        }
+        cursor += 1;
+      }
+      mask(index, cursor);
+      index = cursor;
+      continue;
+    }
+    if (current === 'r') {
+      const rawStart = source.slice(index).match(/^r(#+)?"/);
+      if (rawStart) {
+        const hashes = rawStart[1] ?? '';
+        const terminator = `"${hashes}`;
+        const contentStart = index + rawStart[0].length;
+        const end = source.indexOf(terminator, contentStart);
+        const stop = end === -1 ? source.length : end + terminator.length;
+        mask(index, stop);
+        index = stop;
+        continue;
+      }
+    }
     if (current === '@' && next === '"') {
       let cursor = index + 2;
       while (cursor < source.length) {
@@ -1600,6 +1637,44 @@ function genericSymbolMatches(source: string, languageId: LanguageId): GenericSy
   return matches;
 }
 
+function genericDeclarationRange(
+  file: RepositoryAnalysisSourceFile,
+  match: GenericSymbolMatch,
+): StaticSourceRange {
+  const starts = lineStarts(file.content);
+  const lineStart = starts[match.line - 1] ?? 0;
+  const lineEnd = starts[match.line] === undefined
+    ? file.content.length
+    : Math.max(lineStart, starts[match.line]! - 1);
+  const declarationStart = lineStart + ((file.content.slice(lineStart, lineEnd).match(/^\s*/) ?? [''])[0]?.length ?? 0);
+  if (file.languageId?.toLowerCase() === 'python') {
+    const lines = file.content.replace(/\r\n?/g, '\n').split('\n');
+    const startIndex = match.line - 1;
+    const baseIndent = (lines[startIndex] ?? '').length - (lines[startIndex] ?? '').trimStart().length;
+    let endLineIndex = startIndex;
+    for (let index = startIndex + 1; index < lines.length; index += 1) {
+      const line = lines[index] ?? '';
+      const indent = line.length - line.trimStart().length;
+      if (line.trim() && indent <= baseIndent) break;
+      endLineIndex = index;
+    }
+    const endLine = lines[endLineIndex] ?? '';
+    return {
+      path: file.path,
+      startLine: match.line,
+      startColumn: declarationStart - lineStart + 1,
+      endLine: endLineIndex + 1,
+      endColumn: Math.max(1, endLine.length),
+    };
+  }
+  const opening = file.masked.indexOf('{', declarationStart);
+  if (opening >= declarationStart && opening <= Math.min(file.masked.length, declarationStart + 4000)) {
+    const closing = matchingBrace(file.masked, opening);
+    if (closing !== undefined) return rangeForOffsets(file as RepositoryFile, starts, declarationStart, closing + 1);
+  }
+  return rangeForOffsets(file as RepositoryFile, starts, declarationStart, lineEnd);
+}
+
 function genericSymbolFacts(
   languageId: LanguageId,
   match: GenericSymbolMatch,
@@ -1684,7 +1759,7 @@ export function createGenericRepositoryLanguageAdapter(input: {
       : {}),
     analysisLevel: 'generic',
     analyze(file, reportDiagnostic) {
-      const symbols = genericSymbolMatches(file.content, input.languageId).map((match) => {
+      const preliminary = genericSymbolMatches(file.content, input.languageId).map((match) => {
         const qualifiedName = genericQualifiedName(file, match.name);
         const kind: StaticSymbolKind = match.kind;
         return {
@@ -1695,15 +1770,28 @@ export function createGenericRepositoryLanguageAdapter(input: {
           qualifiedName,
           path: file.path,
           project: file.project,
-          range: {
-            path: file.path,
-            startLine: match.line,
-            startColumn: 1,
-          },
+          range: genericDeclarationRange(file, match),
           signature: match.signature,
           ...genericSymbolFacts(input.languageId, match),
           testOnly: file.role === 'test',
         } satisfies StaticSymbol;
+      });
+      const symbols = preliminary.map((symbol) => {
+        if (symbol.kind !== 'function' || !symbol.range) return symbol;
+        const owner = preliminary
+          .filter((candidate) =>
+            candidate.kind === 'class' && candidate.range &&
+            (candidate.range.startLine < symbol.range!.startLine ||
+              (candidate.range.startLine === symbol.range!.startLine &&
+                (candidate.range.startColumn ?? 1) < (symbol.range!.startColumn ?? 1))) &&
+            (candidate.range.endLine ?? candidate.range.startLine) >=
+              (symbol.range!.endLine ?? symbol.range!.startLine),
+          )
+          .sort((left, right) =>
+            ((left.range?.endLine ?? 0) - (left.range?.startLine ?? 0)) -
+            ((right.range?.endLine ?? 0) - (right.range?.startLine ?? 0)),
+          )[0];
+        return owner ? { ...symbol, containerSymbolId: owner.id } : symbol;
       });
       reportDiagnostic({
         severity: 'info',

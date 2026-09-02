@@ -18,7 +18,7 @@ _工程边界与验收基线，2026-09-02。本文描述目标工作区（01B）
   → class / file / module 确定性聚合
   → TargetWorkspaceModuleSnapshot
   → 01B 目标树与精确 callable 选择
-  → 既有符号级检索和翻译流程
+  → V2 符号/实现制品与 exact-route 迁移流程
 ```
 
 目标工作区只产生供本次迁移使用的内容寻址目录。它不会生成模块 Wiki，不进入第二道人审，不写 SQLite knowledge registry，不创建 SeekDB module generation/active head，也没有“发布/撤销”动作。
@@ -107,23 +107,23 @@ Host 才能：
 - 运行分析和 Agent client；
 - 读取/校验本地文件；
 - 记录 Gate 1 reviewer；
-- 将 IR 实体转换为旧 `ModuleTarget`；
+- 为 V2 构造并校验开放 `LanguageId` 的目标引用与 `TargetContextSnapshotV2`；仅 deprecated V1 兼容路径才转换为旧 `ModuleTarget`；
 - 在启动检索、翻译和写回前复验当前 snapshot/entity/file/body hash；
 - 打开目标文件或触发快照失效。
 
 Host record 使用扩展本地 Host-owned 文件存储；workspace ID 只映射为哈希文件名，记录以临时文件 + fsync + 原子 rename 写入。同一进程内按 workspace 串行修改，跨扩展窗口用文件锁和完整 expected-record CAS 拒绝覆盖。扩展重启恢复记录后，打开目录或显式启动翻译前仍会重新分析工作区；持久化记录本身不是 freshness 授权。
 
-前端视图必须显示 module → file → type → callable、搜索、五态筛选、分母统计、原因/evidence、shared/unassigned 与 stale 状态。只有 Host 可解析且当前的 concrete callable 可以进入旧翻译流程。
+前端视图必须显示 module → file → type → callable、搜索、五态筛选、分母统计、原因/evidence、shared/unassigned 与 stale 状态。只有 Host 可解析且当前的 concrete callable，并且其完整 `sourceLanguageId × targetLanguageId × strategy` 路线及必需阶段实时可用，才可以进入正式 V2 迁移流程。
 
 ## 当前工作包范围
 
 ### 必须完成
 
 1. 稳定共享契约和确定性聚合器。
-2. Java/C# 实现状态 detector；其他语言显式 `unknown`，registry 保持开放。
+2. 默认 registry 为 Java、C#、TypeScript、Python、Go 和 Rust 提供语言感知的词法 detector；第三方 detector 可注册，未注册、边界无法可靠隔离或证据不足时显式 `unknown`。
 3. 01B Host 生命周期：分析、发现、Gate 1、状态快照、刷新、失效和目标上下文选择。
 4. VS Code 命令、Host/Webview 协议和真实目标树接线。
-5. 选中 callable 后进入现有符号检索/翻译流程，且 Host 重新构造并校验 `ModuleTarget`。
+5. 选中 callable 后由 Host 构造正式 V2 目标上下文和内容寻址引用，并按已物化的 exact route capability 决定是否允许检索后的迁移执行；V1 `ModuleTarget` 只是 deprecated 兼容面。
 6. 写回后失效旧目标快照。
 7. 单元、协议、Host、UI 和跨层构建验证。
 
@@ -133,7 +133,7 @@ Host record 使用扩展本地 Host-owned 文件存储；workspace ID 只映射�
 - 不在本工作包实现目标模块与存量模块的匹配排序。
 - 不实现 module/class 批量翻译。
 - 不从非空方法体推断业务语义正确。
-- 不承诺任意语言 detector；首期真实迁移能力仍是 Java → C#。
+- 不把“全面多语言开发”表述为所有语言组合均已可用；Java → C# 仅是历史回归基线，当前执行权由 exact route capability、验证策略和必需阶段共同决定，缺路线、adapter 或必需验证一律失败关闭。
 - 不用聚合状态替代编译、测试、独立验证或最终人工 diff 审阅。
 - 不用任务目标重新划分已通过 Gate 1 的目标模块；后续 Architect 只能在 immutable catalog 上生成执行 overlay。
 - 不在本工作包实现 01B 多轮历史快照浏览器或保留策略；本地 Store 持久化并 CAS 保护当前 record，不等同于完整审计账本。

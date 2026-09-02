@@ -1,8 +1,8 @@
 # ForeXplore 前端、目标模块划分与模块检索 Handoff
 
-_基于 2026-09-02 当前工作树（HEAD `031dd84`，分支 `codex/module-migration-plan`）；供前端、目标模块和检索团队接手联调。_
+_起始基线为 2026-09-02 的 `031dd84`（分支 `codex/module-migration-plan`）；文末验证结果已更新到本轮语言开放 V2 施工工作树。供前端、目标模块和检索团队接手联调。_
 
-本文审计的是当前未提交工作树中的实际实现，说明本次会话完成了什么、哪些接口已经变化、下游必须适配什么，以及哪些能力仍未实现。
+本文主体记录 01A/01B 交接，后续语言开放执行层以[《语言无关迁移执行：工程规划与验收门禁》](../architecture/language-agnostic-migration-execution.md)为现行事实，说明已经完成什么、哪些接口已经变化、下游必须适配什么，以及哪些能力仍未实现。
 
 ---
 
@@ -20,9 +20,11 @@ _基于 2026-09-02 当前工作树（HEAD `031dd84`，分支 `codex/module-migra
 | 前端入库控制面 | 只有命令、只读预览和 modal | 尚无 React 生命周期、双审、发布历史或撤销页面 |
 | 01B 目标模块划分 | 已接入可信 Host 和 VS Code Webview | 内容寻址、Gate 1、五态状态和 stale/rebase 已实现；尚未绑定来源模块候选或 active publication |
 | 模块与符号融合 | 未实现 | 必须由下一层建立显式匹配与证据制品 |
-| 自动迁移能力 | 仍是 Java → C# MVP | 入库语言开放不等于迁移语言开放 |
+| 自动迁移能力 | 按 exact route capability 快照授权；Java → C# 只是历史回归基线 | 入库语言开放、编译器存在或 route 已注册均不等于可执行；必需阶段不可用时 V2 失败关闭 |
 
 > 当前改动包含大量未跟踪文件和未提交修改；本文不是 commit release note。合并前应先确定提交边界，再按本文的验证矩阵重跑。
+
+> 当前方向是全面多语言开发，但不得把这个方向表述为所有语言组合已可用。正式 V2 能力事实来自 `MigrationRuntimeCapabilitySnapshot`：路线必须精确匹配 source/target/strategy，且 analysis、context、planning、translation、patch、compile、behavior validation 和 workspace gate 中的必需阶段均可用。当前生产 adaptation HTTP 默认不拥有 Host analysis/apply/rollback，且未配置外部隔离 verifier，因此相应路线保持 fail-closed。`/v1/adapt`、旧 `ModuleTarget` 交接和 adaptation MCP 都是 deprecated legacy，不得当作当前语言能力证据。
 
 本文工作包中的 P0/P1 只表示本 handoff 内的依赖顺序，不覆盖仓库 `AGENTS.md` 记录的全局工程优先级。
 
@@ -117,7 +119,7 @@ flowchart LR
 | 发布补偿和显式撤销 | 发布失败执行 saga 补偿；用户撤销采用 remote-first 并恢复前代 | [`repository-module-knowledge-publication.ts`](../../apps/vscode-extension/src/repository-module-knowledge-publication.ts)、[`repository-module-knowledge-withdrawal.ts`](../../apps/vscode-extension/src/repository-module-knowledge-withdrawal.ts) |
 | 新 HTTP 客户端 | 新增 discovery、summary 和模块索引 writer 客户端 | [`module-discovery-client.ts`](../../apps/vscode-extension/src/module-discovery-client.ts)、[`module-summary-client.ts`](../../apps/vscode-extension/src/module-summary-client.ts)、[`module-knowledge-index-client.ts`](../../apps/vscode-extension/src/module-knowledge-index-client.ts) |
 | 01B 可信 Host | 复用 01A 分析/发现，执行独立 Gate 1、状态目录、刷新、显式 body-only rebase 和快照绑定上下文解析 | [`target-workspace-host.ts`](../../apps/vscode-extension/src/target-workspace-host.ts) |
-| 01B 实现状态检测 | Java/C# 做可审计静态检测；未注册 detector 的语言逐 callable 记录 `unknown` | [`implementation-assessment.ts`](../../services/code-indexer/src/implementation-assessment.ts)、[`target-workspace-implementation-inventory.ts`](../../apps/vscode-extension/src/target-workspace-implementation-inventory.ts) |
+| 01B 实现状态检测 | 默认 registry 为 Java、C#、TypeScript、Python、Go 和 Rust 提供可审计的语言感知词法 detector；未注册、边界无法可靠隔离或证据不足时逐 callable 记录 `unknown` | [`implementation-assessment.ts`](../../services/code-indexer/src/implementation-assessment.ts)、[`target-workspace-implementation-inventory.ts`](../../apps/vscode-extension/src/target-workspace-implementation-inventory.ts) |
 
 ### 独立模块索引
 
@@ -160,7 +162,7 @@ flowchart LR
 | `RepositoryModuleKnowledgeSearchRequest/Result` | 已新增 | 下一层要新增只读 search port、fan-out 和缓存/stale 规则 |
 | `EntityImplementationAssessment`、`TargetImplementationRollup`、`TargetWorkspaceModuleSnapshot` | 已新增 | 01B 的五态事实、确定性聚合、排除项和来源 lineage；静态 `implemented` 不是业务正确性 |
 | `TargetWorkspaceSnapshot`、`TargetWorkspaceTreeNode`、`TargetWorkspaceSelectionIdentity` | 已新增（Extension view model） | 前端只能提交当前 snapshot/hash/node/entity；路径只用于 Host → UI 展示 |
-| `ModuleTarget`、`SearchRequest`、`SearchCandidate`、`CodeSearchPort` | 未改为模块检索 | 现有前端和符号召回兼容，但不能表示功能模块命中 |
+| `ModuleTarget`、`SearchRequest`、`SearchCandidate`、`CodeSearchPort` | deprecated V1 符号兼容面，未改为模块检索 | 可保持旧前端和符号召回兼容，但不能表示功能模块命中，也不得成为 V2 adaptation 的输入或回退路径 |
 | `FunctionalModule`、`ModuleMigrationPlan` | 保留 | 仍负责目标写集和执行安全，后续只增加来源选择绑定 |
 
 ### HTTP API
@@ -170,6 +172,9 @@ flowchart LR
 | `POST /v1/module-discovery` | `{ snapshotId, constraints? }` | `ModuleDiscoveryProposal` | VS Code Host；结果仍是不可信提案 |
 | `POST /v1/module-summary` | `RepositoryModuleBundle + EvidenceBundle + optional revision context` | `RepositoryModuleWikiProposal` | VS Code Host；请求和响应都复验 |
 | `POST /v1/search` | 旧 `SearchRequest` | `{ candidates: SearchCandidate[] }` | 现有符号前端/adapter；接口保持不变 |
+| `GET /v2/runtime-capabilities` | 无 | 经 core 物化并验证的 `MigrationRuntimeCapabilitySnapshot`，包括 unavailable route 及 reason codes | 所有 V2 client；这是 service-owned 能力事实，不得用 V1 或 compiler 列表代替 |
+| `POST /v2/adapt` | 已验证的 `AdaptationRequestV2`，其完整制品由服务端权威 store 深绑定 | 直接返回经验证的 `AdaptationResultV2`；能力/组合/制品错误为结构化 409/422，未配置执行端为 503 | 可信 Host 组合；仅可覆盖 Host-owned analysis/apply/rollback 阶段，不得覆盖 service-owned provider/policy |
+| `POST /v1/adapt` | 旧 `AdaptationRequest` | 旧 `AdaptationResult` | deprecated legacy 兼容；V2 不调用且不回退到此路径 |
 | `POST /v1/module-knowledge/search` | `RepositoryModuleKnowledgeSearchRequest` | 直接返回 `RepositoryModuleKnowledgeSearchResult` | 只读匹配层；受 deployment repository allow-list 限制 |
 | `POST /v1/module-knowledge/generations/stage` | staged publication、ACL、documents | `{ receipt }`，正常完成到 `validated` | 仅可信 writer；Bearer token |
 | `POST .../validate` | publication key | `{ receipt }` | 仅可信 writer；Bearer token |
@@ -238,7 +243,7 @@ flowchart LR
 - [`CodeSearchPort`](../../packages/workflow-core/src/ports/code-search.port.ts) 只返回 `SearchCandidate[]`。
 - [`HostToWebviewMessage`](../../apps/vscode-extension/src/protocol/messages.ts) 和 `WebviewToHostMessage` 已有 01B snapshot/refresh/invalidation/selection DTO，但仍没有 01A ingestion、双审、publication 或来源 module-match DTO。
 - [`WorkflowState`](../../packages/workflow-core/src/workflow.ts) 没有 ingestionId、targetModuleId、active publication、module candidates、match receipt 或 stale 状态。
-- 现有 `ModuleTarget.language` 和 `SearchRequest.candidateLanguages` 仍使用封闭 `Language`，与入库侧开放 `LanguageId` 存在明确断层。
+- deprecated V1 的 `ModuleTarget.language` 和 `SearchRequest.candidateLanguages` 仍使用封闭 `Language`；正式 V2 目标、路线与上下文已使用开放 `LanguageId`。前端接线不得把 V2 再降级为旧封闭类型。
 - 共享 contracts 只有本地 `RepositoryKnowledgePublicationHead`；远端 `/generations/head` 使用 retrieval-service 私有 `ModuleKnowledgeHead`，其字段可为空且另有 `revision`。前端联调前应新增共享的远端 active-head/readiness DTO，不能让两种 head 共用一个类型。
 
 ## 🖥️ 前端交接
@@ -313,7 +318,7 @@ flowchart LR
 | --- | --- | --- | --- |
 | TM-01 | 已完成 | 01B 真实目标快照/IR provider 接入 Host 与 Webview | node/entity 绑定内容寻址 snapshot；分析语言通过 registry 开放 |
 | TM-02 | 已完成 | 建立 reviewed target catalog、实现状态目录和精确 callable context | snapshot/catalog/entity/file/body lineage 由 Host 复验；UI 路径不可回传作为授权 |
-| TM-03 | 已完成 | 保留模块与符号双锚点 | `RepositoryModuleCatalog` 表达目标功能边界；`ModuleTarget` 继续作为现有符号检索/翻译输入 |
+| TM-03 | 已完成（V1 兼容边界） | 保留模块与符号双锚点 | `RepositoryModuleCatalog` 表达目标功能边界；`ModuleTarget` 只继续服务 deprecated V1 符号流，正式 V2 必须使用 `MigrationTargetRef`/`TargetContextSnapshotV2` 与 exact route ref |
 | TM-04 | 已完成（边界明确） | 目标分析/视图使用开放 `LanguageId`，迁移能力保持独立 | 无 detector 的语言记录 `unknown`；不能因此声称可迁移 |
 | TM-05 | P1 待做 | 将人工选择的来源模块和检索快照绑定后续迁移 | 记录 publication/generation/module/artifact hashes、head token 和 retrieval receipt；用独立 decision artifact 或 post-match plan 引用，不反写 target snapshot hash |
 | TM-06 | P1 部分完成 | 完成目标侧 stale 传播；继续实现来源 head 传播 | 当前目标写回/refresh 会阻断旧快照；未来任意来源 head 变更、ABA 恢复或显式撤销还需使旧 match 和未执行 plan 确定性失效 |
@@ -603,7 +608,7 @@ type RetrievalEvidence =
 - 强制 Gate 1 与 Gate 2 由不同已认证人员完成；当前 reviewer/actor 只是宿主记录的字符串；
 - Gate 1、Gate 2、发布恢复和显式撤销的真实 VS Code UI E2E；现有覆盖主要在 Host seam 与 coordinator/store/client；
 - 完整 secret/DLP、物理清理、保留期和合规擦除；
-- 任意语言迁移、独立行为验证或业务语义正确性证明。
+- 任意语言对自动获得生产迁移能力或业务语义正确性证明；现行 V2 已支持精确路线注册和独立验证门禁，但每条路线仍需自己的 adapter、工具链和隔离 verifier 才能变为 available。
 
 当前 `/health` 同时检查 symbol store 和 module store；模块存储不可用时整体 health 会失败，即使符号表仍可连接。部署和前端状态页需要显式决定是否拆分健康度，当前尚未讨论。
 
@@ -613,19 +618,19 @@ type RetrievalEvidence =
 
 | 范围 | 命令 | 结果 |
 | --- | --- | --- |
-| workflow-core | `npm test --workspace @forexplore/workflow-core` | 7 个测试文件、68 项通过 |
-| code-indexer | `npm test --workspace @forexplore/code-indexer` | 4 个测试文件、37 项通过 |
+| workflow-core | `npm test --workspace @forexplore/workflow-core` | 11 个测试文件、101 项通过 |
+| code-indexer | `npm test --workspace @forexplore/code-indexer` | 5 个测试文件、41 项通过 |
 | code-indexer build | `npm run build --workspace @forexplore/code-indexer` | 通过 |
-| adaptation-service | `npm test --workspace @forexplore/adaptation-service` | 20 个测试文件、180 项通过、1 项跳过 |
+| adaptation-service | `npm test --workspace @forexplore/adaptation-service` | 23 个测试文件、201 项通过、1 项跳过 |
 | adaptation-service build | `npm run build --workspace @forexplore/adaptation-service` | 通过 |
-| retrieval-service | `npm test --workspace @forexplore/retrieval-service` | 13 个测试文件、81 项通过 |
+| retrieval-service | `npm test --workspace @forexplore/retrieval-service` | 14 个测试文件、86 项通过 |
 | retrieval-service build | `npm run build --workspace @forexplore/retrieval-service` | 通过 |
-| VS Code extension | `npm test --workspace forexplore-vscode` | 30 个测试文件、155 项通过 |
+| VS Code extension | `npm test --workspace forexplore-vscode` | 36 个测试文件、185 项通过 |
 | VS Code typecheck | `npm run typecheck --workspace forexplore-vscode` | Host 与 Webview TypeScript 检查通过 |
 | VS Code build | `npm run build --workspace forexplore-vscode` | Webview 与 extension bundle 构建通过 |
 | workflow-web | `npm test --workspace @forexplore/workflow-web` | 2 个测试文件、4 项通过 |
 | workflow-web build | `npm run build --workspace @forexplore/workflow-web` | 通过 |
-| monorepo 全量 | `npm test` | 全部 workspace 通过；translation-verifier 547 项通过、9 项跳过，其余计数见上表/命令输出 |
+| monorepo 全量 | `npm test` | 1197 项通过、5 项按显式工具链条件跳过；全部 workspace 通过 |
 
 `@forexplore/workflow-core` 当前没有独立 `build` script；本次用其测试及消费方 TypeScript 检查作为编译证据。上述测试证明的是契约、门禁和失败路径，不证明 Agent 在真实企业仓划分出的业务模块必然正确，也不替代真实 SeekDB 环境的性能和故障注入验证。
 
@@ -645,6 +650,7 @@ type RetrievalEvidence =
 | 独立模块索引与搜索 | [`services/retrieval-service/src/module-knowledge-search.ts`](../../services/retrieval-service/src/module-knowledge-search.ts)、[`seekdb-module-knowledge-store.ts`](../../services/retrieval-service/src/seekdb-module-knowledge-store.ts) |
 | 现有 VS Code 翻译 Webview | [`apps/vscode-extension/webview/src`](../../apps/vscode-extension/webview/src) |
 | 现有独立 Web 原型 | [`web/src`](../../web/src) |
+| 语言开放 V2 执行链 | [`migration-execution-v2.ts`](../../packages/workflow-core/src/migration-execution-v2.ts)、[`migration-workflow-v2-host.ts`](../../apps/vscode-extension/src/migration-workflow-v2-host.ts)、[`adaptation-adapter-v2.ts`](../../services/adaptation-service/src/adaptation-adapter-v2.ts) |
 | 本阶段工程边界 | [《存量代码仓模块划分与知识发布：工程边界》](../architecture/repository-module-processing-boundary.md) |
 | Architecture 图 | [ForeXplore repository module architecture](../architecture/forexplore-repository-module-architecture.html) |
 | Lifecycle 图 | [ForeXplore repository module lifecycle](../architecture/forexplore-repository-module-lifecycle.html) |

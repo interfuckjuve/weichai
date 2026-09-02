@@ -8,6 +8,7 @@ import type {
   ModuleMappingReview,
   ModuleMappingReviewDecision,
   RepositoryModuleCatalog,
+  RepositoryStaticAnalysisAdapterDescriptor,
   UnifiedRepositoryIR,
 } from '@forexplore/contracts';
 import {
@@ -20,6 +21,7 @@ import {
   validateMigrationExecutionOverlay,
   validateMigrationRuntimeCapabilitySnapshot,
   validateModuleMappingProposal,
+  type MigrationExecutionV2ValidationContext,
 } from '@forexplore/workflow-core';
 import type { ModuleMappingRunBinding } from './protocol/messages';
 
@@ -29,6 +31,10 @@ export interface ReviewedModuleCatalogHead {
   workspaceId: string;
   ir: UnifiedRepositoryIR;
   catalog: RepositoryModuleCatalog;
+  analysisSnapshotId: string;
+  analysisContentHash: string;
+  /** Immutable adapter evidence from the exact analysis snapshot behind this catalog. */
+  analysisAdapters: RepositoryStaticAnalysisAdapterDescriptor[];
 }
 
 export interface ModuleMappingCatalogHeadProvider {
@@ -39,7 +45,14 @@ export interface ModuleMappingCatalogHeadProvider {
 }
 
 export interface ModuleMappingRouteProvider {
-  resolve(routeId: string, routeVersion: string): Promise<ResolvedModuleMappingRoute | undefined>;
+  resolve(
+    routeId: string,
+    routeVersion: string,
+    heads: { source: ReviewedModuleCatalogHead; target: ReviewedModuleCatalogHead },
+  ): Promise<ResolvedModuleMappingRoute | undefined>;
+  list?(
+    heads: { source: ReviewedModuleCatalogHead; target: ReviewedModuleCatalogHead },
+  ): Promise<ResolvedModuleMappingRoute[]>;
 }
 
 /** Runtime-owned, fully materialized capability selected before review acceptance. */
@@ -210,7 +223,11 @@ export class ModuleMappingHost {
     } else {
       const routeId = requiredText(input.routeId ?? '', 'Migration route ID');
       const routeVersion = requiredText(input.routeVersion ?? '', 'Migration route version');
-      const resolvedRoute = await this.dependencies.routes.resolve(routeId, routeVersion);
+      const resolvedRoute = await this.dependencies.routes.resolve(
+        routeId,
+        routeVersion,
+        { source, target },
+      );
       if (!resolvedRoute) {
         throw new Error(`Migration route ${routeId}@${routeVersion} is not supported.`);
       }
@@ -276,6 +293,27 @@ export class ModuleMappingHost {
     return records;
   }
 
+  async listRoutes(recordId: string): Promise<ResolvedModuleMappingRoute[]> {
+    const record = await this.#requiredRecord(recordId);
+    const heads = await this.#loadHeads(record.sourceWorkspaceId, record.targetWorkspaceId);
+    if (this.dependencies.routes.list) return this.dependencies.routes.list(heads);
+    return [];
+  }
+
+  /** Supported routes from current accepted mappings for one target catalog. */
+  async listTargetRouteResolutions(targetWorkspaceId: string): Promise<MigrationRouteResolution[]> {
+    const resolutions = new Map<string, MigrationRouteResolution>();
+    for (const stored of (await this.#state()).records) {
+      if (stored.targetWorkspaceId !== targetWorkspaceId || stored.stage !== 'ready') continue;
+      const record = await this.#refresh(stored);
+      if (record.stage !== 'ready' || !record.routeResolution) continue;
+      const route = record.routeResolution.route;
+      resolutions.set(`${route.sourceLanguageId}\0${route.targetLanguageId}\0${route.strategy}`,
+        JSON.parse(JSON.stringify(record.routeResolution)) as MigrationRouteResolution);
+    }
+    return [...resolutions.values()];
+  }
+
   async bindTarget(input: BindModuleMappingTargetInput): Promise<ModuleMappingRunBinding> {
     const allowedRouteIds = new Set(input.allowedRouteIds);
     const candidates: Array<{ record: ModuleMappingHostRecord; groupIndexes: number[] }> = [];
@@ -319,6 +357,35 @@ export class ModuleMappingHost {
     if (JSON.stringify(expected) !== JSON.stringify(binding)) {
       throw new Error('Module mapping proposal/review/overlay or route lineage has changed.');
     }
+  }
+
+  /**
+   * Returns the complete reviewed execution truth for V2 materializers. The
+   * record is refreshed first, so catalog, IR, review, overlay, and exact
+   * runtime changes make the binding stale instead of being inferred by the
+   * caller from the compact protocol DTO.
+   */
+  async executionContext(
+    binding: ModuleMappingRunBinding,
+  ): Promise<MigrationExecutionV2ValidationContext> {
+    await this.assertBindingCurrent(binding);
+    const record = await this.get(binding.mappingRunId, true);
+    if (
+      !record || record.stage !== 'ready' || !record.review || !record.overlay ||
+      !record.runtimeCapabilitySnapshot
+    ) {
+      throw new Error('Module mapping execution context is unavailable or stale.');
+    }
+    return {
+      runtimeCapabilities: JSON.parse(
+        JSON.stringify(record.runtimeCapabilitySnapshot),
+      ) as MigrationRuntimeCapabilitySnapshot,
+      currentSourceCatalog: { ...record.overlay.sourceCatalog },
+      currentTargetCatalog: { ...record.overlay.targetCatalog },
+      mappingProposal: JSON.parse(JSON.stringify(record.proposal)) as ModuleMappingProposal,
+      mappingReview: JSON.parse(JSON.stringify(record.review)) as ModuleMappingReview,
+      executionOverlay: JSON.parse(JSON.stringify(record.overlay)) as MigrationExecutionOverlay,
+    };
   }
 
   async #refresh(record: ModuleMappingHostRecord): Promise<ModuleMappingHostRecord> {
@@ -365,6 +432,7 @@ export class ModuleMappingHost {
             const currentRoute = await this.dependencies.routes.resolve(
               record.overlay.routeId,
               record.overlay.routeVersion,
+              { source, target },
             );
             if (!currentRoute) {
               staleReasons.push('route-resolution-unavailable');

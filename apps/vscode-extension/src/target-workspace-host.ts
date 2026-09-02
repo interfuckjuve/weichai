@@ -919,8 +919,11 @@ export class TargetWorkspaceHost {
       throw new Error('Body-only rebase request is stale and does not bind to both source and target snapshots.');
     }
     validateTargetWorkspaceModuleSnapshot(accepted.snapshot, accepted.ir, accepted.catalog);
-    const freshness = classifyTargetWorkspaceSnapshotFreshness(
-      accepted.snapshot,
+    const freshness = failClosedStructureIdentity(
+      classifyTargetWorkspaceSnapshotFreshness(
+        accepted.snapshot,
+        record.latest.ir,
+      ),
       record.latest.ir,
     );
     const structureCompatible =
@@ -1111,12 +1114,15 @@ export class TargetWorkspaceHost {
 
     const accepted = record.accepted;
     const acceptedSnapshot = accepted.snapshot!;
-    const freshness = classifyTargetWorkspaceSnapshotFreshness(
-      acceptedSnapshot,
+    const freshness = failClosedStructureIdentity(
+      classifyTargetWorkspaceSnapshotFreshness(
+        acceptedSnapshot,
+        ir,
+        accepted.catalog.sourceIrId === ir.id && accepted.catalog.sourceIrHash === ir.contentHash
+          ? accepted.catalog
+          : undefined,
+      ),
       ir,
-      accepted.catalog.sourceIrId === ir.id && accepted.catalog.sourceIrHash === ir.contentHash
-        ? accepted.catalog
-        : undefined,
     );
     const stage: TargetWorkspaceHostStage = freshness.status === 'current'
       ? 'reviewed'
@@ -1237,4 +1243,43 @@ export class TargetWorkspaceHost {
       }
     }
   }
+}
+
+const centralBridgeStructureIdentitySchema = 'repository-static-symbol-declaration-shape-v1';
+
+/** A central bridge cannot substitute for adapter-owned declaration identity. */
+function failClosedStructureIdentity(
+  freshness: TargetWorkspaceFreshness,
+  ir: UnifiedRepositoryIR,
+): TargetWorkspaceFreshness {
+  if (freshness.status !== 'body-only-compatible' || hasAdapterOwnedStructureIdentity(ir)) {
+    return freshness;
+  }
+  return {
+    ...freshness,
+    status: 'stale',
+    reasonCodes: [...new Set([
+      ...freshness.reasonCodes,
+      'structure-identity-unverified' as const,
+    ])].sort(),
+  };
+}
+
+function hasAdapterOwnedStructureIdentity(ir: UnifiedRepositoryIR): boolean {
+  const declarationKinds = new Set(['package', 'namespace', 'module', 'type', 'callable', 'member']);
+  let declarations = 0;
+  for (const entity of ir.entities) {
+    if (
+      entity.fileId === undefined ||
+      (entity.signature === undefined && !declarationKinds.has(entity.kind))
+    ) continue;
+    declarations += 1;
+    const identity = entity.structureIdentity;
+    if (
+      !identity ||
+      (identity.basis !== 'declaration-shape' && identity.basis !== 'semantic-shape') ||
+      identity.schemaVersion === centralBridgeStructureIdentitySchema
+    ) return false;
+  }
+  return declarations > 0;
 }

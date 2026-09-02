@@ -19,7 +19,7 @@
     "README.md"
   ],
   "activationEvents": [
-    "onCommand:forexplore.startTranslation",
+    "onCommand:forexplore.startLegacyTranslation",
     "onCommand:forexplore.showPanel",
     "onCommand:forexplore.checkRepositories",
     "onCommand:forexplore.reindex",
@@ -45,8 +45,8 @@
   "contributes": {
     "commands": [
       {
-        "command": "forexplore.startTranslation",
-        "title": "ForeXplore: 开始代码迁移"
+        "command": "forexplore.startLegacyTranslation",
+        "title": "ForeXplore Legacy: 编辑器 V1 迁移入口（兼容）"
       },
       {
         "command": "forexplore.showPanel",
@@ -136,7 +136,7 @@
     "menus": {
       "editor/context": [
         {
-          "command": "forexplore.startTranslation",
+          "command": "forexplore.startLegacyTranslation",
           "when": "editorHasSelection && resourceScheme == file",
           "group": "forexplore@1"
         }

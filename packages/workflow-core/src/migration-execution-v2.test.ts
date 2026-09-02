@@ -28,6 +28,8 @@ import {
   materializeTargetContextSnapshotV2,
   validateAdaptationRequestV2,
   validateAdaptationResultV2,
+  validateComposedMigrationRouteRef,
+  validateComposedMigrationRuntimeSnapshot,
   validateMigrationRunManifestV2,
   validateMigrationRuntimeCapabilitySnapshot,
   validateSearchCandidateV2,
@@ -358,6 +360,14 @@ function executionFixture() {
   const searchCandidate = materializeSearchCandidateV2({
     request: searchRequest,
     indexedDocument,
+    indexGeneration: {
+      repositoryId: currentSourceCatalog.repositoryId,
+      id: 'implementation-index-generation-1',
+      generation: 1,
+      contentHash: '4'.repeat(64),
+      sourceCatalogId: currentSourceCatalog.moduleCatalogId,
+      sourceCatalogHash: currentSourceCatalog.moduleCatalogHash,
+    },
     score: { overall: 0.9, semantic: 0.9, symbol: 0.8, contract: 0.85 },
     compatibility: ['Approved source catalog'],
     createdAt: NOW,
@@ -367,6 +377,17 @@ function executionFixture() {
     schemaVersion: migrationExecutionV2SchemaVersion,
     target,
     route: routeRef,
+    sourceFiles: [{
+      id: 'target-source-file',
+      role: 'source-file',
+      languageId: 'python',
+      fileId: 'target-file',
+      path: 'app/target.py',
+      content: declarationContent,
+      contentHash: targetIr.files[0]!.contentHash,
+      provider: { providerId: 'python-context-adapter', providerVersion: '3.0.0' },
+      attributes: { nativeKind: 'source-file' },
+    }],
     declarations: [{
       id: 'target-declaration',
       role: 'declaration',
@@ -510,6 +531,120 @@ function executionFixture() {
 }
 
 describe('V2 migration execution contracts', () => {
+  it('validates composed runtime ownership, stage overrides, and deterministic availability', () => {
+    const serviceRoute: MigrationRouteDescriptor = {
+      ...route(),
+      stages: route().stages.map((stage) => stage.stage === 'context-collection'
+        ? {
+            ...stage,
+            providerId: 'service-context-unavailable',
+            availability: {
+              status: 'unavailable' as const,
+              reasonCodes: ['provider-offline'],
+              summary: 'Context provider is offline.',
+            },
+          }
+        : stage),
+      availability: {
+        status: 'unavailable',
+        reasonCodes: ['context-collection:provider-offline'],
+        summary: 'One or more required runtime stages are unavailable.',
+      },
+    };
+    const combinedRoute: MigrationRouteDescriptor = {
+      ...route(),
+      stages: route().stages.map((stage) => stage.stage === 'context-collection'
+        ? { ...stage, providerId: 'host-context-provider' }
+        : stage),
+    };
+    const service = materializeMigrationRuntimeCapabilitySnapshot({
+      routes: [serviceRoute],
+      createdAt: NOW,
+    });
+    const combined = materializeMigrationRuntimeCapabilitySnapshot({
+      routes: [combinedRoute],
+      createdAt: NOW,
+    });
+    const ref = createMigrationRouteSnapshotRef(combined, combinedRoute.id);
+    expect(validateComposedMigrationRuntimeSnapshot(
+      combined,
+      service,
+      ['context-collection'],
+    )).toBe(combined);
+    expect(validateComposedMigrationRouteRef(
+      ref,
+      combined,
+      service,
+      ['context-collection'],
+    ).id).toBe(combinedRoute.id);
+
+    const behaviorTamper = materializeMigrationRuntimeCapabilitySnapshot({
+      routes: [{
+        ...combinedRoute,
+        stages: combinedRoute.stages.map((stage) => stage.stage === 'behavior-validation'
+          ? { ...stage, providerId: 'client-forged-behavior-provider' }
+          : stage),
+      }],
+      createdAt: NOW,
+    });
+    expect(() => validateComposedMigrationRuntimeSnapshot(
+      behaviorTamper,
+      service,
+      ['context-collection'],
+    )).toThrow('protected stage behavior-validation');
+
+    const changedKey = materializeMigrationRuntimeCapabilitySnapshot({
+      routes: [{ ...combinedRoute, sourceLanguageId: 'another-language' }],
+      createdAt: NOW,
+    });
+    expect(() => validateComposedMigrationRuntimeSnapshot(
+      changedKey,
+      service,
+      ['context-collection'],
+    )).toThrow('changes its key');
+
+    const changedPolicy = materializeMigrationRuntimeCapabilitySnapshot({
+      routes: [{
+        ...combinedRoute,
+        validationPolicy: {
+          ...combinedRoute.validationPolicy,
+          checks: combinedRoute.validationPolicy.checks.map((check) => ({
+            ...check,
+            verifierId: 'client-forged-verifier',
+          })),
+        },
+      }],
+      createdAt: NOW,
+    });
+    expect(() => validateComposedMigrationRuntimeSnapshot(
+      changedPolicy,
+      service,
+      ['context-collection'],
+    )).toThrow('version, or policy');
+
+    const missingStage = materializeMigrationRuntimeCapabilitySnapshot({
+      routes: [{
+        ...combinedRoute,
+        stages: combinedRoute.stages.filter((stage) => stage.stage !== 'translation'),
+      }],
+      createdAt: NOW,
+    });
+    expect(() => validateComposedMigrationRuntimeSnapshot(
+      missingStage,
+      service,
+      ['context-collection'],
+    )).toThrow('changes its stage set');
+
+    const forgedAvailability = materializeMigrationRuntimeCapabilitySnapshot({
+      routes: [{ ...serviceRoute, availability: { status: 'available', reasonCodes: [] } }],
+      createdAt: NOW,
+    });
+    expect(() => validateComposedMigrationRuntimeSnapshot(
+      forgedAvailability,
+      service,
+      ['context-collection'],
+    )).toThrow('availability is not the deterministic aggregate');
+  });
   it('materializes an empty runtime capability snapshot as explicit no-capability state', () => {
     const snapshot = materializeMigrationRuntimeCapabilitySnapshot({ routes: [], createdAt: NOW });
     expect(snapshot.routes).toEqual([]);
@@ -542,6 +677,29 @@ describe('V2 migration execution contracts', () => {
       fixture.adaptationRequest,
       fixture.validationContext,
     )).toBe(fixture.adaptationResult);
+  });
+
+  it('requires one content-verified full source file for the selected target', () => {
+    const fixture = executionFixture();
+    const { id: _id, contentHash: _contentHash, ...input } = fixture.targetContext;
+    expect(() => materializeTargetContextSnapshotV2({
+      ...input,
+      sourceFiles: [],
+    }, fixture.runtime)).toThrow(/exactly one full source file/i);
+    expect(() => materializeTargetContextSnapshotV2({
+      ...input,
+      sourceFiles: input.sourceFiles.map((fact) => ({
+        ...fact,
+        fileId: 'different-file',
+      })),
+    }, fixture.runtime)).toThrow(/exactly one full source file/i);
+    expect(() => materializeTargetContextSnapshotV2({
+      ...input,
+      sourceFiles: input.sourceFiles.map((fact) => ({
+        ...fact,
+        content: `${fact.content}\n# stale`,
+      })),
+    }, fixture.runtime)).toThrow(/content hash is invalid/i);
   });
 
   it('rejects route hash mismatch and a tampered runtime route hash', () => {

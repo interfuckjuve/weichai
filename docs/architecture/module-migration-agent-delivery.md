@@ -10,7 +10,7 @@
 
 | 事项 | 责任方 | 当前行为 |
 | --- | --- | --- |
-| 生成仓库静态证据 | VS Code 扩展 + code-indexer | 分析 Java/C# 仓库，生成不可变快照 |
+| 生成仓库静态证据 | VS Code 扩展 + code-indexer | 通过开放语言 adapter registry 分析仓库，生成不可变快照 |
 | 提出功能模块 | `ArchitectAgent` | 只读模型调用，返回非可信 `ModuleMigrationProposal` |
 | 校验模块图、依赖与排程 | `workflow-core` | 确定性规则，不信任模型自行排程 |
 | 计划/波次审批 | 人工 + VS Code 宿主 | 审批分别绑定计划哈希和准备结果哈希 |
@@ -21,7 +21,7 @@
 ## 2. 总体链路与信任边界
 
 ```text
-Java/C# 仓库
+LanguageId 开放的仓库
   │
   ▼
 本地静态分析 ──> 不可变 RepositoryStaticAnalysis 快照
@@ -57,7 +57,7 @@ VS Code 宿主 ──> 确定性校验、SCC 分组和 wave 排程
 
 ### 3.1 输入：可复验的静态证据快照
 
-仓库分析器当前面向 Java 和 C#，将文件划分为 `source`、`test`、`generated`、`configuration` 或 `other`，并收集项目、类型、方法、导入、类型引用、调用、成员访问、测试引用与 C# 项目引用等信息。快照包含文件、符号、依赖边、诊断、仓库 revision、`snapshotId` 和 `contentHash`；其制品默认写在：
+仓库分析器通过开放 `LanguageId` 和可注册 adapter 工作；当前内置 adapter 覆盖 Java、C#、TypeScript、Python、Go 和 Rust，并按各自可证明的深度收集项目、声明、引用、调用、测试和构建事实。新增语言不修改中央语言 union。文件统一划分为 `source`、`test`、`generated`、`configuration` 或 `other`；快照包含文件、实体、依赖边、诊断、仓库 revision、`snapshotId` 和 `contentHash`，其制品默认写在：
 
 ```text
 .forexplore/analysis/<snapshotId>.json
@@ -154,7 +154,7 @@ Agent 提示词明确禁止它输出 wave、并行度、补丁、命令、验证
 
 | 已具备 | 尚未具备或不能据此宣称 |
 | --- | --- |
-| Java/C# 静态快照、模型模块提案、确定性校验、SCC/wave 排程、哈希绑定审批和 worktree 事务 | 完整源码级理解、完整调用图、运行时行为理解或模块边界的语义证明 |
+| 开放语言 adapter 的静态快照、模型模块提案、确定性校验、SCC/wave 排程、哈希绑定审批和 worktree 事务 | 所有语言达到相同语义深度、完整源码级理解、完整调用图、运行时行为理解或模块边界的语义证明 |
 | 通过导入 patch bundle 的受控准备与联合验证门禁 | Agent 自动生成/导入多模块补丁 |
 | 编译、测试、静态检查等由管理员配置的工程验证 | 并发、顺序、超时、取消、幂等、错误语义和业务结果的独立正确性证明 |
 | 本地快照路径约束、范围检查和 Git 提交流程 | 多租户 ACL、远程制品分发、已认证审批身份或全局恢复协议 |

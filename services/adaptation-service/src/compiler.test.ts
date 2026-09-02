@@ -1,11 +1,14 @@
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  CompilerRouteRegistry,
   compileIntegrated,
+  compileTargetStandaloneByLanguageId,
   compileTargetStandalone,
   compilerInternals,
   listCompilerRouteCapabilities,
   resolveCompilerRouteCapability,
+  resolveCompilerRouteCapabilityByLanguageId,
 } from "./compiler";
 
 const skeletonProjectPath = fileURLToPath(
@@ -174,13 +177,13 @@ class Unchanged:
 
 describe("language-neutral compiler registry", () => {
   it("publishes validation level and quality for every registered language", () => {
-    expect(listCompilerRouteCapabilities().map((capability) => capability.language)).toEqual([
-      "Java",
-      "C#",
-      "TypeScript",
-      "Python",
-      "Rust",
-      "Go",
+    expect(listCompilerRouteCapabilities().map((capability) => capability.languageId)).toEqual([
+      "java",
+      "csharp",
+      "typescript",
+      "python",
+      "rust",
+      "go",
     ]);
     expect(resolveCompilerRouteCapability("Python")).toMatchObject({
       standalone: { command: "python -m py_compile", level: "syntax" },
@@ -211,5 +214,41 @@ describe("language-neutral compiler registry", () => {
 
     expect(result.success).toBe(true);
     expect(result.errors).toEqual([]);
+  });
+
+  it("registers and executes an open LanguageId outside the legacy Language union", () => {
+    const registry = new CompilerRouteRegistry();
+    registry.register({
+      capability: {
+        languageId: "elixir",
+        displayName: "Elixir",
+        providerId: "fixture.compiler.elixir",
+        version: "7.1.0",
+        standalone: { command: "fixture-elixir-check", level: "syntax" },
+        integrated: { command: "fixture-elixir-project-check", level: "project-build-or-test" },
+        quality: {
+          provesBehavioralCorrectness: false,
+          limitations: ["Deterministic fixture compiler only."],
+        },
+      },
+      standalone: (code, targetName) => ({
+        success: true,
+        errors: [],
+        output: `${targetName}:${code}`,
+      }),
+      integrated: () => ({ success: true, errors: [], output: "fixture-project-ok" }),
+    });
+
+    expect(resolveCompilerRouteCapabilityByLanguageId("ELIXIR", registry)).toMatchObject({
+      languageId: "elixir",
+      displayName: "Elixir",
+      providerId: "fixture.compiler.elixir",
+    });
+    expect(compileTargetStandaloneByLanguageId("elixir", "def run, do: :ok", "Run", registry))
+      .toEqual({
+        success: true,
+        errors: [],
+        output: "Run:def run, do: :ok",
+      });
   });
 });

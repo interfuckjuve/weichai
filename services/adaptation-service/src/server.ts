@@ -9,6 +9,12 @@ import { ModuleSummaryAgent } from './module-summary-agent.js';
 import { TranslationVerifierAdapter } from './verification-adapter.js';
 import { createDefaultTargetEngineeringAdapterRegistry } from './context-collector.js';
 import { createAdaptationRuntimeCapabilitySnapshot } from './runtime-capability-snapshot.js';
+import {
+  AdaptationAdapterV2,
+  DeepSeekMigrationAnalyzerV2,
+  DeepSeekMigrationPlannerV2,
+  DeepSeekMigrationTranslatorV2,
+} from './adaptation-adapter-v2.js';
 
 const config = loadConfig();
 const targetEngineeringRegistry = createDefaultTargetEngineeringAdapterRegistry();
@@ -35,9 +41,18 @@ const runtimeCapabilitySnapshot = createAdaptationRuntimeCapabilitySnapshot({
   workspaceMutationExecution: 'disabled',
   targetEngineeringRegistry,
 });
+const migrationAgentsV2 = { apiKey: config.apiKey };
+const adapterV2 = new AdaptationAdapterV2({
+  runtimeCapabilities: runtimeCapabilitySnapshot,
+  analyzer: new DeepSeekMigrationAnalyzerV2(migrationAgentsV2),
+  planner: new DeepSeekMigrationPlannerV2(migrationAgentsV2),
+  translator: new DeepSeekMigrationTranslatorV2(migrationAgentsV2),
+  targetEngineeringRegistry,
+});
 
 const server = createHttpServer({
   adapter,
+  adapterV2,
   runtimeCapabilitySnapshot,
   architecturePort: new ArchitectAgent({ apiKey: config.apiKey }),
   moduleDiscoveryPort: new ModuleDiscoveryAgent({ apiKey: config.apiKey }),

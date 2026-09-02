@@ -128,6 +128,27 @@ describe('bridgeRepositoryStaticAnalysis', () => {
     const runEntity = first.unifiedIr.entities.find((entity) => entity.name === 'run');
     const serviceEntity = first.unifiedIr.entities.find((entity) => entity.name === 'Service');
     expect(runEntity?.containerEntityId).toBe(serviceEntity?.id);
+    expect(runEntity?.structureIdentity).toEqual(expect.objectContaining({
+      basis: 'declaration-shape',
+      contentHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+      adapterId: expect.any(String),
+      adapterVersion: expect.any(String),
+    }));
+    expect(serviceEntity?.containerCapability).toEqual(expect.objectContaining({
+      canContainCallables: true,
+      nativeKind: 'class',
+    }));
+    const pythonTopLevel = first.unifiedIr.entities.find((entity) => entity.name === 'public_task');
+    const pythonModule = first.unifiedIr.entities.find(
+      (entity) => entity.id === pythonTopLevel?.containerEntityId,
+    );
+    expect(pythonModule).toEqual(expect.objectContaining({
+      kind: 'module',
+      containerCapability: expect.objectContaining({
+        canContainCallables: true,
+        nativeKind: 'source-file-module',
+      }),
+    }));
 
     for (const languageId of ['java', 'csharp', 'typescript', 'rust', 'go', 'python']) {
       const shard = first.shards.find((entry) => entry.languageIds[0] === languageId);
@@ -176,7 +197,7 @@ describe('bridgeRepositoryStaticAnalysis', () => {
     expect(shards.flatMap((shard) => shard.languageIds).sort()).toEqual(expectedLanguageIds);
     expect(unifiedIr.coverage.languageIds).toEqual(expectedLanguageIds);
     expect(unifiedIr.files.map((file) => file.languageId).sort()).toEqual(expectedLanguageIds);
-    expect(unifiedIr.entities.map((entity) => entity.languageId).sort()).toEqual(
+    expect([...new Set(unifiedIr.entities.map((entity) => entity.languageId))].sort()).toEqual(
       expectedLanguageIds,
     );
     expect(profile.analysisAdapterIds).toEqual(

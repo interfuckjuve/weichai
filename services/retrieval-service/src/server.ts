@@ -4,10 +4,14 @@ import { createConfiguredHttpServer } from './runtime.js';
 
 const config = loadConfig();
 const { server, runtime } = createConfiguredHttpServer(config);
-const { store, moduleStore } = runtime;
+const { store, moduleStore, implementationStoreV2 } = runtime;
 
 if (config.autoMigrate) {
-  await Promise.all([store.initialize(), moduleStore.initialize()]);
+  await Promise.all([
+    store.initialize(),
+    moduleStore.initialize(),
+    implementationStoreV2.initialize(),
+  ]);
 }
 
 server.listen(config.port, config.host, () => {
@@ -19,7 +23,7 @@ async function shutdown(): Promise<void> {
     server.close((error) => (error ? reject(error) : resolve()));
     server.closeIdleConnections();
   });
-  await Promise.all([store.close(), moduleStore.close()]);
+  await Promise.all([store.close(), moduleStore.close(), implementationStoreV2.close()]);
 }
 
 function requestShutdown(): void {

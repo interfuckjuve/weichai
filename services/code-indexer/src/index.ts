@@ -52,6 +52,12 @@ export {
   repositoryStaticAnalysisToUnifiedIr,
 } from './repository-ingestion-bridge.js';
 export type {
+  MaterializeReviewedImplementationIndexV2Input,
+  ReviewedImplementationIndexArtifactV2,
+  ReviewedRepositorySourceFileV2,
+} from './implementation-index-v2.js';
+export { materializeReviewedImplementationIndexV2 } from './implementation-index-v2.js';
+export type {
   AssessRepositoryImplementationsRequest,
   ImplementationBodyIsolation,
   ImplementationMaskingProfile,

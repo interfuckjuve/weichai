@@ -3,8 +3,8 @@ import { createRoot, type Root } from 'react-dom/client';
 import type {
   EntityImplementationAssessment,
   MigrationRouteDescriptor,
-  ModuleTarget,
-  SearchCandidate,
+  SearchCandidateV2,
+  SourceImplementationBundleV2,
   TargetImplementationRollup,
   TargetWorkspaceModuleSnapshot,
 } from '@forexplore/contracts';
@@ -26,7 +26,7 @@ import type {
   TargetWorkspaceTreeNode,
   WebviewToHostMessage,
 } from '../../src/protocol/messages';
-import { isWebviewToHostMessage } from '../../src/protocol/messages';
+import { isHostToWebviewMessage, isWebviewToHostMessage } from '../../src/protocol/messages';
 import App from './App';
 
 const snapshotHash = 'a'.repeat(64);
@@ -73,6 +73,56 @@ const javaToCsharpRouteRef = createMigrationRouteSnapshotRef(
   javaToCsharpRoute.id,
 );
 
+function unavailableRoute(
+  id: string,
+  sourceLanguageId: string,
+  targetLanguageId: string,
+): MigrationRouteDescriptor {
+  const reason = 'behavior-verifier-execution-disabled';
+  return {
+    schemaVersion: migrationRouteSchemaVersion,
+    id,
+    name: `${sourceLanguageId} to ${targetLanguageId}`,
+    version: '2.0.0',
+    sourceLanguageId,
+    targetLanguageId,
+    strategy: 'translate',
+    stages: [{
+      stage: 'behavior-validation',
+      providerId: 'forexplore.translation-verifier.differential',
+      providerVersion: '1.0.0',
+      capabilities: ['migration-validation'],
+      availability: { status: 'unavailable', reasonCodes: [reason] },
+    }],
+    availability: {
+      status: 'unavailable',
+      reasonCodes: [`behavior-validation:${reason}`],
+    },
+    validationPolicy: {
+      schemaVersion: validationPolicySchemaVersion,
+      id: `${id}.policy`,
+      routeId: id,
+      routeVersion: '2.0.0',
+      checks: [{
+        id: 'behavior',
+        label: 'Independent behavior check',
+        phase: 'behavior',
+        required: true,
+        verifierId: 'forexplore.translation-verifier.differential',
+      }],
+    },
+  };
+}
+
+const unavailableRuntimeCapabilities = materializeMigrationRuntimeCapabilitySnapshot({
+  routes: [
+    unavailableRoute('route:java-to-csharp-unavailable', 'java', 'csharp'),
+    unavailableRoute('route:typescript-to-python-unavailable', 'typescript', 'python'),
+    unavailableRoute('route:python-to-typescript-unavailable', 'python', 'typescript'),
+  ],
+  createdAt: '2026-09-02T00:00:00.000Z',
+});
+
 const blockedEligibility = {
   status: 'blocked' as const,
   routeOptions: [],
@@ -80,33 +130,85 @@ const blockedEligibility = {
   summary: '请选择可调用实体。',
 };
 
-const target: ModuleTarget = {
-  id: 'workspace://src/PaymentService.cs#L12',
-  name: 'Pay',
-  kind: 'function',
-  path: 'src/PaymentService.cs',
-  language: 'C#',
-  signature: 'Task<Payment> Pay(Request request)',
-  line: 12,
-  implementationStatus: 'unimplemented',
-};
-
-function candidate(id: string, language: SearchCandidate['language']): SearchCandidate {
+function candidate(id: string, languageId: string): SearchCandidateV2 {
   return {
+    schemaVersion: '2.0',
     id,
-    title: `${language} payment candidate`,
-    repository: 'history-repository',
-    license: 'internal',
-    language,
-    kind: 'function',
-    path: `src/${id}`,
-    signature: 'pay(request)',
+    requestId: 'search-request:test',
+    requestHash: artifactHash,
+    targetId: 'migration-target:test',
+    targetHash: artifactHash,
+    route: javaToCsharpRouteRef,
+    indexGeneration: {
+      repositoryId: 'history-repository',
+      id: 'index-generation:1',
+      generation: 1,
+      contentHash: artifactHash,
+      sourceCatalogId: 'catalog:history',
+      sourceCatalogHash: artifactHash,
+    },
+    indexedDocumentId: `document:${id}`,
+    indexedDocumentHash: artifactHash,
+    candidate: {
+      schemaVersion: '2.0',
+      id: `candidate-ref:${id}`,
+      lineage: {
+        repositoryId: 'history-repository',
+        repositoryContentHash: artifactHash,
+        unifiedRepositoryIrId: 'ir:history',
+        unifiedRepositoryIrHash: artifactHash,
+        moduleCatalogId: 'catalog:history',
+        moduleCatalogHash: artifactHash,
+        moduleReviewId: 'review:history',
+        moduleReviewHash: artifactHash,
+      },
+      entity: {
+        entityId: `history:${id}`,
+        fileId: `file:${id}`,
+        languageId,
+        kind: 'function',
+        name: id,
+        path: `src/${id}`,
+        signature: 'pay(request)',
+      },
+      sourceBundleId: `bundle:${id}`,
+      sourceBundleHash: artifactHash,
+      license: 'internal',
+      contentHash: artifactHash,
+    },
+    sourceBundle: { id: `bundle:${id}`, contentHash: artifactHash },
+    title: `${languageId} payment candidate`,
     summary: 'Historical payment implementation.',
     score: { overall: 0.9, semantic: 0.9, symbol: 0.8, contract: 0.7 },
     preview: 'pay(request)',
-    dependencies: [],
     compatibility: [],
     risks: [],
+    createdAt: '2026-09-02T00:00:00.000Z',
+    contentHash: artifactHash,
+  };
+}
+
+function sourceBundle(item: SearchCandidateV2): SourceImplementationBundleV2 {
+  return {
+    schemaVersion: '2.0',
+    id: item.sourceBundle.id,
+    candidate: item.candidate,
+    lineage: item.candidate.lineage,
+    primaryEntityId: item.candidate.entity.entityId,
+    helperEntityIds: [],
+    testEntityIds: [],
+    dependencyIds: [],
+    files: [{
+      fileId: item.candidate.entity.fileId!,
+      path: item.candidate.entity.path!,
+      languageId: item.candidate.entity.languageId,
+      role: 'primary',
+      content: 'pay(request)',
+      contentHash: artifactHash,
+    }],
+    producer: { providerId: 'test-retrieval', providerVersion: '1.0.0' },
+    createdAt: '2026-09-02T00:00:00.000Z',
+    contentHash: item.sourceBundle.contentHash,
   };
 }
 
@@ -433,13 +535,28 @@ describe('01B target workspace Webview', () => {
     });
   }
 
-  it('keeps the legacy single-target INIT flow compatible', async () => {
-    await send({ type: 'INIT', payload: initPayload({ target }) });
-
+  it('rejects a V1 target and accepts only a V2 reviewed target', async () => {
+    expect(isHostToWebviewMessage({
+      type: 'INIT',
+      payload: initPayload({
+        target: {
+          id: 'legacy-target',
+          name: 'Pay',
+          kind: 'function',
+          path: 'src/PaymentService.cs',
+          language: 'C#',
+          signature: 'Pay()',
+        } as never,
+      }),
+    })).toBe(false);
+    const snapshot = targetWorkspaceSnapshot();
+    await send({
+      type: 'INIT',
+      payload: initPayload({ target: migrationSelection(snapshot).target }),
+    });
     expect(container.textContent).toContain('迁移目标');
     expect(container.textContent).toContain('Pay');
-    expect(container.textContent).toContain('检索相似实现');
-    expect(posted[0]).toEqual({ type: 'READY' });
+    expect(container.textContent).toContain('java → csharp');
   });
 
   it('renders a reviewed module tree, five-state counts, evidence, and bounded intents', async () => {
@@ -483,6 +600,19 @@ describe('01B target workspace Webview', () => {
     });
   });
 
+  it('shows all unavailable exact routes and the service-owned verifier reason', async () => {
+    const snapshot = targetWorkspaceSnapshot();
+    snapshot.runtimeCapabilitySnapshot = unavailableRuntimeCapabilities;
+    await send({ type: 'INIT', payload: initPayload({ targetWorkspace: snapshot }) });
+
+    const capabilities = container.querySelector('[aria-label="运行时迁移能力"]');
+    expect(capabilities?.textContent).toContain('java → csharp');
+    expect(capabilities?.textContent).toContain('typescript → python');
+    expect(capabilities?.textContent).toContain('python → typescript');
+    expect(capabilities?.textContent?.match(/behavior-verifier-execution-disabled/g))
+      .toHaveLength(3);
+  });
+
   it('does not emit selection/start intents for an ineligible node or a stale snapshot', async () => {
     const snapshot = targetWorkspaceSnapshot();
     await send({ type: 'INIT', payload: initPayload({ targetWorkspace: snapshot }) });
@@ -522,7 +652,7 @@ describe('01B target workspace Webview', () => {
         nodeId: 'node:callable:pay',
         entityId: 'callable:pay',
       },
-      target,
+      target: migrationSelection(snapshot).target,
       migrationSelection: migrationSelection(snapshot),
     };
     await send({
@@ -545,26 +675,34 @@ describe('01B target workspace Webview', () => {
     await send({
       type: 'TARGET_ENTITY_SELECTED',
       selection: migrationSelection(snapshot).selection,
-      target,
+      target: migrationSelection(snapshot).target,
       migrationSelection: migrationSelection(snapshot),
       activateWorkflow: true,
     });
     await click(container.querySelector('.primary-action'));
     await send({
       type: 'SEARCH_RESULT',
-      candidates: [candidate('go-pay', 'Go'), candidate('java-pay', 'Java')],
+      candidates: [candidate('go-pay', 'go'), candidate('java-pay', 'java')],
     });
 
     await click(container.querySelectorAll('.candidate-item')[0] ?? null);
-    expect(container.textContent).toContain('Go → csharp');
-    expect(container.textContent).toContain('当前语言对无可执行路线');
+    expect(container.textContent).toContain('go → csharp');
+    expect(container.textContent).toContain('没有与当前源/目标语言精确匹配的可执行路线');
     expect((container.querySelector('.decision-card .primary-action') as HTMLButtonElement).disabled)
       .toBe(true);
 
     await click(container.querySelectorAll('.candidate-item')[1] ?? null);
-    expect(container.textContent).toContain('Java → csharp');
+    expect(container.textContent).toContain('java → csharp');
     expect(container.textContent).toContain('route:java-to-csharp@1.0.0');
-    const adapt = container.querySelector('.decision-card .primary-action') as HTMLButtonElement;
+    let adapt = container.querySelector('.decision-card .primary-action') as HTMLButtonElement;
+    expect(adapt.disabled).toBe(true);
+    const javaCandidate = candidate('java-pay', 'java');
+    await send({
+      type: 'CANDIDATE_SELECTED',
+      candidateId: javaCandidate.id,
+      sourceBundle: sourceBundle(javaCandidate),
+    });
+    adapt = container.querySelector('.decision-card .primary-action') as HTMLButtonElement;
     expect(adapt.disabled).toBe(false);
     await click(adapt);
     expect(posted.at(-1)).toEqual({ type: 'START_ADAPT', decisionNotes: '' });

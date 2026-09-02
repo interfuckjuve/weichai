@@ -1,14 +1,14 @@
-import type { SearchCandidate } from '@forexplore/contracts';
-import type { WorkflowState } from '@forexplore/workflow-core';
+import type { SearchCandidateV2 } from '@forexplore/contracts';
 import type { TargetWorkspaceMigrationRouteOption } from '../../../src/protocol/messages';
+import type { WorkflowStateV2 } from '../v2-workflow';
 
 export function AdaptationStage({
   state,
   candidate,
   routeOption,
 }: {
-  state: WorkflowState;
-  candidate: SearchCandidate | null;
+  state: WorkflowStateV2;
+  candidate: SearchCandidateV2 | null;
   routeOption: TargetWorkspaceMigrationRouteOption | null;
 }) {
   const logs = [
@@ -33,7 +33,7 @@ export function AdaptationStage({
         路线：{routeOption
           ? `${routeOption.route.strategy} · ${routeOption.route.id}@${routeOption.route.version}`
           : '未声明（已禁止执行）'}
-        {' · '}{candidate?.language ?? '?'} → {routeOption?.route.targetLanguageId ?? state.target?.language}
+        {' · '}{candidate?.candidate.entity.languageId ?? '?'} → {routeOption?.route.targetLanguageId ?? state.target?.entity.languageId}
       </p>
       <p className="muted-copy">编译结果是工程检查证据，不等同于业务行为正确性。</p>
       <ol className="processing-log">

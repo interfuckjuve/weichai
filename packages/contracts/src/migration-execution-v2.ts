@@ -36,6 +36,16 @@ export interface MigrationArtifactRefV2 {
   contentHash: string;
 }
 
+/** Active retrieval generation from which a candidate was served. */
+export interface ImplementationIndexGenerationRefV2 {
+  repositoryId: string;
+  id: string;
+  generation: number;
+  contentHash: string;
+  sourceCatalogId: string;
+  sourceCatalogHash: string;
+}
+
 export interface MigrationProviderRefV2 {
   providerId: string;
   providerVersion: string;
@@ -97,6 +107,7 @@ export interface SearchCandidateV2 {
   targetId: string;
   targetHash: string;
   route: MigrationRouteSnapshotRef;
+  indexGeneration: ImplementationIndexGenerationRefV2;
   indexedDocumentId: string;
   indexedDocumentHash: string;
   candidate: ImplementationCandidateRef;
@@ -139,6 +150,7 @@ export interface SourceImplementationBundleV2 {
 }
 
 export type TargetContextFactRoleV2 =
+  | 'source-file'
   | 'declaration'
   | 'container'
   | 'import'
@@ -180,6 +192,8 @@ export interface TargetContextSnapshotV2 {
   id: string;
   target: MigrationTargetRef;
   route: MigrationRouteSnapshotRef;
+  /** Complete adapter/Host-read files; never a declaration preview. */
+  sourceFiles: TargetContextFactV2[];
   declarations: TargetContextFactV2[];
   containers: TargetContextFactV2[];
   imports: TargetContextFactV2[];

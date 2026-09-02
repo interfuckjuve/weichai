@@ -11,7 +11,7 @@
 - Java、C# 目前有较深的结构/依赖分析。
 - TypeScript、Python、Rust、Go 内置通用分析的深度较低。
 - 未注册或证据不足的源码会保留 inventory，并以 `partial` 失败关闭，Module Agent 不得猜测。
-- 分析支持与迁移支持是两套能力；真实迁移边界仍按项目定位保持 Java → C# MVP。
+- 分析支持与迁移支持是两套能力；Java → C# 是历史回归基线，不再是当前产品方向或能力上限。每次迁移由 exact route capability 与验证策略决定，未注册或缺必需阶段时失败关闭。
 
 ## 为什么旧实现看起来像白名单
 
@@ -23,9 +23,9 @@
 | 静态分析 | Java/C# 专用路径 | 引入可注册 adapter 和能力描述；深分析仍可作为专用实现 |
 | 模块 Agent 输入 | 依赖具体分析结构 | 统一消费 `UnifiedRepositoryIR` |
 | 旧符号检索 | 候选语言枚举、class/function 粒度 | 保留原契约，避免为“语言无关”破坏现有搜索 |
-| 迁移/编译 | 真实 Java → C# 能力 | 继续显式授权，不从“可分析”推导“可迁移” |
+| 迁移/编译 | Java → C# 历史 V1 回归链 | V2 仅按 exact route 快照、provider/version、验证策略和必需阶段显式授权，不从“可分析”、“有编译器”或“路线已注册”推导“当前可迁移” |
 
-因此正确演进不是删除所有语言门禁，而是把仓库理解层开放，把迁移执行层继续按真实 provider/compiler/validator 能力授权。
+因此正确演进不是删除所有语言门禁，而是把仓库理解层开放，把迁移执行层继续按真实 provider/compiler/validator 能力授权。项目已转入全面多语言开发，但这不等于所有语言对当前都可用；生产 V2 在缺少权威制品、可信 Host 阶段或外部隔离 verifier 时默认失败关闭，V1/旧 MCP 仅保留 deprecated 兼容。
 
 ## Adapter 契约
 

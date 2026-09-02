@@ -1,12 +1,14 @@
 import { Sparkles } from 'lucide-react';
-import type { WorkflowEvent, WorkflowState } from '@forexplore/workflow-core';
-import { selectedCandidate } from '@forexplore/workflow-core';
-import { normalizeLanguageId } from '@forexplore/contracts';
 import type { TargetWorkspaceMigrationSelection } from '../../../src/protocol/messages';
+import {
+  selectedCandidateV2,
+  type WorkflowEventV2,
+  type WorkflowStateV2,
+} from '../v2-workflow';
 
 interface CandidatesStageProps {
-  state: WorkflowState;
-  dispatch: React.Dispatch<WorkflowEvent>;
+  state: WorkflowStateV2;
+  dispatch: React.Dispatch<WorkflowEventV2>;
   adaptationProvider: 'DeepSeek';
   migrationSelection: TargetWorkspaceMigrationSelection | null;
   onSelectCandidate: (candidateId: string) => void;
@@ -21,15 +23,16 @@ export function CandidatesStage({
   onSelectCandidate,
   onAdapt,
 }: CandidatesStageProps) {
-  const candidate = selectedCandidate(state);
+  const candidate = selectedCandidateV2(state);
   const adapting = state.pending === 'adapt';
-  const sourceLanguageId = candidate ? normalizedLanguageId(candidate.language) : null;
+  const resolving = state.pending === 'resolve';
+  const sourceLanguageId = candidate?.candidate.entity.languageId ?? null;
   const routeOption = sourceLanguageId === null ? null : migrationSelection?.routeOptions.find(
     ({ route }) =>
       route.sourceLanguageId === sourceLanguageId &&
       route.targetLanguageId === migrationSelection.target.entity.languageId,
   ) ?? null;
-  const canAdapt = candidate !== null && routeOption !== null;
+  const canAdapt = candidate !== null && routeOption !== null && state.sourceBundle !== null;
 
   return (
     <div className="stage-stack">
@@ -52,7 +55,8 @@ export function CandidatesStage({
               <span className="candidate-copy">
                 <strong>{item.title}</strong>
                 <span>
-                  {item.language} · {item.repository} · {item.kind}
+                  {item.candidate.entity.languageId} · {item.candidate.lineage.repositoryId}
+                  {' · '}{item.candidate.entity.kind}
                 </span>
               </span>
               <span className="candidate-score" title="用于候选排序，不是正确率或兼容概率">
@@ -84,14 +88,13 @@ export function CandidatesStage({
               </div>
             ))}
           </div>
-          <pre className="code-preview">{candidate.preview}</pre>
-          {candidate.rerankReason ? <p className="muted-copy">重排依据：{candidate.rerankReason}</p> : null}
+          {candidate.preview ? <pre className="code-preview">{candidate.preview}</pre> : null}
           <details className="detail-fold">
-            <summary>依赖与风险</summary>
+            <summary>目录、兼容性与风险</summary>
             <dl className="risk-list">
               <div>
-                <dt>依赖</dt>
-                <dd>{candidate.dependencies.join('、') || '无'}</dd>
+                <dt>来源目录</dt>
+                <dd>{candidate.indexGeneration.sourceCatalogId}@{candidate.indexGeneration.generation}</dd>
               </div>
               <div>
                 <dt>兼容性</dt>
@@ -111,7 +114,7 @@ export function CandidatesStage({
           <div className="decision-static">
             <span>迁移路线</span>
             <strong>
-              {candidate?.language ?? '?'} → {migrationSelection?.target.entity.languageId ?? state.target?.language ?? '?'}
+              {candidate?.candidate.entity.languageId ?? '?'} → {migrationSelection?.target.entity.languageId ?? state.target?.entity.languageId ?? '?'}
             </strong>
             {routeOption ? (
               <>
@@ -121,6 +124,13 @@ export function CandidatesStage({
                     `${stage.stage}:${stage.availability.status}`,
                   ).join('、') || '未列出阶段'}
                   {' · '}{adaptationProvider}
+                </small>
+                <small>
+                  {state.sourceBundle
+                    ? `完整来源 bundle 已解析：${state.sourceBundle.id}`
+                    : resolving
+                      ? '正在按 active index generation 解析完整来源 bundle…'
+                      : '必须先解析并复验完整来源 bundle，预览不能作为迁移输入。'}
                 </small>
                 <small>
                   已审映射 {migrationSelection!.moduleMapping.mappingProposalId}
@@ -149,13 +159,17 @@ export function CandidatesStage({
           type="button"
           className="primary-action"
           onClick={onAdapt}
-        disabled={adapting || !canAdapt}
+        disabled={adapting || resolving || !canAdapt}
       >
         {adapting ? <span className="spinner" /> : <Sparkles size={15} />}
           {adapting
             ? '正在生成迁移实现…'
-            : !candidate
+            : resolving
+              ? '正在解析完整来源实现…'
+              : !candidate
               ? '请先明确选择一个候选'
+              : !state.sourceBundle
+                ? '完整来源实现尚未复验'
               : !routeOption
                 ? '当前语言对无可执行路线'
                 : '确认此路线并生成实现'}
@@ -163,12 +177,4 @@ export function CandidatesStage({
       </section>
     </div>
   );
-}
-
-function normalizedLanguageId(value: string): string | null {
-  try {
-    return normalizeLanguageId(value);
-  } catch {
-    return null;
-  }
 }

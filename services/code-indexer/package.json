@@ -15,7 +15,8 @@
   },
   "types": "./src/index.ts",
   "dependencies": {
-    "@forexplore/contracts": "0.1.0"
+    "@forexplore/contracts": "0.1.0",
+    "@forexplore/workflow-core": "0.1.0"
   },
   "devDependencies": {
     "@types/node": "^24.10.1",

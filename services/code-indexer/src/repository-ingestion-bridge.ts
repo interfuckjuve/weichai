@@ -19,6 +19,8 @@ import {
   type RepositoryLanguageProfile,
   type RepositoryProfile,
   type RepositoryProjectProfile,
+  type RepositoryStructureIdentity,
+  type RepositoryContainerCapability,
   type RepositoryStaticAnalysis,
   type RepositoryStaticAnalysisAdapterDescriptor,
   type StaticAnalysisDiagnostic,
@@ -28,7 +30,7 @@ import {
 } from '@forexplore/contracts';
 import { verifyRepositoryStaticAnalysis } from './repository-analysis.js';
 
-export const repositoryIngestionBridgeVersion = '1.1.0-api-surface';
+export const repositoryIngestionBridgeVersion = '1.2.0-structure-identity';
 
 const bridgeProducerId = 'forexplore-code-indexer/repository-ingestion-bridge';
 const inventoryAdapterId = 'repository-file-inventory';
@@ -101,6 +103,62 @@ function adapterDescriptor(
 
 function adapterId(analysis: RepositoryStaticAnalysis, languageId: LanguageId): string {
   return adapterDescriptor(analysis, languageId)?.id ?? legacyAdapterId(languageId);
+}
+
+function structureIdentityForSymbol(
+  analysis: RepositoryStaticAnalysis,
+  symbol: StaticSymbol,
+): RepositoryStructureIdentity {
+  const languageId = canonicalLanguageId(symbol.language);
+  const descriptor = adapterDescriptor(analysis, languageId);
+  const identity: RepositoryStructureIdentity = {
+    basis: 'declaration-shape',
+    contentHash: repositoryIngestionBridgeHash({
+      languageId,
+      kind: symbol.kind,
+      name: symbol.name,
+      qualifiedName: symbol.qualifiedName,
+      containerSymbolId: symbol.containerSymbolId,
+      signature: symbol.signature,
+      visibility: symbol.visibility,
+      exported: symbol.exported,
+      parameters: symbol.parameters,
+      returnShape: symbol.returnShape,
+    }),
+    schemaVersion: 'repository-static-symbol-declaration-shape-v1',
+    adapterId: descriptor?.id ?? legacyAdapterId(languageId),
+    adapterVersion: descriptor?.version ?? analysis.analyzerVersion,
+    ...(descriptor?.configurationHash
+      ? { configurationHash: descriptor.configurationHash }
+      : {}),
+  };
+  return identity;
+}
+
+function containerCapabilityForSymbol(
+  analysis: RepositoryStaticAnalysis,
+  symbol: StaticSymbol,
+  referencedContainerIds: ReadonlySet<string>,
+): RepositoryContainerCapability | undefined {
+  const isNativeContainer = [
+    'project',
+    'package',
+    'namespace',
+    'class',
+    'interface',
+    'record',
+    'struct',
+    'enum',
+  ].includes(symbol.kind);
+  if (!isNativeContainer && !referencedContainerIds.has(symbol.id)) return undefined;
+  const languageId = canonicalLanguageId(symbol.language);
+  const descriptor = adapterDescriptor(analysis, languageId);
+  return {
+    canContainCallables: true,
+    nativeKind: symbol.kind,
+    adapterId: descriptor?.id ?? legacyAdapterId(languageId),
+    adapterVersion: descriptor?.version ?? analysis.analyzerVersion,
+  };
 }
 
 function bridgeProducer(): RepositoryArtifactProducer {
@@ -279,7 +337,10 @@ function apiExposure(symbol: StaticSymbol): RepositoryApiExposure {
   return 'unknown';
 }
 
-function apiSurfaceForSymbol(symbol: StaticSymbol): RepositoryApiSurface | undefined {
+function apiSurfaceForSymbol(
+  analysis: RepositoryStaticAnalysis,
+  symbol: StaticSymbol,
+): RepositoryApiSurface | undefined {
   const kind = entityKind(symbol);
   if (!['type', 'callable', 'member'].includes(kind)) return undefined;
   const exposure = apiExposure(symbol);
@@ -334,6 +395,7 @@ function apiSurfaceForSymbol(symbol: StaticSymbol): RepositoryApiSurface | undef
     ...(symbol.returnShape ? { returnShape: { type: symbol.returnShape } } : {}),
     completeness,
     missingFeatures: canonicalMissingFeatures,
+    structureIdentity: structureIdentityForSymbol(analysis, symbol),
     evidenceRefs,
   };
   return { ...payload, id: addressedId('api-surface', payload) };
@@ -450,7 +512,65 @@ export function bridgeRepositoryStaticAnalysis(
   })).sort((left, right) => compareText(left.path, right.path));
   const fileByPath = new Map(files.map((file) => [file.path, file]));
 
-  const entities: RepositoryIREntity[] = analysis.symbols.map((symbol) => ({
+  const referencedContainerIds = new Set(
+    analysis.symbols.flatMap((symbol) => symbol.containerSymbolId ? [symbol.containerSymbolId] : []),
+  );
+  const fileContainerByFileId = new Map<string, RepositoryIREntity>();
+  for (const file of files) {
+    if (!file.languageId || !['source', 'test', 'generated'].includes(file.role)) continue;
+    const descriptor = adapterDescriptor(analysis, file.languageId);
+    const id = addressedId('entity', {
+      snapshotId: analysis.snapshotId,
+      fileId: file.id,
+      nativeKind: 'source-file-module',
+    });
+    fileContainerByFileId.set(file.id, {
+      id,
+      kind: 'module',
+      name: `[module] ${file.path.replace(/\.[^/.]+$/, '').split('/').at(-1) ?? file.path}`,
+      qualifiedName: `[module] ${file.path.replace(/\.[^/.]+$/, '').replaceAll('/', '.')}`,
+      languageId: file.languageId,
+      fileId: file.id,
+      structureIdentity: {
+        basis: 'declaration-shape',
+        contentHash: repositoryIngestionBridgeHash({
+          languageId: file.languageId,
+          path: file.path,
+          nativeKind: 'source-file-module',
+        }),
+        schemaVersion: 'repository-source-file-module-shape-v1',
+        adapterId: descriptor?.id ?? legacyAdapterId(file.languageId),
+        adapterVersion: descriptor?.version ?? analysis.analyzerVersion,
+        ...(descriptor?.configurationHash
+          ? { configurationHash: descriptor.configurationHash }
+          : {}),
+      },
+      containerCapability: {
+        canContainCallables: true,
+        nativeKind: 'source-file-module',
+        adapterId: descriptor?.id ?? legacyAdapterId(file.languageId),
+        adapterVersion: descriptor?.version ?? analysis.analyzerVersion,
+      },
+      attributes: {
+        sourceSnapshotId: analysis.snapshotId,
+        syntheticFileContainer: true,
+      },
+    });
+  }
+  const symbolEntities: RepositoryIREntity[] = analysis.symbols.map((symbol) => {
+    const boundFile = fileByPath.get(symbol.path);
+    const explicitContainer = symbol.containerSymbolId;
+    const fileContainer = boundFile ? fileContainerByFileId.get(boundFile.id) : undefined;
+    const inferredFileContainer = !explicitContainer &&
+      ['type', 'callable', 'member'].includes(entityKind(symbol))
+      ? fileContainer?.id
+      : undefined;
+    const containerCapability = containerCapabilityForSymbol(
+      analysis,
+      symbol,
+      referencedContainerIds,
+    );
+    return {
     id: symbol.id,
     kind: entityKind(symbol),
     name: symbol.name,
@@ -463,18 +583,27 @@ export function bridgeRepositoryStaticAnalysis(
     ...(symbol.range ? { range: symbol.range } : {}),
     ...(symbol.signature ? { signature: symbol.signature } : {}),
     ...(symbol.visibility ? { visibility: symbol.visibility } : {}),
-    ...(symbol.containerSymbolId ? { containerEntityId: symbol.containerSymbolId } : {}),
+    ...(explicitContainer || inferredFileContainer
+      ? { containerEntityId: explicitContainer ?? inferredFileContainer }
+      : {}),
     ...(symbol.testOnly !== undefined ? { testOnly: symbol.testOnly } : {}),
+    structureIdentity: structureIdentityForSymbol(analysis, symbol),
+    ...(containerCapability ? { containerCapability } : {}),
     attributes: {
       sourceSnapshotId: analysis.snapshotId,
       staticSymbolKind: symbol.kind,
       ...(symbol.exported !== undefined ? { exported: symbol.exported } : {}),
       ...(symbol.returnShape ? { returnShape: symbol.returnShape } : {}),
     },
-  })).sort((left, right) => compareText(left.id, right.id));
+    };
+  });
+  const entities: RepositoryIREntity[] = [
+    ...fileContainerByFileId.values(),
+    ...symbolEntities,
+  ].sort((left, right) => compareText(left.id, right.id));
   const entityIds = new Set(entities.map((entity) => entity.id));
   const apiSurfaces = analysis.symbols
-    .map(apiSurfaceForSymbol)
+    .map((symbol) => apiSurfaceForSymbol(analysis, symbol))
     .filter((surface): surface is RepositoryApiSurface => surface !== undefined)
     .sort((left, right) => compareText(left.id, right.id));
 

@@ -94,9 +94,9 @@ flowchart TD
 | TypeScript、Python、Rust、Go 通用 adapter | 提供可靠的 inventory/声明/API exposure；缺失语义如实反映在 capability/coverage |
 | 第三方语言 adapter | 只要注册且满足宿主契约，就通过同一门禁产出 IR |
 | 未注册或证据不足 | 保留文件 inventory，状态为 `partial`，不允许 Agent 猜测完整模块 |
-| 迁移执行 | 仍是独立能力边界；当前真实适配能力仍按项目说明保持 Java → C# MVP |
+| 迁移执行 | 仍是独立能力边界；Java → C# 仅作为历史回归基线，实际执行由 exact `sourceLanguageId × targetLanguageId × strategy` 路线快照、验证策略与每个必需阶段的可用性共同授权；缺任一能力失败关闭 |
 
-“语言无关”在本模块的证明是扩展机制、失败关闭和统一契约，不是声称所有语言已有同等解析器、编译器或行为验证。
+“语言无关”在本模块的证明是扩展机制、失败关闭和统一契约，不是声称所有语言已有同等解析器、编译器或行为验证。全面开发是工程方向，不是路线可用性声明；deprecated V1/旧 MCP 也不得用来推导当前能力。生产 V2 在缺可信 Host 阶段、权威制品或外部隔离 verifier 时默认失败关闭。
 
 ## 5. 存储、追溯和分批导入
 

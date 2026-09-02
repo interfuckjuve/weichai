@@ -15,6 +15,13 @@ import {
 import { SeekDbModuleKnowledgeStore } from './seekdb-module-knowledge-store.js';
 import { createHttpServer } from './http-server.js';
 import type { EmbeddingProvider, LlmReranker, SearchEngine } from './types.js';
+import { materializeMigrationRuntimeCapabilitySnapshot } from '@forexplore/workflow-core';
+import {
+  DefaultImplementationIndexServiceV2,
+  HybridImplementationSearchEngineV2,
+  retrievalHostOwnedRuntimeOverrideStages,
+} from './implementation-index-v2.js';
+import { SeekDbImplementationIndexStoreV2 } from './seekdb-implementation-index-v2-store.js';
 
 export function createEmbeddingProvider(config: RetrievalConfig): EmbeddingProvider {
   if (config.embedding.provider === 'openai') {
@@ -83,7 +90,35 @@ export function createRuntime(config: RetrievalConfig) {
   const moduleStore = new SeekDbModuleKnowledgeStore(config.seekdb, undefined, indexer);
   const moduleIndex = new DefaultModuleKnowledgeIndexService(moduleStore, embeddings, indexer);
   const moduleEngine = new HybridModuleKnowledgeSearchEngine(moduleStore, embeddings);
-  return { store, moduleStore, embeddings, engine, moduleIndex, moduleEngine, indexer };
+  const implementationStoreV2 = new SeekDbImplementationIndexStoreV2(config.seekdb);
+  const runtimeCapabilitiesV2 = config.migrationRuntimeCapabilitySnapshot ??
+    materializeMigrationRuntimeCapabilitySnapshot({
+      routes: [],
+      createdAt: '1970-01-01T00:00:00.000Z',
+    });
+  const implementationIndexV2 = new DefaultImplementationIndexServiceV2(
+    implementationStoreV2,
+    embeddings,
+  );
+  const implementationEngineV2 = new HybridImplementationSearchEngineV2(
+    implementationStoreV2,
+    embeddings,
+    runtimeCapabilitiesV2,
+    retrievalHostOwnedRuntimeOverrideStages,
+  );
+  return {
+    store,
+    moduleStore,
+    implementationStoreV2,
+    embeddings,
+    engine,
+    moduleIndex,
+    moduleEngine,
+    implementationIndexV2,
+    implementationEngineV2,
+    runtimeCapabilitiesV2,
+    indexer,
+  };
 }
 
 /**
@@ -105,6 +140,11 @@ export function createConfiguredHttpServer(
     moduleStore: runtime.moduleStore,
     moduleIndexToken: config.moduleIndexToken,
     moduleIndexMaxBodyBytes: config.moduleIndexMaxBodyBytes,
+    implementationEngineV2: runtime.implementationEngineV2,
+    implementationIndexV2: runtime.implementationIndexV2,
+    implementationStoreV2: runtime.implementationStoreV2,
+    implementationIndexToken: config.implementationIndexToken,
+    implementationIndexMaxBodyBytes: config.implementationIndexMaxBodyBytes,
   });
   return { server, runtime };
 }

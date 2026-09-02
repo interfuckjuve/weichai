@@ -1,22 +1,47 @@
 import { createHash, randomUUID } from 'node:crypto';
+import path from 'node:path';
+import { existsSync, realpathSync } from 'node:fs';
 import * as vscode from 'vscode';
-import type { ApplyResult, FilePatch, WorkspaceCheckpoint } from '@forexplore/contracts';
+import type {
+  ApplyResult,
+  FilePatch,
+  MigrationCheckpointRefV2,
+  WorkspaceCheckpoint,
+  BackfillTransactionState,
+} from '@forexplore/contracts';
+import type { PatchHunk } from '@forexplore/contracts';
 import { applyHunks } from './diff-apply';
-import { canonicalWorkspacePath, resolveRealWorkspaceFile } from './diff-apply';
+import {
+  canonicalWorkspacePath,
+  resolvePatchPath,
+  resolveRealWorkspaceFile,
+} from './diff-apply';
+import {
+  interruptedRecoveryDecision,
+  type InterruptedFileObservation,
+} from './backfill-transaction';
 
 interface StoredCheckpoint extends WorkspaceCheckpoint {
+  workspaceUri: string;
   files: Array<
     WorkspaceCheckpoint['files'][number] & {
-      beforeContentBase64: string;
+      beforeContentBase64: string | null;
     }
   >;
+}
+
+interface StoredTransactionMarker {
+  checkpointId: string;
+  workspaceUri: string;
+  state: BackfillTransactionState;
+  updatedAt: string;
 }
 
 export interface WorkspaceBackfillOptions {
   workspaceFolder: vscode.WorkspaceFolder;
   storageUri: vscode.Uri;
-  /** Demo scope: exactly the target selected in the editor may be changed. */
-  allowedTargetPath: string;
+  /** Exact reviewed authorization set. Every patch path must be a member. */
+  allowedTargetPaths: string[];
 }
 
 /**
@@ -27,76 +52,117 @@ export class WorkspaceBackfill {
   constructor(private readonly options: WorkspaceBackfillOptions) {}
 
   async apply(files: FilePatch[]): Promise<ApplyResult> {
-    if (files.length !== 1) {
-      throw new Error('演示版一次只能应用当前选中目标的一个修改补丁。');
-    }
-    const patch = files[0];
-    if (!patch || patch.status !== 'modified') {
-      throw new Error('演示版只允许修改当前已存在的目标文件。');
-    }
-
+    await this.recoverInterrupted();
+    if (files.length === 0) throw new Error('迁移补丁不包含任何文件。');
     const workspaceRoot = this.options.workspaceFolder.uri.fsPath;
-    const canonicalPath = canonicalWorkspacePath(workspaceRoot, patch.path);
-    if (canonicalPath !== this.options.allowedTargetPath) {
-      throw new Error('补丁目标不等于当前选中的迁移目标，已拒绝写入。');
+    const allowed = new Set(this.options.allowedTargetPaths.map((item) =>
+      canonicalWorkspacePath(workspaceRoot, item)));
+    if (allowed.size !== this.options.allowedTargetPaths.length || allowed.size === 0) {
+      throw new Error('迁移写回授权路径必须非空且唯一。');
     }
-    const uri = vscode.Uri.file(resolveRealWorkspaceFile(workspaceRoot, patch.path));
-    const originalBytes = await vscode.workspace.fs.readFile(uri);
-    const originalHash = sha256(originalBytes);
-    if (originalHash !== patch.expectedOriginalSha256) {
-      throw new Error('目标文件已在生成补丁后被修改；请重新开始迁移。');
+    const seen = new Set<string>();
+    const prepared: Array<{
+      patch: FilePatch;
+      path: string;
+      uri: vscode.Uri;
+      beforeContentBase64: string | null;
+      beforeSha256: string | null;
+      afterSha256: string;
+      nextContent: string;
+      document?: vscode.TextDocument;
+    }> = [];
+    // Complete every hash, realpath, absence, dirty-document and hunk preflight
+    // before creating a checkpoint or mutating any editor buffer.
+    for (const patch of files) {
+      const canonicalPath = canonicalWorkspacePath(workspaceRoot, patch.path);
+      if (!allowed.has(canonicalPath) || seen.has(canonicalPath)) {
+        throw new Error(`补丁路径未授权或重复：${canonicalPath}。`);
+      }
+      seen.add(canonicalPath);
+      if (patch.status === 'modified') {
+        const uri = vscode.Uri.file(resolveRealWorkspaceFile(workspaceRoot, patch.path));
+        const originalBytes = await vscode.workspace.fs.readFile(uri);
+        const originalHash = sha256(originalBytes);
+        if (originalHash !== patch.expectedOriginalSha256) {
+          throw new Error(`目标文件已变化：${canonicalPath}。`);
+        }
+        const document = await vscode.workspace.openTextDocument(uri);
+        if (document.isDirty) throw new Error(`目标文件有未保存编辑：${canonicalPath}。`);
+        const nextContent = applyHunks(Buffer.from(originalBytes).toString('utf8'), patch.hunks);
+        prepared.push({
+          patch,
+          path: canonicalPath,
+          uri,
+          beforeContentBase64: Buffer.from(originalBytes).toString('base64'),
+          beforeSha256: originalHash,
+          afterSha256: sha256(Buffer.from(nextContent, 'utf8')),
+          nextContent,
+          document,
+        });
+      } else {
+        const uri = vscode.Uri.file(resolveAuthorizedCreatePath(workspaceRoot, patch.path));
+        const nextContent = createdFileContent(patch.hunks);
+        prepared.push({
+          patch,
+          path: canonicalPath,
+          uri,
+          beforeContentBase64: null,
+          beforeSha256: null,
+          afterSha256: sha256(Buffer.from(nextContent, 'utf8')),
+          nextContent,
+        });
+      }
     }
-    const nextContent = applyHunks(Buffer.from(originalBytes).toString('utf8'), patch.hunks);
-    const nextBytes = Buffer.from(nextContent, 'utf8');
-    const checkpoint = await this.writeCheckpoint({
-      path: canonicalPath,
-      status: 'modified',
-      beforeSha256: originalHash,
-      afterSha256: sha256(nextBytes),
-      beforeContentBase64: Buffer.from(originalBytes).toString('base64'),
-    });
+    const checkpoint = await this.writeCheckpoint(prepared.map((item) => ({
+      path: item.path,
+      status: item.patch.status,
+      beforeSha256: item.beforeSha256,
+      afterSha256: item.afterSha256,
+      beforeContentBase64: item.beforeContentBase64,
+    })));
 
     let applied = false;
     try {
-      const document = await vscode.workspace.openTextDocument(uri);
-      if (document.isDirty) {
-        throw new Error('目标文件有未保存的编辑；拒绝用迁移补丁覆盖它。');
-      }
-      const range = new vscode.Range(document.positionAt(0), document.positionAt(document.getText().length));
+      await this.writeTransactionMarker(checkpoint.id, 'committing');
       const edit = new vscode.WorkspaceEdit();
-      edit.replace(uri, range, nextContent);
+      for (const item of prepared) {
+        if (item.patch.status === 'created') {
+          edit.createFile(item.uri, { ignoreIfExists: false, overwrite: false });
+          edit.insert(item.uri, new vscode.Position(0, 0), item.nextContent);
+        } else {
+          const document = item.document!;
+          edit.replace(
+            item.uri,
+            new vscode.Range(document.positionAt(0), document.positionAt(document.getText().length)),
+            item.nextContent,
+          );
+        }
+      }
       applied = await vscode.workspace.applyEdit(edit);
       if (!applied) throw new Error('工作区编辑被拒绝，未写入任何文件。');
-      if (!(await document.save())) {
-        throw new Error('补丁已应用到编辑器但保存失败，正在从恢复点还原。');
+      for (const item of prepared) {
+        const document = item.document ?? await vscode.workspace.openTextDocument(item.uri);
+        if (!(await document.save())) {
+          throw new Error(`补丁保存失败：${item.path}；正在恢复整个事务。`);
+        }
       }
-
-      const written = await vscode.workspace.fs.readFile(uri);
-      if (sha256(written) !== checkpoint.files[0]?.afterSha256) {
-        throw new Error('写入后的文件哈希不匹配，正在从恢复点还原。');
+      for (const item of prepared) {
+        const written = await vscode.workspace.fs.readFile(item.uri);
+        if (sha256(written) !== item.afterSha256) {
+          throw new Error(`写入后的文件哈希不匹配：${item.path}；正在恢复整个事务。`);
+        }
       }
+      await this.writeTransactionMarker(checkpoint.id, 'committed');
       return {
-        appliedFiles: [canonicalPath],
+        appliedFiles: prepared.map((item) => item.path),
         checkpointId: checkpoint.id,
         rollbackAvailable: true,
       };
     } catch (error) {
       if (applied) {
-        const expected = checkpoint.files[0];
-        const current = await vscode.workspace.fs.readFile(uri);
-        const currentHash = sha256(current);
-        if (!expected || (currentHash !== expected.afterSha256 && currentHash !== expected.beforeSha256)) {
-          throw new Error(
-            '补丁写入后目标又发生变化；为避免覆盖新修改，自动恢复已拒绝。',
-            { cause: error },
-          );
-        }
-        await this.restoreCheckpoint(
-          checkpoint,
-          currentHash === expected.afterSha256,
-          true,
-        );
+        await this.restoreCheckpoint(checkpoint, true, true);
       }
+      await this.writeTransactionMarker(checkpoint.id, 'rolled-back');
       throw error;
     }
   }
@@ -104,6 +170,7 @@ export class WorkspaceBackfill {
   async restore(checkpointId: string): Promise<ApplyResult> {
     const checkpoint = await this.readCheckpoint(checkpointId);
     await this.restoreCheckpoint(checkpoint, true);
+    await this.writeTransactionMarker(checkpoint.id, 'rolled-back');
     return {
       appliedFiles: checkpoint.files.map((file) => file.path),
       checkpointId,
@@ -111,14 +178,58 @@ export class WorkspaceBackfill {
     };
   }
 
+  async checkpointRef(checkpointId: string): Promise<MigrationCheckpointRefV2> {
+    const checkpoint = await this.readCheckpoint(checkpointId);
+    return {
+      id: checkpoint.id,
+      contentHash: createHash('sha256')
+        .update(JSON.stringify(checkpoint), 'utf8')
+        .digest('hex'),
+      recoverable: checkpoint.recoverable,
+      createdAt: checkpoint.createdAt,
+    };
+  }
+
+  /** Scans durable prepared/committing journals before a new mutation. A
+   * mixed before/after state is safely rolled back; any third state blocks. */
+  async recoverInterrupted(): Promise<string[]> {
+    const directory = vscode.Uri.joinPath(this.options.storageUri, 'checkpoints');
+    let entries: [string, vscode.FileType][];
+    try {
+      entries = await vscode.workspace.fs.readDirectory(directory);
+    } catch (error) {
+      if (isFileNotFound(error)) return [];
+      throw error;
+    }
+    const recovered: string[] = [];
+    for (const [name, type] of entries) {
+      if (type !== vscode.FileType.File || !name.endsWith('.state.json')) continue;
+      const marker = await this.readTransactionMarker(name.slice(0, -'.state.json'.length));
+      if (
+        marker.workspaceUri !== this.options.workspaceFolder.uri.toString() ||
+        (marker.state !== 'prepared' && marker.state !== 'committing')
+      ) continue;
+      const checkpoint = await this.readCheckpoint(marker.checkpointId);
+      const observations = await this.observeCheckpoint(checkpoint);
+      const decision = interruptedRecoveryDecision([...observations.values()]);
+      if (decision === 'restore') {
+        await this.restoreCheckpoint(checkpoint, false, true, observations);
+      }
+      await this.writeTransactionMarker(checkpoint.id, 'rolled-back');
+      recovered.push(checkpoint.id);
+    }
+    return recovered;
+  }
+
   private async writeCheckpoint(
-    file: StoredCheckpoint['files'][number],
+    files: StoredCheckpoint['files'],
   ): Promise<StoredCheckpoint> {
     const checkpoint: StoredCheckpoint = {
       id: `ws-${randomUUID()}`,
+      workspaceUri: this.options.workspaceFolder.uri.toString(),
       createdAt: new Date().toISOString(),
       recoverable: true,
-      files: [file],
+      files,
     };
     const directory = vscode.Uri.joinPath(this.options.storageUri, 'checkpoints');
     await vscode.workspace.fs.createDirectory(directory);
@@ -126,6 +237,7 @@ export class WorkspaceBackfill {
       this.checkpointUri(checkpoint.id),
       Buffer.from(JSON.stringify(checkpoint, null, 2), 'utf8'),
     );
+    await this.writeTransactionMarker(checkpoint.id, 'prepared');
     return checkpoint;
   }
 
@@ -141,37 +253,160 @@ export class WorkspaceBackfill {
     return vscode.Uri.joinPath(this.options.storageUri, 'checkpoints', `${id}.json`);
   }
 
+  private transactionMarkerUri(id: string): vscode.Uri {
+    return vscode.Uri.joinPath(this.options.storageUri, 'checkpoints', `${id}.state.json`);
+  }
+
+  private async writeTransactionMarker(
+    checkpointId: string,
+    state: BackfillTransactionState,
+  ): Promise<void> {
+    const marker: StoredTransactionMarker = {
+      checkpointId,
+      workspaceUri: this.options.workspaceFolder.uri.toString(),
+      state,
+      updatedAt: new Date().toISOString(),
+    };
+    await vscode.workspace.fs.writeFile(
+      this.transactionMarkerUri(checkpointId),
+      Buffer.from(JSON.stringify(marker, null, 2), 'utf8'),
+    );
+  }
+
+  private async readTransactionMarker(checkpointId: string): Promise<StoredTransactionMarker> {
+    const bytes = await vscode.workspace.fs.readFile(this.transactionMarkerUri(checkpointId));
+    const value = JSON.parse(Buffer.from(bytes).toString('utf8')) as Partial<StoredTransactionMarker>;
+    if (
+      value.checkpointId !== checkpointId ||
+      typeof value.workspaceUri !== 'string' ||
+      !['prepared', 'committing', 'committed', 'rolled-back'].includes(value.state ?? '') ||
+      typeof value.updatedAt !== 'string'
+    ) throw new Error(`Invalid backfill transaction marker: ${checkpointId}.`);
+    return value as StoredTransactionMarker;
+  }
+
+  private async observeCheckpoint(
+    checkpoint: StoredCheckpoint,
+  ): Promise<Map<string, InterruptedFileObservation>> {
+    this.assertCheckpointWorkspace(checkpoint);
+    const workspaceRoot = this.options.workspaceFolder.uri.fsPath;
+    const authorization = this.options.allowedTargetPaths.length > 0
+      ? this.options.allowedTargetPaths
+      : checkpoint.files.map((file) => file.path);
+    const allowed = new Set(authorization.map((item) =>
+      canonicalWorkspacePath(workspaceRoot, item)));
+    const observations = new Map<string, InterruptedFileObservation>();
+    for (const file of checkpoint.files) {
+      const canonicalPath = canonicalWorkspacePath(workspaceRoot, file.path);
+      if (!allowed.has(canonicalPath)) throw new Error('Interrupted checkpoint exceeds current authorization.');
+      const uri = vscode.Uri.file(resolvePatchPath(workspaceRoot, file.path));
+      let bytes: Uint8Array | null;
+      try {
+        bytes = await vscode.workspace.fs.readFile(uri);
+      } catch (error) {
+        if (!isFileNotFound(error)) throw error;
+        bytes = null;
+      }
+      if (file.status === 'created' && bytes === null) {
+        observations.set(file.path, 'before');
+        continue;
+      }
+      if (bytes === null) {
+        observations.set(file.path, 'unknown');
+        continue;
+      }
+      const hash = sha256(bytes);
+      observations.set(
+        file.path,
+        hash === file.afterSha256
+          ? 'after'
+          : hash === file.beforeSha256
+            ? 'before'
+            : 'unknown',
+      );
+    }
+    return observations;
+  }
+
   private async restoreCheckpoint(
     checkpoint: StoredCheckpoint,
     verifyAfterHash: boolean,
     allowDirtyForInternalRecovery = false,
+    interruptedStates?: ReadonlyMap<string, InterruptedFileObservation>,
   ): Promise<void> {
-    const file = checkpoint.files[0];
-    if (!file) throw new Error('恢复点不包含文件快照。');
+    this.assertCheckpointWorkspace(checkpoint);
     const workspaceRoot = this.options.workspaceFolder.uri.fsPath;
-    const canonicalPath = canonicalWorkspacePath(workspaceRoot, file.path);
-    if (canonicalPath !== this.options.allowedTargetPath) {
-      throw new Error('恢复点的目标超出当前迁移范围。');
+    const authorization = this.options.allowedTargetPaths.length > 0
+      ? this.options.allowedTargetPaths
+      : checkpoint.files.map((file) => file.path);
+    const allowed = new Set(authorization.map((item) =>
+      canonicalWorkspacePath(workspaceRoot, item)));
+    const prepared: Array<{
+      file: StoredCheckpoint['files'][number];
+      uri: vscode.Uri;
+      document?: vscode.TextDocument;
+      original?: string;
+    }> = [];
+    for (const file of checkpoint.files) {
+      const canonicalPath = canonicalWorkspacePath(workspaceRoot, file.path);
+      if (!allowed.has(canonicalPath)) throw new Error('恢复点的目标超出当前迁移范围。');
+      const observed = interruptedStates?.get(file.path);
+      if (observed === 'before') continue;
+      if (observed === 'unknown') throw new Error(`Interrupted file state is unknown: ${file.path}.`);
+      const lexical = resolvePatchPath(workspaceRoot, file.path);
+      const uri = vscode.Uri.file(file.status === 'modified'
+        ? resolveRealWorkspaceFile(workspaceRoot, file.path)
+        : lexical);
+      const current = await vscode.workspace.fs.readFile(uri);
+      if (verifyAfterHash && sha256(current) !== file.afterSha256) {
+        throw new Error(`目标文件在应用后又被修改：${file.path}，拒绝覆盖新修改。`);
+      }
+      if (file.status === 'modified') {
+        if (file.beforeContentBase64 === null) throw new Error('修改文件恢复点缺少原始内容。');
+        const document = await vscode.workspace.openTextDocument(uri);
+        if (document.isDirty && !allowDirtyForInternalRecovery) {
+          throw new Error(`目标文件有未保存编辑：${file.path}。`);
+        }
+        prepared.push({
+          file,
+          uri,
+          document,
+          original: Buffer.from(file.beforeContentBase64, 'base64').toString('utf8'),
+        });
+      } else {
+        prepared.push({ file, uri });
+      }
     }
-    const uri = vscode.Uri.file(resolveRealWorkspaceFile(workspaceRoot, file.path));
-    const current = await vscode.workspace.fs.readFile(uri);
-    if (verifyAfterHash && sha256(current) !== file.afterSha256) {
-      throw new Error('目标文件在应用后又被修改，拒绝覆盖用户的新修改。');
-    }
-    const original = Buffer.from(file.beforeContentBase64, 'base64').toString('utf8');
-    const document = await vscode.workspace.openTextDocument(uri);
-    if (document.isDirty && !allowDirtyForInternalRecovery) {
-      throw new Error('目标文件有未保存的编辑；拒绝恢复并覆盖它。');
-    }
-    const range = new vscode.Range(document.positionAt(0), document.positionAt(document.getText().length));
     const edit = new vscode.WorkspaceEdit();
-    edit.replace(uri, range, original);
-    const restored = await vscode.workspace.applyEdit(edit);
-    if (!restored) throw new Error('恢复点写入被工作区拒绝。');
-    if (!(await document.save())) throw new Error('恢复内容无法保存到工作区。');
-    const written = await vscode.workspace.fs.readFile(uri);
-    if (sha256(written) !== file.beforeSha256) {
-      throw new Error('恢复后的文件哈希不匹配。');
+    for (const item of prepared) {
+      if (item.file.status === 'created') {
+        edit.deleteFile(item.uri, { ignoreIfNotExists: false, recursive: false });
+      } else {
+        const document = item.document!;
+        edit.replace(
+          item.uri,
+          new vscode.Range(document.positionAt(0), document.positionAt(document.getText().length)),
+          item.original!,
+        );
+      }
+    }
+    if (prepared.length > 0) {
+      const restored = await vscode.workspace.applyEdit(edit);
+      if (!restored) throw new Error('恢复点写入被工作区拒绝。');
+    }
+    for (const item of prepared) {
+      if (item.file.status === 'created') continue;
+      if (!(await item.document!.save())) throw new Error(`恢复内容无法保存：${item.file.path}。`);
+      const written = await vscode.workspace.fs.readFile(item.uri);
+      if (sha256(written) !== item.file.beforeSha256) {
+        throw new Error(`恢复后的文件哈希不匹配：${item.file.path}。`);
+      }
+    }
+  }
+
+  private assertCheckpointWorkspace(checkpoint: StoredCheckpoint): void {
+    if (checkpoint.workspaceUri !== this.options.workspaceFolder.uri.toString()) {
+      throw new Error('恢复点不属于当前工作区。');
     }
   }
 }
@@ -183,16 +418,49 @@ function sha256(bytes: Uint8Array): string {
 function isStoredCheckpoint(value: unknown): value is StoredCheckpoint {
   if (typeof value !== 'object' || value === null) return false;
   const checkpoint = value as Partial<StoredCheckpoint>;
-  const file = checkpoint.files?.[0];
+  const files = checkpoint.files;
   return (
     typeof checkpoint.id === 'string' &&
+    typeof checkpoint.workspaceUri === 'string' &&
+    checkpoint.workspaceUri.length > 0 &&
     typeof checkpoint.createdAt === 'string' &&
     checkpoint.recoverable === true &&
-    checkpoint.files?.length === 1 &&
-    typeof file?.path === 'string' &&
-    file.status === 'modified' &&
-    typeof file.beforeSha256 === 'string' &&
-    typeof file.afterSha256 === 'string' &&
-    typeof file.beforeContentBase64 === 'string'
+    Array.isArray(files) &&
+    files.length > 0 &&
+    files.every((file) =>
+      typeof file.path === 'string' &&
+      (file.status === 'modified' || file.status === 'created') &&
+      (file.beforeSha256 === null || typeof file.beforeSha256 === 'string') &&
+      typeof file.afterSha256 === 'string' &&
+      (file.beforeContentBase64 === null || typeof file.beforeContentBase64 === 'string'))
   );
+}
+
+function resolveAuthorizedCreatePath(workspaceRoot: string, filePath: string): string {
+  const lexical = resolvePatchPath(workspaceRoot, filePath);
+  if (existsSync(lexical)) throw new Error(`新建文件已存在：${filePath}。`);
+  const parent = path.dirname(lexical);
+  const realRoot = realpathSync(path.resolve(workspaceRoot));
+  const realParent = realpathSync(parent);
+  const relativeParent = path.relative(realRoot, realParent);
+  if (
+    relativeParent === '..' ||
+    relativeParent.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relativeParent)
+  ) {
+    throw new Error('新建文件父目录经符号链接解析后超出工作区。');
+  }
+  return path.join(realParent, path.basename(lexical));
+}
+
+function createdFileContent(hunks: PatchHunk[]): string {
+  const lines = hunks.flatMap((hunk) => hunk.lines);
+  if (lines.length === 0 || lines.some((line) => line.type !== 'add')) {
+    throw new Error('新建文件补丁只能包含有内容的 add 行。');
+  }
+  return lines.map((line) => line.content).join('\n');
+}
+
+function isFileNotFound(error: unknown): boolean {
+  return error instanceof vscode.FileSystemError && error.code === 'FileNotFound';
 }

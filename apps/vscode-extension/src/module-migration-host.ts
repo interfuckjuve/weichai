@@ -36,6 +36,7 @@ import {
   readRepositoryAnalysisArtifact,
   writeRepositoryAnalysisArtifact,
   type RepositoryLanguageRegistry,
+  type AnalyzeRepositoryRequest,
 } from '@forexplore/code-indexer';
 import { requestRepositoryModuleDiscovery } from './module-discovery-client';
 import {
@@ -220,6 +221,10 @@ export interface ModuleMigrationHostOptions {
   ) => Promise<RepositoryIngestionInitializationResult>;
   /** Runtime extension point for repository-analysis languages; migration support is separate. */
   repositoryLanguageRegistry?: RepositoryLanguageRegistry;
+  /** Host-owned analyzer reused by indexing and every freshness gate. */
+  repositoryAnalyzer?: (
+    request: AnalyzeRepositoryRequest,
+  ) => Promise<RepositoryStaticAnalysis>;
   /** Test/host seam for the repository-local SQLite publication control plane. */
   repositoryKnowledgePublicationStore?: RepositoryKnowledgePublicationStore;
   /** Test/host seam for the separately deployed module-knowledge index writer. */
@@ -237,8 +242,18 @@ export interface ModuleMigrationHostOptions {
 export class ModuleMigrationHost {
   private readonly sessions = new Map<string, ModuleMigrationReviewSession>();
   private currentState: ModuleMigrationHostState = { stage: 'idle' };
+  readonly #analyzeRepository: (
+    request: AnalyzeRepositoryRequest,
+  ) => Promise<RepositoryStaticAnalysis>;
 
-  constructor(private readonly options: ModuleMigrationHostOptions) {}
+  constructor(private readonly options: ModuleMigrationHostOptions) {
+    this.#analyzeRepository = options.repositoryAnalyzer ?? ((request) => analyzeRepository({
+      ...request,
+      ...(options.repositoryLanguageRegistry === undefined
+        ? {}
+        : { languageRegistry: options.repositoryLanguageRegistry }),
+    }));
+  }
 
   get state(): ModuleMigrationHostState {
     return { ...this.currentState };
@@ -268,7 +283,14 @@ export class ModuleMigrationHost {
     if (catalog.status !== 'active' || !catalog.reviewId || !catalog.reviewHash) {
       throw new Error('源仓库没有当前已审 RepositoryModuleCatalog。');
     }
-    return { workspaceId: workspaceFolder.uri.toString(), ir, catalog };
+    return {
+      workspaceId: workspaceFolder.uri.toString(),
+      ir,
+      catalog,
+      analysisSnapshotId: session.analysis.snapshotId,
+      analysisContentHash: session.analysis.contentHash,
+      analysisAdapters: [...(session.analysis.analysisAdapters ?? [])],
+    };
   }
 
   async indexRepository(): Promise<void> {
@@ -282,13 +304,10 @@ export class ModuleMigrationHost {
           location: vscode.ProgressLocation.Notification,
           title: 'ForeXplore: 正在收集模块迁移静态证据',
         },
-        () => analyzeRepository({
+        () => this.#analyzeRepository({
           root: workspaceFolder.uri.fsPath,
           semanticEnrichment: true,
           allowDirtyWorktreeForPlanning: true,
-          ...(this.options.repositoryLanguageRegistry === undefined
-            ? {}
-            : { languageRegistry: this.options.repositoryLanguageRegistry }),
         }),
       );
       const artifactPath = await writeRepositoryAnalysisArtifact(workspaceFolder.uri.fsPath, analysis);
@@ -1177,7 +1196,7 @@ export class ModuleMigrationHost {
   }
 
   private async assertSnapshotCurrent(session: ModuleMigrationReviewSession): Promise<void> {
-    const current = await analyzeRepository({
+    const current = await this.#analyzeRepository({
       root: session.workspaceFolder.uri.fsPath,
       semanticEnrichment: true,
       allowDirtyWorktreeForPlanning: true,

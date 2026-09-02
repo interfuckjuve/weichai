@@ -4,11 +4,31 @@ import type {
   IndexedModuleKnowledgeDocument,
   Language,
   LanguageId,
+  MigrationRuntimeCapabilitySnapshot,
+  SearchCandidateV2,
+  SearchRequestV2,
   SearchRequest,
 } from '@forexplore/contracts';
+import {
+  validateSearchCandidateV2,
+  validateSourceImplementationBundleV2,
+} from '@forexplore/workflow-core';
 import { ModuleKnowledgeCasError } from './seekdb-module-knowledge-store.js';
 import { RepositoryScopeError, requireRepositoryScopes } from './repository-scope.js';
 import type { SearchEngine, SearchStore } from './types.js';
+import type {
+  ImplementationIndexActivationRequestV2,
+  ImplementationIndexGenerationKeyV2,
+  ImplementationIndexGenerationV2,
+  ImplementationIndexServiceV2,
+  ImplementationIndexStoreV2,
+  SearchEngineV2,
+} from './implementation-index-v2-types.js';
+import { validateImplementationIndexGenerationV2 } from './implementation-index-v2.js';
+import {
+  ImplementationIndexV2ConflictError,
+  ImplementationIndexV2NotFoundError,
+} from './seekdb-implementation-index-v2-store.js';
 import type {
   ModuleKnowledgeActivationRequest,
   ModuleKnowledgeIndexService,
@@ -32,6 +52,12 @@ export interface HttpServerOptions {
   /** Empty/omitted deliberately disables every module-index mutation. */
   moduleIndexToken?: string;
   moduleIndexMaxBodyBytes?: number;
+  implementationEngineV2?: SearchEngineV2;
+  implementationIndexV2?: ImplementationIndexServiceV2;
+  implementationStoreV2?: ImplementationIndexStoreV2;
+  /** Empty/omitted deliberately disables V2 generation mutations. */
+  implementationIndexToken?: string;
+  implementationIndexMaxBodyBytes?: number;
 }
 
 class HttpError extends Error {
@@ -127,6 +153,72 @@ function isSearchRequest(value: unknown): value is SearchRequest {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isSearchRequestV2(value: unknown): value is SearchRequestV2 {
+  if (!isRecord(value) || value.schemaVersion !== '2.0') return false;
+  return (
+    typeof value.id === 'string' &&
+    typeof value.contentHash === 'string' &&
+    isRecord(value.target) &&
+    isRecord(value.route) &&
+    typeof value.requirement === 'string' &&
+    Number.isInteger(value.topK) &&
+    Array.isArray(value.repositoryScopes) &&
+    Array.isArray(value.candidateLanguageIds) &&
+    typeof value.rerank === 'boolean' &&
+    typeof value.createdAt === 'string'
+  );
+}
+
+function isRuntimeCapabilitySnapshot(
+  value: unknown,
+): value is MigrationRuntimeCapabilitySnapshot {
+  return isRecord(value) && value.schemaVersion === '2.0' &&
+    typeof value.id === 'string' && Array.isArray(value.routes) &&
+    typeof value.createdAt === 'string' && typeof value.contentHash === 'string';
+}
+
+function isSourceBundleCandidateRef(value: unknown): value is SearchCandidateV2 {
+  if (!isRecord(value) || !isRecord(value.sourceBundle) || !isRecord(value.indexGeneration)) {
+    return false;
+  }
+  return value.schemaVersion === '2.0' &&
+    typeof value.requestId === 'string' && typeof value.requestHash === 'string' &&
+    typeof value.indexedDocumentId === 'string' && typeof value.indexedDocumentHash === 'string' &&
+    typeof value.sourceBundle.id === 'string' && typeof value.sourceBundle.contentHash === 'string' &&
+    typeof value.indexGeneration.repositoryId === 'string' &&
+    typeof value.indexGeneration.id === 'string' &&
+    Number.isSafeInteger(value.indexGeneration.generation) &&
+    typeof value.indexGeneration.contentHash === 'string';
+}
+
+function isImplementationIndexGenerationV2(
+  value: unknown,
+): value is ImplementationIndexGenerationV2 {
+  return isRecord(value) && value.schemaVersion === '2.0' &&
+    typeof value.id === 'string' && typeof value.contentHash === 'string' &&
+    typeof value.repositoryId === 'string' && Number.isSafeInteger(value.generation) &&
+    isRecord(value.sourceCatalog) && Array.isArray(value.repositoryScopes) &&
+    Array.isArray(value.documents) && Array.isArray(value.sourceBundles) &&
+    typeof value.createdAt === 'string';
+}
+
+function isImplementationGenerationKeyV2(
+  value: unknown,
+): value is ImplementationIndexGenerationKeyV2 {
+  return isRecord(value) && typeof value.repositoryId === 'string' &&
+    typeof value.generationId === 'string' && Number.isSafeInteger(value.generation) &&
+    typeof value.generationContentHash === 'string';
+}
+
+function isImplementationActivationV2(
+  value: unknown,
+): value is ImplementationIndexActivationRequestV2 {
+  if (!isImplementationGenerationKeyV2(value)) return false;
+  const activation = value as Partial<ImplementationIndexActivationRequestV2>;
+  return activation.expectedActiveGenerationId === null ||
+    typeof activation.expectedActiveGenerationId === 'string';
 }
 
 function isStringArray(value: unknown): value is string[] {
@@ -277,6 +369,33 @@ function authorizedRequest(
   return { ...request, repositoryScopes: requestedRepositories };
 }
 
+function authorizedRequestV2(
+  request: SearchRequestV2,
+  combinedRuntimeCapabilities: MigrationRuntimeCapabilitySnapshot,
+  engine: SearchEngineV2,
+  configuredRepositories: readonly string[],
+): SearchRequestV2 {
+  try {
+    engine.validateRequest(request, combinedRuntimeCapabilities);
+  } catch (error) {
+    throw new HttpError(400, error instanceof Error ? error.message : 'Invalid SearchRequestV2 payload.');
+  }
+  const allowed = deploymentRepositories(configuredRepositories);
+  let requested: string[];
+  try {
+    requested = requireRepositoryScopes(request.repositoryScopes, 'SearchRequestV2 repository scopes');
+  } catch (error) {
+    throw new HttpError(400, error instanceof Error ? error.message : 'Invalid V2 repository scopes.');
+  }
+  const unauthorized = requested.find((repository) => !allowed.includes(repository));
+  if (unauthorized) {
+    throw new HttpError(403, `Repository is not authorized for this retrieval service: ${unauthorized}.`);
+  }
+  // SearchRequestV2 is content addressed. Authorization may reject it but may
+  // never inject or strip scopes and thereby create a different request.
+  return request;
+}
+
 function deploymentRepositories(configuredRepositories: readonly string[]): string[] {
   try {
     return requireRepositoryScopes(
@@ -349,6 +468,20 @@ function requireModuleWriter(request: IncomingMessage, configuredToken: string |
   }
 }
 
+function requireImplementationWriter(
+  request: IncomingMessage,
+  configuredToken: string | undefined,
+): void {
+  if (!configuredToken) {
+    throw new HttpError(503, 'V2 implementation-index control endpoints are disabled for this deployment.');
+  }
+  const expected = Buffer.from(`Bearer ${configuredToken}`, 'utf8');
+  const supplied = Buffer.from(request.headers.authorization ?? '', 'utf8');
+  if (expected.length !== supplied.length || !timingSafeEqual(expected, supplied)) {
+    throw new HttpError(401, 'V2 implementation-index writer authorization failed.');
+  }
+}
+
 function requireModuleServices(options: HttpServerOptions): {
   moduleIndex: ModuleKnowledgeIndexService;
 } {
@@ -374,8 +507,161 @@ export function createHttpServer(options: HttpServerOptions): Server {
 
     try {
       if (request.method === 'GET' && request.url === '/health') {
-        await Promise.all([options.store.ping(), options.moduleStore?.ping()]);
+        await Promise.all([
+          options.store.ping(),
+          options.moduleStore?.ping(),
+          options.implementationStoreV2?.ping(),
+        ]);
         json(response, 200, { status: 'ok', storage: 'seekdb' }, options.corsOrigin);
+        return;
+      }
+
+      if (request.method === 'GET' && request.url === '/v2/capabilities') {
+        if (!options.implementationEngineV2) {
+          throw new HttpError(503, 'V2 implementation search is unavailable.');
+        }
+        json(response, 200, {
+          runtimeCapabilities: options.implementationEngineV2.runtimeCapabilities,
+        }, options.corsOrigin);
+        return;
+      }
+
+      if (request.method === 'POST' && request.url === '/v2/search') {
+        if (!options.implementationEngineV2) {
+          throw new HttpError(503, 'V2 implementation search is unavailable.');
+        }
+        const body = await readBody(request);
+        if (!isRecord(body) || !isSearchRequestV2(body.request) ||
+            !isRuntimeCapabilitySnapshot(body.runtimeCapabilities)) {
+          throw new HttpError(400, 'Invalid SearchRequestV2 payload.');
+        }
+        const result = await options.implementationEngineV2.search(
+          authorizedRequestV2(
+            body.request,
+            body.runtimeCapabilities,
+            options.implementationEngineV2,
+            options.allowedRepositories,
+          ),
+          body.runtimeCapabilities,
+        );
+        json(response, 200, result, options.corsOrigin);
+        return;
+      }
+
+      if (request.method === 'POST' && request.url === '/v2/source-bundles/resolve') {
+        if (!options.implementationEngineV2 || !options.implementationStoreV2) {
+          throw new HttpError(503, 'V2 source bundle resolution is unavailable.');
+        }
+        const body = await readBody(request);
+        if (!isRecord(body) || !isRecord(body.resolution) ||
+            !isSearchRequestV2(body.resolution.request) ||
+            !isSourceBundleCandidateRef(body.resolution.candidate) ||
+            !isRuntimeCapabilitySnapshot(body.runtimeCapabilities)) {
+          throw new HttpError(400, 'Invalid V2 source bundle resolution request.');
+        }
+        const searchRequest = authorizedRequestV2(
+          body.resolution.request,
+          body.runtimeCapabilities,
+          options.implementationEngineV2,
+          options.allowedRepositories,
+        );
+        const selectedCandidate = body.resolution.candidate;
+        if (
+          selectedCandidate.requestId !== searchRequest.id ||
+          selectedCandidate.requestHash !== searchRequest.contentHash ||
+          selectedCandidate.targetId !== searchRequest.target.id ||
+          selectedCandidate.targetHash !== searchRequest.target.contentHash
+        ) {
+          throw new HttpError(409, 'Selected V2 candidate does not bind to the exact search request and target.');
+        }
+        if (!searchRequest.repositoryScopes.includes(selectedCandidate.indexGeneration.repositoryId)) {
+          throw new HttpError(403, 'Selected V2 candidate repository is outside the authorized search scopes.');
+        }
+        authorizeRepository(selectedCandidate.indexGeneration.repositoryId, options.allowedRepositories);
+        const resolutionRequest = {
+          request: searchRequest,
+          candidate: selectedCandidate,
+        };
+        const resolved = await options.implementationStoreV2.resolveSourceBundle(resolutionRequest);
+        try {
+          validateSearchCandidateV2(
+            resolutionRequest.candidate,
+            searchRequest,
+            resolved.indexedDocument,
+            body.runtimeCapabilities,
+          );
+          validateSourceImplementationBundleV2(resolved.bundle);
+        } catch (error) {
+          throw new HttpError(409, error instanceof Error ? error.message : 'Stale V2 source bundle lineage.');
+        }
+        if (
+          resolved.bundle.id !== resolutionRequest.candidate.sourceBundle.id ||
+          resolved.bundle.contentHash !== resolutionRequest.candidate.sourceBundle.contentHash ||
+          resolved.bundle.candidate.id !== resolved.indexedDocument.candidate.id ||
+          resolved.bundle.candidate.contentHash !== resolved.indexedDocument.candidate.contentHash ||
+          !searchRequest.repositoryScopes.includes(resolved.indexedDocument.sourceCatalog.repositoryId)
+        ) {
+          throw new HttpError(409, 'Resolved V2 source bundle lineage does not match the selected candidate.');
+        }
+        json(response, 200, resolved, options.corsOrigin);
+        return;
+      }
+
+      if (request.method === 'POST' && request.url === '/v2/implementation-index/generations/stage') {
+        requireImplementationWriter(request, options.implementationIndexToken);
+        if (!options.implementationIndexV2) {
+          throw new HttpError(503, 'V2 implementation indexing is unavailable.');
+        }
+        const body = await readBody(
+          request,
+          options.implementationIndexMaxBodyBytes ?? 32 * 1024 * 1024,
+        );
+        if (!isImplementationIndexGenerationV2(body)) {
+          throw new HttpError(400, 'Invalid ImplementationIndexGenerationV2 payload.');
+        }
+        try {
+          validateImplementationIndexGenerationV2(body);
+        } catch (error) {
+          throw new HttpError(400, error instanceof Error ? error.message : 'Invalid V2 generation.');
+        }
+        authorizeRepository(body.repositoryId, options.allowedRepositories);
+        await options.implementationIndexV2.stage(body);
+        json(response, 201, { generationId: body.id, contentHash: body.contentHash }, options.corsOrigin);
+        return;
+      }
+
+      if (request.method === 'POST' && request.url === '/v2/implementation-index/generations/validate') {
+        requireImplementationWriter(request, options.implementationIndexToken);
+        if (!options.implementationIndexV2) throw new HttpError(503, 'V2 implementation indexing is unavailable.');
+        const body = await readBody(request);
+        if (!isImplementationGenerationKeyV2(body)) throw new HttpError(400, 'Invalid V2 generation key.');
+        authorizeRepository(body.repositoryId, options.allowedRepositories);
+        const generation = await options.implementationIndexV2.validate(body);
+        json(response, 200, { generation }, options.corsOrigin);
+        return;
+      }
+
+      if (request.method === 'POST' && request.url === '/v2/implementation-index/generations/activate') {
+        requireImplementationWriter(request, options.implementationIndexToken);
+        if (!options.implementationIndexV2) throw new HttpError(503, 'V2 implementation indexing is unavailable.');
+        const body = await readBody(request);
+        if (!isImplementationActivationV2(body)) throw new HttpError(400, 'Invalid V2 activation request.');
+        authorizeRepository(body.repositoryId, options.allowedRepositories);
+        const head = await options.implementationIndexV2.activate(body);
+        json(response, 200, { head }, options.corsOrigin);
+        return;
+      }
+
+      if (request.method === 'POST' && request.url === '/v2/implementation-index/generations/head') {
+        requireImplementationWriter(request, options.implementationIndexToken);
+        if (!options.implementationStoreV2) throw new HttpError(503, 'V2 implementation storage is unavailable.');
+        const body = await readBody(request);
+        if (!isRecord(body) || typeof body.repositoryId !== 'string') {
+          throw new HttpError(400, 'Invalid V2 implementation head request.');
+        }
+        authorizeRepository(body.repositoryId, options.allowedRepositories);
+        const head = await options.implementationStoreV2.activeHead(body.repositoryId);
+        json(response, 200, { head }, options.corsOrigin);
         return;
       }
 
@@ -501,6 +787,10 @@ export function createHttpServer(options: HttpServerOptions): Server {
       const message = error instanceof Error ? error.message : 'Unknown retrieval error.';
       const status = error instanceof HttpError
         ? error.status
+        : error instanceof ImplementationIndexV2NotFoundError
+          ? 404
+          : error instanceof ImplementationIndexV2ConflictError
+            ? 409
         : error instanceof ModuleKnowledgeCasError
           ? 409
           : 503;

@@ -1,8 +1,10 @@
 # 工作区、代码索引、SeekDB 检索与适配开发总览
 
-本文档以 2026-07-25 的最新 `upstream/main`（`851df04`）为准，覆盖 SeekDB
-检索、工作区目标、独立代码索引器和 Java→C# 适配流水线的实现与后续集成，
-面向需要继续开发、调试或替换实现的同事。
+本文档以 2026-07-25 的 `upstream/main`（`851df04`）为历史基线，记录 SeekDB
+检索、工作区目标、独立代码索引器和当时的 Java→C# V1 适配流水线，
+面向需要继续开发、调试或替换实现的同事。本文后文未特别标注的“当前”指该历史基线，不是现行能力声明。
+
+> **现行执行边界（2026-09-02）**：Java → C# 只是历史回归基线，不是产品方向或能力上限。正式 V2 必须依据 `GET /v2/runtime-capabilities` 返回的 exact `sourceLanguageId × targetLanguageId × strategy` 路线快照、provider/version、验证策略和必需阶段状态授权。默认 registry 明确列出 Java→C#、TypeScript→Python 和 Python→TypeScript 三条 translate route，但“已注册”不等于“生产可执行”：生产 adaptation HTTP 不拥有 Host analysis/apply/rollback，且默认没有外部隔离 behavior verifier，因此失败关闭。`POST /v1/adapt`、旧 `ModuleTarget`/`SearchCandidate` 交接和 adaptation MCP 是 deprecated legacy，不得用来推导现行语言能力。全面多语言开发也不等于所有路线已可用。
 
 主要变更来源：
 
@@ -17,7 +19,7 @@
 1. 通过 `ModuleSymbolPort` 加载 C# 目标工作区和可选择符号。
 2. 通过独立 `@forexplore/code-indexer` 发现语料仓库并提取方法级文档。
 3. 使用 SeekDB 保存代码符号，通过向量、全文和混合检索返回真实候选实现。
-4. 提供 Java→C# LLM 翻译、独立编译、自动修复和回填 Adapter。
+4. 提供当时的 Java→C# V1 LLM 翻译、独立编译、自动修复和回填 Adapter；该链现作为 deprecated 兼容与历史回归基线。
 
 Web 运行时的适配和回填仍默认使用 Mock Adapter。`adaptation-service` 已提供真实
 Adapter，但尚未在 `web/src/main.tsx` 组合。只有配置了
@@ -61,7 +63,7 @@ fixtures/code-corpus
      + candidateLanguages（可选硬过滤）
   -> SeekDB 复用语料库
   -> 候选实现
-  -> AdaptationPort（当前 Web 默认 Mock；真实 Adapter 仅支持 Java -> C#）
+  -> AdaptationPort（历史 V1：Web 默认 Mock，当时的 Adapter 路径为 Java -> C#）
   -> BackfillPort
 ```
 
@@ -100,9 +102,9 @@ fixtures/code-corpus
             | @forexplore/code-indexer
             +-----------------------
 
-候选 Java 实现
+候选 Java 实现（历史 V1 示例）
   -> @forexplore/adaptation-service
-  -> DeepSeek Java→C# 翻译
+  -> DeepSeek Java→C# 翻译（历史回归路线）
   -> dotnet/csc 独立编译与最多 3 轮修复
   -> FilePatch / BackfillAdapter
 ```
@@ -206,7 +208,7 @@ const workflowPorts = retrievalApiUrl
 | Port | 实现 |
 | --- | --- |
 | `CodeSearchPort` | SeekDB 或 Mock，取决于前端环境变量 |
-| `CodeAdaptationPort` | Web 默认 Mock；`adaptation-service` 另有 Java→C# 实现 |
+| `CodeAdaptationPort` | 历史 V1 Web 默认 Mock；现行正式执行使用 `CodeAdaptationPortV2` 并按 exact route capability 授权 |
 | `CodeBackfillPort` | Web 默认 Mock；`adaptation-service` 另有文件系统实现 |
 
 ### 4.4 检索服务
@@ -244,12 +246,15 @@ const workflowPorts = retrievalApiUrl
 
 | 文件 | 职责 |
 | --- | --- |
-| `services/adaptation-service/src/translator.ts` | 独立 Translator Agent 调用 DeepSeek 做 Java→C# 翻译和编译错误修复 |
-| `services/adaptation-service/src/compiler.ts` | 使用 .NET SDK 或 csc 做独立编译 |
-| `services/adaptation-service/src/adaptation-adapter.ts` | 编排翻译、最多 3 轮修复、映射和 FilePatch |
+| `services/adaptation-service/src/adaptation-adapter-v2.ts` | 正式 V2 编排：直接消费已验证的完整 `SourceImplementationBundleV2` 和中性 `TargetContextSnapshotV2`，按 exact route/provider/strategy 运行 analyzer、planner、translator、patch 和验证门 |
+| `services/adaptation-service/src/runtime-capability-snapshot.ts` | 明确列出 exact-pair route、每阶段 provider/version/capability/availability 与验证策略；不做语言数组笛卡尔积 |
+| `services/adaptation-service/src/http-server.ts` | `GET /v2/runtime-capabilities` 和 `POST /v2/adapt`；校验 Host 组合快照、权威制品与 lineage，并以结构化 409/422 失败关闭 |
+| `services/adaptation-service/src/translator.ts` | 独立 Translator Agent；不以提示词或编译器自行宣告某语言对可用 |
+| `services/adaptation-service/src/compiler.ts` | TypeScript、Python、Java、C#、Rust 和 Go 的目标编译 registry；编译能力本身不授权迁移路线 |
+| `services/adaptation-service/src/adaptation-adapter.ts` | deprecated V1 兼容编排；使用 `ModuleTarget`/`SearchCandidate`/`TargetModuleContext`，V2 不调用它 |
 | `services/adaptation-service/src/backfill-adapter.ts` | 将 FilePatch 写回指定项目根目录 |
 
-真实 Adapter 当前只接受：
+历史 V1 Adapter 在 2026-07-25 基线只接受：
 
 ```text
 strategy = translate
@@ -257,8 +262,7 @@ candidate.language = Java
 target.language = C#
 ```
 
-`compileIntegrated()` 目前仍是返回成功的占位实现；Web 组合入口也尚未启用这些
-Adapter。因此它们是可调用的服务模块，不等于 Web 已经完成生产级端到端接入。
+上述限制是历史实现记录，不是现行工程范围。现行 V2 显式注册 Java→C#、TypeScript→Python 和 Python→TypeScript 的 `translate` route；它们仍必须在 Host 组合后的 runtime snapshot 中每个必需阶段都为 available，且请求引用的 route/policy/catalog/mapping/overlay/source bundle/target context/allowed paths 均通过正式 validator，才能执行。生产 HTTP 默认 verifier 为 disabled 并且不拥有 workspace 权限，因此不会因 route 出现在清单中就自报 supported。
 
 ## 5. SearchRequest 与 HTTP API
 
@@ -509,7 +513,7 @@ UI 客户端通常省略 `repositoryScopes`，服务端会注入上述允许列�
 2. 将 `language IN (...)` 下推到 SeekDB。
 3. 在返回前再次过滤，防止 Store 实现不遵守约束。
 
-Java→C# adaptation pipeline 应发送：
+历史 Java→C# V1 adaptation 回归示例应发送：
 
 ```json
 {
@@ -708,17 +712,17 @@ CALL dbms_index_manager.refresh()
 如果进程中途退出，先重新运行索引。还需确认索引 CLI 和检索服务使用了相同的
 `SEEKDB_DATABASE`、`SEEKDB_TABLE`、Embedding Provider 和向量维度。
 
-### 11.7 调试真实 Java→C# 适配
+### 11.7 调试历史 Java→C# V1 回归链
 
-真实 Adapter 没有由 Web 默认启用。单独调试时需要：
+以下步骤只用于 deprecated V1 兼容回归，不是现行能力授权。单独调试时需要：
 
 - `DEEPSEEK_API_KEY` 或构造 `AdaptationAdapter` 时传入的 API key。
 - Java 候选、C# 目标和 `translate` 策略。
 - .NET 8 SDK 或可用的 `csc.exe`。
 
-如果返回“集成编译成功”，注意检查 detail：
-`compileIntegrated()` 当前是占位实现，不代表已经把生成代码放进完整目标项目编译。
-`BackfillAdapter` 会直接修改磁盘文件，只应把经过校验的明确项目根目录传给它。
+集成编译现在会在临时目标工程中执行对应工具链，但编译通过仍不证明业务行为正确。`BackfillAdapter` 会直接修改磁盘文件，只应由拥有原始哈希、人工审批、必需验证门和恢复点的可信 Host 调用。
+
+调试正式 V2 时，先读取 `GET /v2/runtime-capabilities`，检查精确 route 的每个必需阶段及 reason code；不得从 compiler registry 或 V1 成功推导 V2 可用。`POST /v2/adapt` 还需服务端权威制品 store 和通过 core 校验的 Host-composed snapshot。生产默认缺外部隔离 verifier，拒绝执行是预期的 fail-closed 行为，不是回退到 V1 的信号。
 
 ## 12. 环境变量
 
@@ -773,7 +777,8 @@ npm test --workspace @forexplore/adaptation-service
 - 三种检索模式、语言约束、查询扩展、候选池和融合。
 - HTTP 健康检查、正常搜索、非法 JSON、无效请求和超大请求。
 - C# 工作区与 React 工作流交互，以及保留的 TypeScript 模块树生成器。
-- Java→C# adaptation 的语言/策略入口校验。
+- 历史 Java→C# V1 adaptation 的语言/策略入口回归。
+- V2 exact route 物化、Host 合法组合、service-owned stage 篡改拒绝、生产 unavailable 结构化失败以及完整 source/context/patch lineage 校验。
 
 涉及索引器或搜索排序时，还应执行：
 

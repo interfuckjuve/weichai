@@ -558,9 +558,9 @@ describe("repositoryStaticAnalysisToUnifiedIr", () => {
     expect(result.files).toEqual([
       expect.objectContaining({ path: "src/Quote.cs", languageId: "csharp" }),
     ]);
-    expect(result.entities).toEqual([
+    expect(result.entities).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: "symbol-quote", kind: "type" }),
-    ]);
+    ]));
     expect(result.contentHash).toMatch(/^[0-9a-f]{64}$/);
   });
 

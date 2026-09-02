@@ -9,6 +9,7 @@ import {
   type AdaptationResultV2,
   type AllowedModificationV2,
   type ImplementationCandidateRef,
+  type ImplementationIndexGenerationRefV2,
   type IndexedImplementationDocumentV2,
   type LegacyMigrationExecutionCompatibilityRecordV2,
   type MaterializedMigrationRouteDescriptor,
@@ -372,6 +373,127 @@ export function validateMigrationRouteSnapshotRef(
   return routeForRef(ref, snapshot);
 }
 
+function assertComposedRoute(
+  combinedRoute: MaterializedMigrationRouteDescriptor,
+  serviceRoute: MaterializedMigrationRouteDescriptor,
+  allowedOverrideStages: ReadonlySet<MigrationRouteStage>,
+): void {
+  const assertAggregatedAvailability = (route: MaterializedMigrationRouteDescriptor): void => {
+    const expectedStatus = route.stages.some((stage) => stage.availability.status === 'unavailable')
+      ? 'unavailable'
+      : route.stages.some((stage) => stage.availability.status === 'degraded')
+        ? 'degraded'
+        : 'available';
+    const expectedReasonCodes = sortedUnique(route.stages.flatMap((stage) =>
+      stage.availability.status === expectedStatus
+        ? stage.availability.reasonCodes.map((reason) => `${stage.stage}:${reason}`)
+        : [],
+    ));
+    const expectedAvailability = expectedStatus === 'available'
+      ? { status: 'available' as const, reasonCodes: [] as string[] }
+      : {
+          status: expectedStatus,
+          reasonCodes: expectedReasonCodes,
+          summary: expectedStatus === 'unavailable'
+            ? 'One or more required runtime stages are unavailable.'
+            : 'All required stages are executable, with declared limitations.',
+        };
+    if (
+      canonicalJson(route.availability) !== canonicalJson(expectedAvailability)
+    ) {
+      throw new Error(`Migration route ${route.id} availability is not the deterministic aggregate of its stages.`);
+    }
+  };
+  assertAggregatedAvailability(combinedRoute);
+  assertAggregatedAvailability(serviceRoute);
+  const combinedBase = {
+    schemaVersion: combinedRoute.schemaVersion,
+    id: combinedRoute.id,
+    name: combinedRoute.name,
+    version: combinedRoute.version,
+    sourceLanguageId: combinedRoute.sourceLanguageId,
+    targetLanguageId: combinedRoute.targetLanguageId,
+    strategy: combinedRoute.strategy,
+    validationPolicy: combinedRoute.validationPolicy,
+  };
+  const serviceBase = {
+    schemaVersion: serviceRoute.schemaVersion,
+    id: serviceRoute.id,
+    name: serviceRoute.name,
+    version: serviceRoute.version,
+    sourceLanguageId: serviceRoute.sourceLanguageId,
+    targetLanguageId: serviceRoute.targetLanguageId,
+    strategy: serviceRoute.strategy,
+    validationPolicy: serviceRoute.validationPolicy,
+  };
+  if (canonicalJson(combinedBase) !== canonicalJson(serviceBase)) {
+    throw new Error(`Composed migration route ${serviceRoute.id} changes its key, version, or policy.`);
+  }
+  const combinedStages = new Map(combinedRoute.stages.map((stage) => [stage.stage, stage]));
+  const serviceStages = new Map(serviceRoute.stages.map((stage) => [stage.stage, stage]));
+  if (
+    combinedStages.size !== serviceStages.size ||
+    [...serviceStages.keys()].some((stage) => !combinedStages.has(stage))
+  ) {
+    throw new Error(`Composed migration route ${serviceRoute.id} changes its stage set.`);
+  }
+  for (const [stageId, serviceStage] of serviceStages) {
+    const combinedStage = combinedStages.get(stageId)!;
+    if (!allowedOverrideStages.has(stageId)) {
+      if (canonicalJson(combinedStage) !== canonicalJson(serviceStage)) {
+        throw new Error(`Composed migration route ${serviceRoute.id} changes protected stage ${stageId}.`);
+      }
+      continue;
+    }
+    if (canonicalJson(combinedStage.capabilities) !== canonicalJson(serviceStage.capabilities)) {
+      throw new Error(`Composed migration route ${serviceRoute.id} changes capabilities for override stage ${stageId}.`);
+    }
+  }
+}
+
+/**
+ * Verifies that a host-composed snapshot is an authorized overlay of a
+ * service-owned snapshot. Combined snapshots may contain additional routes;
+ * every service route remains an immutable trust anchor.
+ */
+export function validateComposedMigrationRuntimeSnapshot(
+  combined: MigrationRuntimeCapabilitySnapshot,
+  service: MigrationRuntimeCapabilitySnapshot,
+  allowedOverrideStages: readonly MigrationRouteStage[],
+): MigrationRuntimeCapabilitySnapshot {
+  validateMigrationRuntimeCapabilitySnapshot(combined);
+  validateMigrationRuntimeCapabilitySnapshot(service);
+  const allowed = new Set<MigrationRouteStage>(allowedOverrideStages);
+  if (allowed.size !== allowedOverrideStages.length) {
+    throw new Error('Composed runtime override stages must be unique.');
+  }
+  for (const stage of allowed) {
+    if (!routeStages.has(stage)) throw new Error(`Composed runtime override stage is unsupported: ${stage}.`);
+  }
+  for (const serviceRoute of service.routes) {
+    const combinedRoute = combined.routes.find((candidate) => candidate.id === serviceRoute.id);
+    if (!combinedRoute) {
+      throw new Error(`Composed runtime snapshot omits service route ${serviceRoute.id}.`);
+    }
+    assertComposedRoute(combinedRoute, serviceRoute, allowed);
+  }
+  return combined;
+}
+
+export function validateComposedMigrationRouteRef(
+  ref: MigrationRouteSnapshotRef,
+  combined: MigrationRuntimeCapabilitySnapshot,
+  service: MigrationRuntimeCapabilitySnapshot,
+  allowedOverrideStages: readonly MigrationRouteStage[],
+): MaterializedMigrationRouteDescriptor {
+  validateComposedMigrationRuntimeSnapshot(combined, service, allowedOverrideStages);
+  const route = validateMigrationRouteSnapshotRef(ref, combined);
+  const serviceRoute = service.routes.find((candidate) => candidate.id === route.id);
+  if (!serviceRoute) throw new Error(`Service runtime does not authorize migration route ${route.id}.`);
+  assertComposedRoute(route, serviceRoute, new Set(allowedOverrideStages));
+  return route;
+}
+
 function canonicalRepositoryLineage(
   lineage: ImplementationCandidateRef['lineage'],
   label: string,
@@ -657,6 +779,22 @@ function canonicalScore(score: SearchCandidateV2['score']): SearchCandidateV2['s
   };
 }
 
+function canonicalIndexGenerationRef(
+  ref: ImplementationIndexGenerationRefV2,
+): ImplementationIndexGenerationRefV2 {
+  if (!Number.isSafeInteger(ref.generation) || ref.generation < 1) {
+    throw new Error('Implementation index generation number must be a positive integer.');
+  }
+  return {
+    repositoryId: requiredText(ref.repositoryId, 'Implementation index repository ID'),
+    id: requiredText(ref.id, 'Implementation index generation ID'),
+    generation: ref.generation,
+    contentHash: requireSha256(ref.contentHash, 'Implementation index generation hash'),
+    sourceCatalogId: requiredText(ref.sourceCatalogId, 'Implementation index source catalog ID'),
+    sourceCatalogHash: requireSha256(ref.sourceCatalogHash, 'Implementation index source catalog hash'),
+  };
+}
+
 export type MaterializeIndexedImplementationDocumentV2Input = Omit<
   IndexedImplementationDocumentV2,
   'id' | 'contentHash'
@@ -737,6 +875,7 @@ export function validateIndexedImplementationDocumentV2(
 export interface MaterializeSearchCandidateV2Input {
   request: SearchRequestV2;
   indexedDocument: IndexedImplementationDocumentV2;
+  indexGeneration: ImplementationIndexGenerationRefV2;
   score: SearchCandidateV2['score'];
   preview?: string;
   compatibility?: string[];
@@ -753,6 +892,14 @@ export function materializeSearchCandidateV2(
   if (input.indexedDocument.candidate.entity.languageId !== input.request.route.sourceLanguageId) {
     throw new Error('SearchCandidateV2 language does not match the exact route source language.');
   }
+  const indexGeneration = canonicalIndexGenerationRef(input.indexGeneration);
+  if (
+    indexGeneration.repositoryId !== input.indexedDocument.sourceCatalog.repositoryId ||
+    indexGeneration.sourceCatalogId !== input.indexedDocument.sourceCatalog.moduleCatalogId ||
+    indexGeneration.sourceCatalogHash !== input.indexedDocument.sourceCatalog.moduleCatalogHash
+  ) {
+    throw new Error('SearchCandidateV2 index generation does not match its reviewed source catalog.');
+  }
   return contentAddress('search-candidate-v2', {
     schemaVersion: migrationExecutionV2SchemaVersion,
     requestId: input.request.id,
@@ -760,6 +907,7 @@ export function materializeSearchCandidateV2(
     targetId: input.request.target.id,
     targetHash: input.request.target.contentHash,
     route: input.request.route,
+    indexGeneration,
     indexedDocumentId: input.indexedDocument.id,
     indexedDocumentHash: input.indexedDocument.contentHash,
     candidate: input.indexedDocument.candidate,
@@ -791,6 +939,7 @@ export function validateSearchCandidateV2(
     targetId,
     targetHash,
     route,
+    indexGeneration,
     indexedDocumentId,
     indexedDocumentHash,
     candidate: candidateRef,
@@ -819,7 +968,12 @@ export function validateSearchCandidateV2(
   ) {
     throw new Error('SearchCandidateV2 does not bind to the indexed implementation document.');
   }
-  const rebuilt = materializeSearchCandidateV2({ request, indexedDocument, ...input }, runtime);
+  const rebuilt = materializeSearchCandidateV2({
+    request,
+    indexedDocument,
+    indexGeneration,
+    ...input,
+  }, runtime);
   if (canonicalJson(rebuilt) !== canonicalJson(candidate)) {
     throw new Error('SearchCandidateV2 hash or canonical structure is invalid.');
   }
@@ -1031,10 +1185,34 @@ export function materializeTargetContextSnapshotV2(
   ) {
     throw new Error('Target file modification does not bind its current file hash.');
   }
+  const sourceFiles = canonicalContextFacts(input.sourceFiles, 'source-file');
+  for (const sourceFile of sourceFiles) {
+    if (
+      sourceFile.fileId === undefined ||
+      sourceFile.path === undefined ||
+      sourceFile.content === undefined
+    ) {
+      throw new Error(`Target context source file ${sourceFile.id} requires file ID, path, and full content.`);
+    }
+  }
+  if (
+    new Set(sourceFiles.map((fact) => fact.fileId)).size !== sourceFiles.length ||
+    new Set(sourceFiles.map((fact) => fact.path)).size !== sourceFiles.length
+  ) {
+    throw new Error('Target context source files must have unique file IDs and paths.');
+  }
+  const selectedSourceFiles = sourceFiles.filter((fact) =>
+    fact.fileId === input.target.entity.fileId &&
+    fact.path === input.target.entity.path &&
+    fact.contentHash === input.target.entity.fileContentHash);
+  if (selectedSourceFiles.length !== 1) {
+    throw new Error('Target context requires exactly one full source file matching the selected target file identity.');
+  }
   return contentAddress('target-context-v2', {
     schemaVersion: migrationExecutionV2SchemaVersion,
     target: input.target,
     route: input.route,
+    sourceFiles,
     declarations,
     containers: canonicalContextFacts(input.containers, 'container'),
     imports: canonicalContextFacts(input.imports, 'import'),

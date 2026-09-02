@@ -1,6 +1,15 @@
 # ForeXplore Adaptation MCP Server
 
-Local stdio MCP server for the guarded translation workflow. Claude Code is the
+> **Deprecated legacy V1 compatibility surface.** These tools use the old
+> `ModuleTarget`/`SearchCandidate`/`TargetModuleContext` flow. They do not
+> consume or validate `MigrationRuntimeCapabilitySnapshot`, exact V2 route and
+> policy references, authoritative source/context artifacts, or V2 lineage.
+> They therefore never determine which language pair is currently available.
+> Formal execution uses the adaptation HTTP V2 capability and adaptation
+> endpoints. The protocol and tool names below remain unchanged only for
+> compatibility, and no MCP tool may write workspace files.
+
+Local stdio MCP server for the legacy guarded translation workflow. Claude Code is the
 outer Agent Host and connects to DeepSeek through its Anthropic-compatible API.
 The independent Analyzer and Translator agents inside this server also use
 DeepSeek. The server never writes workspace files.

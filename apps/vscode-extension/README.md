@@ -131,7 +131,7 @@ $env:FOREXPLORE_MODULE_INDEX_WRITER_TOKEN = $env:RETRIEVAL_MODULE_INDEX_TOKEN
 ## 运行方式
 
 1. 在仓库根目录运行 `npm run dev:extension`。脚本会启动 SeekDB、两个本地服务，并打开 Extension Development Host。
-2. 在开发宿主中打开目标工作区；默认夹具是 Java 工程 `fixtures/target-system/commons-fileupload-java-skeleton`。
+2. 在开发宿主中打开要处理的任意受支持目标工作区；`fixtures/target-system/commons-fileupload-java-skeleton` 只是在需要复跑历史回归时使用的夹具，不是默认产品目标。
 3. 若要使用 01B，依次运行初始化、模块边界人审和打开目标工作区命令，再从目标树中显式启动某个可调用实体。
 4. 输入需求并检索语料候选。只有运行时 route capability snapshot 精确支持的源/目标语言与策略组合才能继续生成补丁。
 
@@ -144,11 +144,11 @@ $env:FOREXPLORE_MODULE_INDEX_WRITER_TOKEN = $env:RETRIEVAL_MODULE_INDEX_TOKEN
 运行插件需要一台具备以下条件的机器：
 
 - SeekDB 检索服务已经建立并加载完整的多语言 `code-corpus` 索引；
-- 适配服务具备 `DEEPSEEK_API_KEY` 和目标语言的编译器；
-- `ADAPTATION_PROJECT_ROOT` 指向与插件选中目标**相同内容**的工程；
-- `ADAPTATION_SKELETON_PROJECT_PATH` 对应同一目标工程，用于临时集成编译。
+- 适配服务具备 `DEEPSEEK_API_KEY`、精确 route 所需的目标工程 adapter/编译器和外部隔离行为 verifier；
+- V2 部署提供权威 request artifact store，并允许 Host 只组合 source/target analysis 与 workspace apply/rollback 四个宿主阶段；
+- `ADAPTATION_PROJECT_ROOT`、`ADAPTATION_SKELETON_PROJECT_PATH` 只服务 deprecated V1 集成编译，不授权 V2 路线。
 
-适配服务环境示例：
+历史 V1 回归环境示例：
 
 ```bash
 # 服务端环境；密钥只保留在这里
@@ -178,9 +178,10 @@ npm run dev:adaptation
 
 - Webview 只能发送“检索、选择候选、生成、应用”的意图，不能提交路径、候选对象或补丁。
 - 扩展宿主保存当前运行的目标语言、候选、原始文件 SHA-256 和适配结果；候选必须由用户明确选择。
-- 仅接受工作区内、当前选中目标对应的一个相对路径修改补丁；路径遍历、绝对路径和经符号链接逃逸都会被拒绝。
-- 应用前和应用时都会重新校验 SHA-256，hunk 必须精确匹配原始内容。
-- 写入建立持久恢复点。可使用 **ForeXplore: 恢复最近一次回填** 恢复；若文件随后又被编辑，恢复会拒绝覆盖该编辑。
+- 仅接受 route-owned allowed write set 内的非重复相对路径；路径遍历、绝对路径和经符号链接逃逸都会被拒绝。
+- 所有文件在任何写入前统一完成原始 SHA-256、缺失前置条件、dirty buffer、realpath 和 hunk 预检。
+- 多文件写入使用单次 `WorkspaceEdit`，并持久化 prepared/committing/committed/rolled-back 事务 journal、不可变 V2 manifest 和恢复点。启动时会先恢复可证明的中断事务；出现未知文件 hash 时停止并要求人工处理。
+- 可使用 **ForeXplore: 恢复最近一次回填** 恢复；若文件随后又被编辑，恢复会拒绝覆盖该编辑。
 - HTTP `POST /v1/backfill` 已禁用。写回只能由经过用户确认的 VS Code 宿主执行。
 
 编译或集成编译通过仅代表相应工程检查通过；它不证明业务行为、并发、超时、取消或幂等语义正确。

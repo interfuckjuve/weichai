@@ -14,7 +14,7 @@ prototype; it is not the primary product entry point.
 - `packages/mock-adapters`: demonstration search, adaptation, and backfill implementations.
 - `packages/seekdb-adapter`: browser-to-retrieval-service `CodeSearchPort` adapter.
 - `services/retrieval-service`: SeekDB-backed semantic, structural, and hybrid search.
-- `services/adaptation-mcp-server`: local stdio MCP server for guarded translation tools.
+- `services/adaptation-mcp-server`: deprecated legacy V1 stdio MCP compatibility server; it is not a V2 capability authority.
 - `services`: backend boundaries for indexing, retrieval, and adaptation services.
 - `fixtures`: target workspaces and cross-language code corpus fixtures.
 - `tests`: repository-level contract, integration, and end-to-end tests.
@@ -118,11 +118,25 @@ DEEPSEEK_MODEL=deepseek-v4-flash
 
 The adaptation service selects validation from the target language: `tsc`,
 `python -m py_compile`, `javac`, `dotnet build`, `rustc`/`cargo check`, or
-`go test`. Make the selected compiler available on `PATH`.
+`go test`. Make the selected compiler available on `PATH`. Compiler presence
+does not authorize a migration route. Java → C# is a historical regression
+baseline; current execution is authorized by a validated exact
+`sourceLanguageId × targetLanguageId × strategy` runtime snapshot and its
+required stages and validation policy. A listed route is not necessarily
+available, and comprehensive multi-language development is not a claim that
+every pair can run.
+
+Inspect the server-owned facts with `GET /v2/runtime-capabilities`. The normal
+production V2 server fails closed because Host-owned analysis/apply/rollback,
+an authoritative request artifact store, and externally isolated behavioral
+verification are not supplied by the standalone HTTP process. It must not
+downgrade a rejected `POST /v2/adapt` request to V1.
 
 ### Configure the MCP translation server
 
-The MCP server exposes context collection, analysis, generation, repair,
+This is a **deprecated legacy V1 compatibility path**. It does not consume the
+V2 runtime snapshot or establish current language-pair availability. The MCP
+server exposes context collection, analysis, generation, repair,
 validation, and complete adaptation with patch preview. It does not expose file
 write-back. Copy `services/adaptation-mcp-server/.env.example`, configure the
 same DeepSeek and target-project variables, then run:
@@ -204,10 +218,11 @@ npm run build:adaptation
 npm test
 ```
 
-The primary entry point is the VS Code extension. Its current workspace UI
-selects Java modules and defaults to
-`fixtures/target-system/commons-fileupload-java-skeleton`; the adaptation
-service and Claude Code workflow themselves are language-neutral.
+The primary entry point is the VS Code extension. Its V2 workspace UI reads
+the canonical `languageId`, entity kind, reviewed catalogs and exact route
+snapshot from the selected source and target workspaces; it has no Java/C#
+default route. `fixtures/target-system/commons-fileupload-java-skeleton` is
+retained only as a historical regression fixture.
 
 ## Development guide
 

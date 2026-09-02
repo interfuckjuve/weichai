@@ -1,12 +1,12 @@
 import { RefreshCw, Search } from 'lucide-react';
-import type { ModuleTarget } from '@forexplore/contracts';
-import type { WorkflowEvent, WorkflowState } from '@forexplore/workflow-core';
+import type { MigrationTargetRef } from '@forexplore/contracts';
+import type { WorkflowEventV2, WorkflowStateV2 } from '../v2-workflow';
 import type { RepositoryStatus } from '../../../src/ui-types';
 
 interface RequirementStageProps {
-  state: WorkflowState;
-  target: ModuleTarget;
-  dispatch: React.Dispatch<WorkflowEvent>;
+  state: WorkflowStateV2;
+  target: MigrationTargetRef;
+  dispatch: React.Dispatch<WorkflowEventV2>;
   repositoryStatuses: RepositoryStatus[];
   onSearch: () => void;
   onCheckRepositories: () => void;
@@ -29,29 +29,29 @@ export function RequirementStage({
         <div className="card-heading">
           <span>01 · 迁移目标</span>
           <span className="card-heading-meta">
-            {target.language} · {target.kind}
+            {target.entity.languageId} · {target.entity.kind}
           </span>
         </div>
         <div className="target-edit-fields target-readonly-fields">
           <div>
             <span>符号名</span>
-            <strong>{target.name}</strong>
+            <strong>{target.entity.name}</strong>
           </div>
           <div>
             <span>类型</span>
-            <strong>{target.kind}</strong>
+            <strong>{target.entity.kind}</strong>
           </div>
           <div className="target-signature-field">
             <span>签名</span>
-            <code>{target.signature}</code>
+            <code>{target.entity.signature ?? '未提供原生签名'}</code>
           </div>
         </div>
         <div className="target-location">
-          <code>{target.path}</code>
-          <span>第 {target.line} 行</span>
+          <code>{target.entity.path}</code>
+          <span>{target.route.sourceLanguageId} → {target.route.targetLanguageId}</span>
         </div>
         <p className="muted-copy">
-          目标由扩展宿主从已保存的编辑器选择建立快照。若要更换目标，请返回编辑器重新启动迁移。
+          目标来自已审 01B 目录，并绑定精确 route、文件哈希、模块映射与允许修改范围。
         </p>
       </section>
 

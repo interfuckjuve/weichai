@@ -1,13 +1,6 @@
 import { useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { ChevronDown, ChevronRight, RefreshCw, Search } from 'lucide-react';
 import type { RepositoryStatus, ServiceStatus } from '../../src/ui-types';
-import {
-  initialWorkflowState,
-  selectedCandidate,
-  workflowReducer,
-  type WorkflowState,
-} from '@forexplore/workflow-core';
-import { normalizeLanguageId } from '@forexplore/contracts';
 import type {
   PanelInitPayload,
   TargetWorkspaceImplementationState,
@@ -26,6 +19,12 @@ import { RequirementStage } from './components/RequirementStage';
 import { StepRail } from './components/StepRail';
 import { errorEvent } from './errors';
 import { createMessageBus, type MessageBus } from './vscode-api';
+import {
+  initialWorkflowStateV2,
+  selectedCandidateV2,
+  workflowReducerV2,
+  type WorkflowStateV2,
+} from './v2-workflow';
 
 type TargetWorkspaceFilter = 'all' | TargetWorkspaceImplementationState;
 
@@ -68,14 +67,8 @@ function routeForCandidate(
   candidateLanguage: string | undefined,
 ): TargetWorkspaceMigrationRouteOption | null {
   if (!selection || !candidateLanguage) return null;
-  let sourceLanguageId: string;
-  try {
-    sourceLanguageId = normalizeLanguageId(candidateLanguage);
-  } catch {
-    return null;
-  }
   return selection.routeOptions.find(({ route }) =>
-    route.sourceLanguageId === sourceLanguageId &&
+    route.sourceLanguageId === candidateLanguage &&
     route.targetLanguageId === selection.target.entity.languageId,
   ) ?? null;
 }
@@ -504,6 +497,28 @@ function TargetWorkspaceBrowser({
         ))}
       </section>
 
+      {snapshot.runtimeCapabilitySnapshot ? (
+        <section className="target-workspace-capabilities" aria-label="运行时迁移能力">
+          <h3>运行时迁移能力</h3>
+          <ul className="target-reason-list">
+            {snapshot.runtimeCapabilitySnapshot.routes.map((route) => (
+              <li key={route.id}>
+                <code>{route.sourceLanguageId} → {route.targetLanguageId}</code>
+                <span>{route.strategy} · {route.availability.status}</span>
+                <small>
+                  {route.availability.reasonCodes.length > 0
+                    ? route.availability.reasonCodes.join('、')
+                    : '全部必需阶段可用'}
+                </small>
+              </li>
+            ))}
+          </ul>
+          {snapshot.runtimeCapabilitySnapshot.routes.length === 0 ? (
+            <p className="muted-copy">适配服务未提供可验证的精确语言路线；执行保持关闭。</p>
+          ) : null}
+        </section>
+      ) : null}
+
       <div className="target-workspace-content">
         <section className="target-workspace-tree-panel" aria-label="目标工作区模块树">
           <div className="target-workspace-panel-heading">
@@ -583,9 +598,18 @@ function TargetWorkspaceBrowser({
                       ))}
                     </ul>
                   ) : (
-                    <p className="muted-copy">
-                      {selectedNode.migrationEligibility.summary ?? '未声明可执行迁移路线。'}
-                    </p>
+                    <>
+                      <p className="muted-copy">
+                        {selectedNode.migrationEligibility.summary ?? '未声明可执行迁移路线。'}
+                      </p>
+                      {selectedNode.migrationEligibility.reasonCodes.length > 0 ? (
+                        <ul className="target-reason-list">
+                          {selectedNode.migrationEligibility.reasonCodes.map((reason) => (
+                            <li key={reason}><code>{reason}</code></li>
+                          ))}
+                        </ul>
+                      ) : null}
+                    </>
                   )}
                 </section>
               ) : null}
@@ -629,7 +653,7 @@ function TargetWorkspaceBrowser({
 
 export default function App() {
   const bus: MessageBus = useMemo(() => createMessageBus(), []);
-  const [state, dispatch] = useReducer(workflowReducer, initialWorkflowState);
+  const [state, dispatch] = useReducer(workflowReducerV2, initialWorkflowStateV2);
   const [payload, setPayload] = useState<PanelInitPayload | null>(null);
   const [repositoryStatuses, setRepositoryStatuses] = useState<RepositoryStatus[]>([]);
   const [serviceStatus, setServiceStatus] = useState<ServiceStatus | null>(null);
@@ -641,7 +665,7 @@ export default function App() {
   const [selectedTargetNodeId, setSelectedTargetNodeId] = useState<string | null>(null);
   const [migrationSelection, setMigrationSelection] =
     useState<TargetWorkspaceMigrationSelection | null>(null);
-  const pendingRef = useRef<WorkflowState['pending']>(null);
+  const pendingRef = useRef<WorkflowStateV2['pending']>(null);
   const targetWorkspaceRef = useRef<TargetWorkspaceSnapshot | null>(null);
   const invalidationRef = useRef<TargetWorkspaceInvalidation | null>(null);
   const refreshingRef = useRef(false);
@@ -767,11 +791,18 @@ export default function App() {
         case 'SEARCH_RESULT':
           dispatch({ type: 'SEARCH_SUCCESS', candidates: message.candidates });
           break;
+        case 'CANDIDATE_SELECTED':
+          dispatch({
+            type: 'CANDIDATE_RESOLVE_SUCCESS',
+            candidateId: message.candidateId,
+            sourceBundle: message.sourceBundle,
+          });
+          break;
         case 'ADAPT_RESULT':
           dispatch({ type: 'ADAPT_SUCCESS', result: message.result });
           break;
         case 'APPLY_RESULT':
-          dispatch({ type: 'APPLY_SUCCESS', result: message.result });
+          dispatch({ type: 'APPLY_SUCCESS', result: message.result, manifest: message.manifest });
           break;
         case 'REPOSITORY_STATUS':
           setRepositoryStatuses(message.statuses);
@@ -807,16 +838,19 @@ export default function App() {
   }
 
   function handleAdapt(): void {
-    const candidate = selectedCandidate(state);
+    const candidate = selectedCandidateV2(state);
     if (!state.target || !candidate) return;
     if ((targetWorkspace && targetWorkspace.freshness !== 'current') || targetWorkspaceInvalidation) {
       setError('目标工作区快照已失效，请刷新并重新选择目标实体。');
       return;
     }
-    const routeOption = routeForCandidate(migrationSelection, candidate.language);
+    const routeOption = routeForCandidate(
+      migrationSelection,
+      candidate.candidate.entity.languageId,
+    );
     if (!routeOption) {
       setError(
-        `未声明 ${candidate.language} → ${migrationSelection?.target.entity.languageId ?? state.target.language} ` +
+        `未声明 ${candidate.candidate.entity.languageId} → ${migrationSelection?.target.entity.languageId ?? state.target.entity.languageId} ` +
         '的可执行迁移路线，已按 fail-closed 阻止。',
       );
       return;
@@ -846,7 +880,7 @@ export default function App() {
   }
 
   function handleSelectCandidate(candidateId: string): void {
-    dispatch({ type: 'SELECT_CANDIDATE', candidateId });
+    dispatch({ type: 'CANDIDATE_RESOLVE_START', candidateId });
     bus.post({ type: 'SELECT_CANDIDATE', candidateId });
   }
 
@@ -908,7 +942,7 @@ export default function App() {
     );
   }
 
-  const candidate = selectedCandidate(state);
+  const candidate = selectedCandidateV2(state);
   const targetWorkspaceStage = state.stage === 'target';
 
   return (
@@ -987,7 +1021,10 @@ export default function App() {
           <AdaptationStage
             state={state}
             candidate={candidate}
-            routeOption={routeForCandidate(migrationSelection, candidate?.language)}
+            routeOption={routeForCandidate(
+              migrationSelection,
+              candidate?.candidate.entity.languageId,
+            )}
           />
         ) : null}
 

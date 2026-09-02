@@ -3,6 +3,7 @@ import type {
   EntityImplementationAssessment,
   MigrationTargetRef,
   MigrationRouteResolution,
+  MigrationRuntimeCapabilitySnapshot,
   RepositoryModuleAssignment,
   TargetImplementationRollup,
   TargetWorkspaceModuleSnapshot,
@@ -33,6 +34,8 @@ export interface ProjectTargetWorkspaceInput {
    * Omission means no executable migration capability, not "all languages".
    */
   routeResolutions?: readonly MigrationRouteResolution[];
+  /** Host-owned combined capability artifact shown for fail-closed diagnostics. */
+  runtimeCapabilitySnapshot?: MigrationRuntimeCapabilitySnapshot;
 }
 
 interface ProjectionIndexes {
@@ -145,6 +148,13 @@ export function projectTargetWorkspace(
     snapshotId: snapshot.id,
     contentHash: snapshot.contentHash,
     moduleSnapshot: snapshot,
+    ...(input.runtimeCapabilitySnapshot === undefined
+      ? {}
+      : {
+          runtimeCapabilitySnapshot: JSON.parse(
+            JSON.stringify(input.runtimeCapabilitySnapshot),
+          ) as MigrationRuntimeCapabilitySnapshot,
+        }),
     languageIds: [...new Set(ir.files.flatMap((file) => file.languageId ? [file.languageId] : []))]
       .sort(),
     freshness: 'current',
@@ -288,7 +298,10 @@ function callableEligibility(
       'implementation-state-unknown',
     );
   }
-  if (entity.structureIdentity?.basis !== 'declaration-shape') {
+  if (
+    entity.structureIdentity?.basis !== 'declaration-shape' ||
+    entity.structureIdentity.schemaVersion === 'repository-static-symbol-declaration-shape-v1'
+  ) {
     return blockedEligibility(
       '目标 adapter 未提供可归因的声明身份；不能建立 V2 目标引用。',
       'target-declaration-identity-missing',

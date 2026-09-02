@@ -7,10 +7,12 @@ import {
 import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 import type {
   CallerContext,
+  MigrationTargetEntityRef,
   ModuleTarget,
   RelatedTypeContext,
   TargetDependencyContext,
   TargetModuleContext,
+  TargetContextFactV2,
 } from "@forexplore/contracts";
 import { normalizeLanguageId } from "@forexplore/contracts";
 
@@ -135,6 +137,12 @@ export interface TargetPatchLocation {
   declarationIndentation: string;
 }
 
+export interface TargetEngineeringPatchContextV2 {
+  source: string;
+  target: MigrationTargetEntityRef;
+  declaration: TargetContextFactV2;
+}
+
 export type TargetEngineeringResult<T> =
   | { status: "supported"; value: T }
   | { status: "unsupported"; reason: TargetEngineeringUnsupportedReason };
@@ -155,6 +163,9 @@ export interface TargetEngineeringAdapter {
   ): TargetEngineeringResult<TargetContextSnapshot>;
   locatePatch(
     input: TargetPatchLocatorInput,
+  ): TargetEngineeringResult<TargetPatchLocation>;
+  locatePatchFromContext(
+    input: TargetEngineeringPatchContextV2,
   ): TargetEngineeringResult<TargetPatchLocation>;
 }
 
@@ -257,6 +268,9 @@ function createBraceEngineeringAdapter(
     locatePatch(input) {
       return locateBracePatch(input, configuration);
     },
+    locatePatchFromContext(input) {
+      return locateBracePatch(patchLocatorInputFromContext(input, configuration), configuration);
+    },
   };
 }
 
@@ -294,6 +308,9 @@ function createPythonEngineeringAdapter(): TargetEngineeringAdapter {
       };
     },
     locatePatch: locatePythonPatch,
+    locatePatchFromContext(input) {
+      return locatePythonPatch(pythonPatchLocatorInputFromContext(input));
+    },
   };
 }
 
@@ -330,6 +347,14 @@ function createCapabilityGapAdapter(languageId: "go" | "rust"): TargetEngineerin
       );
     },
     locatePatch() {
+      return unsupportedEngineering(
+        "TARGET_PATCH_LOCATOR_CAPABILITY_UNAVAILABLE",
+        "patch-locator",
+        languageId,
+        `The ${languageId} target engineering adapter is an explicit capability gap.`,
+      );
+    },
+    locatePatchFromContext() {
       return unsupportedEngineering(
         "TARGET_PATCH_LOCATOR_CAPABILITY_UNAVAILABLE",
         "patch-locator",
@@ -828,6 +853,55 @@ function maskPythonSyntax(source: string): string {
     index += 1;
   }
   return output.join("");
+}
+
+function patchLocatorInputFromContext(
+  input: TargetEngineeringPatchContextV2,
+  configuration: BraceEngineeringConfiguration,
+): TargetPatchLocatorInput {
+  const declaration = input.declaration.content?.trimStart() ?? "";
+  const declarationIsType = configuration.languageId === "typescript"
+    ? /^(?:export\s+)?(?:default\s+)?(?:abstract\s+)?(?:class|interface|type|enum)\b/.test(declaration)
+    : /^(?:(?:public|private|protected|internal|abstract|sealed|final|static|partial)\s+)*(?:class|record|struct|interface|enum)\b/.test(declaration);
+  return {
+    source: input.source,
+    targetLine: contextDeclarationStartLine(input),
+    targetKind: declarationIsType || nativeEntityKindIsType(input.target.kind)
+      ? "class"
+      : "function",
+    targetName: input.target.name,
+  };
+}
+
+function pythonPatchLocatorInputFromContext(
+  input: TargetEngineeringPatchContextV2,
+): TargetPatchLocatorInput {
+  const declaration = input.declaration.content?.trimStart() ?? "";
+  return {
+    source: input.source,
+    targetLine: contextDeclarationStartLine(input),
+    targetKind: /^class\b/.test(declaration) || nativeEntityKindIsType(input.target.kind)
+      ? "class"
+      : "function",
+    targetName: input.target.name,
+  };
+}
+
+function contextDeclarationStartLine(input: TargetEngineeringPatchContextV2): number {
+  const value = input.declaration.attributes.startLine;
+  if (typeof value === "number" && Number.isInteger(value) && value > 0) return value;
+  const declaration = input.declaration.content;
+  if (declaration) {
+    const offset = input.source.indexOf(declaration);
+    if (offset >= 0) return input.source.slice(0, offset).split("\n").length;
+  }
+  throw new Error(
+    `Target declaration fact ${input.declaration.id} must provide a positive startLine or exact declaration content.`,
+  );
+}
+
+function nativeEntityKindIsType(kind: string): boolean {
+  return /^(?:class|record|struct|interface|enum|type|trait|protocol)$/i.test(kind.trim());
 }
 
 function locateBracePatch(

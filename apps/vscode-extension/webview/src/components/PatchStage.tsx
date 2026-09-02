@@ -1,8 +1,12 @@
-import { Check, FilePlus2, FileSymlink, ShieldCheck, TriangleAlert } from 'lucide-react';
-import { canApplyAdaptation, evaluateValidationGate, type WorkflowState } from '@forexplore/workflow-core';
+import { Check, FilePlus2, ShieldCheck, TriangleAlert } from 'lucide-react';
+import {
+  canApplyAdaptationForRoute,
+  evaluateValidationPolicyGate,
+} from '@forexplore/workflow-core';
+import type { WorkflowStateV2 } from '../v2-workflow';
 
 interface PatchStageProps {
-  state: WorkflowState;
+  state: WorkflowStateV2;
   onApply: () => void;
   onBack: () => void;
   onOpenTarget: () => void;
@@ -14,16 +18,24 @@ export function PatchStage({ state, onApply, onBack, onOpenTarget }: PatchStageP
   const applying = state.pending === 'apply';
   const additions = result.files.reduce((sum, file) => sum + file.additions, 0);
   const deletions = result.files.reduce((sum, file) => sum + file.deletions, 0);
-  const gate = evaluateValidationGate(result.validation);
-  const canApply = canApplyAdaptation(result);
-  const visibleValidation = result.validation.filter((item) => item.id !== 'standalone-compile');
+  const gate = evaluateValidationPolicyGate(
+    result.validationPolicy,
+    result.validation,
+    { subjectHash: result.patchHash },
+  );
+  const canApply = canApplyAdaptationForRoute(
+    result,
+    result.validationPolicy,
+    { subjectHash: result.patchHash },
+  );
+  const visibleValidation = result.validation;
 
   return (
     <div className="stage-stack">
       <div className="card-heading">
         <span>05 · 校验与回填预览</span>
         <span className="card-heading-meta">
-          {result.files.length} files · +{additions} / −{deletions} · {result.strategy}
+          {result.files.length} files · +{additions} / −{deletions} · {result.route.strategy}
         </span>
       </div>
 
@@ -39,6 +51,7 @@ export function PatchStage({ state, onApply, onBack, onOpenTarget }: PatchStageP
               <code>{state.applyResult.checkpointId}</code>
               {state.applyResult.rollbackAvailable ? '（可通过命令恢复）' : '（不可恢复）'}
             </p>
+            {state.manifest ? <p>V2 清单：<code>{state.manifest.id}</code></p> : null}
           </div>
         </section>
       ) : null}
@@ -70,34 +83,14 @@ export function PatchStage({ state, onApply, onBack, onOpenTarget }: PatchStageP
         ) : null}
       </section>
 
-      {result.interfaceMappings.length > 0 ? (
-        <section className="card">
-          <h3 className="section-title">
-            <FileSymlink size={14} /> 接口映射
-          </h3>
-          <ul className="mapping-list">
-            {result.interfaceMappings.map((mapping) => (
-              <li key={`${mapping.source}-${mapping.target}`}>
-                <code>{mapping.source}</code>
-                <span className="mapping-action">{mapping.action}</span>
-                <code>{mapping.target}</code>
-                <small>{mapping.note}</small>
-              </li>
-            ))}
-          </ul>
-        </section>
-      ) : null}
-
-      {result.modificationPlan && result.modificationPlan.length > 0 ? (
-        <section className="card">
-          <h3 className="section-title">修改计划</h3>
-          <ol className="mapping-list">
-            {result.modificationPlan.map((item, index) => (
-              <li key={`${index}-${item}`}>{item}</li>
-            ))}
-          </ol>
-        </section>
-      ) : null}
+      <section className="card">
+        <h3 className="section-title">V2 执行 lineage</h3>
+        <p className="muted-copy">
+          request <code>{result.requestId}</code> · target <code>{result.targetId}</code>
+          {' · '}bundle <code>{result.sourceBundleId}</code> · context <code>{result.targetContextId}</code>
+          {' · '}overlay <code>{result.executionLineage.executionOverlayId}</code>
+        </p>
+      </section>
 
       {result.files.map((file) => (
         <section className="card file-diff" key={file.path}>

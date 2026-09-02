@@ -106,7 +106,14 @@ function head(side: 'source' | 'target', moduleIds: string[]): ReviewedModuleCat
     createdAt: NOW,
     updatedAt: NOW,
   };
-  return { workspaceId: `${side}-workspace`, ir, catalog };
+  return {
+    workspaceId: `${side}-workspace`,
+    ir,
+    catalog,
+    analysisSnapshotId: `${side}-snapshot-v1`,
+    analysisContentHash: marker.repeat(64),
+    analysisAdapters: [],
+  };
 }
 
 const source = head('source', ['s1', 's2', 's3']);
@@ -217,6 +224,7 @@ function harness(input: { omitSource?: boolean; omitTarget?: boolean } = {}) {
   ]);
   if (input.omitSource) heads.delete(source.workspaceId);
   if (input.omitTarget) heads.delete(target.workspaceId);
+  let currentRoute = resolvedRoute();
   const host = new ModuleMappingHost({
     store,
     catalogs: {
@@ -227,7 +235,7 @@ function harness(input: { omitSource?: boolean; omitTarget?: boolean } = {}) {
     },
     routes: {
       async resolve(id, version) {
-        const value = resolvedRoute();
+        const value = structuredClone(currentRoute);
         return value.resolution.route.id === id && value.resolution.route.version === version
           ? value
           : undefined;
@@ -235,7 +243,14 @@ function harness(input: { omitSource?: boolean; omitTarget?: boolean } = {}) {
     },
     now: () => NOW,
   });
-  return { host, store, heads };
+  return {
+    host,
+    store,
+    heads,
+    replaceRuntimeSnapshot(snapshot: ResolvedModuleMappingRoute['runtimeCapabilitySnapshot']) {
+      currentRoute = { ...currentRoute, runtimeCapabilitySnapshot: structuredClone(snapshot) };
+    },
+  };
 }
 
 async function readyHost() {
@@ -282,6 +297,15 @@ describe('ModuleMappingHost canonical mainline', () => {
       targetModuleId: 't3',
       targetEntityId: 'target-entity-t3',
       allowedRouteIds: ['route:python-to-rust'],
+    });
+    const executionContext = await host.executionContext(binding);
+    expect(executionContext).toMatchObject({
+      runtimeCapabilities: { id: binding.runtimeCapabilitySnapshot.id },
+      currentSourceCatalog: { moduleCatalogId: binding.sourceCatalog.moduleCatalogId },
+      currentTargetCatalog: { moduleCatalogId: binding.targetCatalog.moduleCatalogId },
+      mappingProposal: { id: binding.mappingProposalId },
+      mappingReview: { id: binding.mappingReviewId },
+      executionOverlay: { id: binding.executionOverlayId },
     });
     expect(binding).toMatchObject({
       mappingProposalHash: record.proposal.contentHash,
@@ -355,6 +379,26 @@ describe('ModuleMappingHost canonical mainline', () => {
     const refreshed = await host.get(record.id, true);
     expect(refreshed).toMatchObject({ stage: 'stale' });
     expect(refreshed?.staleReasons).toContain('source:unified-ir-changed');
+  });
+
+  it('invalidates mapping and active-run bindings when the service snapshot changes', async () => {
+    const ready = await readyHost();
+    const binding = await ready.host.bindTarget({
+      targetWorkspaceId: target.workspaceId,
+      targetModuleId: 't3',
+      targetEntityId: 'target-entity-t3',
+      allowedRouteIds: ['route:python-to-rust'],
+    });
+    const changed = materializeMigrationRuntimeCapabilitySnapshot({
+      routes: ready.record.runtimeCapabilitySnapshot!.routes,
+      createdAt: '2026-09-02T09:00:00.000Z',
+    });
+    ready.replaceRuntimeSnapshot(changed);
+
+    const refreshed = await ready.host.get(ready.record.id, true);
+    expect(refreshed).toMatchObject({ stage: 'stale' });
+    expect(refreshed?.staleReasons).toContain('route-resolution-changed');
+    await expect(ready.host.assertBindingCurrent(binding)).rejects.toThrow(/unavailable or stale/);
   });
 
   it('rejects invented module/entity ownership and never persists FunctionalModule facts', async () => {

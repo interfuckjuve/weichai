@@ -129,3 +129,32 @@ UI 和 Host 展示同一份结构化 route capability，不允许各自推导“
 10. 最终 `MigrationRunManifest` 能重放并核对 route、provider、validator、patch、修复轮次和恢复点。
 
 在以上门禁全部有当前证据以前，只能报告阶段性能力，不能宣布迁移执行已经完全语言无关。
+
+## 8. 2026-09-02 施工结果
+
+本轮已完成 LA-01～LA-10 的工程主体和验收闭环。这里的“完成”指默认产品链已经改为语言开放、精确路线、制品可追踪且失败关闭；不表示任意语言对已经自动获得生产级迁移能力。
+
+| 施工包 | 当前证据 |
+|---|---|
+| LA-01 | V2 正式制品使用开放 `LanguageId`；V1 `Language/ModuleTarget` 只保留在明确命名的 Legacy 入口和兼容 API 中 |
+| LA-02 | route registry 按 source、target、strategy、provider/version、stage availability 和 validation policy 精确解析；可外部注册路线和编译器能力 |
+| LA-03 | Extension Host 与 Webview 默认走 V2；目标语言和实体类型来自 reviewed IR；未注册、能力不完整和 unknown 均失败关闭 |
+| LA-04 | source/target reviewed catalog、mapping proposal/review 和 execution overlay 形成唯一模块事实链，覆盖 1:1、1:N、N:1 |
+| LA-05 | V2 search、candidate、index generation、source bundle、target context、adaptation 和 manifest 均验证完整内容哈希与 lineage |
+| LA-06 | VS Code Extension 是可信 V2 产品入口；原独立 Web/V1 命令已明确标为 Legacy，不再代表当前生产能力 |
+| LA-07 | detector、target context/patch locator、compiler 和 verifier 通过语言/路线 registry 注入；workflow-core 不解析语言语法 |
+| LA-08 | 目标树使用 container/callable/native kind 投影；Python 顶层函数不再伪造成 class/method |
+| LA-09 | 写回对所有文件先做授权路径、realpath、原始 hash、dirty buffer 和 hunk 预检；使用单次 `WorkspaceEdit`、持久化 prepared/committing/committed/rolled-back journal、启动恢复、不可变 V2 制品和检查点恢复 |
+| LA-10 | 受控 TypeScript → Python 顶层函数路线使用真实 Node/tsx 与 Python 子进程做差分执行，并验证缺失 verifier 必然形成 required `unverified`、阻止写回 |
+
+当前显式注册的工程路线为：
+
+- Java → C#：仅历史回归路线；
+- TypeScript → Python：跨范式验收路线；
+- Python → TypeScript：反向开放路线骨架。
+
+生产服务不会因为路线出现在清单中就宣称可用。缺少 Host 组合、权威制品存储、目标工程 adapter、编译工具链或隔离的独立行为 verifier 时，对应 stage 和整条路线保持 `unavailable`；当前 HTTP 默认部署正是按此规则失败关闭。测试中的 TypeScript → Python verifier 只执行仓库内固定 fixture，不冒充生产隔离执行证明。
+
+本轮当前验证证据：全仓 1197 项测试通过、5 项按显式工具链条件跳过；Extension、根 Web、Retrieval、Adaptation、Adaptation MCP、Code Indexer、Translation Verifier 和 Adaptation HTTP Adapter 均构建通过，Extension typecheck 与 SeekDB Adapter 独立严格检查通过。5 个跳过项分别来自 1 个需显式开启的 .NET 集成测试和 4 个依赖 C# SDK 的 verifier 测试；当前机器可发现 `dotnet` 可执行文件但没有可用 SDK，因此没有把受支持路线的失败伪装成 skip。
+
+因此，Java → C# 已明确降级为历史回归基线；新增语言的工程入口是注册 adapter 和精确 route，而不是修改中央语言 union 或复制单语言工作流。后续扩展的施工单位是“可验证路线”，不是“模型声称会写某种语言”。

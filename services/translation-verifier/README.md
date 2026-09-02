@@ -5,6 +5,8 @@
 核心定位:差分验证是**差异探测器而非裁判**——两侧行为不一致不等于目标侧错(可能是源侧历史缺陷),
 判定以**用户需求**为准。
 
+> 本服务的语言驱动和工具链存在，不会自动授权一条迁移路线。Java → C# 仅是历史回归基线；当前是全面多语言开发，但每个 source/target/strategy 组合仍必须由 adaptation V2 exact route capability 和必需验证策略独立授权。生产 adaptation HTTP 默认未配置外部隔离 verifier，因此 behavior-validation 失败关闭。本仓库的 `RealDriverExecutor` 和 E2E/测试 fixture driver 会继承本地环境且不提供生产级网络、凭据与工作区隔离，不得用作 trusted-isolated 证据。
+
 ## 架构
 
 ```
@@ -12,7 +14,7 @@
               │                                                │
               ▼                                                ▼
         源侧驱动执行(A)  ◄── 描述 ──►  目标侧驱动执行(B)
-              │                       (Java/C# 生成器 + javac/dotnet)
+              │                  (Java/C#/Python/TypeScript 驱动 + 对应工具链)
               ▼                       │
          ┌────────────────────────────┘
          ▼
@@ -38,7 +40,7 @@
 | 模块 | 职责 |
 | --- | --- |
 | `description.ts` | 语言无关测试描述类型 + 校验 + canonical 规范化 |
-| `driver/` | Java / C# 目标驱动，以及 Python / TypeScript 源侧驱动(确定性 JSON 输出) |
+| `driver/` | Java / C# / Python / TypeScript 的源侧与目标侧驱动（确定性 JSON 输出） |
 | `executor.ts` | javac / dotnet / python3 / tsc+tsx 编译 + 运行(可注入 fake) |
 | `comparator.ts` | 差分比较器(数值容差 / 跨语言异常等价类 / 语义集合比较) |
 | `verifier.ts` | 双轨道验证编排 + 量化报告 + 需求裁决(`requirementVerdict`) |
@@ -180,7 +182,7 @@ npx tsx services/translation-verifier/src/cli.ts \
 - `--description` / `--source` / `--target` 必填;`--requirement` 缺失时描述须自带(需求第一)。
 - 源目录只含一种 `.java`、`.cs`、`.py` 或 `.ts` 时自动识别语言；Python/TypeScript 必须提供
   `--source-module`，类方法再提供 `--source-class`，模块级函数可省略类名。
-- `TestDescription.target.language` 仍只支持 Java/C#；Python/TypeScript 是源侧执行适配器，不会改变目标翻译契约。
+- `TestDescription.target.language` 支持 Java、C#、Python 和 TypeScript；Python/TypeScript 模块级目标必须提供 `target.module`。这只说明 verifier 的驱动能力，不会绕过 V2 exact route 授权。
 - 翻译由 agent 在调度时完成,CLI 不做 LLM 调用。
 
 ## 统一测试质量评估框架(`src/quality/`)
@@ -277,6 +279,7 @@ npx tsx services/translation-verifier/src/quality/cli.ts \
 
 ## 已知限制
 
+- `RealDriverExecutor` 和本地 fixture driver 只是受控的开发/测试执行器，不是无网络、无凭据、无工作区挂载的生产隔离器。
 - 真实分支覆盖率(需要 JaCoCo / dotnet-coverage 插桩)尚未接入,报告 `coverage` 字段预留。
 - 状态路径(state path)深度支持受限:本期 expected 支持 return / exception;对象内部状态可通过
   getter 以 return 形式断言。

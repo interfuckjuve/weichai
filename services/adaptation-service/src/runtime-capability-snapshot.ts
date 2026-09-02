@@ -2,10 +2,13 @@ import {
   migrationRouteSchemaVersion,
   normalizeLanguageId,
   validationPolicySchemaVersion,
+  type Language,
+  type LanguageId,
   type MaterializedMigrationRouteDescriptor,
   type MigrationRouteAvailability,
   type MigrationRouteDescriptor,
   type MigrationRouteStageCapability,
+  type MigrationRouteStage,
   type MigrationRuntimeCapabilitySnapshot,
 } from "@forexplore/contracts";
 import {
@@ -13,7 +16,9 @@ import {
   validateMigrationRuntimeCapabilitySnapshot,
 } from "@forexplore/workflow-core";
 import {
+  createDefaultCompilerRouteRegistry,
   listCompilerRouteCapabilities,
+  type CompilerRouteRegistry,
   type CompilerRouteCapability,
 } from "./compiler";
 import {
@@ -29,66 +34,147 @@ import {
 export type WorkspaceMutationExecution = "disabled" | "trusted-host";
 export type RepositoryAnalysisExecution = "disabled" | "trusted-host";
 
+export const adaptationServiceOwnedRouteStages = [
+  "context-collection",
+  "behavior-extraction",
+  "migration-planning",
+  "translation",
+  "patch-generation",
+  "compile-validation",
+  "behavior-validation",
+] as const satisfies readonly MigrationRouteStage[];
+
+export const hostOwnedRouteStages = [
+  "source-analysis",
+  "target-analysis",
+  "workspace-apply",
+  "workspace-rollback",
+] as const satisfies readonly MigrationRouteStage[];
+
+const adaptationServiceOwnedStageSet = new Set<MigrationRouteStage>(
+  adaptationServiceOwnedRouteStages,
+);
+
 export interface AdaptationRuntimeCapabilitySnapshotOptions {
   createdAt: string;
   analysisExecution: RepositoryAnalysisExecution;
   verifierExecution: TranslationVerifierExecution;
   workspaceMutationExecution: WorkspaceMutationExecution;
   targetEngineeringRegistry?: TargetEngineeringAdapterRegistry;
+  compilerRegistry?: CompilerRouteRegistry;
+  /**
+   * Complete reviewed exact-route inventory; defaults to the built-in three.
+   * Spread defaultExactTranslationRouteRegistrations() to append, or supply a
+   * standalone array to replace the defaults.
+   */
+  routeRegistrations?: readonly ExactTranslationRouteRegistration[];
 }
 
-interface ExactTranslationRoute {
+export interface ExactTranslationRouteRegistration {
   id: string;
   name: string;
-  sourceLanguageId: "java" | "python" | "typescript";
-  sourceLanguage: "Java" | "Python" | "TypeScript";
-  targetLanguageId: "csharp" | "python" | "typescript";
-  targetLanguage: "C#" | "Python" | "TypeScript";
+  strategy: "translate";
+  sourceLanguageId: LanguageId;
+  sourceDisplayName: string;
+  targetLanguageId: LanguageId;
+  targetDisplayName: string;
+  /** Optional compatibility mapping for the legacy verifier protocol. */
+  legacyVerifier?: { sourceLanguage: Language; targetLanguage: Language };
 }
 
 /**
  * Explicit route inventory. Adding a language adapter never creates migration
  * pairs implicitly; every source x target x strategy tuple remains reviewed.
  */
-const EXACT_TRANSLATION_ROUTES: readonly ExactTranslationRoute[] = [
+const DEFAULT_EXACT_TRANSLATION_ROUTES: readonly ExactTranslationRouteRegistration[] = [
   {
     id: "forexplore.translate.java-to-csharp",
     name: "Java to C# translation (historical regression route)",
+    strategy: "translate",
     sourceLanguageId: "java",
-    sourceLanguage: "Java",
+    sourceDisplayName: "Java",
     targetLanguageId: "csharp",
-    targetLanguage: "C#",
+    targetDisplayName: "C#",
+    legacyVerifier: { sourceLanguage: "Java", targetLanguage: "C#" },
   },
   {
     id: "forexplore.translate.typescript-to-python",
     name: "TypeScript to Python translation",
+    strategy: "translate",
     sourceLanguageId: "typescript",
-    sourceLanguage: "TypeScript",
+    sourceDisplayName: "TypeScript",
     targetLanguageId: "python",
-    targetLanguage: "Python",
+    targetDisplayName: "Python",
+    legacyVerifier: { sourceLanguage: "TypeScript", targetLanguage: "Python" },
   },
   {
     id: "forexplore.translate.python-to-typescript",
     name: "Python to TypeScript translation",
+    strategy: "translate",
     sourceLanguageId: "python",
-    sourceLanguage: "Python",
+    sourceDisplayName: "Python",
     targetLanguageId: "typescript",
-    targetLanguage: "TypeScript",
+    targetDisplayName: "TypeScript",
+    legacyVerifier: { sourceLanguage: "Python", targetLanguage: "TypeScript" },
   },
 ];
+
+export function defaultExactTranslationRouteRegistrations(): ExactTranslationRouteRegistration[] {
+  return DEFAULT_EXACT_TRANSLATION_ROUTES.map((route) => structuredClone(route));
+}
+
+function validateExactRouteRegistrations(
+  registrations: readonly ExactTranslationRouteRegistration[],
+): ExactTranslationRouteRegistration[] {
+  const routeIds = new Set<string>();
+  const exactKeys = new Set<string>();
+  return registrations.map((registration) => {
+    const sourceLanguageId = normalizeLanguageId(registration.sourceLanguageId);
+    const targetLanguageId = normalizeLanguageId(registration.targetLanguageId);
+    if (
+      !registration.id.trim() ||
+      !registration.name.trim() ||
+      !registration.sourceDisplayName.trim() ||
+      !registration.targetDisplayName.trim() ||
+      registration.strategy !== "translate"
+    ) {
+      throw new Error("Exact translation route requires stable identity, display metadata, and translate strategy.");
+    }
+    const exactKey = `${sourceLanguageId}\u0000${targetLanguageId}\u0000${registration.strategy}`;
+    if (routeIds.has(registration.id)) {
+      throw new Error(`Duplicate migration route ID ${registration.id}.`);
+    }
+    if (exactKeys.has(exactKey)) {
+      throw new Error(
+        `Duplicate exact migration route ${sourceLanguageId} -> ${targetLanguageId} (${registration.strategy}).`,
+      );
+    }
+    routeIds.add(registration.id);
+    exactKeys.add(exactKey);
+    return {
+      ...structuredClone(registration),
+      sourceLanguageId,
+      targetLanguageId,
+    };
+  });
+}
 
 export function createAdaptationRuntimeCapabilitySnapshot(
   options: AdaptationRuntimeCapabilitySnapshotOptions,
 ): MigrationRuntimeCapabilitySnapshot {
   const targetRegistry =
     options.targetEngineeringRegistry ?? createDefaultTargetEngineeringAdapterRegistry();
+  const compilerRegistry = options.compilerRegistry ?? createDefaultCompilerRouteRegistry();
   const compilerByLanguageId = new Map(
-    listCompilerRouteCapabilities().map((capability) => [
-      normalizeLanguageId(capability.language),
+    listCompilerRouteCapabilities(compilerRegistry).map((capability) => [
+      capability.languageId,
       capability,
     ]),
   );
-  const routes = EXACT_TRANSLATION_ROUTES.map((route) => buildRoute(
+  const registrations = validateExactRouteRegistrations(
+    options.routeRegistrations ?? DEFAULT_EXACT_TRANSLATION_ROUTES,
+  );
+  const routes = registrations.map((route) => buildRoute(
     route,
     targetRegistry.adapterFor(route.targetLanguageId)?.descriptor,
     compilerByLanguageId.get(route.targetLanguageId),
@@ -101,7 +187,7 @@ export function createAdaptationRuntimeCapabilitySnapshot(
 }
 
 function buildRoute(
-  route: ExactTranslationRoute,
+  route: ExactTranslationRouteRegistration,
   targetEngineering: TargetEngineeringCapabilityDescriptor | undefined,
   compiler: CompilerRouteCapability | undefined,
   options: AdaptationRuntimeCapabilitySnapshotOptions,
@@ -130,10 +216,12 @@ function buildRoute(
         "target-compiler-capability-unavailable",
         `No compiler route is available for ${route.targetLanguageId}.`,
       );
-  const verifierRoute = resolveTranslationVerifierRoute(
-    route.sourceLanguage,
-    route.targetLanguage,
-  );
+  const verifierRoute = route.legacyVerifier
+    ? resolveTranslationVerifierRoute(
+        route.legacyVerifier.sourceLanguage,
+        route.legacyVerifier.targetLanguage,
+      )
+    : undefined;
   const behaviorAvailability = !verifierRoute
     ? unavailable(
         "behavior-verifier-route-unavailable",
@@ -192,7 +280,7 @@ function buildRoute(
     ),
     stage(
       "migration-planning",
-      "forexplore.analyzer.deepseek",
+      "forexplore.planner.deepseek",
       "1.0.0",
       ["migration-planning"],
       available(),
@@ -249,7 +337,7 @@ function buildRoute(
     version: "2.0.0",
     sourceLanguageId: route.sourceLanguageId,
     targetLanguageId: route.targetLanguageId,
-    strategy: "translate",
+    strategy: route.strategy,
     stages,
     availability: routeAvailability,
     validationPolicy: {
@@ -278,7 +366,7 @@ function buildRoute(
         },
         {
           id: "target-compile",
-          label: `${route.targetLanguage} target compilation`,
+          label: `${route.targetDisplayName} target compilation`,
           phase: compiler?.integrated.level === "syntax" ? "syntax" : "compile",
           required: true,
           verifierId: compilerProviderId,
@@ -385,4 +473,18 @@ export function routeByExactPair(
     route.sourceLanguageId === source &&
     route.targetLanguageId === target &&
     route.strategy === "translate");
+}
+
+export function adaptationServiceOwnedRouteUnavailability(
+  serviceSnapshot: MigrationRuntimeCapabilitySnapshot,
+  routeId: string,
+): string[] {
+  validateMigrationRuntimeCapabilitySnapshot(serviceSnapshot);
+  const route = serviceSnapshot.routes.find((candidate) => candidate.id === routeId);
+  if (!route) return ["route-not-registered"];
+  return route.stages
+    .filter((stage) =>
+      adaptationServiceOwnedStageSet.has(stage.stage) &&
+      stage.availability.status === "unavailable")
+    .flatMap((stage) => stage.availability.reasonCodes.map((reason) => `${stage.stage}:${reason}`));
 }

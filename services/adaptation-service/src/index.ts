@@ -14,6 +14,30 @@ export type {
 } from "./adaptation-adapter";
 
 export {
+  AdaptationAdapterV2,
+  DeepSeekMigrationAnalyzerV2,
+  DeepSeekMigrationPlannerV2,
+  DeepSeekMigrationTranslatorV2,
+  MigrationRouteExecutionError,
+} from "./adaptation-adapter-v2";
+export type {
+  AdaptationAdapterV2Options,
+  CodeAdaptationPortV2,
+  DeepSeekMigrationAgentsV2Options,
+  MigrationAnalysisV2,
+  MigrationAnalyzerV2,
+  MigrationBehaviorVerifierV2,
+  MigrationCompilerV2,
+  MigrationEvidenceInputV2,
+  MigrationPlanV2,
+  MigrationPlannerV2,
+  MigrationRouteExecutionErrorCode,
+  MigrationTranslationV2,
+  MigrationTranslatorV2,
+  MigrationValidationEvidenceV2,
+} from "./adaptation-adapter-v2";
+
+export {
   listTranslationVerifierRuntimeCapabilities,
   resolveTranslationVerifierRoute,
   TranslationVerifierAdapter,
@@ -125,6 +149,7 @@ export type {
   TargetEngineeringAdapter,
   TargetEngineeringCapabilityDescriptor,
   TargetEngineeringContextRequest,
+  TargetEngineeringPatchContextV2,
   TargetEngineeringResult,
   TargetEngineeringStage,
   TargetEngineeringUnsupportedReason,
@@ -140,15 +165,21 @@ export {
   compileTargetStandalone,
   compileTargetIntegrated,
   compilerCommand,
+  createDefaultCompilerRouteRegistry,
   listCompilerRouteCapabilities,
   resolveCompilerRouteCapability,
+  resolveCompilerRouteCapabilityByLanguageId,
+  compileTargetStandaloneByLanguageId,
+  compileTargetIntegratedByLanguageId,
 } from "./compiler";
 export type {
   CompileResult,
+  CompilerRouteRegistration,
   CompilerRouteCapability,
   CompilerUnsupportedReason,
   CompilerValidationLevel,
 } from "./compiler";
+export { CompilerRouteRegistry } from "./compiler";
 
 export { deepSeekModelConfig, loadDeepSeekModelConfig } from "./model-config";
 export type { DeepSeekModelConfig } from "./model-config";
@@ -162,6 +193,9 @@ export type { AdaptationServiceConfig } from "./config";
 export { createHttpServer } from "./http-server";
 export type {
   HttpServerOptions,
+  MigrationExecutionV2ArtifactLookup,
+  MigrationExecutionV2ArtifactStore,
+  MigrationExecutionV2ServerArtifacts,
   ModuleDiscoveryHttpConstraint,
   ModuleDiscoveryHttpRequest,
   ModulePlanHttpRequest,
@@ -170,11 +204,16 @@ export type {
 export type { RepositoryArchitecturePort } from "@forexplore/workflow-core";
 
 export {
+  adaptationServiceOwnedRouteStages,
+  adaptationServiceOwnedRouteUnavailability,
   createAdaptationRuntimeCapabilitySnapshot,
+  defaultExactTranslationRouteRegistrations,
+  hostOwnedRouteStages,
   routeByExactPair,
 } from "./runtime-capability-snapshot";
 export type {
   AdaptationRuntimeCapabilitySnapshotOptions,
+  ExactTranslationRouteRegistration,
   RepositoryAnalysisExecution,
   WorkspaceMutationExecution,
 } from "./runtime-capability-snapshot";

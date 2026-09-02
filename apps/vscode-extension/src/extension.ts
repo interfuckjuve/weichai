@@ -2,28 +2,33 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import * as vscode from 'vscode';
 import type {
-  AdaptationResult,
-  FilePatch,
+  AdaptationRequestV2,
+  AdaptationResultV2,
   MigrationRouteDescriptor,
   MigrationRouteResolution,
+  MigrationCheckpointRefV2,
+  MigrationRunManifestV2,
+  MigrationRouteStage,
   ModuleMappingEntry,
-  ModuleTarget,
-  SearchCandidate,
-  ValidationRecord,
 } from '@forexplore/contracts';
 import { normalizeLanguageId } from '@forexplore/contracts';
 import {
-  analyzeRepository,
   writeRepositoryAnalysisArtifact,
 } from '@forexplore/code-indexer';
 import {
   applyHunksStrict,
-  canApplyAdaptation,
-  evaluateValidationGate,
+  canApplyAdaptationForRoute,
+  evaluateValidationPolicyGate,
+  materializeMigrationRunManifestV2,
+  validateMigrationRunManifestV2,
   type MigrationExecutionGroupDraft,
+  type MigrationExecutionV2ValidationContext,
 } from '@forexplore/workflow-core';
 import { WorkspaceBackfill } from './backfill';
 import { canonicalWorkspacePath } from './diff-apply';
+import {
+  HostOwnedRepositoryAnalyzer,
+} from './host-owned-repository-analyzer';
 import {
   ModuleMigrationHost,
   ModuleMigrationPreviewProvider,
@@ -32,7 +37,7 @@ import {
 import {
   ModuleMappingHost,
   type ModuleMappingHostRecord,
-  type ResolvedModuleMappingRoute,
+  type ModuleMappingRouteProvider,
 } from './module-mapping-host';
 import { VSCodeModuleMappingHostStore } from './module-mapping-store';
 import { requestRepositoryModuleDiscovery } from './module-discovery-client';
@@ -46,8 +51,11 @@ import type {
 import { RepositoryHealthCheck } from './repository-health';
 import { decorateRepositoryStatuses } from './repository-status';
 import { ServiceManager } from './service-manager';
+import {
+  combineHostRuntimeCapabilities,
+  runtimeCapabilityView,
+} from './runtime-capability-host';
 import { loadSettings } from './settings';
-import { buildModuleTarget } from './target-builder';
 import {
   TargetWorkspaceHost,
   type TargetWorkspaceHostRecord,
@@ -57,9 +65,19 @@ import { FileSystemTargetWorkspaceHostStore } from './target-workspace-store';
 import {
   assertTargetWorkspaceSelection,
   migrationSelectionFromTargetWorkspaceContext,
-  moduleTargetFromTargetWorkspaceContext,
   projectTargetWorkspace,
 } from './target-workspace-projection';
+import {
+  adaptRunV2,
+  assertRunContextCurrent,
+  createActiveMigrationRunV2,
+  selectCandidateV2,
+  selectedCandidateV2,
+  startSearchV2,
+  type ActiveMigrationRunV2,
+} from './migration-workflow-v2-host';
+import { collectTargetContextV2 } from './target-context-v2';
+import { MigrationRunV2Store } from './migration-run-v2-store';
 import type {
   TargetWorkspaceSelectionIdentity,
   TargetWorkspaceMigrationSelection,
@@ -85,26 +103,15 @@ interface ExtensionHost {
   health: RepositoryHealthCheck;
   targetWorkspaces: TargetWorkspaceHost;
   moduleMappings: ModuleMappingHost;
-  /** Resolved exact-pair capabilities. Empty means migration execution is disabled. */
-  migrationRouteResolutions: readonly MigrationRouteResolution[];
+  repositoryAnalyzer: HostOwnedRepositoryAnalyzer;
 }
 
-interface ActiveMigrationRun {
+interface ActiveMigrationRun extends ActiveMigrationRunV2 {
   workspaceFolder: vscode.WorkspaceFolder;
   targetUri: vscode.Uri;
-  target: ModuleTarget;
   /** Exact bytes read before retrieval / adaptation began. */
   originalSha256: string;
   originalContent: string;
-  requirement: string;
-  candidates: SearchCandidate[];
-  /** Null until the user expressly clicks a candidate in this run. */
-  selectedCandidateId: string | null;
-  /** Exact route chosen for the selected candidate; null is fail-closed. */
-  selectedRouteId: string | null;
-  adaptation: AdaptationResult | null;
-  /** Present only when 01B, rather than an editor selection, chose this target. */
-  migrationSelection?: TargetWorkspaceMigrationSelection;
 }
 
 interface ActiveTargetWorkspacePanel {
@@ -115,17 +122,22 @@ interface ActiveTargetWorkspacePanel {
 interface LastCheckpoint {
   checkpointId: string;
   workspaceUri: string;
-  targetPath: string;
+  allowedTargetPaths: string[];
+  runId: string;
+  manifestId: string;
+  manifestHash: string;
+  manifestPath: string;
 }
 
 let activeRun: ActiveMigrationRun | null = null;
 let activeTargetWorkspacePanel: ActiveTargetWorkspacePanel | null = null;
 let targetSelectionEpoch = 0;
 
-export function activate(context: vscode.ExtensionContext): void {
+export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const output = vscode.window.createOutputChannel('ForeXplore');
   const services = new ServiceManager(output);
   const health = new RepositoryHealthCheck();
+  const repositoryAnalyzer = new HostOwnedRepositoryAnalyzer();
   const moduleMigrationPreviews = new ModuleMigrationPreviewProvider();
   const moduleMigration = new ModuleMigrationHost({
     context,
@@ -134,6 +146,7 @@ export function activate(context: vscode.ExtensionContext): void {
     previews: moduleMigrationPreviews,
     waveRecovery: new GitWaveTransaction(),
     waveExecution: new ModuleWaveExecutionCoordinator(),
+    repositoryAnalyzer: (request) => repositoryAnalyzer.analyze(request),
   });
   const targetWorkspaces = new TargetWorkspaceHost({
     store: new FileSystemTargetWorkspaceHostStore({
@@ -141,7 +154,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     implementationInventory: new LocalTargetWorkspaceImplementationInventory(),
     analyze: async (request) => {
-      const analysis = await analyzeRepository(request);
+      const analysis = await repositoryAnalyzer.analyze(request);
       // The separately deployed Module Discovery service reads the same
       // immutable sidecar by snapshot ID. Persist before sending that ID.
       await writeRepositoryAnalysisArtifact(request.root, analysis);
@@ -160,11 +173,21 @@ export function activate(context: vscode.ExtensionContext): void {
       );
     },
   });
-  // Capability-client integration seam. Only entries materialized from a
-  // signed runtime capability snapshot may populate this collection.
-  const migrationRouteCapabilities: readonly ResolvedModuleMappingRoute[] = [];
-  const migrationRouteResolutions: readonly MigrationRouteResolution[] =
-    migrationRouteCapabilities.map(({ resolution }) => resolution);
+  const listModuleMappingRoutes: NonNullable<ModuleMappingRouteProvider['list']> = async (heads) => {
+    const combined = combineHostRuntimeCapabilities(
+      services.runtimeCapabilityState.snapshot,
+      {
+        source: heads.source,
+        target: heads.target,
+        analyzerDescriptors: repositoryAnalyzer.descriptors(),
+        workspaceMutationAvailable: true,
+      },
+    );
+    return runtimeCapabilityView(combined).resolutions
+      .filter((resolution): resolution is Extract<MigrationRouteResolution, { status: 'supported' }> =>
+        resolution.status === 'supported')
+      .map((resolution) => ({ resolution, runtimeCapabilitySnapshot: combined }));
+  };
   const moduleMappings = new ModuleMappingHost({
     store: new VSCodeModuleMappingHostStore(context.workspaceState),
     catalogs: {
@@ -186,12 +209,17 @@ export function activate(context: vscode.ExtensionContext): void {
           workspaceId,
           ir: record.accepted.ir,
           catalog: record.accepted.catalog,
+          analysisSnapshotId: record.accepted.analysis.snapshotId,
+          analysisContentHash: record.accepted.analysis.contentHash,
+          analysisAdapters: [...(record.accepted.analysis.analysisAdapters ?? [])],
         };
       },
     },
     routes: {
-      async resolve(routeId, routeVersion) {
-        return migrationRouteCapabilities.find(({ resolution }) =>
+      list: listModuleMappingRoutes,
+      async resolve(routeId, routeVersion, heads) {
+        const capabilities = await listModuleMappingRoutes(heads);
+        return capabilities.find(({ resolution }) =>
           resolution.route.id === routeId &&
           resolution.route.version === routeVersion,
         );
@@ -204,10 +232,11 @@ export function activate(context: vscode.ExtensionContext): void {
     health,
     targetWorkspaces,
     moduleMappings,
-    // Integration seam: populate from the adaptation runtime's signed route
-    // registry response. Until that endpoint is wired, execution is disabled.
-    migrationRouteResolutions,
+    repositoryAnalyzer,
   };
+  // Recovery completes before mutation commands become reachable. This avoids
+  // a startup race between journal replay and a newly requested write-back.
+  await recoverInterruptedBackfills(context, output);
 
   context.subscriptions.push(
     output,
@@ -216,8 +245,8 @@ export function activate(context: vscode.ExtensionContext): void {
       moduleMigrationPreviewScheme,
       moduleMigrationPreviews,
     ),
-    vscode.commands.registerCommand('forexplore.startTranslation', () =>
-      startTranslation(extensionHost),
+    vscode.commands.registerCommand('forexplore.startLegacyTranslation', () =>
+      startLegacyTranslation(),
     ),
     vscode.commands.registerCommand('forexplore.showPanel', () =>
       showPanel(extensionHost),
@@ -302,6 +331,36 @@ export function activate(context: vscode.ExtensionContext): void {
     });
 }
 
+async function recoverInterruptedBackfills(
+  context: vscode.ExtensionContext,
+  output: vscode.OutputChannel,
+): Promise<void> {
+  for (const workspaceFolder of vscode.workspace.workspaceFolders ?? []) {
+    try {
+      const recovered = await new WorkspaceBackfill({
+        workspaceFolder,
+        storageUri: context.globalStorageUri,
+        // Recovery authorization is rehydrated from the Host-owned checkpoint
+        // only when its journal binds this exact workspace identity.
+        allowedTargetPaths: [],
+      }).recoverInterrupted();
+      if (recovered.length > 0) {
+        output.appendLine(
+          `[forexplore] recovered interrupted backfill transactions: ${recovered.join(', ')}`,
+        );
+        void vscode.window.showWarningMessage(
+          `ForeXplore 已安全恢复 ${recovered.length} 个中断的写回事务。`,
+        );
+      }
+    } catch (error) {
+      output.appendLine(`[forexplore] interrupted backfill recovery blocked: ${errorMessage(error, 'unknown')}`);
+      void vscode.window.showErrorMessage(
+        'ForeXplore 检测到无法自动恢复的中断写回事务；在人工检查前将阻止新的写回。',
+      );
+    }
+  }
+}
+
 export function deactivate(): void {
   targetSelectionEpoch += 1;
   activeRun = null;
@@ -370,6 +429,7 @@ async function reviewModuleMapping(
   previews: ModuleMigrationPreviewProvider,
 ): Promise<void> {
   try {
+    await host.services.refresh();
     const records = (await host.moduleMappings.list(true)).filter(
       (record) => record.stage === 'awaiting-review',
     );
@@ -422,10 +482,8 @@ async function reviewModuleMapping(
         : 'reject' as const;
     let selectedRoute: Extract<MigrationRouteResolution, { status: 'supported' }> | undefined;
     if (decision === 'accept') {
-      const supportedRoutes = host.migrationRouteResolutions.filter(
-        (resolution): resolution is Extract<MigrationRouteResolution, { status: 'supported' }> =>
-          resolution.status === 'supported',
-      );
+      const supportedRoutes = (await host.moduleMappings.listRoutes(record.id))
+        .map(({ resolution }) => resolution);
       if (supportedRoutes.length === 0) {
         throw new Error('当前没有来自能力注册表的 supported route；接受操作已 fail closed。');
       }
@@ -525,84 +583,9 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === 'string');
 }
 
-async function startTranslation(
-  host: ExtensionHost,
-): Promise<void> {
-  targetSelectionEpoch += 1;
-  const { context, services, health } = host;
-  const editor = vscode.window.activeTextEditor;
-  if (!editor) {
-    void vscode.window.showInformationMessage('请先打开并选中一个目标实体。');
-    return;
-  }
-  if (editor.selection.isEmpty) {
-    void vscode.window.showWarningMessage('请先选中待实现的目标可调用实体或其签名。');
-    return;
-  }
-
-  const document = editor.document;
-  if (document.uri.scheme !== 'file') {
-    void vscode.window.showErrorMessage('目标必须是工作区中的本地文件。');
-    return;
-  }
-  if (document.isDirty) {
-    void vscode.window.showWarningMessage('请先保存目标文件，再开始迁移，以便建立可校验的文件快照。');
-    return;
-  }
-  const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
-  if (!workspaceFolder) {
-    void vscode.window.showErrorMessage('目标文件必须位于已打开的工作区文件夹中。');
-    return;
-  }
-
-  const target = buildModuleTarget({
-    languageId: document.languageId,
-    selectedText: document.getText(editor.selection),
-    filePath: document.uri.fsPath,
-    fileBaseName: path.basename(document.uri.fsPath),
-    workspaceRoot: workspaceFolder.uri.fsPath,
-    startLine: editor.selection.start.line,
-  });
-  if (!target) {
-    void vscode.window.showErrorMessage(
-      `V1 编辑器入口无法表示 ${document.languageId} 目标；请从已审目标工作区选择实体。`,
-    );
-    return;
-  }
-
-  const originalBytes = await vscode.workspace.fs.readFile(document.uri);
-  activeRun = {
-    workspaceFolder,
-    targetUri: document.uri,
-    target,
-    originalSha256: sha256(originalBytes),
-    originalContent: Buffer.from(originalBytes).toString('utf8'),
-    requirement: '',
-    candidates: [],
-    selectedCandidateId: null,
-    selectedRouteId: null,
-    adaptation: null,
-  };
-
-  const serviceStatus = await services.refresh();
-  const statuses = await refreshRepositoryStatus(services, health);
-  const runtime = services.getRuntimePresentation();
-
-  await TranslationPanel.createOrShow(
-    context,
-    {
-      target,
-      workspaceRoot: workspaceFolder.uri.fsPath,
-      repositoryStatuses: statuses,
-      serviceStatus,
-      searchProvider: runtime.searchProvider,
-      adaptationProvider: runtime.adaptationProvider,
-    },
-    {
-      onMessage: (message) => {
-        void handlePanelMessage(host, message);
-      },
-    },
+async function startLegacyTranslation(): Promise<void> {
+  void vscode.window.showWarningMessage(
+    'Legacy V1 编辑器迁移入口不会进入生产工作流。请从已审 01B 目标工作区选择实体，并使用 V2 路线、目录映射和验证证据。',
   );
 }
 
@@ -611,11 +594,6 @@ async function showPanel(
 ): Promise<void> {
   if (TranslationPanel.current && activeRun) {
     TranslationPanel.current.panel.reveal(vscode.ViewColumn.Beside);
-    return;
-  }
-  const editor = vscode.window.activeTextEditor;
-  if (editor && !editor.selection.isEmpty) {
-    await startTranslation(host);
     return;
   }
   if (activeTargetWorkspacePanel) {
@@ -867,10 +845,13 @@ async function openReviewedTargetWorkspace(
   record: TargetWorkspaceHostRecord,
 ): Promise<void> {
   targetSelectionEpoch += 1;
+  await host.services.refresh();
+  const capabilities = await targetWorkspaceCapabilityView(host, record);
   const projection = projectTargetWorkspace({
     record,
     workspaceName: workspaceFolder.name,
-    routeResolutions: host.migrationRouteResolutions,
+    routeResolutions: capabilities.resolutions,
+    runtimeCapabilitySnapshot: capabilities.snapshot,
   });
   const panelState = { workspaceFolder, projection };
   activeTargetWorkspacePanel = panelState;
@@ -878,11 +859,56 @@ async function openReviewedTargetWorkspace(
   await showTargetWorkspacePanel(host, panelState);
 }
 
+async function targetWorkspaceCapabilityView(
+  host: ExtensionHost,
+  record: TargetWorkspaceHostRecord,
+) {
+  const accepted = record.accepted;
+  if (record.stage !== 'reviewed' || !accepted?.snapshot) {
+    throw new Error('目标工作区没有 current reviewed catalog，不能解析迁移能力。');
+  }
+  const combined = combineHostRuntimeCapabilities(
+    host.services.runtimeCapabilityState.snapshot,
+    {
+      target: {
+        workspaceId: record.workspaceId,
+        ir: accepted.ir,
+        catalog: accepted.catalog,
+        analysisSnapshotId: accepted.analysis.snapshotId,
+        analysisContentHash: accepted.analysis.contentHash,
+        analysisAdapters: [...(accepted.analysis.analysisAdapters ?? [])],
+      },
+      analyzerDescriptors: host.repositoryAnalyzer.descriptors(),
+      workspaceMutationAvailable: true,
+    },
+  );
+  const base = runtimeCapabilityView(combined);
+  const acceptedMappingRoutes = await host.moduleMappings.listTargetRouteResolutions(
+    record.workspaceId,
+  );
+  const byKey = new Map(base.resolutions.map((resolution) => [
+    routeResolutionKey(resolution),
+    resolution,
+  ]));
+  for (const resolution of acceptedMappingRoutes) {
+    if (resolution.status === 'supported') byKey.set(routeResolutionKey(resolution), resolution);
+  }
+  return { snapshot: combined, resolutions: [...byKey.values()] };
+}
+
+function routeResolutionKey(resolution: MigrationRouteResolution): string {
+  return JSON.stringify([
+    resolution.key.sourceLanguageId,
+    resolution.key.targetLanguageId,
+    resolution.key.strategy,
+  ]);
+}
+
 async function showTargetWorkspacePanel(
   host: ExtensionHost,
   panelState: ActiveTargetWorkspacePanel,
 ): Promise<void> {
-  const serviceStatus = await host.services.refresh();
+  const serviceStatus = host.services.serviceStatus;
   const repositoryStatuses = await refreshRepositoryStatus(host.services, host.health);
   const runtime = host.services.getRuntimePresentation();
   await TranslationPanel.createOrShow(
@@ -918,12 +944,15 @@ async function refreshTargetWorkspace(
       previousSnapshotId: panelState.projection.snapshotId,
       previousContentHash: panelState.projection.contentHash,
     });
+    await host.services.refresh();
     const refreshed = await host.targetWorkspaces.refresh(panelState.projection.workspaceId);
     if (refreshed.stage === 'reviewed' && refreshed.accepted?.snapshot) {
+      const capabilities = await targetWorkspaceCapabilityView(host, refreshed);
       const projection = projectTargetWorkspace({
         record: refreshed,
         workspaceName: panelState.workspaceFolder.name,
-        routeResolutions: host.migrationRouteResolutions,
+        routeResolutions: capabilities.resolutions,
+        runtimeCapabilitySnapshot: capabilities.snapshot,
       });
       activeTargetWorkspacePanel = { ...panelState, projection };
       publish({ type: 'TARGET_WORKSPACE_SNAPSHOT', snapshot: projection });
@@ -950,6 +979,7 @@ async function selectTargetWorkspaceEntity(
   try {
     const panelState = activeTargetWorkspacePanel;
     if (!panelState) throw new Error('当前面板没有已审的 01B 目标工作区。');
+    await host.services.refresh();
     const selectedNode = assertTargetWorkspaceSelection(panelState.projection, message);
     if (activateWorkflow) {
       await refreshTargetWorkspaceBinding(host, {
@@ -966,7 +996,6 @@ async function selectTargetWorkspaceEntity(
       entityId: message.entityId,
     });
     if (requestEpoch !== targetSelectionEpoch) return;
-    const target = moduleTargetFromTargetWorkspaceContext(context);
     if (!selectedNode.moduleId) {
       throw new Error('目标实体没有已审模块归属，不能绑定模块映射。');
     }
@@ -992,7 +1021,10 @@ async function selectTargetWorkspaceEntity(
       selectedNode.moduleId,
     );
     if (activateWorkflow) {
-      const relativeParts = target.path.replaceAll('\\', '/').split('/').filter(Boolean);
+      const relativeParts = migrationSelection.target.entity.path
+        .replaceAll('\\', '/')
+        .split('/')
+        .filter(Boolean);
       const targetUri = vscode.Uri.joinPath(panelState.workspaceFolder.uri, ...relativeParts);
       const openDocument = vscode.workspace.textDocuments.find(
         (document) => document.uri.toString() === targetUri.toString(),
@@ -1006,23 +1038,17 @@ async function selectTargetWorkspaceEntity(
       }
       if (requestEpoch !== targetSelectionEpoch) return;
       activeRun = {
+        ...createActiveMigrationRunV2(migrationSelection),
         workspaceFolder: panelState.workspaceFolder,
         targetUri,
-        target,
         originalSha256: sha256(originalBytes),
         originalContent: Buffer.from(originalBytes).toString('utf8'),
-        requirement: '',
-        candidates: [],
-        selectedCandidateId: null,
-        selectedRouteId: null,
-        adaptation: null,
-        migrationSelection,
       };
     }
     publish({
       type: 'TARGET_ENTITY_SELECTED',
       selection: message,
-      target,
+      target: migrationSelection.target,
       migrationSelection,
       activateWorkflow,
     });
@@ -1069,7 +1095,7 @@ async function handlePanelMessage(
       await selectTargetWorkspaceEntity(host, message, true);
       return;
     case 'SELECT_CANDIDATE':
-      selectCandidate(message.candidateId);
+      await selectCandidate(host, message.candidateId);
       return;
     case 'START_ADAPT':
       await startAdaptation(host, message.decisionNotes);
@@ -1095,39 +1121,39 @@ async function startSearch(
     await assertTargetUnchanged(run, host);
     const status = await host.services.refresh();
     publish({ type: 'SERVICE_STATUS', status });
-    const runtime = host.services.getRuntimePorts();
-    const candidates = await runtime.ports.search.search({
-      target: run.target,
-      requirement: message.requirement.trim(),
+    const executionContext = await host.moduleMappings.executionContext(
+      run.migrationSelection.moduleMapping,
+    );
+    assertRunContextCurrent(run, executionContext);
+    const runtime = host.services.getRuntimePortsV2(executionContext.runtimeCapabilities);
+    await startSearchV2(run, runtime.search, {
+      requirement: message.requirement,
       topK: message.topK,
-      // Local paths are presentation-only checks; only the server can state
-      // which repositories were indexed. An empty scope means its configured
-      // authorized index, not a fake "configured-repositories" filter.
-      repositoryScopes: [],
+      // The current V2 retrieval contract has no lineage-preserving reranker.
+      // Fail closed at the client instead of asking the server to ignore it.
+      rerank: false,
     });
-    run.requirement = message.requirement.trim();
-    run.candidates = candidates;
-    run.selectedCandidateId = null;
-    run.selectedRouteId = null;
-    run.adaptation = null;
     publish({ type: 'SEARCH_RESULT', candidates: run.candidates });
   } catch (error) {
     publishError(errorMessage(error, '检索失败'));
   }
 }
 
-function selectCandidate(candidateId: string): void {
+async function selectCandidate(host: ExtensionHost, candidateId: string): Promise<void> {
   try {
     const run = requireActiveRun();
-    const candidate = run.candidates.find((item) => item.id === candidateId);
-    if (!candidate) {
-      throw new Error('该候选不属于当前检索结果。');
-    }
-    // This is deliberately the only operation that changes this field. A
-    // retrieval ranking never becomes consent by itself.
-    run.selectedCandidateId = candidateId;
-    run.selectedRouteId = routeForCandidate(run, candidate)?.id ?? null;
-    run.adaptation = null;
+    await assertTargetUnchanged(run, host);
+    const executionContext = await host.moduleMappings.executionContext(
+      run.migrationSelection.moduleMapping,
+    );
+    const runtime = host.services.getRuntimePortsV2(executionContext.runtimeCapabilities);
+    const sourceBundle = await selectCandidateV2(
+      run,
+      candidateId,
+      runtime.sourceBundleResolver,
+      executionContext,
+    );
+    publish({ type: 'CANDIDATE_SELECTED', candidateId, sourceBundle });
   } catch (error) {
     publishError(errorMessage(error, '候选选择无效'));
   }
@@ -1136,21 +1162,35 @@ function selectCandidate(candidateId: string): void {
 async function startAdaptation(host: ExtensionHost, decisionNotes: string): Promise<void> {
   try {
     const run = requireActiveRun();
-    const candidate = selectedRunCandidate(run);
-    const route = selectedRunRoute(run, candidate);
+    selectedCandidateV2(run);
     await assertTargetUnchanged(run, host);
     const status = await host.services.refresh();
     publish({ type: 'SERVICE_STATUS', status });
-    const runtime = host.services.getRuntimePorts();
-    const rawResult = await runtime.ports.adaptation.adapt({
-      target: run.target,
-      candidate,
-      requirement: run.requirement,
-      strategy: route.strategy,
-      decisionNotes,
+    const executionContext = await host.moduleMappings.executionContext(
+      run.migrationSelection.moduleMapping,
+    );
+    assertRunContextCurrent(run, executionContext);
+    const targetWorkspaceContext = await host.targetWorkspaces.getTargetContext({
+      workspaceId: run.migrationSelection.workspaceId,
+      snapshotId: run.migrationSelection.targetWorkspaceSnapshotId,
+      snapshotHash: run.migrationSelection.targetWorkspaceSnapshotHash,
+      entityId: run.target.entity.entityId,
     });
-    const result = validateHostOwnedResult(run, route, rawResult);
-    run.adaptation = result;
+    const targetContext = collectTargetContextV2({
+      target: run.target,
+      runtimeCapabilities: executionContext.runtimeCapabilities,
+      context: targetWorkspaceContext,
+      targetFileContent: run.originalContent,
+    });
+    const runtime = host.services.getRuntimePortsV2(executionContext.runtimeCapabilities);
+    const result = await adaptRunV2(
+      run,
+      targetContext,
+      executionContext,
+      runtime.adaptation,
+      decisionNotes.trim() ? [decisionNotes.trim()] : [],
+    );
+    validateHostOwnedPatch(run, result);
     publish({ type: 'ADAPT_RESULT', result });
   } catch (error) {
     publishError(errorMessage(error, '迁移适配失败'));
@@ -1163,18 +1203,32 @@ async function applyCurrentRun(host: ExtensionHost): Promise<void> {
     const run = requireActiveRun();
     const adaptation = run.adaptation;
     if (!adaptation) throw new Error('尚未生成当前迁移运行的补丁。');
-    const gate = evaluateValidationGate(adaptation.validation);
-    if (!canApplyAdaptation(adaptation)) {
+    const adaptationRequest = run.adaptationRequest;
+    if (!adaptationRequest || !run.sourceBundle || !run.indexedDocument || !run.searchRequest) {
+      throw new Error('V2 运行缺少 request/bundle/context lineage，禁止写回。');
+    }
+    const gate = evaluateValidationPolicyGate(
+      adaptation.validationPolicy,
+      adaptation.validation,
+      { subjectHash: adaptation.patchHash },
+    );
+    if (!canApplyAdaptationForRoute(
+      adaptation,
+      adaptation.validationPolicy,
+      { subjectHash: adaptation.patchHash },
+    )) {
       const labels = gate.blockers.map((record) => record.label).join('、');
       throw new Error(`必需验证未通过或尚未验证：${labels || '缺少可写回补丁'}。`);
     }
     await assertTargetUnchanged(run, host);
-    const referenceFree = adaptation.validation.some(
-      (record) => record.id === 'reference-candidate',
+    const executionContext = await host.moduleMappings.executionContext(
+      run.migrationSelection.moduleMapping,
     );
-    const confirmation = referenceFree
-      ? `Analyzer 已拒绝所选参考实现；当前 ${run.target.language} 代码仅依据目标上下文和需求自主生成。请重点审查后再写入 ${run.target.language} 文件。确认继续？`
-      : `将把已预览的补丁写入当前选中的 ${run.target.language} 文件，并创建可恢复检查点。确认继续？`;
+    assertRunContextCurrent(run, executionContext);
+    validateHostOwnedPatch(run, adaptation);
+    const confirmation =
+      `将把已预览、并通过路线策略验证的补丁写入当前 ${run.target.entity.languageId} 目标，` +
+      '同时创建可恢复检查点与 V2 审计清单。确认继续？';
     const choice = await vscode.window.showWarningMessage(
       confirmation,
       { modal: true },
@@ -1185,18 +1239,171 @@ async function applyCurrentRun(host: ExtensionHost): Promise<void> {
       return;
     }
 
-    const result = await new WorkspaceBackfill({
+    const now = new Date().toISOString();
+    const artifactStore = new MigrationRunV2Store(context.globalStorageUri);
+    const artifactPaths = await artifactStore.writeArtifacts(adaptationRequest.id, {
+      searchRequest: run.searchRequest,
+      searchCandidate: selectedCandidateV2(run),
+      indexedDocument: run.indexedDocument,
+      sourceBundle: run.sourceBundle,
+      targetContext: run.targetContext,
+      adaptationRequest,
+      adaptationResult: adaptation,
+      executionContext,
+    });
+    const approvedManifest = materializeMigrationRunManifestV2({
+      status: 'approved',
+      request: adaptationRequest,
+      result: adaptation,
+      providers: manifestProviderExecutions(
+        executionContext.runtimeCapabilities,
+        run,
+        adaptation,
+        now,
+        false,
+      ),
+      validators: manifestValidatorExecutions(adaptation),
+      artifactPaths,
+      createdAt: adaptation.createdAt,
+      updatedAt: now,
+    }, executionContext);
+    await artifactStore.writeManifest(adaptationRequest.id, approvedManifest);
+
+    const backfill = new WorkspaceBackfill({
       workspaceFolder: run.workspaceFolder,
       storageUri: context.globalStorageUri,
-      allowedTargetPath: run.target.path,
-    }).apply(adaptation.files);
-    await context.workspaceState.update('forexplore.lastCheckpoint', {
-      checkpointId: result.checkpointId,
-      workspaceUri: run.workspaceFolder.uri.toString(),
-      targetPath: run.target.path,
+      allowedTargetPaths: [...run.target.allowedModificationPaths],
     });
-    publish({ type: 'APPLY_RESULT', result });
-    await invalidateTargetWorkspaceAfterMutation(host, run, '目标补丁已写回；旧实现状态证据不再是当前状态。');
+    let result: Awaited<ReturnType<WorkspaceBackfill['apply']>> | null = null;
+    try {
+      result = await backfill.apply(adaptation.files);
+      const checkpoint = await backfill.checkpointRef(result.checkpointId);
+      const pendingRecoveryHead = await artifactStore.writeManifest(
+        adaptationRequest.id,
+        materializeMigrationRunManifestV2({
+          status: 'executing',
+          request: adaptationRequest,
+          result: adaptation,
+          providers: manifestProviderExecutions(
+            executionContext.runtimeCapabilities,
+            run,
+            adaptation,
+            new Date().toISOString(),
+            true,
+          ),
+          validators: manifestValidatorExecutions(adaptation),
+          checkpoint,
+          recovery: recoveryRecord(
+            executionContext,
+            run.target.route.routeId,
+            checkpoint,
+            'available',
+          ),
+          artifactPaths,
+          createdAt: adaptation.createdAt,
+          updatedAt: new Date().toISOString(),
+        }, executionContext),
+      );
+      await context.workspaceState.update('forexplore.lastCheckpoint', {
+        checkpointId: result.checkpointId,
+        workspaceUri: run.workspaceFolder.uri.toString(),
+        allowedTargetPaths: [...run.target.allowedModificationPaths],
+        runId: adaptationRequest.id,
+        manifestId: pendingRecoveryHead.manifestId,
+        manifestHash: pendingRecoveryHead.manifestHash,
+        manifestPath: pendingRecoveryHead.path,
+      } satisfies LastCheckpoint);
+      const completedAt = new Date().toISOString();
+      const manifest = materializeMigrationRunManifestV2({
+        status: 'completed',
+        request: adaptationRequest,
+        result: adaptation,
+        providers: manifestProviderExecutions(
+          executionContext.runtimeCapabilities,
+          run,
+          adaptation,
+          completedAt,
+          true,
+        ),
+        validators: manifestValidatorExecutions(adaptation),
+        checkpoint,
+        recovery: recoveryRecord(
+          executionContext,
+          run.target.route.routeId,
+          checkpoint,
+          'available',
+        ),
+        artifactPaths,
+        createdAt: adaptation.createdAt,
+        updatedAt: completedAt,
+      }, executionContext);
+      run.manifest = manifest;
+      const completedHead = await artifactStore.writeManifest(adaptationRequest.id, manifest);
+      await context.workspaceState.update('forexplore.lastCheckpoint', {
+        checkpointId: result.checkpointId,
+        workspaceUri: run.workspaceFolder.uri.toString(),
+        allowedTargetPaths: [...run.target.allowedModificationPaths],
+        runId: adaptationRequest.id,
+        manifestId: completedHead.manifestId,
+        manifestHash: completedHead.manifestHash,
+        manifestPath: completedHead.path,
+      } satisfies LastCheckpoint);
+      publish({ type: 'APPLY_RESULT', result, manifest });
+      await invalidateTargetWorkspaceAfterMutation(host, run, '目标补丁已写回；旧实现状态证据不再是当前状态。');
+    } catch (postApplyError) {
+      if (!result) throw postApplyError;
+      let checkpoint: MigrationCheckpointRefV2;
+      try {
+        checkpoint = await backfill.checkpointRef(result.checkpointId);
+        await backfill.restore(result.checkpointId);
+        const rolledBackAt = new Date().toISOString();
+        const rolledBack = materializeMigrationRunManifestV2({
+          status: 'rolled-back',
+          request: adaptationRequest,
+          result: adaptation,
+          providers: markRollbackProvider(
+            manifestProviderExecutions(
+              executionContext.runtimeCapabilities,
+              run,
+              adaptation,
+              rolledBackAt,
+              true,
+            ),
+            'completed',
+            checkpoint,
+            rolledBackAt,
+          ),
+          validators: manifestValidatorExecutions(adaptation),
+          checkpoint,
+          recovery: recoveryRecord(
+            executionContext,
+            run.target.route.routeId,
+            checkpoint,
+            'completed',
+          ),
+          artifactPaths,
+          createdAt: adaptation.createdAt,
+          updatedAt: rolledBackAt,
+        }, executionContext);
+        await artifactStore.writeManifest(adaptationRequest.id, rolledBack);
+        await context.workspaceState.update('forexplore.lastCheckpoint', undefined);
+      } catch (rollbackError) {
+        await artifactStore.writeRecoveryRecord(adaptationRequest.id, {
+          schemaVersion: '1.0',
+          status: 'failed',
+          checkpointId: result.checkpointId,
+          originalError: errorMessage(postApplyError, 'post-apply-audit-failed'),
+          recoveryError: errorMessage(rollbackError, 'automatic-recovery-failed'),
+          updatedAt: new Date().toISOString(),
+        });
+        throw new Error('写回后的审计持久化失败，自动恢复也失败；可恢复检查点已保留。', {
+          cause: rollbackError,
+        });
+      }
+      throw new Error('写回后的审计持久化失败；Host 已从检查点自动恢复全部文件。', {
+        cause: postApplyError,
+      });
+    }
   } catch (error) {
     publishError(errorMessage(error, '回填失败'));
   }
@@ -1205,16 +1412,35 @@ async function applyCurrentRun(host: ExtensionHost): Promise<void> {
 async function restoreLastCheckpoint(host: ExtensionHost): Promise<void> {
   const { context } = host;
   const checkpoint = context.workspaceState.get<LastCheckpoint>('forexplore.lastCheckpoint');
-  const run = activeRun;
-  if (!checkpoint || !run) {
-    void vscode.window.showInformationMessage('没有与当前迁移运行关联的可恢复检查点。');
+  if (!isLastCheckpoint(checkpoint)) {
+    void vscode.window.showInformationMessage('没有可验证的 V2 可恢复检查点。');
     return;
   }
-  if (
-    checkpoint.workspaceUri !== run.workspaceFolder.uri.toString() ||
-    checkpoint.targetPath !== run.target.path
-  ) {
-    void vscode.window.showWarningMessage('恢复点不属于当前选中的迁移目标，已拒绝恢复。');
+  const workspaceFolder = vscode.workspace.workspaceFolders?.find((folder) =>
+    folder.uri.toString() === checkpoint.workspaceUri);
+  if (!workspaceFolder) {
+    void vscode.window.showWarningMessage('请先重新打开该检查点所属工作区，再执行恢复。');
+    return;
+  }
+  const artifactStore = new MigrationRunV2Store(context.globalStorageUri);
+  let request: AdaptationRequestV2;
+  let result: AdaptationResultV2;
+  let executionContext: MigrationExecutionV2ValidationContext;
+  let previousManifest: MigrationRunManifestV2;
+  try {
+    [request, result, executionContext, previousManifest] = await Promise.all([
+      artifactStore.readArtifact<AdaptationRequestV2>(checkpoint.runId, 'adaptationRequest'),
+      artifactStore.readArtifact<AdaptationResultV2>(checkpoint.runId, 'adaptationResult'),
+      artifactStore.readArtifact<MigrationExecutionV2ValidationContext>(checkpoint.runId, 'executionContext'),
+      artifactStore.readManifest<MigrationRunManifestV2>(checkpoint.runId, checkpoint.manifestId),
+    ]);
+    if (
+      previousManifest.contentHash !== checkpoint.manifestHash ||
+      previousManifest.id !== checkpoint.manifestId
+    ) throw new Error('Persisted manifest head does not match the immutable manifest.');
+    validateMigrationRunManifestV2(previousManifest, request, result, executionContext);
+  } catch (error) {
+    void vscode.window.showErrorMessage(errorMessage(error, '恢复审计制品无效'));
     return;
   }
   const choice = await vscode.window.showWarningMessage(
@@ -1224,14 +1450,44 @@ async function restoreLastCheckpoint(host: ExtensionHost): Promise<void> {
   );
   if (choice !== '恢复检查点') return;
   try {
-    const result = await new WorkspaceBackfill({
-      workspaceFolder: run.workspaceFolder,
+    const backfill = new WorkspaceBackfill({
+      workspaceFolder,
       storageUri: context.globalStorageUri,
-      allowedTargetPath: run.target.path,
-    }).restore(checkpoint.checkpointId);
+      allowedTargetPaths: [...checkpoint.allowedTargetPaths],
+    });
+    const checkpointRef = await backfill.checkpointRef(checkpoint.checkpointId);
+    const restoreResult = await backfill.restore(checkpoint.checkpointId);
+    const restoredAt = new Date().toISOString();
+    const rolledBack = materializeMigrationRunManifestV2({
+      status: 'rolled-back',
+      request,
+      result,
+      providers: markRollbackProvider(
+        previousManifest.providers,
+        'completed',
+        checkpointRef,
+        restoredAt,
+      ),
+      validators: previousManifest.validators,
+      repairRounds: previousManifest.repairRounds,
+      checkpoint: checkpointRef,
+      recovery: recoveryRecord(
+        executionContext,
+        request.route.routeId,
+        checkpointRef,
+        'completed',
+      ),
+      artifactPaths: previousManifest.artifactPaths,
+      createdAt: previousManifest.createdAt,
+      updatedAt: restoredAt,
+    }, executionContext);
+    await artifactStore.writeManifest(checkpoint.runId, rolledBack);
     await context.workspaceState.update('forexplore.lastCheckpoint', undefined);
-    await invalidateTargetWorkspaceAfterMutation(host, run, '目标文件已从检查点恢复；请刷新 01B 快照后继续。');
-    void vscode.window.showInformationMessage(`已恢复 ${result.appliedFiles.join('、')}。`);
+    const run = activeRun;
+    if (run && run.workspaceFolder.uri.toString() === checkpoint.workspaceUri) {
+      await invalidateTargetWorkspaceAfterMutation(host, run, '目标文件已从检查点恢复；请刷新 01B 快照后继续。');
+    }
+    void vscode.window.showInformationMessage(`已恢复 ${restoreResult.appliedFiles.join('、')}。`);
   } catch (error) {
     void vscode.window.showErrorMessage(errorMessage(error, '恢复失败'));
   }
@@ -1254,9 +1510,9 @@ async function openTarget(): Promise<void> {
     await vscode.window.showTextDocument(run.targetUri, {
       preview: true,
       selection: new vscode.Range(
-        Math.max(0, (run.target.line ?? 1) - 1),
         0,
-        Math.max(0, (run.target.line ?? 1) - 1),
+        0,
+        0,
         0,
       ),
     });
@@ -1265,125 +1521,207 @@ async function openTarget(): Promise<void> {
   }
 }
 
-function validateHostOwnedResult(
+function validateHostOwnedPatch(
   run: ActiveMigrationRun,
-  route: MigrationRouteDescriptor,
-  result: AdaptationResult,
-): AdaptationResult {
-  const validation = [...result.validation];
-  const failures: string[] = [];
-  const mappingFailures: string[] = [];
-  let files: FilePatch[] = result.files;
-
-  const mapping = run.migrationSelection?.moduleMapping;
-  if (!mapping) {
-    mappingFailures.push('运行缺少已接受的模块映射 Overlay。');
-  } else {
+  result: AdaptationResultV2,
+): void {
+  if (result.files.length === 0 || !run.targetContext) {
+    throw new Error('Host write-back requires patches and an authoritative V2 target context.');
+  }
+  const allowed = new Set(run.target.allowedModificationPaths.map((allowedPath) =>
+    canonicalWorkspacePath(run.workspaceFolder.uri.fsPath, allowedPath)));
+  const seen = new Set<string>();
+  for (const patch of result.files) {
+    const returnedPath = canonicalWorkspacePath(run.workspaceFolder.uri.fsPath, patch.path);
+    if (!allowed.has(returnedPath) || seen.has(returnedPath)) {
+      throw new Error(`V2 patch path is unauthorized or duplicated: ${returnedPath}.`);
+    }
+    seen.add(returnedPath);
+    if (patch.status === 'created') continue;
+    const sourceFile = run.targetContext.sourceFiles.find((fact) =>
+      fact.path === patch.path && fact.content !== undefined,
+    );
     if (
-      mapping.route.routeId !== route.id ||
-      mapping.route.routeVersion !== route.version ||
-      mapping.route.sourceLanguageId !== route.sourceLanguageId ||
-      mapping.route.targetLanguageId !== route.targetLanguageId ||
-      mapping.route.strategy !== route.strategy ||
-      mapping.route.routeContentHash !== route.contentHash
+      !sourceFile ||
+      sourceFile.contentHash !== patch.expectedOriginalSha256 ||
+      (returnedPath === canonicalWorkspacePath(
+        run.workspaceFolder.uri.fsPath,
+        run.target.entity.path,
+      ) && patch.expectedOriginalSha256 !== run.originalSha256)
     ) {
-      mappingFailures.push('执行路线与已接受 Overlay 的 route lineage 不一致。');
+      throw new Error(`V2 patch original hash lacks a Host-verified source-file fact: ${returnedPath}.`);
     }
-    if (
-      mapping.mappingProposalId.length === 0 || !isSha256(mapping.mappingProposalHash) ||
-      mapping.mappingReviewId.length === 0 || !isSha256(mapping.mappingReviewHash) ||
-      mapping.executionOverlayId.length === 0 || !isSha256(mapping.executionOverlayHash)
-    ) {
-      mappingFailures.push('模块映射 proposal/review/overlay lineage 不完整。');
-    }
+    applyHunksStrict(sourceFile.content!, patch.hunks);
   }
-  validation.push({
-    id: 'extension-module-mapping-lineage',
-    label: '已审模块映射与执行 Overlay',
-    status: mappingFailures.length === 0 ? 'pass' : 'fail',
-    required: true,
-    summary: mappingFailures.length > 0
-      ? mappingFailures.join(' ')
-      : [
-          `proposal=${mapping!.mappingProposalId}@${mapping!.mappingProposalHash}`,
-          `review=${mapping!.mappingReviewId}@${mapping!.mappingReviewHash}`,
-          `overlay=${mapping!.executionOverlayId}@${mapping!.executionOverlayHash}`,
-          `route=${mapping!.route.routeId}@${mapping!.route.routeVersion}`,
-          `sourceCatalog=${mapping!.sourceCatalog.moduleCatalogId}@${mapping!.sourceCatalog.moduleCatalogHash}`,
-          `targetCatalog=${mapping!.targetCatalog.moduleCatalogId}@${mapping!.targetCatalog.moduleCatalogHash}`,
-        ].join('; '),
-    failureReason: mappingFailures.length === 0 ? undefined : 'stale-or-missing-module-mapping-lineage',
-  });
-  failures.push(...mappingFailures);
-
-  if (result.strategy !== route.strategy || result.targetLanguage !== run.target.language) {
-    failures.push('服务返回的策略或目标语言与当前选中的目标不一致。');
-  }
-  if (files.length !== 1) {
-    failures.push('写回只接受当前目标文件的一个修改补丁。');
-  }
-
-  const patch = files[0];
-  if (patch) {
-    const expectedPath = canonicalWorkspacePath(run.workspaceFolder.uri.fsPath, run.target.path);
-    let returnedPath: string | undefined;
-    try {
-      returnedPath = canonicalWorkspacePath(run.workspaceFolder.uri.fsPath, patch.path);
-    } catch {
-      failures.push('服务返回的补丁路径不是工作区内的相对路径。');
-    }
-    if (patch.status !== 'modified' || returnedPath !== expectedPath) {
-      failures.push('服务返回的补丁不严格对应当前选中的目标文件。');
-    }
-    if (patch.status === 'modified') {
-      if (patch.expectedOriginalSha256 !== run.originalSha256) {
-        failures.push('服务补丁的原始文件哈希与扩展宿主快照不一致。');
-      }
-      try {
-        applyHunksStrict(run.originalContent, patch.hunks);
-      } catch (error) {
-        failures.push(
-          `补丁不能精确应用到本次目标快照：${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-    }
-  }
-
-  validation.push({
-    id: 'extension-target-snapshot',
-    label: '扩展目标快照',
-    status: failures.length === 0 ? 'pass' : 'fail',
-    required: true,
-    command: 'VS Code workspace.fs.readFile + SHA-256',
-    summary:
-      failures.length === 0
-        ? '补丁路径、原始哈希和 hunk 均与本次编辑器目标快照一致。'
-        : failures.join(' '),
-    failureReason: failures.length === 0 ? undefined : 'host-owned-patch-validation-failed',
-  });
-
-  if (failures.length > 0) {
-    validation.push({
-      id: 'extension-patch-scope',
-      label: '补丁范围与前置条件',
-      status: 'fail',
-      required: true,
-      summary: failures.join(' '),
-      failureReason: 'unsafe-or-stale-patch',
-    });
-    files = [];
-  }
-
-  return { ...result, validation: deduplicateValidation(validation), files };
 }
 
-function deduplicateValidation(records: ValidationRecord[]): ValidationRecord[] {
-  const ids = new Set<string>();
-  return records.filter((record) => {
-    if (ids.has(record.id)) return false;
-    ids.add(record.id);
-    return true;
+function manifestProviderExecutions(
+  runtimeCapabilities: ActiveMigrationRun['migrationSelection']['moduleMapping']['runtimeCapabilitySnapshot'],
+  run: ActiveMigrationRun,
+  result: AdaptationResultV2,
+  timestamp: string,
+  workspaceApplied: boolean,
+): MigrationRunManifestV2['providers'] {
+  const route = runtimeCapabilities.routes.find((candidate) =>
+    candidate.id === run.target.route.routeId &&
+    candidate.version === run.target.route.routeVersion &&
+    candidate.contentHash === run.target.route.routeContentHash,
+  );
+  if (!route) throw new Error('Manifest route is absent from the active runtime snapshot.');
+  return route.stages
+    .filter((stage) => stage.availability.status !== 'unavailable')
+    .map((stage) => {
+      const records = validationForStage(stage.stage, result);
+      const status: MigrationRunManifestV2['providers'][number]['status'] =
+        stage.stage === 'workspace-rollback'
+          ? 'unverified'
+          : records.some((record) => record.status === 'fail')
+            ? 'failed'
+            : records.some((record) => record.status === 'unverified')
+              ? 'unverified'
+              : provenProviderStage(stage.stage, run, workspaceApplied)
+                ? 'completed'
+                : 'unverified';
+      const artifactRefs = stageArtifactRefs(stage.stage, run, result);
+      return {
+        providerId: stage.providerId,
+        providerVersion: stage.providerVersion,
+        stage: stage.stage,
+        status,
+        startedAt: timestamp,
+        completedAt: timestamp,
+        artifactRefs,
+      };
+    });
+}
+
+function manifestValidatorExecutions(
+  result: AdaptationResultV2,
+): MigrationRunManifestV2['validators'] {
+  return result.validation.map((record) => {
+    if (!record.verifierId || !record.verifierVersion || !record.policyCheckId) {
+      throw new Error(`Validation record ${record.id} lacks durable verifier lineage.`);
+    }
+    return {
+      providerId: record.verifierId,
+      providerVersion: record.verifierVersion,
+      policyCheckId: record.policyCheckId,
+      validationRecordId: record.id,
+      subjectHash: result.patchHash,
+      status: record.status,
+      artifactRefs: [],
+    };
   });
+}
+
+function validationForStage(
+  stage: MigrationRouteStage,
+  result: AdaptationResultV2,
+): AdaptationResultV2['validation'] {
+  if (stage === 'compile-validation') {
+    return result.validation.filter((record) => record.phase === 'compile');
+  }
+  if (stage === 'behavior-validation') {
+    return result.validation.filter((record) => record.phase === 'behavior');
+  }
+  return [];
+}
+
+function provenProviderStage(
+  stage: MigrationRouteStage,
+  run: ActiveMigrationRun,
+  workspaceApplied: boolean,
+): boolean {
+  if (stage === 'source-analysis') return run.sourceBundle !== null && run.indexedDocument !== null;
+  if (stage === 'target-analysis' || stage === 'context-collection') return run.targetContext !== null;
+  if (stage === 'workspace-apply') return workspaceApplied;
+  return stage === 'translation' || stage === 'patch-generation';
+}
+
+function stageArtifactRefs(
+  stage: MigrationRouteStage,
+  run: ActiveMigrationRun,
+  result: AdaptationResultV2,
+): MigrationRunManifestV2['providers'][number]['artifactRefs'] {
+  if (stage === 'source-analysis' && run.sourceBundle && run.indexedDocument) {
+    return [
+      { id: run.indexedDocument.id, contentHash: run.indexedDocument.contentHash },
+      { id: run.sourceBundle.id, contentHash: run.sourceBundle.contentHash },
+    ];
+  }
+  if ((stage === 'target-analysis' || stage === 'context-collection') && run.targetContext) {
+    return [{ id: run.targetContext.id, contentHash: run.targetContext.contentHash }];
+  }
+  return [{ id: result.id, contentHash: result.contentHash }];
+}
+
+function routeStageProvider(
+  runtimeCapabilities: ActiveMigrationRun['migrationSelection']['moduleMapping']['runtimeCapabilitySnapshot'],
+  routeId: string,
+  stage: MigrationRouteStage,
+): { providerId: string; providerVersion: string } {
+  const route = runtimeCapabilities.routes.find((candidate) => candidate.id === routeId);
+  const capability = route?.stages.find((candidate) =>
+    candidate.stage === stage && candidate.availability.status !== 'unavailable',
+  );
+  if (!capability) throw new Error(`The active route has no available ${stage} provider.`);
+  return {
+    providerId: capability.providerId,
+    providerVersion: capability.providerVersion,
+  };
+}
+
+function recoveryRecord(
+  context: MigrationExecutionV2ValidationContext,
+  routeId: string,
+  checkpoint: MigrationCheckpointRefV2,
+  status: 'available' | 'completed' | 'failed',
+  failureReason?: string,
+): NonNullable<MigrationRunManifestV2['recovery']> {
+  return {
+    status,
+    checkpointId: checkpoint.id,
+    provider: routeStageProvider(context.runtimeCapabilities, routeId, 'workspace-rollback'),
+    artifactRefs: [{ id: checkpoint.id, contentHash: checkpoint.contentHash }],
+    updatedAt: new Date().toISOString(),
+    ...(failureReason === undefined ? {} : { failureReason }),
+  };
+}
+
+function markRollbackProvider(
+  providers: MigrationRunManifestV2['providers'],
+  status: 'completed' | 'failed',
+  checkpoint: MigrationCheckpointRefV2,
+  completedAt: string,
+): MigrationRunManifestV2['providers'] {
+  let found = false;
+  const updated = providers.map((provider) => {
+    if (provider.stage !== 'workspace-rollback') return provider;
+    found = true;
+    return {
+      ...provider,
+      status,
+      completedAt,
+      artifactRefs: [{ id: checkpoint.id, contentHash: checkpoint.contentHash }],
+    };
+  });
+  if (!found) throw new Error('The V2 route lacks an available workspace rollback provider.');
+  return updated;
+}
+
+function isLastCheckpoint(value: LastCheckpoint | undefined): value is LastCheckpoint {
+  return Boolean(
+    value &&
+    value.checkpointId &&
+    value.workspaceUri &&
+    Array.isArray(value.allowedTargetPaths) &&
+    value.allowedTargetPaths.length > 0 &&
+    value.allowedTargetPaths.every((item) => typeof item === 'string' && item.length > 0) &&
+    value.runId &&
+    value.manifestId &&
+    isSha256(value.manifestHash) &&
+    value.manifestPath,
+  );
 }
 
 function requireActiveRun(): ActiveMigrationRun {
@@ -1391,54 +1729,6 @@ function requireActiveRun(): ActiveMigrationRun {
   return activeRun;
 }
 
-function selectedRunCandidate(run: ActiveMigrationRun): SearchCandidate {
-  if (!run.selectedCandidateId) {
-    throw new Error('请先明确点击并选择一个候选实现。');
-  }
-  const candidate = run.candidates.find((item) => item.id === run.selectedCandidateId);
-  if (!candidate) {
-    throw new Error('当前候选已失效；请重新检索并明确选择。');
-  }
-  return candidate;
-}
-
-function routeForCandidate(
-  run: ActiveMigrationRun,
-  candidate: SearchCandidate,
-): MigrationRouteDescriptor | null {
-  const binding = run.migrationSelection;
-  if (!binding) return null;
-  let sourceLanguageId: string;
-  try {
-    sourceLanguageId = normalizeLanguageId(candidate.language);
-  } catch {
-    return null;
-  }
-  const targetLanguageId = binding.target.entity.languageId;
-  const mappedRoute = binding.moduleMapping.route;
-  return binding.routeOptions.find(({ route }) =>
-    route.sourceLanguageId === sourceLanguageId &&
-    route.targetLanguageId === targetLanguageId &&
-    route.id === mappedRoute.routeId &&
-    route.version === mappedRoute.routeVersion &&
-    route.strategy === mappedRoute.strategy &&
-    route.contentHash === mappedRoute.routeContentHash,
-  )?.route ?? null;
-}
-
-function selectedRunRoute(
-  run: ActiveMigrationRun,
-  candidate: SearchCandidate,
-): MigrationRouteDescriptor {
-  const route = routeForCandidate(run, candidate);
-  if (!route || run.selectedRouteId !== route.id) {
-    throw new Error(
-      `未声明 ${candidate.language} → ${run.migrationSelection?.target.entity.languageId ?? run.target.language} ` +
-      '的可执行迁移路线；系统已阻止默认适配。',
-    );
-  }
-  return route;
-}
 
 async function assertTargetUnchanged(
   run: ActiveMigrationRun,
@@ -1446,6 +1736,7 @@ async function assertTargetUnchanged(
 ): Promise<void> {
   if (run.migrationSelection) {
     const binding = run.migrationSelection;
+    await host.services.refresh();
     await host.moduleMappings.assertBindingCurrent(binding.moduleMapping);
     await refreshTargetWorkspaceBinding(host, {
       workspaceId: binding.workspaceId,

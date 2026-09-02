@@ -1129,6 +1129,41 @@ button:disabled {
   font-variant-numeric: tabular-nums;
 }
 
+.target-workspace-capabilities {
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.target-workspace-capabilities h3 {
+  margin: 0 0 5px;
+  font-size: 12px;
+}
+
+.target-workspace-capabilities .target-reason-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.target-workspace-capabilities li {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 5px 6px;
+  border-radius: 4px;
+  background: var(--code-bg);
+}
+
+.target-workspace-capabilities small {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+}
+
 .target-workspace-content {
   display: grid;
   grid-template-columns: minmax(360px, 1.45fr) minmax(260px, 0.75fr);

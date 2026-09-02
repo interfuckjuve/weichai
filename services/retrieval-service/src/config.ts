@@ -1,4 +1,6 @@
 import { requireRepositoryScopes } from './repository-scope.js';
+import type { MigrationRuntimeCapabilitySnapshot } from '@forexplore/contracts';
+import { validateMigrationRuntimeCapabilitySnapshot } from '@forexplore/workflow-core';
 
 export type RerankingConfig =
   | { provider: 'none' }
@@ -25,6 +27,10 @@ export interface RetrievalConfig {
   /** Bearer token for publication/index lifecycle mutations; empty disables writes. */
   moduleIndexToken: string;
   moduleIndexMaxBodyBytes: number;
+  /** Bearer token for V2 implementation-index generation mutations. */
+  implementationIndexToken: string;
+  implementationIndexMaxBodyBytes: number;
+  migrationRuntimeCapabilitySnapshot?: MigrationRuntimeCapabilitySnapshot;
   autoMigrate: boolean;
   seekdb: {
     host: string;
@@ -93,6 +99,25 @@ function deepSeekChatCompletionsUrl(env: NodeJS.ProcessEnv): string {
     .replace(/\/chat\/completions\/?$/, '')
     .replace(/\/+$/, '');
   return `${apiBase}/chat/completions`;
+}
+
+function runtimeCapabilitySnapshot(
+  value: string | undefined,
+): MigrationRuntimeCapabilitySnapshot | undefined {
+  if (!value?.trim()) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error('RETRIEVAL_MIGRATION_RUNTIME_CAPABILITY_SNAPSHOT_JSON must be valid JSON.');
+  }
+  try {
+    return validateMigrationRuntimeCapabilitySnapshot(parsed as MigrationRuntimeCapabilitySnapshot);
+  } catch (error) {
+    throw new Error(
+      `RETRIEVAL_MIGRATION_RUNTIME_CAPABILITY_SNAPSHOT_JSON is invalid: ${error instanceof Error ? error.message : 'unknown error'}`,
+    );
+  }
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): RetrievalConfig {
@@ -167,6 +192,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RetrievalConfi
       'SEEKDB_MODULE_KNOWLEDGE_TABLE must be at most 52 characters so lifecycle table names remain valid.',
     );
   }
+  const configuredRuntimeCapabilities = runtimeCapabilitySnapshot(
+    env.RETRIEVAL_MIGRATION_RUNTIME_CAPABILITY_SNAPSHOT_JSON,
+  );
 
   return {
     host: env.RETRIEVAL_HOST?.trim() || '127.0.0.1',
@@ -179,6 +207,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RetrievalConfi
       16 * 1024 * 1024,
       'RETRIEVAL_MODULE_INDEX_MAX_BODY_BYTES',
     ),
+    implementationIndexToken: env.RETRIEVAL_IMPLEMENTATION_INDEX_TOKEN?.trim() || '',
+    implementationIndexMaxBodyBytes: positiveInteger(
+      env.RETRIEVAL_IMPLEMENTATION_INDEX_MAX_BODY_BYTES,
+      32 * 1024 * 1024,
+      'RETRIEVAL_IMPLEMENTATION_INDEX_MAX_BODY_BYTES',
+    ),
+    ...(configuredRuntimeCapabilities
+      ? {
+          migrationRuntimeCapabilitySnapshot: configuredRuntimeCapabilities,
+        }
+      : {}),
     autoMigrate: boolean(env.SEEKDB_AUTO_MIGRATE, true),
     seekdb: {
       host: env.SEEKDB_HOST?.trim() || '127.0.0.1',

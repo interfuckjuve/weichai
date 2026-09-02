@@ -205,6 +205,10 @@ describe("TargetEngineeringAdapterRegistry", () => {
         status: "supported",
         value: { startLine: 0, endLine: 1, declarationIndentation: "" },
       }),
+      locatePatchFromContext: () => ({
+        status: "supported",
+        value: { startLine: 0, endLine: 1, declarationIndentation: "" },
+      }),
     };
     const registry = new TargetEngineeringAdapterRegistry([customAdapter]);
 

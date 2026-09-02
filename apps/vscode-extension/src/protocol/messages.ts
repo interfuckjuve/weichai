@@ -1,16 +1,17 @@
 import type {
-  AdaptationResult,
+  AdaptationResultV2,
   ApplyResult,
   EntityImplementationAssessment,
   ImplementationState,
   LanguageId,
   MigrationRouteDescriptor,
   MigrationRuntimeCapabilitySnapshot,
+  MigrationRunManifestV2,
   MigrationRouteSnapshotRef,
   RepositoryModuleCatalogRef,
   MigrationTargetRef,
-  ModuleTarget,
-  SearchCandidate,
+  SearchCandidateV2,
+  SourceImplementationBundleV2,
   TargetImplementationRollup,
   TargetWorkspaceModuleSnapshot,
   TargetWorkspaceSnapshotFreshness,
@@ -98,6 +99,8 @@ export interface TargetWorkspaceSnapshot {
   /** Must equal the canonical module snapshot content hash. */
   contentHash: string;
   moduleSnapshot: TargetWorkspaceModuleSnapshot;
+  /** Combined Host-owned runtime truth used to derive route eligibility. */
+  runtimeCapabilitySnapshot?: MigrationRuntimeCapabilitySnapshot;
   languageIds: LanguageId[];
   freshness: TargetWorkspaceSnapshotFreshness;
   staleReason?: string;
@@ -166,8 +169,8 @@ export type TargetWorkspaceImplementationState = ImplementationState;
 
 /** Snapshot sent by the trusted extension host when the panel is created. */
 export interface PanelInitPayload {
-  /** Legacy single-symbol entrypoint. New target-workspace panels may omit it. */
-  target?: ModuleTarget;
+  /** Current V2 target. It is present only after a reviewed 01B selection. */
+  target?: MigrationTargetRef;
   /** Present only when a reviewed target and explicit route capabilities are bound. */
   migrationSelection?: TargetWorkspaceMigrationSelection;
   /** Optional first 01B snapshot; later refreshes use TARGET_WORKSPACE_SNAPSHOT. */
@@ -192,14 +195,19 @@ export type HostToWebviewMessage =
   | {
       type: 'TARGET_ENTITY_SELECTED';
       selection: TargetWorkspaceSelectionIdentity;
-      target: ModuleTarget;
+      target: MigrationTargetRef;
       migrationSelection: TargetWorkspaceMigrationSelection;
       /** Only an explicit start intent may leave the 01B browser. */
       activateWorkflow: boolean;
     }
-  | { type: 'SEARCH_RESULT'; candidates: SearchCandidate[] }
-  | { type: 'ADAPT_RESULT'; result: AdaptationResult }
-  | { type: 'APPLY_RESULT'; result: ApplyResult }
+  | { type: 'SEARCH_RESULT'; candidates: SearchCandidateV2[] }
+  | {
+      type: 'CANDIDATE_SELECTED';
+      candidateId: string;
+      sourceBundle: SourceImplementationBundleV2;
+    }
+  | { type: 'ADAPT_RESULT'; result: AdaptationResultV2 }
+  | { type: 'APPLY_RESULT'; result: ApplyResult; manifest: MigrationRunManifestV2 }
   | { type: 'REPOSITORY_STATUS'; statuses: RepositoryStatus[] }
   | { type: 'SERVICE_STATUS'; status: ServiceStatus }
   | { type: 'ERROR'; message: string };
@@ -235,6 +243,7 @@ const hostMessageTypes = new Set<string>([
   'TARGET_WORKSPACE_INVALIDATED',
   'TARGET_ENTITY_SELECTED',
   'SEARCH_RESULT',
+  'CANDIDATE_SELECTED',
   'ADAPT_RESULT',
   'APPLY_RESULT',
   'REPOSITORY_STATUS',
@@ -312,6 +321,30 @@ function isContentHash(value: unknown): value is string {
 
 export function isHostToWebviewMessage(value: unknown): value is HostToWebviewMessage {
   if (typeof value !== 'object' || value === null) return false;
-  const message = value as { type?: unknown };
-  return typeof message.type === 'string' && hostMessageTypes.has(message.type);
+  const message = value as { type?: unknown; payload?: unknown; candidates?: unknown; result?: unknown };
+  if (typeof message.type !== 'string' || !hostMessageTypes.has(message.type)) return false;
+  if (message.type === 'INIT' && isRecord(message.payload)) {
+    const target = message.payload.target;
+    if (target !== undefined && (!isRecord(target) || target.schemaVersion !== '2.0')) return false;
+  }
+  if (message.type === 'TARGET_ENTITY_SELECTED') {
+    const target = (message as Record<string, unknown>).target;
+    return isRecord(target) && target.schemaVersion === '2.0';
+  }
+  if (message.type === 'SEARCH_RESULT') {
+    return Array.isArray(message.candidates) && message.candidates.every((candidate) =>
+      isRecord(candidate) && candidate.schemaVersion === '2.0');
+  }
+  if (message.type === 'ADAPT_RESULT') {
+    return isRecord(message.result) && message.result.schemaVersion === '2.0';
+  }
+  if (message.type === 'CANDIDATE_SELECTED') {
+    const sourceBundle = (message as Record<string, unknown>).sourceBundle;
+    return isRecord(sourceBundle) && sourceBundle.schemaVersion === '2.0';
+  }
+  return true;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
