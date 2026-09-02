@@ -1,11 +1,14 @@
 import { Sparkles } from 'lucide-react';
 import type { WorkflowEvent, WorkflowState } from '@forexplore/workflow-core';
 import { selectedCandidate } from '@forexplore/workflow-core';
+import { normalizeLanguageId } from '@forexplore/contracts';
+import type { TargetWorkspaceMigrationSelection } from '../../../src/protocol/messages';
 
 interface CandidatesStageProps {
   state: WorkflowState;
   dispatch: React.Dispatch<WorkflowEvent>;
   adaptationProvider: 'DeepSeek';
+  migrationSelection: TargetWorkspaceMigrationSelection | null;
   onSelectCandidate: (candidateId: string) => void;
   onAdapt: () => void;
 }
@@ -14,12 +17,19 @@ export function CandidatesStage({
   state,
   dispatch,
   adaptationProvider,
+  migrationSelection,
   onSelectCandidate,
   onAdapt,
 }: CandidatesStageProps) {
   const candidate = selectedCandidate(state);
   const adapting = state.pending === 'adapt';
-  const canAdapt = candidate !== null;
+  const sourceLanguageId = candidate ? normalizedLanguageId(candidate.language) : null;
+  const routeOption = sourceLanguageId === null ? null : migrationSelection?.routeOptions.find(
+    ({ route }) =>
+      route.sourceLanguageId === sourceLanguageId &&
+      route.targetLanguageId === migrationSelection.target.entity.languageId,
+  ) ?? null;
+  const canAdapt = candidate !== null && routeOption !== null;
 
   return (
     <div className="stage-stack">
@@ -99,9 +109,29 @@ export function CandidatesStage({
       <section className="card decision-card">
         <div className="decision-fields">
           <div className="decision-static">
-            <span>适配方式</span>
-            <strong>translate · 任意候选语言 → Java</strong>
-            <small>全部语言均参与检索，并可生成 Java 目标方法的适配实现。</small>
+            <span>迁移路线</span>
+            <strong>
+              {candidate?.language ?? '?'} → {migrationSelection?.target.entity.languageId ?? state.target?.language ?? '?'}
+            </strong>
+            {routeOption ? (
+              <>
+                <small>
+                  {routeOption.route.strategy} · {routeOption.route.id}@{routeOption.route.version}
+                  {' · '}{routeOption.route.stages.map((stage) =>
+                    `${stage.stage}:${stage.availability.status}`,
+                  ).join('、') || '未列出阶段'}
+                  {' · '}{adaptationProvider}
+                </small>
+                <small>
+                  已审映射 {migrationSelection!.moduleMapping.mappingProposalId}
+                  {' · review '}{migrationSelection!.moduleMapping.mappingReviewId}
+                  {' · overlay '}{migrationSelection!.moduleMapping.executionOverlayId}
+                  {' · runtime '}{migrationSelection!.moduleMapping.runtimeCapabilitySnapshot.id}
+                </small>
+              </>
+            ) : (
+              <small>没有与当前源/目标语言精确匹配的可执行路线；默认禁止生成。</small>
+            )}
           </div>
           <label>
             <span>人工备注 / 额外约束</span>
@@ -122,9 +152,23 @@ export function CandidatesStage({
         disabled={adapting || !canAdapt}
       >
         {adapting ? <span className="spinner" /> : <Sparkles size={15} />}
-          {adapting ? '正在生成适配…' : !candidate ? '请先明确选择一个候选' : '确认此方案并生成适配'}
+          {adapting
+            ? '正在生成迁移实现…'
+            : !candidate
+              ? '请先明确选择一个候选'
+              : !routeOption
+                ? '当前语言对无可执行路线'
+                : '确认此路线并生成实现'}
       </button>
       </section>
     </div>
   );
+}
+
+function normalizedLanguageId(value: string): string | null {
+  try {
+    return normalizeLanguageId(value);
+  } catch {
+    return null;
+  }
 }

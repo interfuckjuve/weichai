@@ -13,14 +13,22 @@ export type {
   AdaptationValidator,
 } from "./adaptation-adapter";
 
-export { TranslationVerifierAdapter } from "./verification-adapter";
+export {
+  listTranslationVerifierRuntimeCapabilities,
+  resolveTranslationVerifierRoute,
+  TranslationVerifierAdapter,
+} from "./verification-adapter";
 export type {
   AdaptationVerifier,
   DifferentialVerificationInput,
   DifferentialVerificationResult,
   IsolatedDriverExecutor,
+  TranslationVerifierRouteCapability,
+  TranslationVerifierRuntimeCapability,
   TranslationVerifierAdapterOptions,
   TranslationVerifierExecution,
+  VerificationUnsupportedCode,
+  VerificationUnsupportedReason,
 } from "./verification-adapter";
 
 export { BackfillAdapter } from "./backfill-adapter";
@@ -101,8 +109,28 @@ export type {
   ArchitectModelClient,
 } from "./architect-agent";
 
-export { collectTargetContext, serializeTargetContext } from "./context-collector";
-export type { ContextCollectorOptions } from "./context-collector";
+export {
+  canonicalTargetLanguageId,
+  collectTargetContext,
+  collectTargetContextSnapshot,
+  createDefaultTargetEngineeringAdapterRegistry,
+  locateTargetPatch,
+  serializeTargetContext,
+  TargetEngineeringAdapterRegistry,
+  TargetEngineeringUnsupportedError,
+} from "./context-collector";
+export type {
+  ContextCollectorOptions,
+  TargetContextSnapshot,
+  TargetEngineeringAdapter,
+  TargetEngineeringCapabilityDescriptor,
+  TargetEngineeringContextRequest,
+  TargetEngineeringResult,
+  TargetEngineeringStage,
+  TargetEngineeringUnsupportedReason,
+  TargetPatchLocation,
+  TargetPatchLocatorInput,
+} from "./context-collector";
 
 export {
   compileStandalone,
@@ -112,8 +140,15 @@ export {
   compileTargetStandalone,
   compileTargetIntegrated,
   compilerCommand,
+  listCompilerRouteCapabilities,
+  resolveCompilerRouteCapability,
 } from "./compiler";
-export type { CompileResult } from "./compiler";
+export type {
+  CompileResult,
+  CompilerRouteCapability,
+  CompilerUnsupportedReason,
+  CompilerValidationLevel,
+} from "./compiler";
 
 export { deepSeekModelConfig, loadDeepSeekModelConfig } from "./model-config";
 export type { DeepSeekModelConfig } from "./model-config";
@@ -133,6 +168,16 @@ export type {
   StaticAnalysisSnapshotStore,
 } from "./http-server";
 export type { RepositoryArchitecturePort } from "@forexplore/workflow-core";
+
+export {
+  createAdaptationRuntimeCapabilitySnapshot,
+  routeByExactPair,
+} from "./runtime-capability-snapshot";
+export type {
+  AdaptationRuntimeCapabilitySnapshotOptions,
+  RepositoryAnalysisExecution,
+  WorkspaceMutationExecution,
+} from "./runtime-capability-snapshot";
 
 export {
   ModuleDiscoveryAgent,

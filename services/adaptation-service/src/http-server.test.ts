@@ -3,6 +3,7 @@ import type {
   AdaptationRequest,
   AdaptationResult,
   ModuleMigrationProposal,
+  MigrationRuntimeCapabilitySnapshot,
   RepositoryArchitectureRequest,
   RepositoryStaticAnalysis,
   SearchCandidate,
@@ -16,6 +17,7 @@ import {
   createHttpServer,
   type StaticAnalysisSnapshotStore,
 } from './http-server';
+import { createAdaptationRuntimeCapabilitySnapshot } from './runtime-capability-snapshot';
 
 const servers: ReturnType<typeof createHttpServer>[] = [];
 
@@ -35,6 +37,7 @@ async function listen(
   options: {
     architecturePort?: RepositoryArchitecturePort;
     staticAnalysisSnapshots?: StaticAnalysisSnapshotStore;
+    runtimeCapabilitySnapshot?: MigrationRuntimeCapabilitySnapshot;
   } = {},
 ): Promise<string> {
   const server = createHttpServer({
@@ -169,6 +172,49 @@ describe('adaptation HTTP API', () => {
     const response = await fetch(`${url}/health`);
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ status: 'ok', provider: 'deepseek' });
+  });
+
+  it('always serves a validated runtime capability snapshot', async () => {
+    const adapter: CodeAdaptationPort = { adapt: vi.fn() };
+    const emptyUrl = await listen(adapter);
+
+    const emptyResponse = await fetch(`${emptyUrl}/v2/runtime-capabilities`);
+    expect(emptyResponse.status).toBe(200);
+    expect(await emptyResponse.json()).toEqual(expect.objectContaining({
+      schemaVersion: '2.0',
+      id: expect.stringMatching(/^migration-runtime-capabilities:/),
+      routes: [],
+      contentHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+    }));
+
+    const snapshot = createAdaptationRuntimeCapabilitySnapshot({
+      createdAt: '2026-09-02T00:00:00.000Z',
+      analysisExecution: 'trusted-host',
+      verifierExecution: 'trusted-isolated',
+      workspaceMutationExecution: 'trusted-host',
+    });
+    const configuredUrl = await listen(adapter, { runtimeCapabilitySnapshot: snapshot });
+    const configuredResponse = await fetch(`${configuredUrl}/v2/runtime-capabilities`);
+    expect(configuredResponse.status).toBe(200);
+    expect(await configuredResponse.json()).toEqual(snapshot);
+    expect(adapter.adapt).not.toHaveBeenCalled();
+  });
+
+  it('rejects a tampered runtime capability snapshot before listening', () => {
+    const adapter: CodeAdaptationPort = { adapt: vi.fn() };
+    const snapshot = createAdaptationRuntimeCapabilitySnapshot({
+      createdAt: '2026-09-02T00:00:00.000Z',
+      analysisExecution: 'trusted-host',
+      verifierExecution: 'trusted-isolated',
+      workspaceMutationExecution: 'trusted-host',
+    });
+    const tampered = structuredClone(snapshot);
+    tampered.contentHash = '0'.repeat(64);
+
+    expect(() => createHttpServer({
+      adapter,
+      runtimeCapabilitySnapshot: tampered,
+    })).toThrow('Runtime capability snapshot hash or canonical structure is invalid');
   });
 
   it('routes adaptation requests to the adapter', async () => {

@@ -5,6 +5,8 @@ import type {
 } from "@forexplore/contracts";
 import { describe, expect, it } from "vitest";
 import {
+  listTranslationVerifierRuntimeCapabilities,
+  resolveTranslationVerifierRoute,
   TranslationVerifierAdapter,
   type DifferentialVerificationInput,
   type IsolatedDriverExecutor,
@@ -133,5 +135,60 @@ describe("TranslationVerifierAdapter execution boundary", () => {
       execution: "trusted-isolated",
       executor: malformedExecutor,
     })).toThrow(/external, credential-free, network-disabled workspace boundary/);
+  });
+
+  it("advertises Python and TypeScript as target runtimes instead of a Java/C# target gate", () => {
+    expect(listTranslationVerifierRuntimeCapabilities().map((capability) => capability.language)).toEqual([
+      "Java",
+      "C#",
+      "Python",
+      "TypeScript",
+    ]);
+    expect(resolveTranslationVerifierRoute("Java", "Python")).toMatchObject({
+      source: { language: "Java", sourceDriver: true },
+      target: {
+        language: "Python",
+        targetDriver: true,
+        ownerKinds: ["type", "module"],
+        quality: {
+          level: "isolated-differential-execution",
+          provesBehavioralCorrectness: false,
+        },
+      },
+    });
+    expect(resolveTranslationVerifierRoute("Python", "TypeScript")).toBeDefined();
+    expect(resolveTranslationVerifierRoute("Go", "TypeScript")).toBeUndefined();
+  });
+
+  it("returns a structured fail-closed reason for an unregistered runtime route", async () => {
+    const adapter = new TranslationVerifierAdapter({
+      apiKey: "test-key",
+      execution: "trusted-isolated",
+      executor: isolatedExecutor,
+    });
+    const result = await adapter.verify({
+      ...input,
+      request: {
+        ...request,
+        candidate: {
+          ...candidate,
+          language: "Go",
+          path: "src/calculator.go",
+        },
+      },
+    });
+
+    expect(result).toMatchObject({
+      status: "unverified",
+      reason: "route-unsupported",
+      unsupportedReason: {
+        code: "SOURCE_RUNTIME_UNAVAILABLE",
+        stage: "source-driver",
+        sourceLanguage: "Go",
+        targetLanguage: "C#",
+        retryable: false,
+      },
+    });
+    expect(result.summary).toContain("SOURCE_RUNTIME_UNAVAILABLE");
   });
 });

@@ -26,9 +26,23 @@ export function generateDriverSource(description: TestDescription): string {
       return generateJavaDriver(description);
     case "C#":
       return generateCSharpDriver(description);
-    default:
-      throw new Error(`Unsupported driver language: ${String(description.target.language)}`);
+    case "Python":
+      return generatePythonDriver(description, targetInvocation(description));
+    case "TypeScript":
+      return generateTypeScriptDriver(description, targetInvocation(description));
   }
+}
+
+function targetInvocation(description: TestDescription): SourceInvocation {
+  const target = description.target;
+  return {
+    language: target.language,
+    module: target.module,
+    className: target.ownerKind === "module" ? undefined : target.className,
+    method: target.method,
+    isStatic: target.isStatic,
+    constructorArgs: target.constructorArgs,
+  };
 }
 
 /** Generate a source-side driver without widening the translated target schema. */

@@ -1,3 +1,4 @@
+/** @deprecated Use the open-ended `LanguageId` at new boundaries. */
 export type Language = 'TypeScript' | 'Python' | 'Java' | 'C#' | 'Rust' | 'Go';
 
 export type ModuleKind =
@@ -24,6 +25,10 @@ export interface ModuleNode {
   children?: ModuleNode[];
 }
 
+/**
+ * @deprecated V1 class/function compatibility shape. New migration flows must
+ * use `MigrationTargetRef`, whose language and entity kind are open-ended.
+ */
 export interface ModuleTarget {
   id: string;
   name: string;

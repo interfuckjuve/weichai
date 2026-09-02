@@ -34,6 +34,46 @@ const csharpDescription: TestDescription = {
   ],
 };
 
+const pythonDescription: TestDescription = {
+  schemaVersion: "1.0",
+  target: {
+    language: "Python",
+    module: "target_module",
+    ownerKind: "module",
+    className: "",
+    method: "double_it",
+    isStatic: true,
+    constructorArgs: [],
+  },
+  cases: [
+    {
+      id: "c1",
+      inputs: [{ type: "number", value: 21 }],
+      expected: { kind: "return", value: { type: "number", value: 42 } },
+    },
+  ],
+};
+
+const typeScriptDescription: TestDescription = {
+  schemaVersion: "1.0",
+  target: {
+    language: "TypeScript",
+    module: "target-module.ts",
+    ownerKind: "module",
+    className: "",
+    method: "doubleIt",
+    isStatic: true,
+    constructorArgs: [],
+  },
+  cases: [
+    {
+      id: "c1",
+      inputs: [{ type: "number", value: 21 }],
+      expected: { kind: "return", value: { type: "number", value: 42 } },
+    },
+  ],
+};
+
 function makeSide(
   language: VerifierLanguage,
   driverSource: string,
@@ -246,5 +286,49 @@ describe.skipIf(!isToolchainAvailable("C#"))("RealDriverExecutor C# 集成", () 
     const compiled = await executor.compile(side);
     expect(compiled.success).toBe(false);
     expect(compiled.errors.length).toBeGreaterThan(0);
+  });
+});
+
+describe.skipIf(!isToolchainAvailable("Python"))("RealDriverExecutor Python 目标侧集成", () => {
+  const executor = new RealDriverExecutor();
+
+  it("顶层函数目标无需伪造 class，driver + module 可完成编译和执行", async () => {
+    const side = makeSide("Python", generateDriverSource(pythonDescription), [
+      { relativePath: "target_module.py", content: "def double_it(value):\n    return value * 2\n" },
+    ]);
+
+    const compiled = await executor.compile(side);
+    expect(compiled).toMatchObject({ success: true, errors: [] });
+
+    const ran = await executor.run(side);
+    expect(ran).toMatchObject({ exitCode: 0, stderr: "" });
+    const parsed = JSON.parse(ran.stdout) as {
+      results: Array<{ caseId: string; outcome: string; returnValue: { type: string; value: number } }>;
+    };
+    expect(parsed.results).toEqual([
+      { caseId: "c1", outcome: "return", returnValue: { type: "number", value: 42 } },
+    ]);
+  });
+});
+
+describe.skipIf(!isToolchainAvailable("TypeScript"))("RealDriverExecutor TypeScript 目标侧集成", () => {
+  const executor = new RealDriverExecutor();
+
+  it("顶层导出函数目标无需伪造 class，driver + module 可完成编译和执行", async () => {
+    const side = makeSide("TypeScript", generateDriverSource(typeScriptDescription), [
+      { relativePath: "target-module.ts", content: "export function doubleIt(value: number): number { return value * 2; }\n" },
+    ]);
+
+    const compiled = await executor.compile(side);
+    expect(compiled).toMatchObject({ success: true, errors: [] });
+
+    const ran = await executor.run(side);
+    expect(ran).toMatchObject({ exitCode: 0, stderr: "" });
+    const parsed = JSON.parse(ran.stdout) as {
+      results: Array<{ caseId: string; outcome: string; returnValue: { type: string; value: number } }>;
+    };
+    expect(parsed.results).toEqual([
+      { caseId: "c1", outcome: "return", returnValue: { type: "number", value: 42 } },
+    ]);
   });
 });

@@ -10,6 +10,7 @@ import {
 import { describe, expect, it } from 'vitest';
 import {
   buildTargetWorkspaceModuleSnapshot,
+  calculateTargetWorkspaceStructureHash,
   classifyTargetWorkspaceSnapshotFreshness,
   createEntityImplementationAssessment,
   validateTargetWorkspaceModuleSnapshot,
@@ -23,6 +24,16 @@ const HASHES = {
   review: '4'.repeat(64),
   body: '5'.repeat(64),
 };
+
+function structureIdentity(contentHash = '0'.repeat(64)) {
+  return {
+    basis: 'declaration-shape' as const,
+    contentHash,
+    schemaVersion: 'fixture-shape-v1',
+    adapterId: 'fixture-language-adapter',
+    adapterVersion: '1.0.0',
+  };
+}
 
 const files: RepositoryIRFile[] = [
   { id: 'file-main', path: 'src/Main.cs', contentHash: 'a'.repeat(64), role: 'source', languageId: 'csharp', projectIds: [] },
@@ -42,6 +53,7 @@ function typeEntity(id: string, name: string, fileId: string): RepositoryIREntit
     languageId: 'csharp',
     fileId,
     signature: `public class ${name}`,
+    structureIdentity: structureIdentity(),
     attributes: { staticSymbolKind: 'class' },
   };
 }
@@ -61,6 +73,7 @@ function callable(
     fileId,
     containerEntityId,
     signature: `public void ${name}()`,
+    structureIdentity: structureIdentity(),
     attributes: { staticSymbolKind: 'method' },
   };
 }
@@ -217,7 +230,11 @@ function makeAssessments(ir = makeIr()): EntityImplementationAssessment[] {
               : 'syntactic-body',
         reasonCodes: [`fixture-${state}`],
         evidenceRefs: [{ id: `evidence-${entity.id}`, kind: 'syntactic-analysis' }],
-        detector: { id: 'fixture-detector', version: '1.0.0', languageId: 'csharp' },
+        detector: {
+          id: 'fixture-detector',
+          version: '1.0.0',
+          languageId: entity.languageId ?? 'unknown-language',
+        },
       },
       lineage,
       createdAt: NOW,
@@ -262,6 +279,11 @@ describe('target workspace implementation inventory', () => {
       ['call-unassigned', 'unassigned-file'],
     ]);
     expect(first.classRollups.find((rollup) => rollup.scopeId === 'type-main')).toMatchObject({
+      state: 'unknown',
+      counts: { eligible: 2, implemented: 1, unknown: 1, notApplicable: 1 },
+    });
+    expect(first.containerRollups.find((rollup) => rollup.scopeId === 'type-main')).toMatchObject({
+      scope: 'container',
       state: 'unknown',
       counts: { eligible: 2, implemented: 1, unknown: 1, notApplicable: 1 },
     });
@@ -340,6 +362,163 @@ describe('target workspace implementation inventory', () => {
       .toThrow('hash or deterministic projection is invalid');
   });
 
+  it('uses adapter shape identity for TypeScript object and arrow declarations without parsing syntax', () => {
+    const typescriptEntities = entities.map((entity) => entity.id === 'call-implemented'
+      ? {
+          ...entity,
+          languageId: 'typescript',
+          signature: 'export const Ready = (input: { value: string }) => ({ value: input.value });',
+          structureIdentity: structureIdentity('a'.repeat(64)),
+          attributes: { staticSymbolKind: 'function' },
+        }
+      : entity);
+    const ir = makeIr({ entities: typescriptEntities });
+    const snapshot = buildTargetWorkspaceModuleSnapshot({
+      ir,
+      catalog: makeCatalog(),
+      assessments: makeAssessments(ir),
+      producer: { kind: 'ingestion-host', id: 'target-host' },
+      createdAt: NOW,
+    });
+    const bodyChanged = makeIr({
+      id: 'unified-ir-typescript-body-v2',
+      repositoryRevision: 'commit-typescript-v2',
+      repositoryContentHash: '7'.repeat(64),
+      contentHash: '8'.repeat(64),
+      entities: typescriptEntities.map((entity) => entity.id === 'call-implemented'
+        ? {
+            ...entity,
+            signature: 'export const Ready = (input: { value: string }) => ({ value: input.value.trim() });',
+          }
+        : entity),
+    });
+    expect(calculateTargetWorkspaceStructureHash(bodyChanged)).toBe(snapshot.structureHash);
+    expect(classifyTargetWorkspaceSnapshotFreshness(snapshot, bodyChanged)).toMatchObject({
+      status: 'body-only-compatible',
+    });
+
+    const declarationChanged = makeIr({
+      id: 'unified-ir-typescript-shape-v2',
+      repositoryContentHash: '9'.repeat(64),
+      contentHash: 'a'.repeat(64),
+      entities: typescriptEntities.map((entity) => entity.id === 'call-implemented'
+        ? {
+            ...entity,
+            signature: 'export const Ready = (input: { value: string; strict: boolean }) => ({ value: input.value });',
+            structureIdentity: structureIdentity('b'.repeat(64)),
+          }
+        : entity),
+    });
+    expect(calculateTargetWorkspaceStructureHash(declarationChanged)).not.toBe(snapshot.structureHash);
+    expect(classifyTargetWorkspaceSnapshotFreshness(snapshot, declarationChanged)).toMatchObject({
+      status: 'stale',
+      reasonCodes: expect.arrayContaining(['structure-changed']),
+    });
+  });
+
+  it('rolls up Python module and top-level function relationships as containers', () => {
+    const pythonIr = makeIr({
+      entities: entities.map((entity) => {
+        if (entity.id === 'type-main') {
+          return {
+            ...entity,
+            kind: 'module' as const,
+            languageId: 'python',
+            signature: 'module example.main',
+            containerCapability: {
+              canContainCallables: true as const,
+              nativeKind: 'module',
+              adapterId: 'python-shape-adapter',
+              adapterVersion: '1.0.0',
+            },
+            attributes: { staticSymbolKind: 'module' },
+          };
+        }
+        return entity.containerEntityId === 'type-main'
+          ? { ...entity, languageId: 'python', attributes: { staticSymbolKind: 'function' } }
+          : entity;
+      }),
+    });
+    const snapshot = buildTargetWorkspaceModuleSnapshot({
+      ir: pythonIr,
+      catalog: makeCatalog(),
+      assessments: makeAssessments(pythonIr),
+      producer: { kind: 'ingestion-host', id: 'target-host' },
+      createdAt: NOW,
+    });
+    expect(snapshot.containerRollups.find((rollup) => rollup.scopeId === 'type-main'))
+      .toMatchObject({ scope: 'container', state: 'unknown' });
+    expect(snapshot.classRollups.some((rollup) => rollup.scopeId === 'type-main')).toBe(false);
+  });
+
+  it('uses Rust trait and impl adapter facts as container scopes without central kinds', () => {
+    const rustIr = makeIr({
+      entities: entities.map((entity) => {
+        if (entity.id === 'type-main' || entity.id === 'type-shared') {
+          const nativeKind = entity.id === 'type-main' ? 'trait' : 'impl';
+          return {
+            ...entity,
+            kind: 'unknown' as const,
+            languageId: 'rust',
+            signature: `${nativeKind} ${entity.name}`,
+            containerCapability: {
+              canContainCallables: true as const,
+              nativeKind,
+              adapterId: 'rust-shape-adapter',
+              adapterVersion: '1.0.0',
+            },
+            attributes: { staticSymbolKind: nativeKind },
+          };
+        }
+        return entity.containerEntityId === 'type-main' || entity.containerEntityId === 'type-shared'
+          ? { ...entity, languageId: 'rust', attributes: { staticSymbolKind: 'function' } }
+          : entity;
+      }),
+    });
+    const snapshot = buildTargetWorkspaceModuleSnapshot({
+      ir: rustIr,
+      catalog: makeCatalog(),
+      assessments: makeAssessments(rustIr),
+      producer: { kind: 'ingestion-host', id: 'target-host' },
+      createdAt: NOW,
+    });
+    expect(snapshot.containerRollups.map((rollup) => rollup.scopeId)).toEqual(
+      expect.arrayContaining(['type-main', 'type-shared']),
+    );
+    expect(snapshot.classRollups.map((rollup) => rollup.scopeId)).not.toEqual(
+      expect.arrayContaining(['type-main', 'type-shared']),
+    );
+  });
+
+  it('fails closed when a changed IR lacks trusted declaration identity', () => {
+    const identityMissingEntities = entities.map((entity) => entity.id === 'call-implemented'
+      ? { ...entity, structureIdentity: undefined }
+      : entity);
+    const ir = makeIr({ entities: identityMissingEntities });
+    const snapshot = buildTargetWorkspaceModuleSnapshot({
+      ir,
+      catalog: makeCatalog(),
+      assessments: makeAssessments(ir),
+      producer: { kind: 'ingestion-host', id: 'target-host' },
+      createdAt: NOW,
+    });
+    const bodyChanged = makeIr({
+      id: 'unified-ir-without-shape-v2',
+      repositoryRevision: 'commit-without-shape-v2',
+      repositoryContentHash: 'c'.repeat(64),
+      contentHash: 'd'.repeat(64),
+      entities: identityMissingEntities,
+      files: files.map((file) => file.id === 'file-main'
+        ? { ...file, contentHash: 'e'.repeat(64) }
+        : file),
+    });
+    expect(calculateTargetWorkspaceStructureHash(bodyChanged)).toBe(snapshot.structureHash);
+    expect(classifyTargetWorkspaceSnapshotFreshness(snapshot, bodyChanged)).toMatchObject({
+      status: 'stale',
+      reasonCodes: expect.arrayContaining(['structure-identity-unverified']),
+    });
+  });
+
   it('distinguishes exact lineage, declaration-compatible changes and structural staleness', () => {
     const ir = makeIr();
     const catalog = makeCatalog();
@@ -402,7 +581,11 @@ describe('target workspace implementation inventory', () => {
       repositoryContentHash: 'a'.repeat(64),
       contentHash: 'b'.repeat(64),
       entities: entities.map((entity) => entity.id === 'call-implemented'
-        ? { ...entity, signature: 'public int Ready(string input)' }
+        ? {
+            ...entity,
+            signature: 'public int Ready(string input)',
+            structureIdentity: structureIdentity('f'.repeat(64)),
+          }
         : entity),
     });
     expect(classifyTargetWorkspaceSnapshotFreshness(snapshot, signatureChanged)).toMatchObject({

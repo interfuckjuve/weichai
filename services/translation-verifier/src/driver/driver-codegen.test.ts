@@ -67,12 +67,42 @@ describe("generateDriverSource 按 language 分派", () => {
     expect(generateDriverSource(csharpDescription())).toContain("Util.DoubleIt(21)");
   });
 
-  it("非法语言(Python)→ 抛错", () => {
+  it("Python module-level target uses the Python driver without an artificial class owner", () => {
     const desc: TestDescription = {
-      ...csharpDescription(),
-      target: { ...csharpDescription().target, language: "Python" as never },
+      ...javaDescription(),
+      target: {
+        language: "Python",
+        module: "target_module",
+        ownerKind: "module",
+        className: "",
+        method: "double_it",
+        isStatic: true,
+        constructorArgs: [],
+      },
     };
-    expect(() => generateDriverSource(desc)).toThrow(/Unsupported driver language: Python/);
+    const source = generateDriverSource(desc);
+    expect(source).toContain('importlib.import_module("target_module")');
+    expect(source).toContain("owner = module");
+    expect(source).toContain("owner.double_it");
+  });
+
+  it("TypeScript module-level target uses the TypeScript driver", () => {
+    const desc: TestDescription = {
+      ...javaDescription(),
+      target: {
+        language: "TypeScript",
+        module: "target-module.ts",
+        ownerKind: "module",
+        className: "",
+        method: "doubleIt",
+        isStatic: true,
+        constructorArgs: [],
+      },
+    };
+    const source = generateDriverSource(desc);
+    expect(source).toContain('import * as sourceModule from "./target-module.ts";');
+    expect(source).toContain("const owner: any = sourceModule;");
+    expect(source).toContain('owner["doubleIt"]');
   });
 });
 

@@ -1,9 +1,9 @@
 /** Languages that can execute one side of a differential verification. */
 export type VerifierLanguage = "Java" | "C#" | "Python" | "TypeScript";
-/** Languages currently supported as the translated target side. */
-export type TargetLanguage = "Java" | "C#";
+/** Languages currently supported as either side of differential verification. */
+export type TargetLanguage = VerifierLanguage;
 export const verifierSchemaVersion = "1.0" as const;
-const VALID_TARGET_LANGUAGES: ReadonlySet<string> = new Set(["Java", "C#"]);
+const VALID_TARGET_LANGUAGES: ReadonlySet<string> = new Set(["Java", "C#", "Python", "TypeScript"]);
 
 export type TypedValue =
   | { type: "string"; value: string }
@@ -33,6 +33,10 @@ export interface TestDescription {
   requirement?: string;
   target: {
     language: TargetLanguage;
+    /** Import path used by module-oriented target runtimes such as Python and TypeScript. */
+    module?: string;
+    /** `module` supports top-level functions without inventing an enclosing class. */
+    ownerKind?: "type" | "module";
     className: string;
     method: string;
     /** Class-level verification may use a constructor as its executable entry. */
@@ -54,12 +58,27 @@ export function validateDescription(value: unknown): TestDescription {
   const target = d.target as Record<string, unknown> | undefined;
   if (typeof target !== "object" || target === null) throw new Error("TestDescription.target is required.");
   if (typeof target.language !== "string" || !VALID_TARGET_LANGUAGES.has(target.language)) {
-    throw new Error(`TestDescription.target.language must be one of Java, C#; received ${String(target.language)}.`);
+    throw new Error(`TestDescription.target.language must be one of Java, C#, Python, TypeScript; received ${String(target.language)}.`);
   }
-  for (const key of ["className", "method"] as const) {
-    if (typeof target[key] !== "string" || !(target[key] as string).trim()) {
-      throw new Error(`TestDescription.target.${key} must be a non-empty string.`);
-    }
+  if (typeof target.method !== "string" || !target.method.trim()) {
+    throw new Error("TestDescription.target.method must be a non-empty string.");
+  }
+  if (typeof target.className !== "string") {
+    throw new Error("TestDescription.target.className must be a string.");
+  }
+  const ownerKind = target.ownerKind ?? "type";
+  if (ownerKind !== "type" && ownerKind !== "module") {
+    throw new Error('TestDescription.target.ownerKind must be "type" or "module" when present.');
+  }
+  if (ownerKind === "type" && !target.className.trim()) {
+    throw new Error("TestDescription.target.className must be a non-empty string for type-owned targets.");
+  }
+  const moduleLanguage = target.language === "Python" || target.language === "TypeScript";
+  if (moduleLanguage && (typeof target.module !== "string" || !target.module.trim())) {
+    throw new Error(`TestDescription.target.module must be a non-empty string for ${target.language}.`);
+  }
+  if (!moduleLanguage && ownerKind === "module") {
+    throw new Error(`TestDescription.target.ownerKind=module is not supported for ${target.language}.`);
   }
   if (typeof target.isStatic !== "boolean") {
     throw new Error("TestDescription.target.isStatic must be a boolean.");
@@ -184,6 +203,8 @@ export function canonicalDescriptionJson(description: TestDescription): string {
     schemaVersion: description.schemaVersion,
     target: {
       language: description.target.language,
+      ...(description.target.module === undefined ? {} : { module: description.target.module }),
+      ...(description.target.ownerKind === undefined ? {} : { ownerKind: description.target.ownerKind }),
       className: description.target.className,
       method: description.target.method,
       ...(description.target.entryKind === undefined ? {} : { entryKind: description.target.entryKind }),

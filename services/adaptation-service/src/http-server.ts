@@ -8,6 +8,7 @@ import {
   moduleMigrationSchemaVersion,
   type AdaptationRequest,
   type Language,
+  type MigrationRuntimeCapabilitySnapshot,
   type ModuleDiscoveryConstraint,
   type RepositoryArchitectureRequest,
   type RepositoryStaticAnalysis,
@@ -17,7 +18,11 @@ import type {
   CodeAdaptationPort,
   RepositoryArchitecturePort,
 } from "@forexplore/workflow-core";
-import { validateRepositoryModuleWikiProposal } from "@forexplore/workflow-core";
+import {
+  materializeMigrationRuntimeCapabilitySnapshot,
+  validateMigrationRuntimeCapabilitySnapshot,
+  validateRepositoryModuleWikiProposal,
+} from "@forexplore/workflow-core";
 import {
   repositoryStaticAnalysisToUnifiedIr,
   validateModuleDiscoveryProposal,
@@ -38,6 +43,8 @@ export interface StaticAnalysisSnapshotStore {
 
 export interface HttpServerOptions {
   adapter: CodeAdaptationPort;
+  /** Server-owned, content-addressed exact-pair route inventory. */
+  runtimeCapabilitySnapshot?: MigrationRuntimeCapabilitySnapshot;
   /** Optional read-only module-planning endpoint. It has no write-back path. */
   architecturePort?: RepositoryArchitecturePort;
   /** Server-owned static-analysis snapshots addressed by their immutable ID. */
@@ -302,6 +309,14 @@ function requestSignal(request: IncomingMessage): AbortSignal {
 }
 
 export function createHttpServer(options: HttpServerOptions): Server {
+  const runtimeCapabilitySnapshot = validateMigrationRuntimeCapabilitySnapshot(
+    structuredClone(
+      options.runtimeCapabilitySnapshot ?? materializeMigrationRuntimeCapabilitySnapshot({
+        routes: [],
+        createdAt: new Date().toISOString(),
+      }),
+    ),
+  );
   return createServer(async (request, response) => {
     if (request.method === "OPTIONS") {
       json(response, 204, null, options.corsOrigin);
@@ -314,6 +329,16 @@ export function createHttpServer(options: HttpServerOptions): Server {
           response,
           200,
           { status: "ok", provider: "deepseek" },
+          options.corsOrigin,
+        );
+        return;
+      }
+
+      if (request.method === "GET" && request.url === "/v2/runtime-capabilities") {
+        json(
+          response,
+          200,
+          runtimeCapabilitySnapshot,
           options.corsOrigin,
         );
         return;

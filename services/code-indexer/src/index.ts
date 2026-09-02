@@ -53,9 +53,14 @@ export {
 } from './repository-ingestion-bridge.js';
 export type {
   AssessRepositoryImplementationsRequest,
+  ImplementationBodyIsolation,
+  ImplementationMaskingProfile,
   RepositoryImplementationDetectionInput,
   RepositoryImplementationDetectionResult,
   RepositoryImplementationDetector,
+  RepositoryImplementationDetectorCapability,
+  RepositoryImplementationDetectorDescriptor,
+  RepositoryImplementationDetectorQuality,
 } from './implementation-assessment.js';
 export {
   assessRepositoryImplementations,

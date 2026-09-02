@@ -54,7 +54,7 @@ export class ServiceManager implements vscode.Disposable {
       executionMode: 'real',
       message: [
         !retrieval.healthy && `检索：${retrieval.detail}`,
-        !adaptation.healthy && `翻译：${adaptation.detail}`,
+        !adaptation.healthy && `迁移适配：${adaptation.detail}`,
       ]
         .filter(Boolean)
         .join('；') || undefined,

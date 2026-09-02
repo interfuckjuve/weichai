@@ -41,7 +41,7 @@ export function toMigrationInput(task: QualityTask): MigrationInput {
     repository: "commons-fileupload",
     sourcePath: entry.source.file,
     target: {
-      language: entry.target.language === "C#" ? "C#" : "Java",
+      language: task.target.language,
       className: entry.target.className,
       method: entry.target.method,
       isStatic: entry.target.isStatic,

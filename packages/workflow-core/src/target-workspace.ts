@@ -2,6 +2,7 @@ import {
   targetWorkspaceSchemaVersion,
   type EntityImplementationAssessment,
   type EntityImplementationAssessmentDraft,
+  type CurrentTargetWorkspaceModuleSnapshot,
   type ImplementationAssessmentBasis,
   type ImplementationRollupCounts,
   type ImplementationState,
@@ -10,6 +11,7 @@ import {
   type RepositoryIRFile,
   type RepositoryModuleAssignment,
   type RepositoryModuleCatalog,
+  type RepositoryStructureIdentity,
   type TargetImplementationRollup,
   type TargetImplementationRollupScope,
   type TargetWorkspaceAnalysisLineage,
@@ -209,16 +211,21 @@ function entityStructureKey(
     ? entityById.get(entity.containerEntityId)
     : undefined;
   const staticKind = entity.attributes?.staticSymbolKind;
+  const structureIdentity = trustedStructureIdentity(entity.structureIdentity);
   return canonicalJson({
     filePath,
     kind: entity.kind,
     name: entity.name,
     qualifiedName: entity.qualifiedName,
     languageId: entity.languageId,
-    signature: declarationSignature(entity.signature),
+    structureIdentity,
+    // The complete opaque signature is a fail-closed fallback. Core never
+    // attempts to locate a declaration/body boundary inside this value.
+    signature: structureIdentity ? undefined : entity.signature,
     visibility: entity.visibility,
     testOnly: entity.testOnly,
     staticSymbolKind: typeof staticKind === 'string' ? staticKind : undefined,
+    containerCapability: trustedContainerCapability(entity.containerCapability),
     container: container
       ? {
           kind: container.kind,
@@ -230,12 +237,93 @@ function entityStructureKey(
   });
 }
 
-function declarationSignature(value: string | undefined): string | undefined {
-  if (value === undefined) return undefined;
-  const bodyOffsets = [value.indexOf('{'), value.indexOf('=>')]
-    .filter((offset) => offset >= 0);
-  const bodyOffset = bodyOffsets.length > 0 ? Math.min(...bodyOffsets) : value.length;
-  return value.slice(0, bodyOffset).replace(/\s+/g, ' ').trim();
+interface TrustedStructureIdentity {
+  basis: RepositoryStructureIdentity['basis'];
+  contentHash: string;
+  schemaVersion: string;
+  adapterId: string;
+  adapterVersion: string;
+  configurationHash?: string;
+}
+
+function trustedStructureIdentity(
+  identity: RepositoryStructureIdentity | undefined,
+): TrustedStructureIdentity | undefined {
+  if (
+    identity === undefined ||
+    (identity.basis !== 'declaration-shape' && identity.basis !== 'semantic-shape') ||
+    !sha256Pattern.test(identity.contentHash) ||
+    !identity.schemaVersion.trim() ||
+    !identity.adapterId.trim() ||
+    !identity.adapterVersion.trim() ||
+    (identity.configurationHash !== undefined && !sha256Pattern.test(identity.configurationHash))
+  ) {
+    return undefined;
+  }
+  return {
+    basis: identity.basis,
+    contentHash: identity.contentHash,
+    schemaVersion: identity.schemaVersion.trim(),
+    adapterId: identity.adapterId.trim(),
+    adapterVersion: identity.adapterVersion.trim(),
+    ...(identity.configurationHash === undefined
+      ? {}
+      : { configurationHash: identity.configurationHash }),
+  };
+}
+
+function trustedContainerCapability(
+  capability: RepositoryIREntity['containerCapability'],
+): RepositoryIREntity['containerCapability'] | undefined {
+  if (
+    capability === undefined ||
+    capability.canContainCallables !== true ||
+    !capability.nativeKind.trim() ||
+    !capability.adapterId.trim() ||
+    !capability.adapterVersion.trim()
+  ) {
+    return undefined;
+  }
+  return {
+    canContainCallables: true,
+    nativeKind: capability.nativeKind.trim(),
+    adapterId: capability.adapterId.trim(),
+    adapterVersion: capability.adapterVersion.trim(),
+  };
+}
+
+function hasTrustedStructureIdentityCoverage(ir: UnifiedRepositoryIR): boolean {
+  const entityById = new Map(ir.entities.map((entity) => [entity.id, entity]));
+  const declarationKinds = new Set<RepositoryIREntity['kind']>([
+    'package',
+    'namespace',
+    'module',
+    'type',
+    'callable',
+    'member',
+  ]);
+  for (const entity of ir.entities) {
+    const declarationFact = entity.fileId !== undefined &&
+      (entity.signature !== undefined || declarationKinds.has(entity.kind));
+    if (declarationFact && trustedStructureIdentity(entity.structureIdentity) === undefined) {
+      return false;
+    }
+    if (
+      entity.containerCapability !== undefined &&
+      trustedContainerCapability(entity.containerCapability) === undefined
+    ) {
+      return false;
+    }
+  }
+  for (const surface of ir.apiSurfaces) {
+    if (
+      trustedStructureIdentity(surface.structureIdentity) === undefined &&
+      trustedStructureIdentity(entityById.get(surface.entityId)?.structureIdentity) === undefined
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 /**
@@ -265,7 +353,12 @@ export function calculateTargetWorkspaceStructureHash(ir: UnifiedRepositoryIR): 
       kind: surface.kind,
       name: surface.name,
       qualifiedName: surface.qualifiedName,
-      signature: declarationSignature(surface.signature) ?? '',
+      structureIdentity: trustedStructureIdentity(surface.structureIdentity) ??
+        trustedStructureIdentity(entityById.get(surface.entityId)?.structureIdentity),
+      signature: trustedStructureIdentity(surface.structureIdentity) ||
+        trustedStructureIdentity(entityById.get(surface.entityId)?.structureIdentity)
+        ? undefined
+        : surface.signature,
       visibility: surface.visibility,
       exposure: surface.exposure,
       parameters: surface.parameters?.map((parameter) => ({
@@ -673,24 +766,30 @@ function callableOutcomes(
   }).sort((left, right) => compareText(left.entity.id, right.entity.id));
 }
 
-/** Build deterministic class/file/module aggregates from a reviewed 01A catalog. */
+/** Build deterministic container/file/module aggregates from a reviewed 01A catalog. */
 export function buildTargetWorkspaceModuleSnapshot(
   input: BuildTargetWorkspaceModuleSnapshotInput,
-): TargetWorkspaceModuleSnapshot {
+): CurrentTargetWorkspaceModuleSnapshot {
   assertCatalogLineage(input.ir, input.catalog);
   const assessments = verifiedAssessments(input.ir, input.assessments);
   const outcomes = callableOutcomes(input.ir, input.catalog, assessments);
   const outcomesByFile = new Map<string, CallableOutcome[]>();
-  const outcomesByClass = new Map<string, CallableOutcome[]>();
+  const outcomesByContainer = new Map<string, CallableOutcome[]>();
   const outcomesByModule = new Map<string, CallableOutcome[]>();
+  const entityById = new Map(input.ir.entities.map((entity) => [entity.id, entity]));
   for (const outcome of outcomes) {
     const fileOutcomes = outcomesByFile.get(outcome.file.id) ?? [];
     fileOutcomes.push(outcome);
     outcomesByFile.set(outcome.file.id, fileOutcomes);
     if (outcome.entity.containerEntityId) {
-      const classOutcomes = outcomesByClass.get(outcome.entity.containerEntityId) ?? [];
-      classOutcomes.push(outcome);
-      outcomesByClass.set(outcome.entity.containerEntityId, classOutcomes);
+      if (!entityById.has(outcome.entity.containerEntityId)) {
+        throw new Error(
+          `Callable references an unknown IR container: ${outcome.entity.containerEntityId}`,
+        );
+      }
+      const containerOutcomes = outcomesByContainer.get(outcome.entity.containerEntityId) ?? [];
+      containerOutcomes.push(outcome);
+      outcomesByContainer.set(outcome.entity.containerEntityId, containerOutcomes);
     }
     if (outcome.moduleId) {
       const moduleOutcomes = outcomesByModule.get(outcome.moduleId) ?? [];
@@ -699,9 +798,22 @@ export function buildTargetWorkspaceModuleSnapshot(
     }
   }
 
+  const containerIds = new Set(outcomesByContainer.keys());
+  for (const entity of input.ir.entities) {
+    if (trustedContainerCapability(entity.containerCapability)) containerIds.add(entity.id);
+  }
+  const containerRollups = [...containerIds]
+    .map((entityId) => createRollup(
+      'container',
+      entityId,
+      outcomesByContainer.get(entityId) ?? [],
+    ))
+    .sort((left, right) => compareText(left.scopeId, right.scopeId));
+  // Keep the V1 class projection until all external readers consume the
+  // language-neutral container rollup. It is not used as the formal aggregate.
   const classRollups = input.ir.entities
     .filter((entity) => entity.kind === 'type')
-    .map((entity) => createRollup('class', entity.id, outcomesByClass.get(entity.id) ?? []))
+    .map((entity) => createRollup('class', entity.id, outcomesByContainer.get(entity.id) ?? []))
     .sort((left, right) => compareText(left.scopeId, right.scopeId));
   const fileRollups = input.ir.files
     .map((file) => createRollup('file', file.id, outcomesByFile.get(file.id) ?? []))
@@ -718,12 +830,13 @@ export function buildTargetWorkspaceModuleSnapshot(
     reason: outcome.exclusion!,
   })).sort((left, right) => compareText(left.entityId, right.entityId));
   const lineage = moduleLineage(input.ir, input.catalog);
-  const payload: Omit<TargetWorkspaceModuleSnapshot, 'id' | 'contentHash'> = {
+  const payload: Omit<CurrentTargetWorkspaceModuleSnapshot, 'id' | 'contentHash'> = {
     schemaVersion: targetWorkspaceSchemaVersion,
     lineage,
     structureHash: calculateTargetWorkspaceStructureHash(input.ir),
     moduleBoundaryHash: calculateTargetWorkspaceModuleBoundaryHash(input.ir, input.catalog),
     assessments,
+    containerRollups,
     classRollups,
     fileRollups,
     moduleRollups,
@@ -757,7 +870,7 @@ export function validateTargetWorkspaceModuleSnapshot(
   snapshot: TargetWorkspaceModuleSnapshot,
   ir: UnifiedRepositoryIR,
   catalog: RepositoryModuleCatalog,
-): TargetWorkspaceModuleSnapshot {
+): CurrentTargetWorkspaceModuleSnapshot {
   const rebuilt = buildTargetWorkspaceModuleSnapshot({
     ir,
     catalog,
@@ -773,7 +886,7 @@ export function validateTargetWorkspaceModuleSnapshot(
   ) {
     throw new Error('Target workspace module snapshot hash or deterministic projection is invalid.');
   }
-  return snapshot;
+  return snapshot as CurrentTargetWorkspaceModuleSnapshot;
 }
 
 function snapshotEnvelopeIsValid(snapshot: TargetWorkspaceModuleSnapshot): boolean {
@@ -806,6 +919,10 @@ export function classifyTargetWorkspaceSnapshotFreshness(
     snapshot.lineage.unifiedRepositoryIrHash === currentIr.contentHash;
   if (!exactIr) reasons.add('unified-ir-changed');
   if (snapshot.structureHash !== currentStructureHash) reasons.add('structure-changed');
+  const trustedStructureIdentityCoverage = hasTrustedStructureIdentityCoverage(currentIr);
+  if (!exactIr && !trustedStructureIdentityCoverage) {
+    reasons.add('structure-identity-unverified');
+  }
 
   let currentModuleBoundaryHash: string | undefined;
   let exactCatalog = false;
@@ -847,6 +964,7 @@ export function classifyTargetWorkspaceSnapshotFreshness(
     snapshot.lineage.repositoryId === currentIr.repositoryId &&
     snapshot.structureHash === currentStructureHash &&
     !exactIr &&
+    trustedStructureIdentityCoverage &&
     !reasons.has('module-boundary-changed') &&
     !reasons.has('module-catalog-not-active')
   ) {

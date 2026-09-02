@@ -17,6 +17,7 @@ import {
   type RepositoryModuleKnowledgeReviewDecision,
   type RepositoryModuleWikiProposal,
   type RepositoryStaticAnalysis,
+  type UnifiedRepositoryIR,
 } from '@forexplore/contracts';
 import {
   arePlanApprovalsCurrent,
@@ -94,6 +95,7 @@ import {
 } from './module-wave-run-manifest';
 import { CommandModuleWaveValidator, type ModuleWaveValidator } from './module-wave-validation';
 import type { ServiceManager } from './service-manager';
+import type { ReviewedModuleCatalogHead } from './module-mapping-host';
 
 export const moduleMigrationPreviewScheme = 'forexplore-module-migration';
 const reviewStorageVersion = 4;
@@ -240,6 +242,33 @@ export class ModuleMigrationHost {
 
   get state(): ModuleMigrationHostState {
     return { ...this.currentState };
+  }
+
+  /** Read the current accepted catalog head; draft/legacy FunctionalModule plans are excluded. */
+  async getReviewedCatalogHead(
+    workspaceFolder: vscode.WorkspaceFolder,
+  ): Promise<ReviewedModuleCatalogHead> {
+    const session = await this.loadSession(workspaceFolder);
+    await this.assertSnapshotCurrent(session);
+    const ingestion = requireRepositoryIngestion(session);
+    const manifest = await requireRepositoryIngestionManifest(
+      workspaceFolder.uri.fsPath,
+      ingestion.ingestionId,
+    );
+    const ir = await readManifestJson<UnifiedRepositoryIR>(
+      workspaceFolder.uri.fsPath,
+      manifest,
+      requiredIngestionArtifact(manifest.artifacts.unifiedRepositoryIr, '统一仓库 IR'),
+    );
+    const catalog = await readManifestJson<RepositoryModuleCatalog>(
+      workspaceFolder.uri.fsPath,
+      manifest,
+      requiredIngestionArtifact(manifest.artifacts.activeModuleCatalog, '已审活动模块目录'),
+    );
+    if (catalog.status !== 'active' || !catalog.reviewId || !catalog.reviewHash) {
+      throw new Error('源仓库没有当前已审 RepositoryModuleCatalog。');
+    }
+    return { workspaceId: workspaceFolder.uri.toString(), ir, catalog };
   }
 
   async indexRepository(): Promise<void> {
@@ -696,7 +725,8 @@ export class ModuleMigrationHost {
     );
   }
 
-  async reviewPlan(): Promise<void> {
+  /** Explicit compatibility path; never used by the canonical mapping workflow. */
+  async reviewLegacyPlan(): Promise<void> {
     try {
       const workspaceFolder = await selectWorkspaceFolder();
       if (!workspaceFolder) return;
@@ -728,7 +758,7 @@ export class ModuleMigrationHost {
       const proposal = await vscode.window.withProgress(
         {
           location: vscode.ProgressLocation.Notification,
-          title: 'ForeXplore: Agenticodex 正在提出模块边界',
+          title: 'ForeXplore Legacy: Agenticodex 正在提出 FunctionalModule 调度提案',
         },
         () => requestModuleMigrationProposal(settings.adaptationApiUrl, {
           snapshotId: session.analysis.snapshotId,

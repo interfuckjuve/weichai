@@ -4,6 +4,8 @@ import {
   compileIntegrated,
   compileTargetStandalone,
   compilerInternals,
+  listCompilerRouteCapabilities,
+  resolveCompilerRouteCapability,
 } from "./compiler";
 
 const skeletonProjectPath = fileURLToPath(
@@ -171,6 +173,35 @@ class Unchanged:
 });
 
 describe("language-neutral compiler registry", () => {
+  it("publishes validation level and quality for every registered language", () => {
+    expect(listCompilerRouteCapabilities().map((capability) => capability.language)).toEqual([
+      "Java",
+      "C#",
+      "TypeScript",
+      "Python",
+      "Rust",
+      "Go",
+    ]);
+    expect(resolveCompilerRouteCapability("Python")).toMatchObject({
+      standalone: { command: "python -m py_compile", level: "syntax" },
+      integrated: { command: "python -m py_compile", level: "syntax" },
+      quality: { provesBehavioralCorrectness: false },
+    });
+  });
+
+  it("fails closed with a structured reason when no provider is registered", () => {
+    const result = compileTargetStandalone("Kotlin" as never, "fun run() = Unit", "Run");
+    expect(result).toMatchObject({
+      success: false,
+      unsupportedReason: {
+        code: "COMPILER_ROUTE_UNAVAILABLE",
+        stage: "standalone",
+        language: "Kotlin",
+        retryable: false,
+      },
+    });
+  });
+
   it("validates a Python target through the same registry entry used by the adapter", () => {
     const result = compileTargetStandalone(
       "Python",

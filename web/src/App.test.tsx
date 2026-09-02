@@ -7,7 +7,7 @@ import App from './App';
 afterEach(cleanup);
 
 describe('ForeXplore vertical workflow', () => {
-  it('limits real adaptation demo searches to Java candidates', async () => {
+  it('does not force Java candidates and fails closed without an explicit real route', async () => {
     const moduleTree = await workspaceModuleSymbols.loadTree(csharpWorkspaceId);
     const search = vi.fn(
       mockWorkflowPorts.search.search.bind(mockWorkflowPorts.search),
@@ -30,9 +30,8 @@ describe('ForeXplore vertical workflow', () => {
     fireEvent.click(screen.getByRole('button', { name: '检索相似实现' }));
 
     await waitFor(() => {
-      expect(search).toHaveBeenCalledWith(
-        expect.objectContaining({ candidateLanguages: ['Java'] }),
-      );
+      expect(search).toHaveBeenCalledOnce();
+      expect(search.mock.calls[0]?.[0]).not.toHaveProperty('candidateLanguages');
       expect(screen.getByRole('button', { name: /QuoteCache\.getOrLoad/ })).toBeTruthy();
       expect(
         screen.queryByRole('button', { name: '使用此方案并生成适配' }),
@@ -44,9 +43,9 @@ describe('ForeXplore vertical workflow', () => {
     await waitFor(() => {
       expect(
         (screen.getByRole('button', {
-          name: '使用此方案并生成适配',
+          name: '当前语言路线未注册',
         }) as HTMLButtonElement).disabled,
-      ).toBe(false);
+      ).toBe(true);
     });
   });
 

@@ -89,7 +89,12 @@ export interface ImplementationRollupCounts {
   notApplicable: number;
 }
 
-export type TargetImplementationRollupScope = 'class' | 'file' | 'module';
+export type TargetImplementationRollupScope =
+  | 'container'
+  /** @deprecated V1 read compatibility. Use `container`. */
+  | 'class'
+  | 'file'
+  | 'module';
 
 /** Deterministic aggregation over unique callable entity IDs. */
 export interface TargetImplementationRollup {
@@ -132,6 +137,13 @@ export interface TargetWorkspaceModuleSnapshot {
   /** Reviewed module topology projected onto stable file/entity identities. */
   moduleBoundaryHash: string;
   assessments: EntityImplementationAssessment[];
+  /**
+   * Formal rollup over IR container relationships and adapter container facts.
+   * Optional only so persisted V1 snapshots can still be decoded; newly
+   * materialized snapshots must use `CurrentTargetWorkspaceModuleSnapshot`.
+   */
+  containerRollups?: TargetImplementationRollup[];
+  /** @deprecated V1 compatibility projection for consumers which still read classes. */
   classRollups: TargetImplementationRollup[];
   fileRollups: TargetImplementationRollup[];
   moduleRollups: TargetImplementationRollup[];
@@ -141,6 +153,12 @@ export interface TargetWorkspaceModuleSnapshot {
   producer: RepositoryArtifactProducer;
   createdAt: string;
   contentHash: string;
+}
+
+/** Current materialized form; the optional base field is legacy-read only. */
+export interface CurrentTargetWorkspaceModuleSnapshot
+  extends TargetWorkspaceModuleSnapshot {
+  containerRollups: TargetImplementationRollup[];
 }
 
 export type TargetWorkspaceSnapshotFreshness =
@@ -153,6 +171,7 @@ export type TargetWorkspaceSnapshotFreshnessReason =
   | 'repository-content-changed'
   | 'unified-ir-changed'
   | 'structure-changed'
+  | 'structure-identity-unverified'
   | 'module-catalog-unavailable'
   | 'module-catalog-not-active'
   | 'module-catalog-lineage-changed'

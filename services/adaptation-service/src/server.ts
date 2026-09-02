@@ -7,13 +7,17 @@ import { FileStaticAnalysisSnapshotStore } from './analysis-snapshot-store.js';
 import { ModuleDiscoveryAgent } from './module-discovery-agent.js';
 import { ModuleSummaryAgent } from './module-summary-agent.js';
 import { TranslationVerifierAdapter } from './verification-adapter.js';
+import { createDefaultTargetEngineeringAdapterRegistry } from './context-collector.js';
+import { createAdaptationRuntimeCapabilitySnapshot } from './runtime-capability-snapshot.js';
 
 const config = loadConfig();
+const targetEngineeringRegistry = createDefaultTargetEngineeringAdapterRegistry();
 
 const adapter = new AdaptationAdapter({
   apiKey: config.apiKey,
   skeletonProjectPath: config.skeletonProjectPath,
   projectRoot: config.projectRoot,
+  targetEngineeringRegistry,
   verifier: new TranslationVerifierAdapter({
     apiKey: config.apiKey,
     timeoutMs: Number.parseInt(process.env.VERIFIER_TIMEOUT_MS ?? "", 10) || undefined,
@@ -24,8 +28,17 @@ const adapter = new AdaptationAdapter({
   }),
 });
 
+const runtimeCapabilitySnapshot = createAdaptationRuntimeCapabilitySnapshot({
+  createdAt: new Date().toISOString(),
+  analysisExecution: 'disabled',
+  verifierExecution: config.verifierExecution,
+  workspaceMutationExecution: 'disabled',
+  targetEngineeringRegistry,
+});
+
 const server = createHttpServer({
   adapter,
+  runtimeCapabilitySnapshot,
   architecturePort: new ArchitectAgent({ apiKey: config.apiKey }),
   moduleDiscoveryPort: new ModuleDiscoveryAgent({ apiKey: config.apiKey }),
   moduleSummaryPort: new ModuleSummaryAgent({ apiKey: config.apiKey }),
@@ -39,6 +52,7 @@ server.listen(config.port, config.host, () => {
   console.log(`Adaptation service listening on http://${config.host}:${config.port}`);
   console.log(`Target project: ${config.projectRoot}`);
   console.log(`Static analysis snapshots: ${config.analysisRoot}`);
+  console.log(`Runtime capability snapshot: ${runtimeCapabilitySnapshot.id}`);
   console.log("Differential execution: disabled (no isolated executor configured)");
 });
 

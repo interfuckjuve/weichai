@@ -1,4 +1,7 @@
 export * from './module-target';
+export * from './module-mapping';
+export * from './migration-route-registry';
+export * from './migration-execution-v2';
 export * from './ports';
 export * from './workflow';
 export * from './patching';

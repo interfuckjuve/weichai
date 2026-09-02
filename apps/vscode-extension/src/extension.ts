@@ -4,10 +4,14 @@ import * as vscode from 'vscode';
 import type {
   AdaptationResult,
   FilePatch,
+  MigrationRouteDescriptor,
+  MigrationRouteResolution,
+  ModuleMappingEntry,
   ModuleTarget,
   SearchCandidate,
   ValidationRecord,
 } from '@forexplore/contracts';
+import { normalizeLanguageId } from '@forexplore/contracts';
 import {
   analyzeRepository,
   writeRepositoryAnalysisArtifact,
@@ -16,6 +20,7 @@ import {
   applyHunksStrict,
   canApplyAdaptation,
   evaluateValidationGate,
+  type MigrationExecutionGroupDraft,
 } from '@forexplore/workflow-core';
 import { WorkspaceBackfill } from './backfill';
 import { canonicalWorkspacePath } from './diff-apply';
@@ -24,6 +29,12 @@ import {
   ModuleMigrationPreviewProvider,
   moduleMigrationPreviewScheme,
 } from './module-migration-host';
+import {
+  ModuleMappingHost,
+  type ModuleMappingHostRecord,
+  type ResolvedModuleMappingRoute,
+} from './module-mapping-host';
+import { VSCodeModuleMappingHostStore } from './module-mapping-store';
 import { requestRepositoryModuleDiscovery } from './module-discovery-client';
 import type { ModuleWaveExecutionPort } from './module-wave-execution-host';
 import type { ModuleMigrationWaveRecoveryPort } from './module-migration-recovery';
@@ -45,11 +56,13 @@ import { LocalTargetWorkspaceImplementationInventory } from './target-workspace-
 import { FileSystemTargetWorkspaceHostStore } from './target-workspace-store';
 import {
   assertTargetWorkspaceSelection,
+  migrationSelectionFromTargetWorkspaceContext,
   moduleTargetFromTargetWorkspaceContext,
   projectTargetWorkspace,
 } from './target-workspace-projection';
 import type {
   TargetWorkspaceSelectionIdentity,
+  TargetWorkspaceMigrationSelection,
   TargetWorkspaceSnapshot,
 } from './protocol/messages';
 import type { RepositoryStatus } from './ui-types';
@@ -71,6 +84,9 @@ interface ExtensionHost {
   services: ServiceManager;
   health: RepositoryHealthCheck;
   targetWorkspaces: TargetWorkspaceHost;
+  moduleMappings: ModuleMappingHost;
+  /** Resolved exact-pair capabilities. Empty means migration execution is disabled. */
+  migrationRouteResolutions: readonly MigrationRouteResolution[];
 }
 
 interface ActiveMigrationRun {
@@ -84,9 +100,11 @@ interface ActiveMigrationRun {
   candidates: SearchCandidate[];
   /** Null until the user expressly clicks a candidate in this run. */
   selectedCandidateId: string | null;
+  /** Exact route chosen for the selected candidate; null is fail-closed. */
+  selectedRouteId: string | null;
   adaptation: AdaptationResult | null;
   /** Present only when 01B, rather than an editor selection, chose this target. */
-  targetWorkspaceSelection?: TargetWorkspaceSelectionIdentity & { workspaceId: string };
+  migrationSelection?: TargetWorkspaceMigrationSelection;
 }
 
 interface ActiveTargetWorkspacePanel {
@@ -142,7 +160,54 @@ export function activate(context: vscode.ExtensionContext): void {
       );
     },
   });
-  const extensionHost: ExtensionHost = { context, services, health, targetWorkspaces };
+  // Capability-client integration seam. Only entries materialized from a
+  // signed runtime capability snapshot may populate this collection.
+  const migrationRouteCapabilities: readonly ResolvedModuleMappingRoute[] = [];
+  const migrationRouteResolutions: readonly MigrationRouteResolution[] =
+    migrationRouteCapabilities.map(({ resolution }) => resolution);
+  const moduleMappings = new ModuleMappingHost({
+    store: new VSCodeModuleMappingHostStore(context.workspaceState),
+    catalogs: {
+      async load(side, workspaceId) {
+        const workspaceFolder = vscode.workspace.workspaceFolders?.find(
+          (folder) => folder.uri.toString() === workspaceId,
+        );
+        if (!workspaceFolder) return null;
+        if (side === 'source') {
+          try {
+            return await moduleMigration.getReviewedCatalogHead(workspaceFolder);
+          } catch {
+            return null;
+          }
+        }
+        const record = await targetWorkspaces.refresh(workspaceId).catch(() => null);
+        if (record?.stage !== 'reviewed' || !record.accepted?.snapshot) return null;
+        return {
+          workspaceId,
+          ir: record.accepted.ir,
+          catalog: record.accepted.catalog,
+        };
+      },
+    },
+    routes: {
+      async resolve(routeId, routeVersion) {
+        return migrationRouteCapabilities.find(({ resolution }) =>
+          resolution.route.id === routeId &&
+          resolution.route.version === routeVersion,
+        );
+      },
+    },
+  });
+  const extensionHost: ExtensionHost = {
+    context,
+    services,
+    health,
+    targetWorkspaces,
+    moduleMappings,
+    // Integration seam: populate from the adaptation runtime's signed route
+    // registry response. Until that endpoint is wired, execution is disabled.
+    migrationRouteResolutions,
+  };
 
   context.subscriptions.push(
     output,
@@ -205,19 +270,25 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('forexplore.withdrawRepositoryModuleKnowledge', () =>
       moduleMigration.withdrawRepositoryModuleKnowledge(),
     ),
-    vscode.commands.registerCommand('forexplore.reviewModuleMigrationPlan', () =>
-      moduleMigration.reviewPlan(),
+    vscode.commands.registerCommand('forexplore.proposeModuleMapping', () =>
+      proposeModuleMapping(extensionHost, moduleMigrationPreviews),
     ),
-    vscode.commands.registerCommand('forexplore.reviewModuleMigrationWave', () =>
+    vscode.commands.registerCommand('forexplore.reviewModuleMapping', () =>
+      reviewModuleMapping(extensionHost, moduleMigrationPreviews),
+    ),
+    vscode.commands.registerCommand('forexplore.reviewLegacyModuleMigrationPlan', () =>
+      moduleMigration.reviewLegacyPlan(),
+    ),
+    vscode.commands.registerCommand('forexplore.reviewLegacyModuleMigrationWave', () =>
       moduleMigration.reviewNextWave(),
     ),
-    vscode.commands.registerCommand('forexplore.prepareModuleMigrationWave', () =>
+    vscode.commands.registerCommand('forexplore.prepareLegacyModuleMigrationWave', () =>
       moduleMigration.prepareNextWaveFromLocalBundle(),
     ),
-    vscode.commands.registerCommand('forexplore.approveModuleMigrationWave', () =>
+    vscode.commands.registerCommand('forexplore.approveLegacyModuleMigrationWave', () =>
       moduleMigration.approveAndCommitPreparedWave(),
     ),
-    vscode.commands.registerCommand('forexplore.recoverModuleMigrationReview', () =>
+    vscode.commands.registerCommand('forexplore.recoverLegacyModuleMigrationReview', () =>
       moduleMigration.recoverReviewState(),
     ),
   );
@@ -237,6 +308,223 @@ export function deactivate(): void {
   activeTargetWorkspacePanel = null;
 }
 
+interface ModuleMappingImportDocument {
+  mappings: ModuleMappingEntry[];
+  executionGroups: MigrationExecutionGroupDraft[];
+  assumptions?: string[];
+  risks?: string[];
+}
+
+/**
+ * Canonical LA-04 proposal entrypoint. The Host imports references selected by
+ * a human/tooling artifact and lets workflow-core validate every module/entity
+ * ID against the two reviewed catalogs. No static-analysis Agent is allowed to
+ * create or replace ownership facts here.
+ */
+async function proposeModuleMapping(
+  host: ExtensionHost,
+  previews: ModuleMigrationPreviewProvider,
+): Promise<void> {
+  try {
+    const pair = await selectModuleMappingWorkspacePair();
+    if (!pair) return;
+    const objective = await vscode.window.showInputBox({
+      title: 'ForeXplore: 创建跨目录模块映射提案',
+      prompt: '描述这两个已审模块目录之间的迁移目标。',
+      validateInput: (value) => value.trim() ? undefined : '映射目标不能为空。',
+    });
+    if (objective === undefined) return;
+    const picked = await vscode.window.showOpenDialog({
+      canSelectFiles: true,
+      canSelectFolders: false,
+      canSelectMany: false,
+      title: '选择模块映射 JSON（仅引用已审 module/entity ID）',
+      filters: { JSON: ['json'] },
+    });
+    if (!picked?.[0]) return;
+    const bytes = await vscode.workspace.fs.readFile(picked[0]);
+    const imported = parseModuleMappingImport(Buffer.from(bytes).toString('utf8'));
+    const record = await host.moduleMappings.propose({
+      sourceWorkspaceId: pair.source.uri.toString(),
+      targetWorkspaceId: pair.target.uri.toString(),
+      objective: objective.trim(),
+      mappings: imported.mappings,
+      executionGroups: imported.executionGroups,
+      ...(imported.assumptions ? { assumptions: imported.assumptions } : {}),
+      ...(imported.risks ? { risks: imported.risks } : {}),
+    });
+    await previews.show('Canonical module mapping proposal', {
+      warning: '此提案只引用两侧已审 RepositoryModuleCatalog；尚未接受，不能用于迁移运行。',
+      record,
+    });
+    void vscode.window.showInformationMessage(
+      `模块映射提案 ${record.proposal.id} 已保存，等待独立人工审阅。`,
+    );
+  } catch (error) {
+    void vscode.window.showErrorMessage(errorMessage(error, '创建模块映射提案失败'));
+  }
+}
+
+async function reviewModuleMapping(
+  host: ExtensionHost,
+  previews: ModuleMigrationPreviewProvider,
+): Promise<void> {
+  try {
+    const records = (await host.moduleMappings.list(true)).filter(
+      (record) => record.stage === 'awaiting-review',
+    );
+    if (records.length === 0) {
+      void vscode.window.showInformationMessage('没有仍然 current 且等待审阅的模块映射提案。');
+      return;
+    }
+    const picked = await vscode.window.showQuickPick(
+      records.map((record) => ({
+        label: record.proposal.objective,
+        description: `${record.sourceWorkspaceId} → ${record.targetWorkspaceId}`,
+        detail: `${record.proposal.id} · ${record.proposal.mappings.length} mapping(s)`,
+        record,
+      })),
+      { title: '选择待审模块映射提案', placeHolder: '审阅只决定映射；不会改写两侧模块目录。' },
+    );
+    if (!picked) return;
+    const record: ModuleMappingHostRecord = picked.record;
+    await previews.show('Module mapping proposal review', {
+      warning: '核对 1:1、1:N、N:1 对应关系及执行分组；映射不得声明新的模块或实体归属。',
+      sourceCatalog: record.proposal.sourceCatalog,
+      targetCatalog: record.proposal.targetCatalog,
+      proposal: record.proposal,
+      executionGroups: record.executionGroupDrafts,
+    });
+    const action = await vscode.window.showInformationMessage(
+      '请在只读预览中核对模块映射及执行分组。',
+      { modal: true },
+      '接受并物化 Overlay',
+      '要求修订',
+      '拒绝',
+    );
+    if (!action) return;
+    const reviewerId = await vscode.window.showInputBox({
+      title: 'ForeXplore: 模块映射审阅身份',
+      prompt: '输入可审计的审阅者标识。',
+      validateInput: (value) => value.trim() ? undefined : '审阅者标识不能为空。',
+    });
+    if (reviewerId === undefined) return;
+    const comment = await vscode.window.showInputBox({
+      title: 'ForeXplore: 模块映射审阅说明（可选）',
+      prompt: '记录接受、修订或拒绝的依据。',
+    });
+    if (comment === undefined) return;
+
+    const decision = action === '接受并物化 Overlay'
+      ? 'accept' as const
+      : action === '要求修订'
+        ? 'revise' as const
+        : 'reject' as const;
+    let selectedRoute: Extract<MigrationRouteResolution, { status: 'supported' }> | undefined;
+    if (decision === 'accept') {
+      const supportedRoutes = host.migrationRouteResolutions.filter(
+        (resolution): resolution is Extract<MigrationRouteResolution, { status: 'supported' }> =>
+          resolution.status === 'supported',
+      );
+      if (supportedRoutes.length === 0) {
+        throw new Error('当前没有来自能力注册表的 supported route；接受操作已 fail closed。');
+      }
+      const routePick = await vscode.window.showQuickPick(
+        supportedRoutes.map((resolution) => ({
+          label: `${resolution.route.sourceLanguageId} → ${resolution.route.targetLanguageId}`,
+          description: `${resolution.route.strategy} · ${resolution.route.id}@${resolution.route.version}`,
+          resolution,
+        })),
+        { title: '选择并绑定已解析的执行路线' },
+      );
+      if (!routePick) return;
+      selectedRoute = routePick.resolution;
+    }
+    const reviewed = await host.moduleMappings.review({
+      recordId: record.id,
+      expectedProposalId: record.proposal.id,
+      expectedProposalHash: record.proposal.contentHash,
+      decision,
+      reviewerId: reviewerId.trim(),
+      ...(comment.trim() ? { comment: comment.trim() } : {}),
+      ...(selectedRoute ? {
+        routeId: selectedRoute.route.id,
+        routeVersion: selectedRoute.route.version,
+      } : {}),
+    });
+    await previews.show('Module mapping review result', {
+      stage: reviewed.stage,
+      review: reviewed.review,
+      overlay: reviewed.overlay,
+      route: reviewed.routeResolution?.route,
+    });
+    void vscode.window.showInformationMessage(
+      reviewed.stage === 'ready'
+        ? `映射已接受并物化执行 Overlay：${reviewed.overlay!.id}`
+        : `映射审阅已记录为 ${reviewed.stage}。`,
+    );
+  } catch (error) {
+    void vscode.window.showErrorMessage(errorMessage(error, '审阅模块映射失败'));
+  }
+}
+
+async function selectModuleMappingWorkspacePair(): Promise<{
+  source: vscode.WorkspaceFolder;
+  target: vscode.WorkspaceFolder;
+} | undefined> {
+  const folders = vscode.workspace.workspaceFolders ?? [];
+  if (folders.length < 2) {
+    void vscode.window.showInformationMessage('请同时打开不同的历史源仓库与目标仓库工作区。');
+    return undefined;
+  }
+  const items = folders.map((folder) => ({
+    label: folder.name,
+    description: folder.uri.fsPath,
+    folder,
+  }));
+  const source = await vscode.window.showQuickPick(items, {
+    title: '选择已发布模块目录的历史源仓库',
+  });
+  if (!source) return undefined;
+  const target = await vscode.window.showQuickPick(
+    items.filter((item) => item.folder.uri.toString() !== source.folder.uri.toString()),
+    { title: '选择已审模块目录的目标仓库' },
+  );
+  return target ? { source: source.folder, target: target.folder } : undefined;
+}
+
+function parseModuleMappingImport(text: string): ModuleMappingImportDocument {
+  let value: unknown;
+  try {
+    value = JSON.parse(text.replace(/^\uFEFF/, ''));
+  } catch {
+    throw new Error('模块映射文件不是有效 JSON。');
+  }
+  if (!isRecord(value) || !Array.isArray(value.mappings) || !Array.isArray(value.executionGroups)) {
+    throw new Error('模块映射 JSON 必须包含 mappings 与 executionGroups 数组。');
+  }
+  if (value.assumptions !== undefined && !isStringArray(value.assumptions)) {
+    throw new Error('模块映射 assumptions 必须是字符串数组。');
+  }
+  if (value.risks !== undefined && !isStringArray(value.risks)) {
+    throw new Error('模块映射 risks 必须是字符串数组。');
+  }
+  return {
+    mappings: value.mappings as ModuleMappingEntry[],
+    executionGroups: value.executionGroups as MigrationExecutionGroupDraft[],
+    ...(value.assumptions === undefined ? {} : { assumptions: value.assumptions }),
+    ...(value.risks === undefined ? {} : { risks: value.risks }),
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string');
+}
+
 async function startTranslation(
   host: ExtensionHost,
 ): Promise<void> {
@@ -244,17 +532,17 @@ async function startTranslation(
   const { context, services, health } = host;
   const editor = vscode.window.activeTextEditor;
   if (!editor) {
-    void vscode.window.showInformationMessage('请先打开并选中一个目标方法。');
+    void vscode.window.showInformationMessage('请先打开并选中一个目标实体。');
     return;
   }
   if (editor.selection.isEmpty) {
-    void vscode.window.showWarningMessage('请先选中待实现的目标方法或其签名。');
+    void vscode.window.showWarningMessage('请先选中待实现的目标可调用实体或其签名。');
     return;
   }
 
   const document = editor.document;
   if (document.uri.scheme !== 'file') {
-    void vscode.window.showErrorMessage('仅支持工作区中的本地受支持语言文件。');
+    void vscode.window.showErrorMessage('目标必须是工作区中的本地文件。');
     return;
   }
   if (document.isDirty) {
@@ -277,7 +565,7 @@ async function startTranslation(
   });
   if (!target) {
     void vscode.window.showErrorMessage(
-      `请在工作区内选择受支持语言的目标方法（当前为 ${document.languageId}）。`,
+      `V1 编辑器入口无法表示 ${document.languageId} 目标；请从已审目标工作区选择实体。`,
     );
     return;
   }
@@ -292,6 +580,7 @@ async function startTranslation(
     requirement: '',
     candidates: [],
     selectedCandidateId: null,
+    selectedRouteId: null,
     adaptation: null,
   };
 
@@ -333,7 +622,7 @@ async function showPanel(
     await showTargetWorkspacePanel(host, activeTargetWorkspacePanel);
     return;
   }
-  void vscode.window.showInformationMessage('请先在受支持语言文件中选中待实现的目标方法。');
+  void vscode.window.showInformationMessage('请先从已审目标工作区选择待实现实体。');
 }
 
 async function initializeTargetWorkspace(
@@ -538,7 +827,7 @@ async function rebaseTargetWorkspaceBodyOnly(
       record.freshness?.status !== 'body-only-compatible' ||
       !accepted?.snapshot
     ) {
-      throw new Error(`目标工作区不满足方法体兼容 rebase 条件：${record?.stage ?? 'not-initialized'}。`);
+      throw new Error(`目标工作区不满足实现体兼容 rebase 条件：${record?.stage ?? 'not-initialized'}。`);
     }
     const choice = await vscode.window.showWarningMessage(
       '声明结构未变化，但旧实现状态已经过期。将旧模块边界映射到新 IR 并产生一份新的 Gate 1 提案；必须再次人审后才会重算状态。',
@@ -568,7 +857,7 @@ async function rebaseTargetWorkspaceBodyOnly(
       '已生成绑定新 IR 的模块边界提案。请运行“ForeXplore: 审阅 01B 目标模块边界”。',
     );
   } catch (error) {
-    void vscode.window.showErrorMessage(errorMessage(error, '01B 方法体兼容 rebase 失败'));
+    void vscode.window.showErrorMessage(errorMessage(error, '01B 实现体兼容 rebase 失败'));
   }
 }
 
@@ -578,7 +867,11 @@ async function openReviewedTargetWorkspace(
   record: TargetWorkspaceHostRecord,
 ): Promise<void> {
   targetSelectionEpoch += 1;
-  const projection = projectTargetWorkspace({ record, workspaceName: workspaceFolder.name });
+  const projection = projectTargetWorkspace({
+    record,
+    workspaceName: workspaceFolder.name,
+    routeResolutions: host.migrationRouteResolutions,
+  });
   const panelState = { workspaceFolder, projection };
   activeTargetWorkspacePanel = panelState;
   activeRun = null;
@@ -630,6 +923,7 @@ async function refreshTargetWorkspace(
       const projection = projectTargetWorkspace({
         record: refreshed,
         workspaceName: panelState.workspaceFolder.name,
+        routeResolutions: host.migrationRouteResolutions,
       });
       activeTargetWorkspacePanel = { ...panelState, projection };
       publish({ type: 'TARGET_WORKSPACE_SNAPSHOT', snapshot: projection });
@@ -656,7 +950,7 @@ async function selectTargetWorkspaceEntity(
   try {
     const panelState = activeTargetWorkspacePanel;
     if (!panelState) throw new Error('当前面板没有已审的 01B 目标工作区。');
-    assertTargetWorkspaceSelection(panelState.projection, message);
+    const selectedNode = assertTargetWorkspaceSelection(panelState.projection, message);
     if (activateWorkflow) {
       await refreshTargetWorkspaceBinding(host, {
         workspaceId: panelState.projection.workspaceId,
@@ -673,6 +967,30 @@ async function selectTargetWorkspaceEntity(
     });
     if (requestEpoch !== targetSelectionEpoch) return;
     const target = moduleTargetFromTargetWorkspaceContext(context);
+    if (!selectedNode.moduleId) {
+      throw new Error('目标实体没有已审模块归属，不能绑定模块映射。');
+    }
+    const moduleMapping = await host.moduleMappings.bindTarget({
+      targetWorkspaceId: panelState.projection.workspaceId,
+      targetModuleId: selectedNode.moduleId,
+      targetEntityId: selectedNode.entityId,
+      allowedRouteIds: selectedNode.migrationEligibility.routeOptions.map(({ route }) => route.id),
+    });
+    const boundRouteOptions = selectedNode.migrationEligibility.routeOptions.filter(({ route }) =>
+      route.id === moduleMapping.route.routeId &&
+      route.version === moduleMapping.route.routeVersion &&
+      route.contentHash === moduleMapping.route.routeContentHash,
+    );
+    if (boundRouteOptions.length !== 1) {
+      throw new Error('已审模块映射的 route lineage 与当前能力快照不一致。');
+    }
+    const migrationSelection = migrationSelectionFromTargetWorkspaceContext(
+      context,
+      message,
+      boundRouteOptions,
+      moduleMapping,
+      selectedNode.moduleId,
+    );
     if (activateWorkflow) {
       const relativeParts = target.path.replaceAll('\\', '/').split('/').filter(Boolean);
       const targetUri = vscode.Uri.joinPath(panelState.workspaceFolder.uri, ...relativeParts);
@@ -696,20 +1014,16 @@ async function selectTargetWorkspaceEntity(
         requirement: '',
         candidates: [],
         selectedCandidateId: null,
+        selectedRouteId: null,
         adaptation: null,
-        targetWorkspaceSelection: {
-          workspaceId: panelState.projection.workspaceId,
-          snapshotId: message.snapshotId,
-          contentHash: message.contentHash,
-          nodeId: message.nodeId,
-          entityId: message.entityId,
-        },
+        migrationSelection,
       };
     }
     publish({
       type: 'TARGET_ENTITY_SELECTED',
       selection: message,
       target,
+      migrationSelection,
       activateWorkflow,
     });
   } catch (error) {
@@ -794,6 +1108,7 @@ async function startSearch(
     run.requirement = message.requirement.trim();
     run.candidates = candidates;
     run.selectedCandidateId = null;
+    run.selectedRouteId = null;
     run.adaptation = null;
     publish({ type: 'SEARCH_RESULT', candidates: run.candidates });
   } catch (error) {
@@ -811,6 +1126,7 @@ function selectCandidate(candidateId: string): void {
     // This is deliberately the only operation that changes this field. A
     // retrieval ranking never becomes consent by itself.
     run.selectedCandidateId = candidateId;
+    run.selectedRouteId = routeForCandidate(run, candidate)?.id ?? null;
     run.adaptation = null;
   } catch (error) {
     publishError(errorMessage(error, '候选选择无效'));
@@ -821,6 +1137,7 @@ async function startAdaptation(host: ExtensionHost, decisionNotes: string): Prom
   try {
     const run = requireActiveRun();
     const candidate = selectedRunCandidate(run);
+    const route = selectedRunRoute(run, candidate);
     await assertTargetUnchanged(run, host);
     const status = await host.services.refresh();
     publish({ type: 'SERVICE_STATUS', status });
@@ -829,14 +1146,14 @@ async function startAdaptation(host: ExtensionHost, decisionNotes: string): Prom
       target: run.target,
       candidate,
       requirement: run.requirement,
-      strategy: 'translate',
+      strategy: route.strategy,
       decisionNotes,
     });
-    const result = validateHostOwnedResult(run, rawResult);
+    const result = validateHostOwnedResult(run, route, rawResult);
     run.adaptation = result;
     publish({ type: 'ADAPT_RESULT', result });
   } catch (error) {
-    publishError(errorMessage(error, '翻译失败'));
+    publishError(errorMessage(error, '迁移适配失败'));
   }
 }
 
@@ -950,13 +1267,56 @@ async function openTarget(): Promise<void> {
 
 function validateHostOwnedResult(
   run: ActiveMigrationRun,
+  route: MigrationRouteDescriptor,
   result: AdaptationResult,
 ): AdaptationResult {
   const validation = [...result.validation];
   const failures: string[] = [];
+  const mappingFailures: string[] = [];
   let files: FilePatch[] = result.files;
 
-  if (result.strategy !== 'translate' || result.targetLanguage !== run.target.language) {
+  const mapping = run.migrationSelection?.moduleMapping;
+  if (!mapping) {
+    mappingFailures.push('运行缺少已接受的模块映射 Overlay。');
+  } else {
+    if (
+      mapping.route.routeId !== route.id ||
+      mapping.route.routeVersion !== route.version ||
+      mapping.route.sourceLanguageId !== route.sourceLanguageId ||
+      mapping.route.targetLanguageId !== route.targetLanguageId ||
+      mapping.route.strategy !== route.strategy ||
+      mapping.route.routeContentHash !== route.contentHash
+    ) {
+      mappingFailures.push('执行路线与已接受 Overlay 的 route lineage 不一致。');
+    }
+    if (
+      mapping.mappingProposalId.length === 0 || !isSha256(mapping.mappingProposalHash) ||
+      mapping.mappingReviewId.length === 0 || !isSha256(mapping.mappingReviewHash) ||
+      mapping.executionOverlayId.length === 0 || !isSha256(mapping.executionOverlayHash)
+    ) {
+      mappingFailures.push('模块映射 proposal/review/overlay lineage 不完整。');
+    }
+  }
+  validation.push({
+    id: 'extension-module-mapping-lineage',
+    label: '已审模块映射与执行 Overlay',
+    status: mappingFailures.length === 0 ? 'pass' : 'fail',
+    required: true,
+    summary: mappingFailures.length > 0
+      ? mappingFailures.join(' ')
+      : [
+          `proposal=${mapping!.mappingProposalId}@${mapping!.mappingProposalHash}`,
+          `review=${mapping!.mappingReviewId}@${mapping!.mappingReviewHash}`,
+          `overlay=${mapping!.executionOverlayId}@${mapping!.executionOverlayHash}`,
+          `route=${mapping!.route.routeId}@${mapping!.route.routeVersion}`,
+          `sourceCatalog=${mapping!.sourceCatalog.moduleCatalogId}@${mapping!.sourceCatalog.moduleCatalogHash}`,
+          `targetCatalog=${mapping!.targetCatalog.moduleCatalogId}@${mapping!.targetCatalog.moduleCatalogHash}`,
+        ].join('; '),
+    failureReason: mappingFailures.length === 0 ? undefined : 'stale-or-missing-module-mapping-lineage',
+  });
+  failures.push(...mappingFailures);
+
+  if (result.strategy !== route.strategy || result.targetLanguage !== run.target.language) {
     failures.push('服务返回的策略或目标语言与当前选中的目标不一致。');
   }
   if (files.length !== 1) {
@@ -1027,7 +1387,7 @@ function deduplicateValidation(records: ValidationRecord[]): ValidationRecord[] 
 }
 
 function requireActiveRun(): ActiveMigrationRun {
-  if (!activeRun) throw new Error('请先从已保存的目标方法启动一次迁移。');
+  if (!activeRun) throw new Error('请先从已保存的目标实体启动一次迁移。');
   return activeRun;
 }
 
@@ -1042,18 +1402,63 @@ function selectedRunCandidate(run: ActiveMigrationRun): SearchCandidate {
   return candidate;
 }
 
+function routeForCandidate(
+  run: ActiveMigrationRun,
+  candidate: SearchCandidate,
+): MigrationRouteDescriptor | null {
+  const binding = run.migrationSelection;
+  if (!binding) return null;
+  let sourceLanguageId: string;
+  try {
+    sourceLanguageId = normalizeLanguageId(candidate.language);
+  } catch {
+    return null;
+  }
+  const targetLanguageId = binding.target.entity.languageId;
+  const mappedRoute = binding.moduleMapping.route;
+  return binding.routeOptions.find(({ route }) =>
+    route.sourceLanguageId === sourceLanguageId &&
+    route.targetLanguageId === targetLanguageId &&
+    route.id === mappedRoute.routeId &&
+    route.version === mappedRoute.routeVersion &&
+    route.strategy === mappedRoute.strategy &&
+    route.contentHash === mappedRoute.routeContentHash,
+  )?.route ?? null;
+}
+
+function selectedRunRoute(
+  run: ActiveMigrationRun,
+  candidate: SearchCandidate,
+): MigrationRouteDescriptor {
+  const route = routeForCandidate(run, candidate);
+  if (!route || run.selectedRouteId !== route.id) {
+    throw new Error(
+      `未声明 ${candidate.language} → ${run.migrationSelection?.target.entity.languageId ?? run.target.language} ` +
+      '的可执行迁移路线；系统已阻止默认适配。',
+    );
+  }
+  return route;
+}
+
 async function assertTargetUnchanged(
   run: ActiveMigrationRun,
   host: ExtensionHost,
 ): Promise<void> {
-  if (run.targetWorkspaceSelection) {
-    await refreshTargetWorkspaceBinding(host, run.targetWorkspaceSelection);
-    await host.targetWorkspaces.getTargetContext({
-      workspaceId: run.targetWorkspaceSelection.workspaceId,
-      snapshotId: run.targetWorkspaceSelection.snapshotId,
-      snapshotHash: run.targetWorkspaceSelection.contentHash,
-      entityId: run.targetWorkspaceSelection.entityId,
+  if (run.migrationSelection) {
+    const binding = run.migrationSelection;
+    await host.moduleMappings.assertBindingCurrent(binding.moduleMapping);
+    await refreshTargetWorkspaceBinding(host, {
+      workspaceId: binding.workspaceId,
+      snapshotId: binding.targetWorkspaceSnapshotId,
+      contentHash: binding.targetWorkspaceSnapshotHash,
     });
+    const context = await host.targetWorkspaces.getTargetContext({
+      workspaceId: binding.workspaceId,
+      snapshotId: binding.targetWorkspaceSnapshotId,
+      snapshotHash: binding.targetWorkspaceSnapshotHash,
+      entityId: binding.target.entity.entityId,
+    });
+    assertMigrationSelectionLineage(binding, context);
   }
   const openDocument = vscode.workspace.textDocuments.find(
     (document) => document.uri.toString() === run.targetUri.toString(),
@@ -1127,14 +1532,14 @@ async function invalidateTargetWorkspaceAfterMutation(
   run: ActiveMigrationRun,
   reason: string,
 ): Promise<void> {
-  const selection = run.targetWorkspaceSelection;
+  const selection = run.migrationSelection;
   if (!selection) return;
   const panelState = activeTargetWorkspacePanel;
   if (
     panelState &&
     panelState.projection.workspaceId === selection.workspaceId &&
-    panelState.projection.snapshotId === selection.snapshotId &&
-    panelState.projection.contentHash === selection.contentHash
+    panelState.projection.snapshotId === selection.targetWorkspaceSnapshotId &&
+    panelState.projection.contentHash === selection.targetWorkspaceSnapshotHash
   ) {
     publishTargetWorkspaceInvalidation(panelState.projection, reason);
   }
@@ -1144,6 +1549,79 @@ async function invalidateTargetWorkspaceAfterMutation(
     // The write/restore already succeeded. Keep the UI fail-closed and report
     // refresh failure separately instead of misreporting the mutation itself.
     publishError(errorMessage(error, '目标文件已变化，但 01B 快照刷新失败'));
+  }
+}
+
+function assertMigrationSelectionLineage(
+  binding: TargetWorkspaceMigrationSelection,
+  context: Awaited<ReturnType<TargetWorkspaceHost['getTargetContext']>>,
+): void {
+  const lineage = binding.target.lineage;
+  const entity = binding.target.entity;
+  const snapshotLineage = context.snapshot.lineage;
+  const mappedTarget = binding.moduleMapping.targetCatalog;
+  const mappedRoute = binding.moduleMapping.route;
+  const routeOptions = binding.routeOptions.filter(({ route }) =>
+    route.id === mappedRoute.routeId &&
+    route.version === mappedRoute.routeVersion &&
+    route.sourceLanguageId === mappedRoute.sourceLanguageId &&
+    route.targetLanguageId === mappedRoute.targetLanguageId &&
+    route.strategy === mappedRoute.strategy &&
+    route.contentHash === mappedRoute.routeContentHash,
+  );
+  const coherent =
+    context.workspaceId === binding.workspaceId &&
+    context.snapshot.id === binding.targetWorkspaceSnapshotId &&
+    context.snapshot.contentHash === binding.targetWorkspaceSnapshotHash &&
+    snapshotLineage.repositoryId === lineage.repositoryId &&
+    snapshotLineage.repositoryContentHash === lineage.repositoryContentHash &&
+    snapshotLineage.unifiedRepositoryIrId === lineage.unifiedRepositoryIrId &&
+    snapshotLineage.unifiedRepositoryIrHash === lineage.unifiedRepositoryIrHash &&
+    snapshotLineage.moduleCatalogId === lineage.moduleCatalogId &&
+    snapshotLineage.moduleCatalogHash === lineage.moduleCatalogHash &&
+    snapshotLineage.moduleReviewId === lineage.moduleReviewId &&
+    snapshotLineage.moduleReviewHash === lineage.moduleReviewHash &&
+    mappedTarget.repositoryId === snapshotLineage.repositoryId &&
+    mappedTarget.repositoryContentHash === snapshotLineage.repositoryContentHash &&
+    mappedTarget.unifiedRepositoryIrId === snapshotLineage.unifiedRepositoryIrId &&
+    mappedTarget.unifiedRepositoryIrHash === snapshotLineage.unifiedRepositoryIrHash &&
+    mappedTarget.moduleCatalogId === snapshotLineage.moduleCatalogId &&
+    mappedTarget.moduleCatalogHash === snapshotLineage.moduleCatalogHash &&
+    mappedTarget.moduleReviewId === snapshotLineage.moduleReviewId &&
+    mappedTarget.moduleReviewHash === snapshotLineage.moduleReviewHash &&
+    mappedRoute.targetLanguageId === entity.languageId &&
+    routeOptions.length === 1 &&
+    (!binding.module || (
+      context.catalog.id === binding.module.catalogId &&
+      context.catalog.contentHash === binding.module.catalogHash &&
+      binding.moduleMapping.targetModuleIds.includes(binding.module.moduleId) &&
+      context.catalog.modules.some((module) =>
+        module.id === binding.module!.moduleId &&
+        module.name === binding.module!.moduleName &&
+        (context.file ? module.fileIds.includes(context.file.id) : false),
+      ) &&
+      context.catalog.assignments.some((assignment) =>
+        assignment.fileId === context.file?.id &&
+        assignment.moduleIds.includes(binding.module!.moduleId),
+      )
+    )) &&
+    (binding.moduleMapping.targetEntityIds.length === 0 ||
+      binding.moduleMapping.targetEntityIds.includes(entity.entityId)) &&
+    context.entity.id === entity.entityId &&
+    context.file?.id === entity.fileId &&
+    context.file?.path === entity.path &&
+    normalizedLanguageIdOrNull(context.entity.languageId ?? context.file?.languageId) === entity.languageId;
+  if (!coherent) {
+    throw new Error('目标的 repository/catalog/module/entity lineage 已变化，禁止继续当前迁移运行。');
+  }
+}
+
+function normalizedLanguageIdOrNull(value: string | undefined): string | null {
+  if (!value) return null;
+  try {
+    return normalizeLanguageId(value);
+  } catch {
+    return null;
   }
 }
 
@@ -1172,6 +1650,10 @@ function summarizeRepositoryStatus(statuses: RepositoryStatus[]): string | null 
 
 function sha256(bytes: Uint8Array): string {
   return createHash('sha256').update(bytes).digest('hex');
+}
+
+function isSha256(value: string): boolean {
+  return /^[0-9a-f]{64}$/.test(value);
 }
 
 function errorMessage(error: unknown, fallback: string): string {

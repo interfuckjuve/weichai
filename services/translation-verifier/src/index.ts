@@ -45,7 +45,7 @@ export type {
 } from "./executor.js";
 export { generateDriverSource, generateSourceDriverSource } from "./driver/driver-codegen.js";
 export type { SourceInvocation } from "./driver/source-invocation.js";
-export type { TestDescription, TypedValue, VerifierLanguage } from "./description.js";
+export type { TargetLanguage, TestDescription, TypedValue, VerifierLanguage } from "./description.js";
 export { SmokeAgent } from "./smoke-agent.js";
 export type { SmokeAgentOptions } from "./smoke-agent.js";
 export type {

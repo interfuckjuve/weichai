@@ -222,13 +222,14 @@ packages/mock-adapters        production adapters
 - 存量仓 01A 的开放语言分析 registry、统一 IR、Module Discovery、两道人审、模块 Wiki、SQLite publication registry、独立 SeekDB 模块 active head、发布补偿和显式撤销骨架。
 - 目标工作区 01B：复用 01A 分析/模块发现与 Gate 1，生成 module/file/type/callable 五态实现状态目录，并从 reviewed callable 进入既有符号检索/翻译流程。
 - `target → requirement → candidates → adaptation → patch → complete` 状态机以及可替换检索、适配和回填端口。
-- Java → C# 的真实 `translate` 链路、独立编译和目标 skeleton 集成编译，以及有限次数的编译错误修复。
+- 以 Java → C# 为历史回归基线的真实 `translate` 链路、独立编译和目标 skeleton 集成编译，以及有限次数的编译错误修复；当前施工方向是能力注册驱动的全面多语言迁移。
 - 受保护的本地写回、检查点恢复，以及模块迁移波次的隔离 Git transaction 骨架。
 
 当前仍未完整实现或必须按原型口径描述的部分包括：
 
 - 01B 目标模块与 01A 来源模块的匹配、模块/符号融合召回、人工来源选择制品和最小可迁移实现切片。
-- Java → C# 之外的真实迁移语言对，以及 `bridge`、`wrap`、`reuse` 的真实适配实现。
+- 各 source × target × strategy 路线的目标上下文、补丁、编译、独立验证和工程集成能力仍不齐整；必须逐路线声明支持状态，不能把多语言翻译或编译骨架等同于生产闭环。
+- `bridge`、`wrap`、`reuse` 的真实适配实现。
 - 业务行为、并发、超时、取消、幂等和错误语义的独立验证闭环；当前编译通过不能证明这些语义正确。
 - 完整的多文件原子回填、并发工作区修改处理和通用回滚；现有安全边界仍需继续加固。
 - 生产级多租户 ACL/RBAC、完整 DLP、许可证治理、大仓增量调度和真实 SeekDB 故障演练。

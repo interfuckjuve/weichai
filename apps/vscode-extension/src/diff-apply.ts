@@ -19,7 +19,7 @@ export function applyHunks(content: string, hunks: PatchHunk[]): string {
  * implementation detail supplied by a remote service or Webview.
  */
 export function resolvePatchPath(workspaceRoot: string | undefined, filePath: string): string {
-  if (!workspaceRoot) throw new Error('请先打开一个工作区文件夹，再应用翻译补丁。');
+  if (!workspaceRoot) throw new Error('请先打开一个工作区文件夹，再应用迁移补丁。');
   if (!filePath || path.isAbsolute(filePath)) {
     throw new Error('补丁路径必须是工作区内的相对路径。');
   }

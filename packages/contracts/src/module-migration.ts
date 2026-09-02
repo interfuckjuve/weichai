@@ -406,7 +406,10 @@ export type MigrationRunStatus =
   | 'failed'
   | 'rolled-back';
 
-/** Immutable-per-run audit record; transactions append rather than overwrite evidence. */
+/**
+ * @deprecated V1 plan-bound audit record. Production execution uses
+ * MigrationRunManifestV2 and reviewed catalog/mapping lineage.
+ */
 export interface MigrationRunManifest {
   schemaVersion: typeof moduleMigrationSchemaVersion;
   id: string;

@@ -117,9 +117,9 @@ function normalizeSourceLanguage(value: string): VerifierLanguage {
   throw new Error(`MitGen: 不支持的源语言 "${value}"(支持 Java/C#/Python/TypeScript)。`);
 }
 
-/** 目标侧语言(description.target.language 只接受 Java/C#)。 */
+/** 目标侧语言由 verifier capability set 决定，不折叠到历史 Java/C# 基线。 */
 function targetLanguageOf(language: VerifierLanguage): TargetLanguage {
-  return language === "C#" ? "C#" : "Java";
+  return language;
 }
 
 /** 从源侧运行结果构造 expected(源侧实跑录制,不依赖 LLM 单点推理)。 */

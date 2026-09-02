@@ -53,10 +53,10 @@ const DEFAULT_TIMEOUT_MS = 60_000;
 
 /** 探测 javac / dotnet 是否在 PATH(供测试 skipIf 与调用方预检)。未知语言抛错。 */
 export function isToolchainAvailable(language: VerifierLanguage): boolean {
-  if (language === "Java") return findOnPath("javac");
-  if (language === "C#") return findOnPath("dotnet");
-  if (language === "Python") return findOnPath("python3") || findOnPath("python");
-  if (language === "TypeScript") return findOnPath("node") && packageEntry("tsx/cli") !== null;
+  if (language === "Java") return commandSucceeds("javac", ["-version"]);
+  if (language === "C#") return commandHasOutput("dotnet", ["--list-sdks"]);
+  if (language === "Python") return commandSucceeds("python3", ["--version"]) || commandSucceeds("python", ["--version"]);
+  if (language === "TypeScript") return commandSucceeds("node", ["--version"]) && packageEntry("tsx/cli") !== null;
   throw new Error(`Unsupported language: ${String(language)}`);
 }
 
@@ -68,10 +68,18 @@ function packageEntry(specifier: string): string | null {
   }
 }
 
-function findOnPath(name: string): boolean {
+function commandSucceeds(command: string, args: string[]): boolean {
   try {
-    execFileSync("sh", ["-c", `command -v '${name}'`], { stdio: "ignore", timeout: 2000 });
+    execFileSync(command, args, { stdio: "ignore", timeout: 2000 });
     return true;
+  } catch {
+    return false;
+  }
+}
+
+function commandHasOutput(command: string, args: string[]): boolean {
+  try {
+    return execFileSync(command, args, { encoding: "utf-8", timeout: 2000 }).trim().length > 0;
   } catch {
     return false;
   }
@@ -91,7 +99,7 @@ export class RealDriverExecutor implements DriverExecutor {
       javacPath: options.javacPath ?? "javac",
       javaPath: options.javaPath ?? "java",
       dotnetPath: options.dotnetPath ?? "dotnet",
-      pythonPath: options.pythonPath ?? (findOnPath("python3") ? "python3" : "python"),
+      pythonPath: options.pythonPath ?? (commandSucceeds("python3", ["--version"]) ? "python3" : "python"),
       nodePath: options.nodePath ?? "node",
       tsxPath: options.tsxPath ?? packageEntry("tsx/cli") ?? "",
       timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
@@ -640,10 +648,13 @@ function errorOutput(error: unknown): string {
 
 /** Java 编译错误行:含 "error:" 或 "错误:"(中文 locale javac)。 */
 function parseJavaErrors(output: string): string[] {
-  return output
+  const parsed = output
     .split("\n")
     .filter((line) => /error:|错误:/.test(line))
     .map((line) => line.trim());
+  if (parsed.length > 0) return parsed;
+  const fallback = output.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+  return fallback ? [fallback] : ["javac failed without diagnostic output"];
 }
 
 /** C# 编译错误行:含 "error CS…" / "error MSB…"。 */

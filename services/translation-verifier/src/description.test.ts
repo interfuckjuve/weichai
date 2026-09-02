@@ -78,19 +78,43 @@ describe("validateDescription", () => {
     );
   });
 
-  it("throws when target.language is invalid (e.g. \"Python\")", () => {
+  it("accepts Python module-level targets without inventing an enclosing class", () => {
+    const description = validDescription({
+      target: {
+        language: "Python",
+        module: "target_module",
+        ownerKind: "module",
+        className: "",
+        method: "add",
+        isStatic: true,
+        constructorArgs: [],
+      },
+    });
+    expect(validateDescription(description)).toEqual(description);
+  });
+
+  it("requires module identity for Python and TypeScript targets", () => {
     expect(() =>
       validateDescription({
         ...validDescription(),
-        target: { ...validDescription().target, language: "Python" as never },
+        target: { ...validDescription().target, language: "Python", ownerKind: "module", className: "" },
       }),
-    ).toThrow("TestDescription.target.language must be one of Java, C#; received Python.");
+    ).toThrow("TestDescription.target.module must be a non-empty string for Python.");
+  });
+
+  it("throws when target.language is outside the verifier capability set", () => {
+    expect(() =>
+      validateDescription({
+        ...validDescription(),
+        target: { ...validDescription().target, language: "Rust" as never },
+      }),
+    ).toThrow("TestDescription.target.language must be one of Java, C#, Python, TypeScript; received Rust.");
     expect(() =>
       validateDescription({
         ...validDescription(),
         target: { ...validDescription().target, language: 42 as never },
       }),
-    ).toThrow("TestDescription.target.language must be one of Java, C#; received 42.");
+    ).toThrow("TestDescription.target.language must be one of Java, C#, Python, TypeScript; received 42.");
   });
 
   it("throws when a case is missing id or has an empty id", () => {

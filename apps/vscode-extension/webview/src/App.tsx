@@ -7,10 +7,13 @@ import {
   workflowReducer,
   type WorkflowState,
 } from '@forexplore/workflow-core';
+import { normalizeLanguageId } from '@forexplore/contracts';
 import type {
   PanelInitPayload,
   TargetWorkspaceImplementationState,
   TargetWorkspaceInvalidation,
+  TargetWorkspaceMigrationRouteOption,
+  TargetWorkspaceMigrationSelection,
   TargetWorkspaceSelectionIdentity,
   TargetWorkspaceSnapshot,
   TargetWorkspaceTreeNode,
@@ -47,8 +50,35 @@ const nodeKindLabels: Record<TargetWorkspaceTreeNode['kind'], string> = {
   module: '模块',
   file: '文件',
   type: '类型',
-  callable: '方法',
+  container: '容器',
+  member: '成员',
+  callable: '可调用实体',
 };
+
+function nodeKindLabel(node: TargetWorkspaceTreeNode): string {
+  return node.kindLabel?.trim() || node.nativeKind?.trim() || nodeKindLabels[node.kind];
+}
+
+function nodeGlyph(node: TargetWorkspaceTreeNode): string {
+  return nodeKindLabel(node).slice(0, 1).toLocaleUpperCase();
+}
+
+function routeForCandidate(
+  selection: TargetWorkspaceMigrationSelection | null,
+  candidateLanguage: string | undefined,
+): TargetWorkspaceMigrationRouteOption | null {
+  if (!selection || !candidateLanguage) return null;
+  let sourceLanguageId: string;
+  try {
+    sourceLanguageId = normalizeLanguageId(candidateLanguage);
+  } catch {
+    return null;
+  }
+  return selection.routeOptions.find(({ route }) =>
+    route.sourceLanguageId === sourceLanguageId &&
+    route.targetLanguageId === selection.target.entity.languageId,
+  ) ?? null;
+}
 
 function implementationState(node: TargetWorkspaceTreeNode): TargetWorkspaceImplementationState {
   return node.assessment?.state ?? node.rollup?.state ?? 'unknown';
@@ -145,7 +175,7 @@ function targetWorkspaceStatistics(root: TargetWorkspaceTreeNode): TargetWorkspa
       if (node.kind === 'type') statistics.types += 1;
       if (node.kind === 'callable') {
         statistics.callables += 1;
-        if (node.eligibleForTranslation) statistics.eligibleCallables += 1;
+        if (node.migrationEligibility.status === 'eligible') statistics.eligibleCallables += 1;
         statistics.byState[implementationState(node)] += 1;
       }
     }
@@ -209,6 +239,116 @@ function isCoherentTargetWorkspaceSnapshot(snapshot: TargetWorkspaceSnapshot): b
   );
 }
 
+function isArtifactHash(value: string): boolean {
+  return /^[0-9a-f]{64}$/.test(value);
+}
+
+function hasCompleteCatalogRef(
+  catalog: TargetWorkspaceMigrationSelection['moduleMapping']['sourceCatalog'],
+): boolean {
+  return (
+    catalog.repositoryId.length > 0 &&
+    catalog.unifiedRepositoryIrId.length > 0 &&
+    catalog.moduleCatalogId.length > 0 &&
+    catalog.moduleReviewId.length > 0 &&
+    isArtifactHash(catalog.repositoryContentHash) &&
+    isArtifactHash(catalog.unifiedRepositoryIrHash) &&
+    isArtifactHash(catalog.moduleCatalogHash) &&
+    isArtifactHash(catalog.moduleReviewHash)
+  );
+}
+
+function isCoherentMigrationSelection(
+  snapshot: TargetWorkspaceSnapshot,
+  selection: TargetWorkspaceMigrationSelection,
+  node: TargetWorkspaceTreeNode,
+): boolean {
+  const lineage = snapshot.moduleSnapshot.lineage;
+  const targetLineage = selection.target.lineage;
+  const mapping = selection.moduleMapping;
+  const mappedTarget = mapping.targetCatalog;
+  const mappedRuntimeRoute = mapping.runtimeCapabilitySnapshot.routes.find(
+    (route) => route.id === mapping.route.routeId,
+  );
+  const routeIds = new Set(node.migrationEligibility.routeOptions.map(({ route }) => route.id));
+  const routeOption = selection.routeOptions[0]?.route;
+  return (
+    selection.workspaceId === snapshot.workspaceId &&
+    selection.targetWorkspaceSnapshotId === snapshot.snapshotId &&
+    selection.targetWorkspaceSnapshotHash === snapshot.contentHash &&
+    selection.selection.snapshotId === snapshot.snapshotId &&
+    selection.selection.contentHash === snapshot.contentHash &&
+    selection.selection.nodeId === node.nodeId &&
+    selection.selection.entityId === node.entityId &&
+    selection.target.workspaceId === snapshot.workspaceId &&
+    selection.target.targetWorkspaceSnapshotId === snapshot.snapshotId &&
+    selection.target.targetWorkspaceSnapshotHash === snapshot.contentHash &&
+    isArtifactHash(selection.target.contentHash) &&
+    selection.target.entity.entityId === node.entityId &&
+    selection.target.entity.languageId === node.migrationEligibility.targetLanguageId &&
+    selection.target.entity.path === node.path &&
+    isArtifactHash(selection.target.entity.fileContentHash) &&
+    selection.target.entity.declarationIdentity.providerId.length > 0 &&
+    selection.target.entity.declarationIdentity.providerVersion.length > 0 &&
+    isArtifactHash(selection.target.entity.declarationIdentity.contentHash) &&
+    targetLineage.repositoryId === lineage.repositoryId &&
+    targetLineage.repositoryContentHash === lineage.repositoryContentHash &&
+    targetLineage.unifiedRepositoryIrId === lineage.unifiedRepositoryIrId &&
+    targetLineage.unifiedRepositoryIrHash === lineage.unifiedRepositoryIrHash &&
+    targetLineage.moduleCatalogId === lineage.moduleCatalogId &&
+    targetLineage.moduleCatalogHash === lineage.moduleCatalogHash &&
+    targetLineage.moduleReviewId === lineage.moduleReviewId &&
+    targetLineage.moduleReviewHash === lineage.moduleReviewHash &&
+    hasCompleteCatalogRef(mapping.sourceCatalog) &&
+    hasCompleteCatalogRef(mappedTarget) &&
+    mappedTarget.repositoryId === lineage.repositoryId &&
+    (mappedTarget.repositoryRevision ?? null) === (lineage.repositoryRevision ?? null) &&
+    mappedTarget.repositoryContentHash === lineage.repositoryContentHash &&
+    mappedTarget.unifiedRepositoryIrId === lineage.unifiedRepositoryIrId &&
+    mappedTarget.unifiedRepositoryIrHash === lineage.unifiedRepositoryIrHash &&
+    mappedTarget.moduleCatalogId === lineage.moduleCatalogId &&
+    mappedTarget.moduleCatalogHash === lineage.moduleCatalogHash &&
+    mappedTarget.moduleReviewId === lineage.moduleReviewId &&
+    mappedTarget.moduleReviewHash === lineage.moduleReviewHash &&
+    mapping.mappingRunId.length > 0 &&
+    mapping.mappingProposalId.length > 0 &&
+    isArtifactHash(mapping.mappingProposalHash) &&
+    mapping.mappingReviewId.length > 0 &&
+    isArtifactHash(mapping.mappingReviewHash) &&
+    mapping.executionOverlayId.length > 0 &&
+    isArtifactHash(mapping.executionOverlayHash) &&
+    mapping.runtimeCapabilitySnapshot.id === mapping.route.runtimeCapabilitySnapshotId &&
+    mapping.runtimeCapabilitySnapshot.contentHash === mapping.route.runtimeCapabilitySnapshotHash &&
+    isArtifactHash(mapping.runtimeCapabilitySnapshot.contentHash) &&
+    mappedRuntimeRoute?.version === mapping.route.routeVersion &&
+    mappedRuntimeRoute.contentHash === mapping.route.routeContentHash &&
+    mappedRuntimeRoute.validationPolicy.id === mapping.route.validationPolicyId &&
+    mappedRuntimeRoute.validationPolicy.contentHash === mapping.route.validationPolicyHash &&
+    mapping.groupIds.length > 0 &&
+    mapping.mappingIds.length > 0 &&
+    mapping.sourceModuleIds.length > 0 &&
+    mapping.targetModuleIds.length > 0 &&
+    mapping.targetModuleIds.includes(node.moduleId ?? '') &&
+    (mapping.targetEntityIds.length === 0 || mapping.targetEntityIds.includes(node.entityId)) &&
+    (node.moduleId
+      ? selection.module?.moduleId === node.moduleId &&
+        selection.module.catalogId === lineage.moduleCatalogId &&
+        selection.module.catalogHash === lineage.moduleCatalogHash
+      : selection.module === undefined) &&
+    selection.routeOptions.length === 1 &&
+    routeOption !== undefined &&
+    routeIds.has(routeOption.id) &&
+    routeOption.id === mapping.route.routeId &&
+    routeOption.version === mapping.route.routeVersion &&
+    routeOption.sourceLanguageId === mapping.route.sourceLanguageId &&
+    routeOption.targetLanguageId === mapping.route.targetLanguageId &&
+    routeOption.strategy === mapping.route.strategy &&
+    routeOption.contentHash === mapping.route.routeContentHash &&
+    JSON.stringify(selection.target.route) === JSON.stringify(mapping.route) &&
+    routeOption.targetLanguageId === selection.target.entity.languageId
+  );
+}
+
 function TargetWorkspaceBrowser({
   snapshot,
   selectedNodeId,
@@ -216,7 +356,7 @@ function TargetWorkspaceBrowser({
   invalidation,
   onRefresh,
   onSelect,
-  onStartTranslation,
+  onStartMigration,
 }: {
   snapshot: TargetWorkspaceSnapshot;
   selectedNodeId: string | null;
@@ -224,7 +364,7 @@ function TargetWorkspaceBrowser({
   invalidation: TargetWorkspaceInvalidation | null;
   onRefresh: () => void;
   onSelect: (node: TargetWorkspaceTreeNode) => void;
-  onStartTranslation: (node: TargetWorkspaceTreeNode) => void;
+  onStartMigration: (node: TargetWorkspaceTreeNode) => void;
 }) {
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<TargetWorkspaceFilter>('all');
@@ -282,10 +422,10 @@ function TargetWorkspaceBrowser({
             onClick={() => onSelect(node)}
             aria-current={selectedNodeId === node.nodeId ? 'true' : undefined}
           >
-            <span className={`target-node-glyph is-${node.kind}`}>{nodeKindLabels[node.kind][0]}</span>
+            <span className={`target-node-glyph is-${node.kind}`}>{nodeGlyph(node)}</span>
             <span className="target-node-name">{node.name}</span>
             {node.aliasOfNodeId ? <span className="target-node-alias">共享</span> : null}
-            <span className="target-node-kind">{nodeKindLabels[node.kind]}</span>
+            <span className="target-node-kind">{nodeKindLabel(node)}</span>
             {node.kind !== 'callable' && summary.total > 0 ? (
               <span className="target-node-rollup">{summary.implemented}/{summary.total}</span>
             ) : null}
@@ -307,7 +447,7 @@ function TargetWorkspaceBrowser({
           <input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="搜索模块、文件、类型或方法"
+            placeholder="搜索模块、文件、容器或可调用实体"
             aria-label="搜索目标工作区"
           />
         </label>
@@ -334,8 +474,8 @@ function TargetWorkspaceBrowser({
           ['模块', statistics.modules],
           ['文件', statistics.files],
           ['类型', statistics.types],
-          ['方法', statistics.callables],
-          ['可迁移方法', statistics.eligibleCallables],
+          ['可调用实体', statistics.callables],
+          ['可迁移目标', statistics.eligibleCallables],
         ].map(([label, value]) => (
           <div className="target-stat-card" key={label}>
             <span>{label}</span>
@@ -385,11 +525,11 @@ function TargetWorkspaceBrowser({
             <>
               <div className="target-detail-heading">
                 <span className={`target-node-glyph is-${selectedNode.kind}`}>
-                  {nodeKindLabels[selectedNode.kind][0]}
+                  {nodeGlyph(selectedNode)}
                 </span>
                 <div>
                   <strong>{selectedNode.name}</strong>
-                  <span>{nodeKindLabels[selectedNode.kind]} · {implementationStateLabels[implementationState(selectedNode)]}</span>
+                  <span>{nodeKindLabel(selectedNode)} · {implementationStateLabels[implementationState(selectedNode)]}</span>
                 </div>
               </div>
               <dl className="target-detail-fields">
@@ -423,9 +563,32 @@ function TargetWorkspaceBrowser({
                     ) : <p className="muted-copy">没有可展示的证据引用。</p>}
                   </>
                 ) : (
-                  <p className="muted-copy">该聚合节点没有独立实现判定；状态来自子方法汇总。</p>
+                  <p className="muted-copy">该聚合节点没有独立实现判定；状态来自子可调用实体汇总。</p>
                 )}
               </section>
+              {selectedNode.kind === 'callable' ? (
+                <section className="target-detail-evidence">
+                  <h3>迁移路线与能力</h3>
+                  {selectedNode.migrationEligibility.routeOptions.length > 0 ? (
+                    <ul className="target-reason-list">
+                      {selectedNode.migrationEligibility.routeOptions.map(({ route, warnings }) => (
+                        <li key={route.id}>
+                          <code>{route.sourceLanguageId} → {route.targetLanguageId}</code>
+                          <span>{route.strategy} · {route.id}@{route.version}</span>
+                          <small>
+                            {route.availability.status}
+                            {warnings.length > 0 ? ` · ${warnings.join('、')}` : ''}
+                          </small>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="muted-copy">
+                      {selectedNode.migrationEligibility.summary ?? '未声明可执行迁移路线。'}
+                    </p>
+                  )}
+                </section>
+              ) : null}
               <button
                 type="button"
                 className="primary-action target-start-action"
@@ -433,18 +596,18 @@ function TargetWorkspaceBrowser({
                   stale ||
                   refreshing ||
                   selectedNode.kind !== 'callable' ||
-                  !selectedNode.eligibleForTranslation
+                  selectedNode.migrationEligibility.status !== 'eligible'
                 }
-                onClick={() => onStartTranslation(selectedNode)}
+                onClick={() => onStartMigration(selectedNode)}
               >
-                开始翻译
+                开始迁移
               </button>
-              {!selectedNode.eligibleForTranslation && selectedNode.ineligibilityReason ? (
-                <p className="target-ineligible-reason">{selectedNode.ineligibilityReason}</p>
+              {selectedNode.migrationEligibility.status === 'blocked' && selectedNode.migrationEligibility.summary ? (
+                <p className="target-ineligible-reason">{selectedNode.migrationEligibility.summary}</p>
               ) : null}
             </>
           ) : (
-            <div className="target-workspace-empty">选择一个节点查看状态依据；只有可迁移方法可以开始翻译。</div>
+            <div className="target-workspace-empty">选择一个节点查看状态依据；只有实现证据与迁移路线均可用的目标才可启动。</div>
           )}
           <p className="target-status-disclaimer">
             “检测到实现”只代表静态证据中存在实现体，不证明业务行为、并发或错误语义正确。
@@ -476,6 +639,8 @@ export default function App() {
   const [targetWorkspaceInvalidation, setTargetWorkspaceInvalidation] =
     useState<TargetWorkspaceInvalidation | null>(null);
   const [selectedTargetNodeId, setSelectedTargetNodeId] = useState<string | null>(null);
+  const [migrationSelection, setMigrationSelection] =
+    useState<TargetWorkspaceMigrationSelection | null>(null);
   const pendingRef = useRef<WorkflowState['pending']>(null);
   const targetWorkspaceRef = useRef<TargetWorkspaceSnapshot | null>(null);
   const invalidationRef = useRef<TargetWorkspaceInvalidation | null>(null);
@@ -507,6 +672,7 @@ export default function App() {
           setTargetWorkspaceRefreshing(false);
           setTargetWorkspaceInvalidation(null);
           setSelectedTargetNodeId(null);
+          setMigrationSelection(message.payload.migrationSelection ?? null);
           targetWorkspaceRef.current = acceptedTargetWorkspace;
           refreshingRef.current = false;
           invalidationRef.current = null;
@@ -528,6 +694,7 @@ export default function App() {
           setTargetWorkspaceRefreshing(false);
           setTargetWorkspaceInvalidation(null);
           setSelectedTargetNodeId(null);
+          setMigrationSelection(null);
           setError(null);
           targetWorkspaceRef.current = message.snapshot;
           refreshingRef.current = false;
@@ -562,6 +729,7 @@ export default function App() {
             };
             setTargetWorkspaceInvalidation(message.invalidation);
             setTargetWorkspace(staleSnapshot);
+            setMigrationSelection(null);
             invalidationRef.current = message.invalidation;
             targetWorkspaceRef.current = staleSnapshot;
           }
@@ -582,12 +750,14 @@ export default function App() {
             !selected ||
             selected.entityId !== message.selection.entityId ||
             selected.kind !== 'callable' ||
-            !selected.eligibleForTranslation
+            selected.migrationEligibility.status !== 'eligible' ||
+            !isCoherentMigrationSelection(current, message.migrationSelection, selected)
           ) {
             setError('宿主返回的目标选择不属于当前有效快照，请刷新后重试。');
             break;
           }
           setSelectedTargetNodeId(selected.nodeId);
+          setMigrationSelection(message.migrationSelection);
           setError(null);
           if (message.activateWorkflow) {
             dispatch({ type: 'SELECT_TARGET', target: message.target });
@@ -624,7 +794,7 @@ export default function App() {
   function handleSearch(): void {
     if (!state.target) return;
     if ((targetWorkspace && targetWorkspace.freshness !== 'current') || targetWorkspaceInvalidation) {
-      setError('目标工作区快照已失效，请刷新并重新选择方法。');
+      setError('目标工作区快照已失效，请刷新并重新选择目标实体。');
       return;
     }
     setError(null);
@@ -640,7 +810,15 @@ export default function App() {
     const candidate = selectedCandidate(state);
     if (!state.target || !candidate) return;
     if ((targetWorkspace && targetWorkspace.freshness !== 'current') || targetWorkspaceInvalidation) {
-      setError('目标工作区快照已失效，请刷新并重新选择方法。');
+      setError('目标工作区快照已失效，请刷新并重新选择目标实体。');
+      return;
+    }
+    const routeOption = routeForCandidate(migrationSelection, candidate.language);
+    if (!routeOption) {
+      setError(
+        `未声明 ${candidate.language} → ${migrationSelection?.target.entity.languageId ?? state.target.language} ` +
+        '的可执行迁移路线，已按 fail-closed 阻止。',
+      );
       return;
     }
     setError(null);
@@ -700,23 +878,23 @@ export default function App() {
       targetWorkspace.freshness !== 'current' ||
       targetWorkspaceInvalidation ||
       node.kind !== 'callable' ||
-      !node.eligibleForTranslation
+      node.migrationEligibility.status !== 'eligible'
     ) {
       return;
     }
     bus.post({ type: 'SELECT_TARGET_ENTITY', ...selectionIdentity(targetWorkspace, node) });
   }
 
-  function handleStartTargetTranslation(node: TargetWorkspaceTreeNode): void {
+  function handleStartTargetMigration(node: TargetWorkspaceTreeNode): void {
     if (
       !targetWorkspace ||
       targetWorkspaceRefreshing ||
       targetWorkspace.freshness !== 'current' ||
       targetWorkspaceInvalidation ||
       node.kind !== 'callable' ||
-      !node.eligibleForTranslation
+      node.migrationEligibility.status !== 'eligible'
     ) {
-      setError('只有当前有效快照中的可迁移方法才能开始翻译。');
+      setError('只有当前有效快照中、已声明完整路线能力的可调用实体才能开始迁移。');
       return;
     }
     bus.post({ type: 'START_TARGET_TRANSLATION', ...selectionIdentity(targetWorkspace, node) });
@@ -725,7 +903,7 @@ export default function App() {
   if (!payload) {
     return (
       <div className="app">
-        <div className="loading-state">正在初始化 ForeXplore 翻译面板…</div>
+        <div className="loading-state">正在初始化 ForeXplore 迁移面板…</div>
       </div>
     );
   }
@@ -743,7 +921,7 @@ export default function App() {
         {targetWorkspaceStage ? (
           <div className="target-workspace-title">
             <strong>01B 目标工作区模块划分</strong>
-            <span>识别模块、文件、类型与方法的可追溯实现状态</span>
+            <span>识别模块、文件、容器与可调用实体的可追溯实现状态</span>
           </div>
         ) : <StepRail stage={state.stage} />}
       </header>
@@ -763,7 +941,7 @@ export default function App() {
             invalidation={targetWorkspaceInvalidation}
             onRefresh={handleRefreshTargetWorkspace}
             onSelect={handleSelectTargetWorkspaceNode}
-            onStartTranslation={handleStartTargetTranslation}
+            onStartMigration={handleStartTargetMigration}
           />
         ) : null}
 
@@ -799,13 +977,18 @@ export default function App() {
             state={state}
             dispatch={dispatch}
             adaptationProvider={payload.adaptationProvider}
+            migrationSelection={migrationSelection}
             onSelectCandidate={handleSelectCandidate}
             onAdapt={handleAdapt}
           />
         ) : null}
 
         {state.stage === 'adaptation' ? (
-          <AdaptationStage state={state} candidate={candidate} />
+          <AdaptationStage
+            state={state}
+            candidate={candidate}
+            routeOption={routeForCandidate(migrationSelection, candidate?.language)}
+          />
         ) : null}
 
         {(state.stage === 'patch' || state.stage === 'complete') && state.adaptation ? (

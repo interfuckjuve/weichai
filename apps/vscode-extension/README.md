@@ -1,8 +1,8 @@
 # ForeXplore VS Code 扩展
 
-ForeXplore 将企业已有实现作为迁移证据：在任意受支持语言的目标方法或类上检索候选、由人明确选择候选、生成目标语言补丁，再展示独立验证证据和受保护的回填结果。
+ForeXplore 将企业已有实现作为迁移证据：从已审目标工作区选择可调用实体，检索历史候选，并且只在存在精确的源语言 × 目标语言 × 策略路线时生成补丁。
 
-当前真实自动迁移能力边界是 **`translate` 策略下的 Java → C#**。它不是通用代码生成器；候选排序分也不是正确率或兼容概率。
+项目已经进入语言无关的全面开发阶段，不再把 Java → C# 当作产品边界。实际可执行范围由运行时 `MigrationRouteDescriptor` 和其验证策略决定；没有能力快照时必须 fail closed。
 
 ## 01B 目标工作区模块划分
 
@@ -18,9 +18,9 @@ ForeXplore 将企业已有实现作为迁移证据：在任意受支持语言的
 
 1. **ForeXplore: 初始化 01B 目标工作区**：固定分析快照并生成模块边界提案；证据不足时停止，不会把目标骨架发布为来源知识。
 2. **ForeXplore: 审阅 01B 目标模块边界**：接受 Gate 1 后才建立内容寻址的实现状态目录。
-3. **ForeXplore: 打开 01B 目标工作区**：浏览 module → file → type → callable，按五态搜索/筛选；只有当前快照中宿主可解析的 concrete callable 可进入翻译。
-4. 在树中先选择方法核对证据，再显式点击“开始翻译”。Top-1 候选仍不会被自动选择。
-5. 若仅方法体变化，刷新会进入 `body-only-compatible`。运行 **ForeXplore: 重映射 01B 方法体兼容变更** 只会生成绑定新 IR 的边界提案；仍需再次 Gate 1 人审并重新检测状态。结构变化则必须重新发现和人审。
+3. **ForeXplore: 打开 01B 目标工作区**：浏览 module → file → native container/entity → callable，按五态搜索/筛选；未知实现状态或没有可执行路线的 callable 不可进入迁移。
+4. 在树中先选择目标实体核对证据、lineage 和路线能力，再显式点击“开始迁移”。Top-1 候选仍不会被自动选择。
+5. 若仅实现体变化，刷新会进入 `body-only-compatible`。运行 **ForeXplore: 重映射 01B 实现体兼容变更** 只会生成绑定新 IR 的边界提案；仍需再次 Gate 1 人审并重新检测状态。结构变化则必须重新发现和人审。
 
 若 Gate 1 已接受但 detector 临时失败，运行 **ForeXplore: 重试 01B 实现状态检测**。宿主会先重新校验工作区仍是同一快照；只重试状态清单，不重新伪造审批。01B 记录保存在扩展的 Host-owned 本地存储中，扩展重启后仍会在打开/启动时重新扫描并验证 freshness。
 
@@ -28,7 +28,7 @@ ForeXplore 将企业已有实现作为迁移证据：在任意受支持语言的
 
 ## 存量仓模块知识入库
 
-仓库分析采用开放 `LanguageId` 和可注册 adapter；这使入库契约可扩展，但不代表每种语言都有相同的语义深度，也不扩大上述 Java → C# 迁移边界。完整入库和撤销按五个受信任命令推进：
+仓库分析采用开放 `LanguageId` 和可注册 adapter；这使入库契约可扩展，但不代表每种语言都有相同的语义深度。迁移可执行性另由精确路线和必需验证能力判定。完整入库和撤销按五个受信任命令推进：
 
 - **ForeXplore: 索引模块迁移仓库**：固定工作区快照，生成 profile、analysis shards、统一 IR 和 Module Discovery proposal；证据不足时进入 `partial`，充分时停在 `awaiting-module-review`。
 - **ForeXplore: 审阅仓库模块边界**：第一道人审，只批准文件/实体/API/依赖的模块归属；接受后自动启动证据收集和 Summary Agent，不能直接发布。
@@ -45,18 +45,15 @@ $env:FOREXPLORE_MODULE_INDEX_WRITER_TOKEN = $env:RETRIEVAL_MODULE_INDEX_TOKEN
 
 令牌只从进程环境读取，不接受工作区设置，以免仓库内容为自己授予发布权限。正式查询还受服务端 `RETRIEVAL_ALLOWED_REPOSITORIES` 限制。发布作用域是 `(repositoryId, channel)`；默认 channel 为 `branch:main`，发布前仍会要求人工确认。
 
-## 模块迁移计划
+## 已审模块映射与执行 Overlay
 
-模块级迁移计划由 VS Code 扩展宿主负责，不经 Webview 提交源码、计划或写入请求。迁移执行部分提供六个受信任命令：
+新主链把 01A 与 01B 各自通过 Gate 1 的 `RepositoryModuleCatalog` 作为唯一模块边界事实。任务目标不得重新生成模块所有权；跨仓库对应关系由独立的 `ModuleMappingProposal → ModuleMappingReview → MigrationExecutionOverlay` 制品表达，并允许 1:1、1:N 与 N:1：
 
-- **ForeXplore: 索引模块迁移仓库**：对本地工作区执行已注册语言 adapter 的静态分析，并把不可变快照写入 `.forexplore/analysis/<snapshotId>.json`。默认收集可复现的语法证据；只有受信任的深分析 adapter 明确确认的精确边才会标记为语义证据，编译器可用性探测不会提升证据等级。
-- **ForeXplore: 审阅模块迁移计划**：只向适配服务发送 `snapshotId`、目标和不可变约束；服务端从自己持有的分析制品读取证据。扩展宿主验证 Agenticodex 提案、确定性生成波次，并在只读文档中展示计划和证据。
-- **ForeXplore: 审阅下一迁移波次**：只有整份计划已对同一快照审批后才会展示依赖已提交的下一波次。该命令只显示调度、静态证据和可供后续补丁审阅的范围；它不创建波次审批、不准备补丁，也不提交代码。
-- **ForeXplore: 导入并准备下一迁移波次**：从本机文件选择器读取严格的仅补丁 JSON，在隔离 worktree 中运行宿主范围检查和本地联合验证，并生成待审阅的 `preparedHash`。
-- **ForeXplore: 审批并提交已准备迁移波次**：把人工审批绑定到已审阅的 `preparedHash`，然后将该波次发布为受管迁移分支上的单个原子 Git 提交。
-- **ForeXplore: 恢复模块迁移审阅状态**：从扩展受信任存储和不可变快照恢复审阅状态；它不写入源码，也不把仓库中的摘要当作审批授权。
+- **ForeXplore: 导入跨目录模块映射提案**：选择不同的历史源仓和目标仓，从本机 JSON 导入只含已审 module/entity ID 引用的映射与执行分组。workflow-core 会对两侧当前 IR/catalog/review head 做确定性校验，未知引用立即拒绝。
+- **ForeXplore: 审阅模块映射并物化执行 Overlay**：在只读预览中接受、要求修订或拒绝。只有接受决定和已物化的 runtime route capability snapshot 同时存在时才产生 Overlay；没有能力快照时 fail closed。
+- 目标实体启动迁移前，Host 必须找到唯一覆盖它的 current Overlay。active run 与 Webview 协议保留两侧 catalog ref、proposal/review/overlay hash 及精确 route/runtime/policy lineage；任一 head 或能力快照变化都会使绑定 stale。
 
-计划审批绑定快照和计划哈希，并仅保存在扩展的受信任审阅状态中。执行协调器必须先在隔离 worktree 中生成精确补丁、完成波次联合验证并计算 `preparedHash`；人对该制品审批后，协调器才会把代码、`.forexplore/module-summary.json` 和运行清单放入同一个原子 Git 事务。扩展不会单独写入或覆盖摘要。模块计划服务必须将 `ADAPTATION_ANALYSIS_ROOT` 指向当前工作区的 `.forexplore/analysis`，以便 `/v1/module-plan` 只按快照标识读取服务端制品。
+旧 `FunctionalModule` 计划不是新运行默认入口，也不能覆盖已审目录。它只保留在命令标题和 ID 都显式带 **Legacy** 的兼容路径中，用于已有运行的审阅、准备、审批和恢复。
 
 ### 可信本地波次执行
 
@@ -135,8 +132,8 @@ $env:FOREXPLORE_MODULE_INDEX_WRITER_TOKEN = $env:RETRIEVAL_MODULE_INDEX_TOKEN
 
 1. 在仓库根目录运行 `npm run dev:extension`。脚本会启动 SeekDB、两个本地服务，并打开 Extension Development Host。
 2. 在开发宿主中打开目标工作区；默认夹具是 Java 工程 `fixtures/target-system/commons-fileupload-java-skeleton`。
-3. 若要使用 01B，依次运行初始化、模块边界人审和打开目标工作区命令，再从目标树中显式启动某个方法；也可继续直接在编辑器中选择目标方法并运行 **ForeXplore: 开始代码翻译**。
-4. 输入需求并检索语料候选。只有真实 capability matrix 支持的语言对才能继续生成目标语言补丁；当前真实边界仍是 Java → C#。
+3. 若要使用 01B，依次运行初始化、模块边界人审和打开目标工作区命令，再从目标树中显式启动某个可调用实体。
+4. 输入需求并检索语料候选。只有运行时 route capability snapshot 精确支持的源/目标语言与策略组合才能继续生成补丁。
 
 插件只调用真实的 SeekDB 检索服务和语言无关的适配服务。任一服务不可用时，插件会报错，不会回退到本地样例。
 

@@ -1,5 +1,5 @@
 import { runClaude, type ClaudeClientOptions } from "./claude-client.js";
-import { validateDescription, type TestDescription } from "./description.js";
+import { validateDescription, type TargetLanguage, type TestDescription } from "./description.js";
 import type { SourceInvocation } from "./driver/source-invocation.js";
 import { extractJson, coerceTypedValue } from "./llm-json.js";
 import { createLogger, type Logger } from "./logger.js";
@@ -26,7 +26,9 @@ export interface MigrationInput {
   /** 目标侧翻译产物源码(MitGen 片段对应性检查用;其余生成器忽略)。 */
   targetCode?: string;
   target: {
-    language: "Java" | "C#";
+    language: TargetLanguage;
+    module?: string;
+    ownerKind?: "type" | "module";
     className: string;
     method: string;
     isStatic: boolean;
@@ -54,7 +56,9 @@ exact schema (no markdown):
 {
   "schemaVersion": "1.0",
   "target": {
-    "language": "Java" | "C#",
+    "language": "<the requested target language>",
+    "module": "<required import path for Python/TypeScript>",
+    "ownerKind": "type" | "module",
     "className": "...",
     "method": "...",
     "isStatic": true,
@@ -145,6 +149,8 @@ ${validationFeedback}REFERENCE_IMPLEMENTATION
 Source language: ${input.sourceLanguage}${input.repository ? `\nRepository: ${input.repository}` : ""}${input.sourcePath ? `\nPath: ${input.sourcePath}` : ""}
 Target contract:
 - language: ${input.target.language}
+- module: ${input.target.module ?? "not applicable"}
+- ownerKind: ${input.target.ownerKind ?? "type"}
 - className: ${input.target.className}
 - method: ${input.target.method}
 - isStatic: ${input.target.isStatic}
@@ -188,5 +194,4 @@ function coerceDescription(value: unknown): unknown {
     }),
   };
 }
-
 

@@ -31,7 +31,7 @@ export function FooterStatus({
         className={serviceDot(serviceStatus?.adaptation)}
         title={serviceStatus?.message ?? ''}
       >
-        翻译 {serviceLabel(serviceStatus?.adaptation)}
+        迁移适配 {serviceLabel(serviceStatus?.adaptation)}
       </span>
       <span className="footer-repo" title="forexplore.repositoryPaths">
         {repoLabel}

@@ -49,7 +49,7 @@ ForeXplore 不是通用代码生成器，也不只是代码搜索或代码翻译
 - 可替换的检索、适配和回填端口。
 - SeekDB 向量与全文混合检索服务。
 - Top-K 候选展示、人工备注、候选选择和补丁确认界面。
-- Java → C# 的模型翻译、独立编译、临时目标工程集成编译和有限次数编译修复。
+- 以 Java → C# 为历史实验基线的模型翻译、独立编译、临时目标工程集成编译和有限次数编译修复；当前工程方向已经转为由显式能力注册驱动的全面多语言迁移。
 - 文件补丁预览以及 HTTP 回填边界。
 - 覆盖各 workspace 的单元、契约和组件测试。
 
@@ -77,8 +77,9 @@ ForeXplore 不是通用代码生成器，也不只是代码搜索或代码翻译
    - UI 中的分数属于排序分，不应表述为经过校准的正确率或兼容概率。
 
 5. **多策略和多语言适配**
-   - 真实适配服务当前只支持 `translate` 策略下的 Java → C#。
-   - `bridge`、`wrap`、`reuse` 和其他语言对目前主要是契约或 Mock 能力。
+   - Java → C# 只是历史实验基线，不再是产品方向、默认语言对或施工范围上限。
+   - 当前 `translate` 提示和编译骨架已覆盖多种语言，但目标上下文、补丁构造、独立验证和工程集成的成熟度并不相同；任一具体 source × target × strategy 路线必须由能力注册表和验证策略如实判定。
+   - `bridge`、`wrap`、`reuse` 以及缺少完整验证闭环的语言路线仍不能描述为生产可用。
 
 6. **事务化回填**
    - 当前真实回填会逐文件写入，检查点主要是标识符。
@@ -159,7 +160,8 @@ ForeXplore 不是通用代码生成器，也不只是代码搜索或代码翻译
 - 不得因新增真实实现而静默回退到 Mock，也不得在 UI 中把真实端口错误标记为 Mock。
 - 不得把编译成功、模型自评或启发式分数描述为业务正确性证明。
 - 新增自动回填能力前，必须先实现验证门禁、路径安全、并发修改检测和恢复机制。
-- 在用户没有明确要求扩大范围时，以 Java → C# MVP 为真实能力边界，不为展示效果虚构其他语言对已经可用。
+- Java → C# 仅作为历史回归基线；不得在 contracts、workflow-core、Host、UI 或提示词中把它硬编码为默认方向或能力上限。新增语言应通过 adapter/route 注册完成，不得要求修改中央语言联合类型或语言分支。
+- 全面多语言开发不等于所有语言路线已经同等可用。每条路线必须分别报告分析、上下文、生成、补丁、编译、独立验证和写回能力，缺少必需能力时失败关闭。
 - 优先产出可审阅、可重放、可追踪的结构化制品；Agent 的自然语言说明只能作为辅助证据。
 
 ## 九、关键代码入口
@@ -171,6 +173,6 @@ ForeXplore 不是通用代码生成器，也不只是代码搜索或代码翻译
 - 候选与补丁交互：`apps/workflow-web/src/features`
 - 代码索引：`services/code-indexer/src`
 - SeekDB 检索：`services/retrieval-service/src`
-- Java → C# 适配：`services/adaptation-service/src/adaptation-adapter.ts`
+- 多语言迁移适配：`services/adaptation-service/src/adaptation-adapter.ts`
 - 编译验证：`services/adaptation-service/src/compiler.ts`
 - 回填实现：`services/adaptation-service/src/backfill-adapter.ts`

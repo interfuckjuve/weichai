@@ -27,7 +27,7 @@ export function RequirementStage({
     <div className="stage-stack">
       <section className="card target-edit-card">
         <div className="card-heading">
-          <span>01 · 翻译目标</span>
+          <span>01 · 迁移目标</span>
           <span className="card-heading-meta">
             {target.language} · {target.kind}
           </span>

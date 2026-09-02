@@ -273,7 +273,10 @@ export interface AnalysisAdapterDescriptor {
   requirements?: string[];
 }
 
-/** Optional registry shape for migration engines; never embed this in analysis descriptors. */
+/**
+ * @deprecated Source/target arrays cannot describe exact supported pairs. Use
+ * `MigrationRouteDescriptor` for capability routing. Kept for V1 consumers.
+ */
 export interface MigrationCapabilityDescriptor {
   id: string;
   name: string;
@@ -309,6 +312,32 @@ export type RepositoryIREntityKind =
   | 'external'
   | 'unknown';
 
+/**
+ * Adapter-issued, source-syntax-independent identity for a declaration or a
+ * compiler/semantic shape. The adapter owns the canonicalization scheme;
+ * workflow-core only verifies provenance and the content hash.
+ */
+export interface RepositoryStructureIdentity {
+  basis: 'declaration-shape' | 'semantic-shape';
+  contentHash: string;
+  schemaVersion: string;
+  adapterId: string;
+  adapterVersion: string;
+  configurationHash?: string;
+}
+
+/**
+ * Explicit adapter fact for entities which can contain callable entities.
+ * Actual child membership remains expressed by `containerEntityId`.
+ */
+export interface RepositoryContainerCapability {
+  canContainCallables: true;
+  /** Open adapter-native role such as module, trait, impl, object or namespace. */
+  nativeKind: string;
+  adapterId: string;
+  adapterVersion: string;
+}
+
 export interface RepositoryIREntity {
   id: string;
   kind: RepositoryIREntityKind;
@@ -322,6 +351,8 @@ export interface RepositoryIREntity {
   signature?: string;
   visibility?: string;
   testOnly?: boolean;
+  structureIdentity?: RepositoryStructureIdentity;
+  containerCapability?: RepositoryContainerCapability;
   attributes?: Record<string, RepositoryIngestionJsonValue>;
 }
 
@@ -375,6 +406,8 @@ export interface RepositoryApiSurface {
   returnShape?: RepositoryApiReturnShape;
   completeness: RepositoryApiSurfaceCompleteness;
   missingFeatures: string[];
+  /** Optional API-specific identity; the owning entity identity is the fallback. */
+  structureIdentity?: RepositoryStructureIdentity;
   evidenceRefs: RepositoryEvidenceRef[];
 }
 

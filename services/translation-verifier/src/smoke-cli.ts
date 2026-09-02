@@ -97,8 +97,8 @@ export function parseArgs(argv: string[]): SmokeCliOptions | { error: string } {
         break;
       }
       case "--target-lang": {
-        if (value !== "Java" && value !== "C#") {
-          return { error: `Invalid --target-lang: "${value}" (must be Java or C#).` };
+        if (value !== "Java" && value !== "C#" && value !== "Python" && value !== "TypeScript") {
+          return { error: `Invalid --target-lang: "${value}" (must be Java, C#, Python, or TypeScript).` };
         }
         options.targetLang = value;
         break;

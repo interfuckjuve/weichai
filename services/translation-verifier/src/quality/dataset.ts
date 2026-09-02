@@ -419,6 +419,6 @@ export function alignDescriptionTarget(description: TestDescription, entry: Data
 }
 
 function toTargetLanguage(language: string): TestDescription["target"]["language"] {
-  if (language === "Java" || language === "C#") return language;
-  throw new Error(`不支持的翻译目标语言 "${language}"(仅支持 Java/C#)。`);
+  if (language === "Java" || language === "C#" || language === "Python" || language === "TypeScript") return language;
+  throw new Error(`不支持的翻译目标语言 "${language}"(支持 Java/C#/Python/TypeScript)。`);
 }

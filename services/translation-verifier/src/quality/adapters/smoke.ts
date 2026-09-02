@@ -54,7 +54,7 @@ export class SmokeAdapter implements GeneratorAdapter {
     const agent = new SmokeAgent({
       requirement: task.entry.requirement,
       sourceLang: task.source.language,
-      targetLang: task.target.language === "C#" ? "C#" : "Java",
+      targetLang: task.target.language,
       sourceFile,
       targetFile,
       targetClass: task.entry.target.className.split(".").pop(),

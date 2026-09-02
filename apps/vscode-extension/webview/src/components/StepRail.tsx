@@ -15,7 +15,9 @@ export function StepRail({ stage }: { stage: WorkflowStage }) {
             <span className="step-marker">
               {status === 'done' ? <Check size={11} strokeWidth={2.6} /> : step.shortLabel}
             </span>
-            <span className="step-label">{step.label}</span>
+            <span className="step-label">
+              {step.id === 'adaptation' ? '生成与适配' : step.label}
+            </span>
             {index < workflowSteps.length - 1 ? <span className="step-line" /> : null}
           </div>
         );

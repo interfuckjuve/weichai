@@ -1,7 +1,7 @@
 {
   "name": "forexplore-vscode",
-  "displayName": "ForeXplore Code Translation",
-  "description": "在 VSCode 中运行 ForeXplore 代码翻译工作流：检索相似实现、生成目标代码并以 diff 预览回填。",
+  "displayName": "ForeXplore Code Migration",
+  "description": "在 VSCode 中运行 ForeXplore 跨语言代码迁移工作流：检索历史实现、选择明确迁移路线、生成目标补丁并独立验证。",
   "version": "0.1.0",
   "publisher": "forexplore",
   "license": "MIT",
@@ -34,21 +34,23 @@
     "onCommand:forexplore.generateRepositoryModuleSummaries",
     "onCommand:forexplore.reviewRepositoryModuleKnowledge",
     "onCommand:forexplore.withdrawRepositoryModuleKnowledge",
-    "onCommand:forexplore.reviewModuleMigrationPlan",
-    "onCommand:forexplore.reviewModuleMigrationWave",
-    "onCommand:forexplore.prepareModuleMigrationWave",
-    "onCommand:forexplore.approveModuleMigrationWave",
-    "onCommand:forexplore.recoverModuleMigrationReview"
+    "onCommand:forexplore.proposeModuleMapping",
+    "onCommand:forexplore.reviewModuleMapping",
+    "onCommand:forexplore.reviewLegacyModuleMigrationPlan",
+    "onCommand:forexplore.reviewLegacyModuleMigrationWave",
+    "onCommand:forexplore.prepareLegacyModuleMigrationWave",
+    "onCommand:forexplore.approveLegacyModuleMigrationWave",
+    "onCommand:forexplore.recoverLegacyModuleMigrationReview"
   ],
   "contributes": {
     "commands": [
       {
         "command": "forexplore.startTranslation",
-        "title": "ForeXplore: 开始代码翻译"
+        "title": "ForeXplore: 开始代码迁移"
       },
       {
         "command": "forexplore.showPanel",
-        "title": "ForeXplore: 打开翻译面板"
+        "title": "ForeXplore: 打开迁移面板"
       },
       {
         "command": "forexplore.checkRepositories",
@@ -76,7 +78,7 @@
       },
       {
         "command": "forexplore.rebaseTargetWorkspaceBodyOnly",
-        "title": "ForeXplore: 重映射 01B 方法体兼容变更"
+        "title": "ForeXplore: 重映射 01B 实现体兼容变更"
       },
       {
         "command": "forexplore.retryTargetWorkspaceInventory",
@@ -103,24 +105,32 @@
         "title": "ForeXplore: 撤销当前模块知识发布"
       },
       {
-        "command": "forexplore.reviewModuleMigrationPlan",
-        "title": "ForeXplore: 审阅模块迁移计划"
+        "command": "forexplore.proposeModuleMapping",
+        "title": "ForeXplore: 导入跨目录模块映射提案"
       },
       {
-        "command": "forexplore.reviewModuleMigrationWave",
-        "title": "ForeXplore: 审阅下一迁移波次"
+        "command": "forexplore.reviewModuleMapping",
+        "title": "ForeXplore: 审阅模块映射并物化执行 Overlay"
       },
       {
-        "command": "forexplore.prepareModuleMigrationWave",
-        "title": "ForeXplore: 导入并准备下一迁移波次"
+        "command": "forexplore.reviewLegacyModuleMigrationPlan",
+        "title": "ForeXplore Legacy: 审阅 FunctionalModule 兼容计划"
       },
       {
-        "command": "forexplore.approveModuleMigrationWave",
-        "title": "ForeXplore: 审批并提交已准备迁移波次"
+        "command": "forexplore.reviewLegacyModuleMigrationWave",
+        "title": "ForeXplore Legacy: 审阅下一兼容迁移波次"
       },
       {
-        "command": "forexplore.recoverModuleMigrationReview",
-        "title": "ForeXplore: 恢复模块迁移审阅状态"
+        "command": "forexplore.prepareLegacyModuleMigrationWave",
+        "title": "ForeXplore Legacy: 导入并准备兼容迁移波次"
+      },
+      {
+        "command": "forexplore.approveLegacyModuleMigrationWave",
+        "title": "ForeXplore Legacy: 审批并提交兼容迁移波次"
+      },
+      {
+        "command": "forexplore.recoverLegacyModuleMigrationReview",
+        "title": "ForeXplore Legacy: 恢复兼容迁移审阅状态"
       }
     ],
     "menus": {
@@ -161,7 +171,7 @@
         "forexplore.adaptationApiUrl": {
           "type": "string",
           "default": "http://127.0.0.1:8788",
-          "description": "语言无关翻译服务地址。"
+          "description": "语言无关迁移适配服务地址。"
         },
         "forexplore.repositoryKnowledgeChannel": {
           "type": "string",

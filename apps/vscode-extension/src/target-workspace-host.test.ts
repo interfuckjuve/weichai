@@ -13,8 +13,10 @@ import type {
 import {
   analyzeRepository,
   bridgeRepositoryStaticAnalysis,
+  repositoryIngestionBridgeHash,
   repositoryAnalysisContentHash,
   repositoryAnalysisSnapshotId,
+  type RepositoryStaticAnalysisBridgeArtifacts,
 } from '@forexplore/code-indexer';
 import {
   buildTargetWorkspaceModuleSnapshot,
@@ -120,6 +122,44 @@ function withAmbiguousCallableIdentity(
     ...updated,
     contentHash: repositoryAnalysisContentHash(updated),
     snapshotId: repositoryAnalysisSnapshotId(updated),
+  };
+}
+
+/** Test-only trusted adapter seam: core receives opaque declaration identities. */
+function bridgeWithDeclarationIdentities(
+  analysis: RepositoryStaticAnalysis,
+): RepositoryStaticAnalysisBridgeArtifacts {
+  const bridged = bridgeRepositoryStaticAnalysis(analysis);
+  const entities = bridged.unifiedIr.entities.map((entity) => ({
+    ...entity,
+    structureIdentity: {
+      basis: 'declaration-shape' as const,
+      contentHash: sha256Hex(canonicalJson({
+        kind: entity.kind,
+        name: entity.name,
+        qualifiedName: entity.qualifiedName,
+        languageId: entity.languageId,
+        signature: entity.signature,
+        visibility: entity.visibility,
+      })),
+      schemaVersion: 'fixture-declaration-shape/v1',
+      adapterId: 'fixture-trusted-declaration-adapter',
+      adapterVersion: '1.0.0',
+    },
+  }));
+  const { id: _id, contentHash: _contentHash, ...basePayload } = bridged.unifiedIr;
+  const payload: Omit<UnifiedRepositoryIR, 'id' | 'contentHash'> = {
+    ...basePayload,
+    entities,
+  };
+  const contentHash = repositoryIngestionBridgeHash(payload);
+  return {
+    ...bridged,
+    unifiedIr: {
+      ...payload,
+      id: `unified-repository-ir:${contentHash.slice(0, 32)}`,
+      contentHash,
+    },
   };
 }
 
@@ -288,6 +328,7 @@ function hostFixture(
   proposal: ModuleDiscoveryProposal,
   inventory: TargetWorkspaceImplementationInventoryPort = implementationInventory(),
   gateVerificationAnalysis?: RepositoryStaticAnalysis,
+  bridge?: (analysis: RepositoryStaticAnalysis) => RepositoryStaticAnalysisBridgeArtifacts,
 ): HostFixture {
   let analysisIndex = 0;
   let lastAnalysis = analyses[0]!;
@@ -308,6 +349,7 @@ function hostFixture(
       return lastAnalysis;
     }),
     verifyCurrentAnalysis: vi.fn(async () => gateVerificationAnalysis ?? lastAnalysis),
+    ...(bridge ? { bridge } : {}),
     now: () => hostTime,
     // Poison ports are deliberately present at runtime. The target Host must
     // not inspect or call source-knowledge lifecycle capabilities.
@@ -487,36 +529,28 @@ describe('TargetWorkspaceHost', () => {
     });
   });
 
-  it('marks body-only changes compatible but unusable, and structural changes stale', async () => {
+  it('fails body-only changes closed when the adapter supplies no declaration identity', async () => {
     const root = await createTargetWorkspace(initialSource);
     const initial = await analysisFor(root);
-    const bodyOnly = await analysisFor(
-      root,
-      bodyOnlySource,
-    );
-    const structurallyChanged = await analysisFor(
-      root,
-      structurallyChangedSource,
-    );
+    const bodyOnly = await analysisFor(root, bodyOnlySource);
     const initialIr = bridgeRepositoryStaticAnalysis(initial).unifiedIr;
     const proposal = proposalFor(initialIr);
     const inventory = implementationInventory();
     const inventorySpy = vi.spyOn(inventory, 'build');
-    const fixture = hostFixture(
-      [initial, bodyOnly, bodyOnly, structurallyChanged],
-      proposal,
-      inventory,
-    );
+    const fixture = hostFixture([initial, bodyOnly], proposal, inventory);
     await fixture.host.initialize({ workspaceId: 'target-workspace', repositoryRoot: root });
     const reviewed = await fixture.host.submitGate1(
       gate1Request('target-workspace', proposal, initialIr),
     );
     expect(inventorySpy).toHaveBeenCalledTimes(1);
 
-    const compatible = await fixture.host.refresh('target-workspace');
-    expect(compatible).toMatchObject({
-      stage: 'body-only-compatible',
-      freshness: { status: 'body-only-compatible' },
+    const stale = await fixture.host.refresh('target-workspace');
+    expect(stale).toMatchObject({
+      stage: 'stale',
+      freshness: {
+        status: 'stale',
+        reasonCodes: expect.arrayContaining(['structure-identity-unverified']),
+      },
     });
     const callable = initialIr.entities.find((entity) => entity.kind === 'callable')!;
     await expect(fixture.host.getTargetContext({
@@ -524,68 +558,42 @@ describe('TargetWorkspaceHost', () => {
       snapshotId: reviewed.accepted!.snapshot!.id,
       snapshotHash: reviewed.accepted!.snapshot!.contentHash,
       entityId: callable.id,
-    })).rejects.toThrow('body-only-compatible');
-    expect(inventorySpy).toHaveBeenCalledTimes(1);
-
-    const bodyIr = bridgeRepositoryStaticAnalysis(bodyOnly).unifiedIr;
-    const rebaseRequest = {
-      workspaceId: 'target-workspace',
-      expectedModuleSnapshotId: reviewed.accepted!.snapshot!.id,
-      expectedModuleSnapshotHash: reviewed.accepted!.snapshot!.contentHash,
-      expectedCatalogId: reviewed.accepted!.catalog.id,
-      expectedCatalogHash: reviewed.accepted!.catalog.contentHash,
-      expectedLatestAnalysisSnapshotId: bodyOnly.snapshotId,
-      expectedLatestIrId: bodyIr.id,
-      expectedLatestIrHash: bodyIr.contentHash,
-    };
-    await expect(fixture.host.rebaseBodyOnly({
-      ...rebaseRequest,
-      expectedLatestIrHash: '0'.repeat(64),
     })).rejects.toThrow('stale');
-    expect((await fixture.host.get('target-workspace'))?.stage).toBe('body-only-compatible');
-
-    const awaitingReview = await fixture.host.rebaseBodyOnly(rebaseRequest);
-    expect(awaitingReview).toMatchObject({
-      stage: 'awaiting-module-review',
-      discovery: {
-        proposal: {
-          sourceIrId: bodyIr.id,
-          sourceIrHash: bodyIr.contentHash,
-          status: 'awaiting-review',
-        },
-        draftCatalog: { status: 'draft' },
-      },
-    });
-    expect(fixture.discoverModules).toHaveBeenCalledTimes(1);
     expect(inventorySpy).toHaveBeenCalledTimes(1);
-
-    const stillAwaitingReview = await fixture.host.refresh('target-workspace');
-    expect(stillAwaitingReview).toMatchObject({
-      stage: 'awaiting-module-review',
-      discovery: { proposal: { id: awaitingReview.discovery!.proposal.id } },
-    });
-
-    const rebasedProposal = awaitingReview.discovery!.proposal;
-    expect(rebasedProposal.assignments[0]?.fileId).toBe(bodyIr.files[0]?.id);
-    expect(rebasedProposal.assignments[0]?.fileId).not.toBe(initialIr.files[0]?.id);
-    const rereviewed = await fixture.host.submitGate1(
-      gate1Request('target-workspace', rebasedProposal, bodyIr),
-    );
-    expect(rereviewed.stage).toBe('reviewed');
-    expect(inventorySpy).toHaveBeenCalledTimes(2);
-    expect(rereviewed.accepted!.snapshot!.id).not.toBe(reviewed.accepted!.snapshot!.id);
-    expect(rereviewed.accepted!.snapshot!.assessments.map((assessment) => assessment.id))
-      .not.toEqual(reviewed.accepted!.snapshot!.assessments.map((assessment) => assessment.id));
-
-    const stale = await fixture.host.refresh('target-workspace');
-    expect(stale).toMatchObject({
-      stage: 'stale',
-      freshness: { status: 'stale' },
-    });
-    expect(stale.freshness?.reasonCodes).toContain('structure-changed');
+    for (const port of Object.values(fixture.forbidden)) expect(port).not.toHaveBeenCalled();
   });
 
-  it('fails a body-only boundary rebase closed when declaration identity is ambiguous', async () => {
+  it('allows body-only-compatible only with adapter-owned declaration identities', async () => {
+    const root = await createTargetWorkspace(initialSource);
+    const initial = await analysisFor(root);
+    const bodyOnly = await analysisFor(root, bodyOnlySource);
+    const initialIr = bridgeWithDeclarationIdentities(initial).unifiedIr;
+    const proposal = proposalFor(initialIr);
+    const inventory = implementationInventory();
+    const inventorySpy = vi.spyOn(inventory, 'build');
+    const fixture = hostFixture(
+      [initial, bodyOnly],
+      proposal,
+      inventory,
+      undefined,
+      bridgeWithDeclarationIdentities,
+    );
+    await fixture.host.initialize({ workspaceId: 'target-workspace', repositoryRoot: root });
+    await fixture.host.submitGate1(gate1Request('target-workspace', proposal, initialIr));
+
+    const compatible = await fixture.host.refresh('target-workspace');
+    expect(compatible).toMatchObject({
+      stage: 'body-only-compatible',
+      freshness: {
+        status: 'body-only-compatible',
+        reasonCodes: expect.not.arrayContaining(['structure-identity-unverified']),
+      },
+    });
+    expect(inventorySpy).toHaveBeenCalledTimes(1);
+    for (const port of Object.values(fixture.forbidden)) expect(port).not.toHaveBeenCalled();
+  });
+
+  it('does not attempt ambiguous body-only rebase without trusted declaration identity', async () => {
     const root = await createTargetWorkspace(initialSource);
     const initial = withAmbiguousCallableIdentity(await analysisFor(root));
     const bodyOnly = withAmbiguousCallableIdentity(await analysisFor(root, bodyOnlySource));
@@ -599,8 +607,14 @@ describe('TargetWorkspaceHost', () => {
     const reviewed = await fixture.host.submitGate1(
       gate1Request('target-workspace', proposal, initialIr),
     );
-    const compatible = await fixture.host.refresh('target-workspace');
-    expect(compatible.stage).toBe('body-only-compatible');
+    const stale = await fixture.host.refresh('target-workspace');
+    expect(stale).toMatchObject({
+      stage: 'stale',
+      freshness: {
+        status: 'stale',
+        reasonCodes: expect.arrayContaining(['structure-identity-unverified']),
+      },
+    });
 
     await expect(fixture.host.rebaseBodyOnly({
       workspaceId: 'target-workspace',
@@ -611,10 +625,10 @@ describe('TargetWorkspaceHost', () => {
       expectedLatestAnalysisSnapshotId: bodyOnly.snapshotId,
       expectedLatestIrId: bodyIr.id,
       expectedLatestIrHash: bodyIr.contentHash,
-    })).rejects.toThrow('ambiguous');
+    })).rejects.toThrow(/body-only-compatible|stale/);
     expect(await fixture.host.get('target-workspace')).toMatchObject({
       stage: 'stale',
-      failure: expect.stringContaining('failed closed'),
+      failure: expect.stringContaining('structure is stale'),
     });
     expect(fixture.discoverModules).toHaveBeenCalledTimes(1);
     expect(inventorySpy).toHaveBeenCalledTimes(1);

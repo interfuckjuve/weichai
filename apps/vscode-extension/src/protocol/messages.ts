@@ -4,6 +4,11 @@ import type {
   EntityImplementationAssessment,
   ImplementationState,
   LanguageId,
+  MigrationRouteDescriptor,
+  MigrationRuntimeCapabilitySnapshot,
+  MigrationRouteSnapshotRef,
+  RepositoryModuleCatalogRef,
+  MigrationTargetRef,
   ModuleTarget,
   SearchCandidate,
   TargetImplementationRollup,
@@ -23,7 +28,26 @@ export type TargetWorkspaceNodeKind =
   | 'module'
   | 'file'
   | 'type'
+  | 'container'
+  | 'member'
   | 'callable';
+
+export interface TargetWorkspaceMigrationRouteOption {
+  /** Exact source x target x strategy capability selected by the trusted host. */
+  route: MigrationRouteDescriptor;
+  /** Degraded-but-runnable capability evidence returned by route resolution. */
+  warnings: string[];
+}
+
+export interface TargetWorkspaceMigrationEligibility {
+  status: 'eligible' | 'blocked';
+  /** Canonical, open-ended target language. Absence always blocks execution. */
+  targetLanguageId?: LanguageId;
+  /** Supported exact routes. An empty set is fail-closed, never "any source". */
+  routeOptions: TargetWorkspaceMigrationRouteOption[];
+  reasonCodes: string[];
+  summary?: string;
+}
 
 export interface TargetWorkspaceTreeNode {
   /** Unique within this tree projection. Aliases of a shared entity use different node IDs. */
@@ -35,6 +59,10 @@ export interface TargetWorkspaceTreeNode {
   /** Points at the primary projection node when a shared entity is shown more than once. */
   aliasOfNodeId?: string;
   kind: TargetWorkspaceNodeKind;
+  /** Adapter-native symbol kind (for example function, method, trait, impl). */
+  nativeKind?: string;
+  /** Human-facing native/entity label; old snapshots fall back to `kind`. */
+  kindLabel?: string;
   name: string;
   qualifiedName?: string;
   /** Repository-relative display path only. It is never accepted in a Webview intent. */
@@ -49,9 +77,8 @@ export interface TargetWorkspaceTreeNode {
   };
   assessment?: EntityImplementationAssessment;
   rollup?: TargetImplementationRollup;
-  /** Only a concrete callable with a host-resolvable target contract may be selected. */
-  eligibleForTranslation: boolean;
-  ineligibilityReason?: string;
+  /** Host-derived implementation + route capability decision. */
+  migrationEligibility: TargetWorkspaceMigrationEligibility;
   children: TargetWorkspaceTreeNode[];
 }
 
@@ -92,6 +119,48 @@ export interface TargetWorkspaceSelectionIdentity {
   entityId: string;
 }
 
+/**
+ * Host-owned binding retained from 01A/01B selection through the active run.
+ * It prevents the migration workflow from collapsing reviewed catalog/module
+ * identity into only a path and signature.
+ */
+export interface TargetWorkspaceMigrationSelection {
+  workspaceId: string;
+  targetWorkspaceSnapshotId: string;
+  targetWorkspaceSnapshotHash: string;
+  selection: TargetWorkspaceSelectionIdentity;
+  target: MigrationTargetRef;
+  module?: {
+    catalogId: string;
+    catalogHash: string;
+    moduleId: string;
+    moduleName: string;
+  };
+  /** Reviewed source/target catalog mapping approved before this run. */
+  moduleMapping: ModuleMappingRunBinding;
+  routeOptions: TargetWorkspaceMigrationRouteOption[];
+}
+
+export interface ModuleMappingRunBinding {
+  mappingRunId: string;
+  sourceCatalog: RepositoryModuleCatalogRef;
+  targetCatalog: RepositoryModuleCatalogRef;
+  mappingProposalId: string;
+  mappingProposalHash: string;
+  mappingReviewId: string;
+  mappingReviewHash: string;
+  executionOverlayId: string;
+  executionOverlayHash: string;
+  runtimeCapabilitySnapshot: MigrationRuntimeCapabilitySnapshot;
+  route: MigrationRouteSnapshotRef;
+  groupIds: string[];
+  mappingIds: string[];
+  sourceModuleIds: string[];
+  targetModuleIds: string[];
+  sourceEntityIds: string[];
+  targetEntityIds: string[];
+}
+
 /** Re-exported for UI filter declarations without duplicating canonical values. */
 export type TargetWorkspaceImplementationState = ImplementationState;
 
@@ -99,6 +168,8 @@ export type TargetWorkspaceImplementationState = ImplementationState;
 export interface PanelInitPayload {
   /** Legacy single-symbol entrypoint. New target-workspace panels may omit it. */
   target?: ModuleTarget;
+  /** Present only when a reviewed target and explicit route capabilities are bound. */
+  migrationSelection?: TargetWorkspaceMigrationSelection;
   /** Optional first 01B snapshot; later refreshes use TARGET_WORKSPACE_SNAPSHOT. */
   targetWorkspace?: TargetWorkspaceSnapshot;
   workspaceRoot: string;
@@ -122,6 +193,7 @@ export type HostToWebviewMessage =
       type: 'TARGET_ENTITY_SELECTED';
       selection: TargetWorkspaceSelectionIdentity;
       target: ModuleTarget;
+      migrationSelection: TargetWorkspaceMigrationSelection;
       /** Only an explicit start intent may leave the 01B browser. */
       activateWorkflow: boolean;
     }

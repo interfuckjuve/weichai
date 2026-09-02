@@ -33,7 +33,68 @@ export interface DifferentialVerificationResult {
   report?: VerificationReport;
   summary: string;
   modificationPlan: string[];
-  reason?: string;
+  reason?: "behavioral-divergence" | "verifier-error" | "verifier-unavailable" | "route-unsupported";
+  unsupportedReason?: VerificationUnsupportedReason;
+}
+
+export type VerificationUnsupportedCode =
+  | "SOURCE_RUNTIME_UNAVAILABLE"
+  | "TARGET_RUNTIME_UNAVAILABLE"
+  | "TARGET_SOURCE_FORM_UNSUPPORTED"
+  | "TARGET_CONTEXT_UNAVAILABLE"
+  | "TARGET_ENTRYPOINT_UNAVAILABLE";
+
+export interface VerificationUnsupportedReason {
+  code: VerificationUnsupportedCode;
+  stage: "source-driver" | "target-driver" | "target-context" | "target-entrypoint";
+  sourceLanguage: Language;
+  targetLanguage: Language;
+  detail: string;
+  retryable: false;
+}
+
+export interface TranslationVerifierRuntimeCapability {
+  language: VerifierLanguage;
+  sourceDriver: true;
+  targetDriver: true;
+  ownerKinds: readonly ("type" | "module")[];
+  sourceExtension: ".java" | ".cs" | ".py" | ".ts";
+  quality: {
+    level: "isolated-differential-execution";
+    provesBehavioralCorrectness: false;
+    limitations: readonly string[];
+  };
+}
+
+export interface TranslationVerifierRouteCapability {
+  source: TranslationVerifierRuntimeCapability;
+  target: TranslationVerifierRuntimeCapability;
+}
+
+const VERIFIER_RUNTIME_CAPABILITIES: readonly TranslationVerifierRuntimeCapability[] = [
+  runtimeCapability("Java", ".java", ["type"]),
+  runtimeCapability("C#", ".cs", ["type"]),
+  runtimeCapability("Python", ".py", ["type", "module"]),
+  runtimeCapability("TypeScript", ".ts", ["type", "module"]),
+];
+
+const VERIFIER_RUNTIME_BY_LANGUAGE = new Map<Language, TranslationVerifierRuntimeCapability>(
+  VERIFIER_RUNTIME_CAPABILITIES.map((capability) => [capability.language, capability]),
+);
+
+export function listTranslationVerifierRuntimeCapabilities(): TranslationVerifierRuntimeCapability[] {
+  return VERIFIER_RUNTIME_CAPABILITIES.map(cloneRuntimeCapability);
+}
+
+export function resolveTranslationVerifierRoute(
+  sourceLanguage: Language,
+  targetLanguage: Language,
+): TranslationVerifierRouteCapability | undefined {
+  const source = VERIFIER_RUNTIME_BY_LANGUAGE.get(sourceLanguage);
+  const target = VERIFIER_RUNTIME_BY_LANGUAGE.get(targetLanguage);
+  return source && target
+    ? { source: cloneRuntimeCapability(source), target: cloneRuntimeCapability(target) }
+    : undefined;
 }
 
 export interface AdaptationVerifier {
@@ -126,7 +187,7 @@ export class TranslationVerifierAdapter implements AdaptationVerifier {
     }
 
     const unsupported = unsupportedReason(input.request, input.targetContext);
-    if (unsupported) return unverified(unsupported);
+    if (unsupported) return unsupportedResult(unsupported);
 
     let plan: VerificationPlan;
     try {
@@ -154,13 +215,19 @@ export class TranslationVerifierAdapter implements AdaptationVerifier {
     input: DifferentialVerificationInput,
     signal?: AbortSignal,
   ): Promise<VerificationPlan> {
-    const sourceLanguage = asVerifierLanguage(input.request.candidate.language);
-    const targetLanguage = asVerifierTargetLanguage(input.request.target.language);
-    if (!sourceLanguage || !targetLanguage) {
-      throw new Error("当前 verifier 仅支持 Java/C# 可执行两侧。");
-    }
-
-    const targetClassName = qualifiedTargetClassName(input.targetContext);
+    const route = resolveTranslationVerifierRoute(
+      input.request.candidate.language,
+      input.request.target.language,
+    );
+    if (!route) throw new Error("Verifier route capability disappeared after preflight validation.");
+    const sourceLanguage = route.source.language;
+    const targetLanguage = route.target.language;
+    const targetInvocation = buildTargetInvocation(
+      input.targetContext,
+      targetLanguage,
+      input.request.target.path,
+    );
+    const targetClassName = targetInvocation.className;
     const classEntry = input.request.target.kind === "class"
       ? selectClassEntryPoint(input.targetContext, targetClassName)
       : undefined;
@@ -182,9 +249,10 @@ export class TranslationVerifierAdapter implements AdaptationVerifier {
       targetContext: input.targetContext.source.containingType,
       target: {
         language: targetLanguage,
+        ...targetInvocation.moduleFields,
         className: targetClassName,
         method: targetMethod,
-        isStatic: targetIsStatic,
+        isStatic: targetInvocation.ownerKind === "module" ? true : targetIsStatic,
       },
     }, signal);
     const description: TestDescription = {
@@ -193,10 +261,11 @@ export class TranslationVerifierAdapter implements AdaptationVerifier {
       target: {
         ...generatedDescription.target,
         language: targetLanguage,
+        ...targetInvocation.moduleFields,
         className: targetClassName,
         method: targetMethod,
         entryKind: classEntry?.entryKind ?? "method",
-        isStatic: targetIsStatic,
+        isStatic: targetInvocation.ownerKind === "module" ? true : targetIsStatic,
         constructorArgs: [],
       },
     };
@@ -207,13 +276,13 @@ export class TranslationVerifierAdapter implements AdaptationVerifier {
     if (!targetFile) throw new Error(`目标文件不存在：${input.request.target.path}`);
     const targetRelativePath = relative(input.projectRoot, targetFile).replaceAll("\\", "/");
     const originalTarget = readFileSync(targetFile, "utf8");
-    const targetFiles = collectProjectSourceFiles(input.projectRoot, targetLanguage);
+    const targetFiles = collectProjectSourceFiles(input.projectRoot, route.target);
     const buildTarget = (generatedCode: string): SideSpec => ({
       language: targetLanguage,
       driverSource: generateDriverSource(description),
       sourceFiles: targetFiles.map((file) =>
         file.relativePath === targetRelativePath
-          ? { ...file, content: compilerInternals.replaceTargetCode(originalTarget, generatedCode) }
+          ? { ...file, content: replaceGeneratedTarget(targetLanguage, originalTarget, generatedCode) }
           : file,
       ),
       projectRoot: input.projectRoot,
@@ -274,21 +343,159 @@ function unverified(reason: string): DifferentialVerificationResult {
   };
 }
 
+function unsupportedResult(reason: VerificationUnsupportedReason): DifferentialVerificationResult {
+  return {
+    status: "unverified",
+    summary: `差分验证未执行：[${reason.code}] ${reason.detail}`,
+    modificationPlan: [],
+    reason: "route-unsupported",
+    unsupportedReason: reason,
+  };
+}
+
 function unsupportedReason(
   request: AdaptationRequest,
   context: TargetModuleContext,
-): string | undefined {
-  if (!asVerifierLanguage(request.candidate.language)) {
-    return `源语言 ${request.candidate.language} 暂无可执行 verifier driver。`;
+): VerificationUnsupportedReason | undefined {
+  const source = VERIFIER_RUNTIME_BY_LANGUAGE.get(request.candidate.language);
+  if (!source) {
+    return verificationUnsupported(
+      "SOURCE_RUNTIME_UNAVAILABLE",
+      "source-driver",
+      request,
+      `源语言 ${request.candidate.language} 未注册可执行 verifier runtime。`,
+    );
   }
-  if (!asVerifierTargetLanguage(request.target.language)) {
-    return `目标语言 ${request.target.language} 暂无可执行 verifier driver。`;
+  const target = VERIFIER_RUNTIME_BY_LANGUAGE.get(request.target.language);
+  if (!target) {
+    return verificationUnsupported(
+      "TARGET_RUNTIME_UNAVAILABLE",
+      "target-driver",
+      request,
+      `目标语言 ${request.target.language} 未注册可执行 verifier runtime。`,
+    );
   }
-  if (!context.source.containingType) return "无法确定目标所属类型。";
+  if (!request.target.path.toLowerCase().endsWith(target.sourceExtension)) {
+    return verificationUnsupported(
+      "TARGET_SOURCE_FORM_UNSUPPORTED",
+      "target-driver",
+      request,
+      `目标 runtime ${request.target.language} 仅声明 ${target.sourceExtension} 源文件能力，无法安全验证 ${request.target.path}。`,
+    );
+  }
+  if (!context.source.containingType) {
+    return verificationUnsupported(
+      "TARGET_CONTEXT_UNAVAILABLE",
+      "target-context",
+      request,
+      "目标上下文不包含可验证的声明或模块级函数。",
+    );
+  }
   if (request.target.kind === "class" && !selectClassEntryPoint(context, qualifiedTargetClassName(context))) {
-    return "目标类没有可识别的可调用成员，暂时无法建立类级验证入口。";
+    return verificationUnsupported(
+      "TARGET_ENTRYPOINT_UNAVAILABLE",
+      "target-entrypoint",
+      request,
+      "目标类型没有可识别的可调用成员，无法建立类级验证入口。",
+    );
   }
   return undefined;
+}
+
+function verificationUnsupported(
+  code: VerificationUnsupportedCode,
+  stage: VerificationUnsupportedReason["stage"],
+  request: AdaptationRequest,
+  detail: string,
+): VerificationUnsupportedReason {
+  return {
+    code,
+    stage,
+    sourceLanguage: request.candidate.language,
+    targetLanguage: request.target.language,
+    detail,
+    retryable: false,
+  };
+}
+
+function runtimeCapability(
+  language: VerifierLanguage,
+  sourceExtension: TranslationVerifierRuntimeCapability["sourceExtension"],
+  ownerKinds: readonly ("type" | "module")[],
+): TranslationVerifierRuntimeCapability {
+  return {
+    language,
+    sourceDriver: true,
+    targetDriver: true,
+    ownerKinds,
+    sourceExtension,
+    quality: {
+      level: "isolated-differential-execution",
+      provesBehavioralCorrectness: false,
+      limitations: [
+        "Only JSON-safe test values and generated executable cases are compared.",
+        "A passing route does not prove concurrency, performance, or uncovered business behavior.",
+      ],
+    },
+  };
+}
+
+function cloneRuntimeCapability(
+  capability: TranslationVerifierRuntimeCapability,
+): TranslationVerifierRuntimeCapability {
+  return {
+    ...capability,
+    ownerKinds: [...capability.ownerKinds],
+    quality: {
+      ...capability.quality,
+      limitations: [...capability.quality.limitations],
+    },
+  };
+}
+
+interface TargetInvocationMetadata {
+  className: string;
+  ownerKind: "type" | "module";
+  moduleFields: {
+    module?: string;
+    ownerKind?: "type" | "module";
+  };
+}
+
+function buildTargetInvocation(
+  context: TargetModuleContext,
+  language: VerifierLanguage,
+  requestedPath: string,
+): TargetInvocationMetadata {
+  const declaration = context.source.containingType.trim();
+  const typeName = /(?:class|interface|record|struct|enum)\s+([A-Za-z_$][\w$]*)/.exec(declaration)?.[1];
+  if (language !== "Python" && language !== "TypeScript") {
+    return {
+      className: qualifiedTargetClassName(context),
+      ownerKind: "type",
+      moduleFields: {},
+    };
+  }
+  const ownerKind = typeName ? "type" : "module";
+  const module = targetModulePath(
+    context.collection.targetFile && context.collection.targetFile !== "."
+      ? context.collection.targetFile
+      : requestedPath,
+    language,
+  );
+  return {
+    className: typeName ?? "",
+    ownerKind,
+    moduleFields: { module, ownerKind },
+  };
+}
+
+function targetModulePath(path: string, language: "Python" | "TypeScript"): string {
+  const normalized = path.replaceAll("\\", "/").replace(/^\.\//, "");
+  const withoutExtension = normalized.replace(language === "Python" ? /\.py$/i : /\.ts$/i, "");
+  if (language === "TypeScript") return withoutExtension;
+  const withoutPackageInit = withoutExtension.replace(/\/(?:__init__)$/, "");
+  return withoutPackageInit.replaceAll("/", ".");
 }
 
 function selectClassEntryPoint(
@@ -314,16 +521,6 @@ function selectClassEntryPoint(
     return { name: "__constructor__", entryKind: "constructor", isStatic: false };
   }
   return undefined;
-}
-
-function asVerifierLanguage(language: Language): VerifierLanguage | undefined {
-  return language === "Java" || language === "C#" || language === "Python" || language === "TypeScript"
-    ? language
-    : undefined;
-}
-
-function asVerifierTargetLanguage(language: Language): "Java" | "C#" | undefined {
-  return language === "Java" || language === "C#" ? language : undefined;
 }
 
 function qualifiedTargetClassName(context: TargetModuleContext): string {
@@ -471,8 +668,21 @@ function resolveTargetFile(root: string, targetPath: string): string | undefined
     : undefined;
 }
 
-function collectProjectSourceFiles(root: string, language: "Java" | "C#"): SideFile[] {
-  const extension = language === "Java" ? ".java" : ".cs";
+function replaceGeneratedTarget(
+  language: VerifierLanguage,
+  original: string,
+  generatedCode: string,
+): string {
+  return language === "Python"
+    ? compilerInternals.replacePythonTargetCode(original, generatedCode)
+    : compilerInternals.replaceTargetCode(original, generatedCode);
+}
+
+function collectProjectSourceFiles(
+  root: string,
+  capability: TranslationVerifierRuntimeCapability,
+): SideFile[] {
+  const extension = capability.sourceExtension;
   const rootPath = resolve(root);
   const files: SideFile[] = [];
   const visit = (directory: string): void => {
