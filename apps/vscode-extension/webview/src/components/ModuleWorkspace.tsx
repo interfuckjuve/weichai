@@ -38,7 +38,8 @@ interface ModuleWorkspaceProps {
   onNodeSelect(node: ModuleExplorerNode): void;
   onTargetSelect(targetId: string): void;
   onRefresh(): void;
-  onOpenHistorySettings(): void;
+  onOpenSettings(): void;
+  settingsOpen: boolean;
   children: React.ReactNode;
 }
 
@@ -54,7 +55,8 @@ export function ModuleWorkspace({
   onNodeSelect,
   onTargetSelect,
   onRefresh,
-  onOpenHistorySettings,
+  onOpenSettings,
+  settingsOpen,
   children,
 }: ModuleWorkspaceProps) {
   const [query, setQuery] = useState('');
@@ -188,24 +190,26 @@ export function ModuleWorkspace({
 
       <section className="module-main">
         <div className="module-main-scroll">
-          {explorer.history.length === 0 ? (
+          {!settingsOpen && explorer.history.length === 0 ? (
             <section className="history-configuration-prompt" role="status">
               <div className="history-configuration-icon"><History size={17} /></div>
               <div>
                 <strong>尚未配置历史仓</strong>
-                <span>添加至少一个本地历史代码仓路径，保存后点击左侧刷新按钮即可加载 01A。</span>
+                <span>添加至少一个本地历史代码仓路径，保存后即可从左侧切换并加载 01A。</span>
               </div>
-              <button type="button" className="secondary-action" onClick={onOpenHistorySettings}>
+              <button type="button" className="secondary-action" onClick={onOpenSettings}>
                 配置路径
               </button>
             </section>
           ) : null}
-          {mode === 'target' ? (
-            <TargetOverview workspace={workspace} selectedNode={selectedNode} />
-          ) : (
-            <HistoryOverview workspace={workspace} selectedNode={selectedNode} />
-          )}
-          {mode === 'target' ? children : null}
+          {!settingsOpen && mode === 'history' ? (
+            <HistoryOverview
+              workspace={workspace}
+              selectedNode={selectedNode}
+              onNodeSelect={onNodeSelect}
+            />
+          ) : null}
+          {settingsOpen || mode === 'target' ? children : null}
         </div>
       </section>
     </div>
@@ -278,34 +282,17 @@ function StatusMark({ status }: { status?: ModuleImplementationStatus }) {
   return <i className={`status-mark is-${status ?? 'unknown'}`} title={statusLabel(status)} />;
 }
 
-function TargetOverview({
-  workspace,
-  selectedNode,
-}: {
-  workspace: ModuleWorkspacePresentation;
-  selectedNode?: ModuleExplorerNode;
-}) {
-  return (
-    <div className="module-overview">
-      <OverviewHeader
-        code="01B"
-        title="目标工作区模块划分"
-        description="识别模块、文件、类与方法，并持续记录实现状态"
-        workspace={workspace}
-      />
-      <StatsGrid workspace={workspace} />
-      <NodeDetail node={selectedNode} targetMode />
-    </div>
-  );
-}
-
 function HistoryOverview({
   workspace,
   selectedNode,
+  onNodeSelect,
 }: {
   workspace: ModuleWorkspacePresentation;
   selectedNode?: ModuleExplorerNode;
+  onNodeSelect(node: ModuleExplorerNode): void;
 }) {
+  const [expanded, setExpanded] = useState(false);
+  const modules = workspace.tree.filter((node) => node.kind === 'module');
   const pipeline = [
     { icon: <Database size={15} />, title: '静态索引', detail: `${workspace.stats.files} 文件 / ${workspace.stats.types + workspace.stats.methods} 符号`, complete: Boolean(workspace.snapshotId) },
     { icon: <GitBranch size={15} />, title: '依赖分析', detail: `${workspace.stats.dependencies} 条依赖证据`, complete: Boolean(workspace.snapshotId) },
@@ -321,130 +308,215 @@ function HistoryOverview({
   ];
   return (
     <div className="module-overview history-overview">
-      <OverviewHeader
-        code="01A"
-        title="历史仓模块划分"
-        description="从历史代码静态证据沉淀模块边界与可复用知识"
-        workspace={workspace}
-      />
-      <div className="analysis-pipeline">
-        {pipeline.map((step, index) => (
-          <div key={step.title} className={`pipeline-step${step.complete ? ' is-complete' : ''}`}>
-            <span className="pipeline-number">{index + 1}</span>
-            <span className="pipeline-icon">{step.icon}</span>
-            <div><strong>{step.title}</strong><small>{step.detail}</small></div>
-            {step.complete ? <CheckCircle2 size={14} /> : <span className="pipeline-pending" />}
+      <section className="history-library-hero">
+        <div className="history-library-title">
+          <div className="overview-glyph"><History size={17} /></div>
+          <div>
+            <span className="history-library-code">01A · 历史模块库</span>
+            <h1>{workspace.name}</h1>
+            <p>浏览可复用模块，并选择本次需求需要参考的代码范围</p>
           </div>
-        ))}
-      </div>
-      <div className="history-grid">
-        <NodeDetail node={selectedNode} />
-        <section className="card summary-card">
-          <div className="card-heading"><span>模块知识摘要</span><FileJson2 size={14} /></div>
-          {workspace.summary.error ? (
-            <div className="summary-empty is-error">
-              <AlertTriangle size={24} />
-              <strong>module-summary.json 无法读取</strong>
-              <span>{workspace.summary.error}</span>
+        </div>
+        <div className={`history-library-state${workspace.snapshotId ? ' is-ready' : ''}`}>
+          <span><i />{workspace.snapshotId ? '模块库已就绪' : '等待分析'}</span>
+          <small title={workspace.rootLabel}>{workspace.rootLabel}</small>
+        </div>
+      </section>
+
+      <HistoryStats workspace={workspace} />
+
+      <section className="history-catalog" aria-label="历史模块目录">
+        <div className="history-section-heading">
+          <div>
+            <h2>模块目录</h2>
+            <p>选择模块后，可继续在左侧定位到具体文件、类或方法</p>
+          </div>
+          <span>{modules.length} 个模块</span>
+        </div>
+        {modules.length > 0 ? (
+          <div className="history-module-grid">
+            {modules.map((module) => {
+              const summary = summarizeModule(module);
+              const selected = selectedNode ? containsNode(module, selectedNode.id) : false;
+              return (
+                <button
+                  key={module.id}
+                  type="button"
+                  className={`history-module-card${selected ? ' is-selected' : ''}`}
+                  aria-pressed={selected}
+                  onClick={() => onNodeSelect(module)}
+                >
+                  <span className="history-module-card-top">
+                    <span className="history-module-icon"><Box size={15} /></span>
+                    <span className="history-module-languages">
+                      {summary.languages.length > 0
+                        ? summary.languages.slice(0, 2).map((language) => <small key={language}>{language}</small>)
+                        : <small>代码模块</small>}
+                    </span>
+                  </span>
+                  <strong>{module.name}</strong>
+                  <span className="history-module-description">
+                    {module.description ?? `包含 ${summary.files} 个代码文件，可作为需求实现的检索范围。`}
+                  </span>
+                  <span className="history-module-card-footer">
+                    <span>{summary.files} 文件</span>
+                    <span>{summary.types} 类型</span>
+                    <span>{summary.methods} 方法</span>
+                    <ChevronRight size={13} />
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="history-catalog-empty">
+            <Box size={22} />
+            <div>
+              <strong>暂无可浏览模块</strong>
+              <span>{workspace.error ?? '重新分析该历史仓后，模块会显示在这里。'}</span>
             </div>
-          ) : workspace.summary.exists ? (
-            <dl className="compact-definition-list">
-              <div><dt>计划</dt><dd>{workspace.summary.planId}</dd></div>
-              <div><dt>状态</dt><dd>{workspace.summary.status}</dd></div>
-              <div><dt>模块</dt><dd>{workspace.summary.moduleCount}</dd></div>
-              <div><dt>执行波次</dt><dd>{workspace.summary.waveCount}</dd></div>
-              <div><dt>审批</dt><dd>{workspace.summary.approvalsCurrent ? '当前有效' : '需重新确认'}</dd></div>
-            </dl>
-          ) : (
-            <div className="summary-empty">
-              <FileJson2 size={24} />
-              <strong>未发现 module-summary.json</strong>
-              <span>完成 Agent 模块计划和受信任审批后，由 Host 事务生成。</span>
-            </div>
-          )}
-        </section>
+          </div>
+        )}
+      </section>
+
+      <HistorySelectionPreview node={selectedNode} />
+
+      <div className="history-analysis-fold">
+        <button type="button" className="overview-toggle" onClick={() => setExpanded((value) => !value)}>
+          {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+          {expanded ? '收起分析信息' : '查看分析信息'}
+        </button>
+        {!expanded ? <span>4 项技术状态</span> : null}
       </div>
+      {expanded ? (
+        <>
+          <div className="analysis-pipeline">
+            {pipeline.map((step, index) => (
+              <div key={step.title} className={`pipeline-step${step.complete ? ' is-complete' : ''}`}>
+                <span className="pipeline-number">{index + 1}</span>
+                <span className="pipeline-icon">{step.icon}</span>
+                <div><strong>{step.title}</strong><small>{step.detail}</small></div>
+                {step.complete ? <CheckCircle2 size={14} /> : <span className="pipeline-pending" />}
+              </div>
+            ))}
+          </div>
+          <div className="history-grid">
+            <section className="card summary-card">
+              <div className="card-heading"><span>模块知识摘要</span><FileJson2 size={14} /></div>
+              {workspace.summary.error ? (
+                <div className="summary-empty is-error">
+                  <AlertTriangle size={24} />
+                  <strong>module-summary.json 无法读取</strong>
+                  <span>{workspace.summary.error}</span>
+                </div>
+              ) : workspace.summary.exists ? (
+                <dl className="compact-definition-list">
+                  <div><dt>计划</dt><dd>{workspace.summary.planId}</dd></div>
+                  <div><dt>状态</dt><dd>{workspace.summary.status}</dd></div>
+                  <div><dt>模块</dt><dd>{workspace.summary.moduleCount}</dd></div>
+                  <div><dt>执行波次</dt><dd>{workspace.summary.waveCount}</dd></div>
+                  <div><dt>审批</dt><dd>{workspace.summary.approvalsCurrent ? '当前有效' : '需重新确认'}</dd></div>
+                </dl>
+              ) : (
+                <div className="summary-empty">
+                  <FileJson2 size={24} />
+                  <strong>未发现 module-summary.json</strong>
+                  <span>完成 Agent 模块计划和受信任审批后，由 Host 事务生成。</span>
+                </div>
+              )}
+            </section>
+          </div>
+        </>
+      ) : null}
     </div>
   );
 }
 
-function OverviewHeader({
-  code,
-  title,
-  description,
-  workspace,
-}: {
-  code: string;
-  title: string;
-  description: string;
-  workspace: ModuleWorkspacePresentation;
-}) {
-  return (
-    <div className="overview-header">
-      <div className="overview-glyph"><Box size={17} /></div>
-      <div>
-        <h1><span>{code}</span> {title}</h1>
-        <p>{description}</p>
-      </div>
-      <div className="snapshot-meta">
-        <span>{workspace.snapshotId ? `快照 ${workspace.snapshotId.slice(0, 12)}` : '无可用快照'}</span>
-        {workspace.revision ? <code>{workspace.revision.slice(0, 10)}</code> : null}
-      </div>
-    </div>
-  );
-}
-
-function StatsGrid({ workspace }: { workspace: ModuleWorkspacePresentation }) {
+function HistoryStats({ workspace }: { workspace: ModuleWorkspacePresentation }) {
   const stats = [
-    ['模块', workspace.stats.modules, 'M'],
-    ['文件', workspace.stats.files, 'F'],
+    ['可复用模块', workspace.stats.modules, 'M'],
+    ['代码文件', workspace.stats.files, 'F'],
     ['类 / 类型', workspace.stats.types, 'C'],
-    ['方法', workspace.stats.methods, 'ƒ'],
-    ['已完成', workspace.stats.implemented, '✓'],
-    ['未完成', workspace.stats.unimplemented, '○'],
+    ['方法 / 函数', workspace.stats.methods, 'ƒ'],
   ] as const;
   return (
-    <div className="module-stats">
+    <div className="history-stats" aria-label="历史仓规模">
       {stats.map(([label, value, glyph]) => (
-        <div key={label} className={`stat-card is-${label === '已完成' ? 'done' : label === '未完成' ? 'pending' : 'neutral'}`}>
-          <span>{glyph}</span><div><strong>{value}</strong><small>{label}</small></div>
+        <div key={label}>
+          <span>{glyph}</span>
+          <strong>{value}</strong>
+          <small>{label}</small>
         </div>
       ))}
     </div>
   );
 }
 
-function NodeDetail({ node, targetMode = false }: { node?: ModuleExplorerNode; targetMode?: boolean }) {
+function HistorySelectionPreview({ node }: { node?: ModuleExplorerNode }) {
+  if (!node) {
+    return (
+      <section className="history-selection-preview is-empty">
+        <Box size={16} />
+        <span>从模块卡片或左侧模块树中选择一项，查看它的检索范围。</span>
+      </section>
+    );
+  }
+  const summary = summarizeModule(node);
   return (
-    <section className="card node-detail-card">
-      <div className="card-heading">
-        <span>{targetMode ? '当前目标详情' : '模块项详情'}</span>
-        {node?.targetId ? <StatusPill status={node.implementationStatus} /> : null}
+    <section className="history-selection-preview" aria-label="当前选择">
+      <div className="history-selection-heading">
+        <span>当前选择</span>
+        <small>{kindLabel(node.kind)}</small>
       </div>
-      {!node ? (
-        <p className="muted-copy">从左侧模块树选择一个模块、文件、类或方法查看详情。</p>
-      ) : (
-        <div className="node-detail">
-          <div className="node-detail-title"><NodeIcon node={node} /><strong>{node.name}</strong><small>{kindLabel(node.kind)}</small></div>
-          {node.description ? <p>{node.description}</p> : null}
-          <dl className="compact-definition-list">
-            {node.path ? <div><dt>所属文件</dt><dd><code>{node.path}</code></dd></div> : null}
-            {node.language ? <div><dt>语言</dt><dd>{node.language}</dd></div> : null}
-            {node.line ? <div><dt>起始行</dt><dd>{node.line}</dd></div> : null}
-            {node.children.length ? <div><dt>子项</dt><dd>{node.children.length}</dd></div> : null}
-          </dl>
-          {node.signature ? <pre className="signature-preview"><code>{node.signature}</code></pre> : null}
-          {targetMode && node.targetId ? (
-            <p className="target-reset-note">选择不同的类或方法会建立新的 Host 文件快照，并重置下游需求、候选与补丁。</p>
-          ) : null}
+      <div className="history-selection-body">
+        <span className="history-selection-icon"><NodeIcon node={node} /></span>
+        <div>
+          <strong>{node.name}</strong>
+          <p>{node.description ?? node.signature ?? '该项将作为历史代码检索与复用的参考范围。'}</p>
+          <div className="history-selection-meta">
+            {node.path ? <code title={node.path}>{node.path}</code> : null}
+            {node.language ? <span>{node.language}</span> : null}
+            {summary.files > 0 ? <span>{summary.files} 文件</span> : null}
+            {summary.types > 0 ? <span>{summary.types} 类型</span> : null}
+            {summary.methods > 0 ? <span>{summary.methods} 方法</span> : null}
+          </div>
         </div>
-      )}
+      </div>
     </section>
   );
 }
 
-function StatusPill({ status }: { status?: ModuleImplementationStatus }) {
-  return <span className={`status-pill is-${status ?? 'unknown'}`}><StatusMark status={status} />{statusLabel(status)}</span>;
+interface ModuleContentsSummary {
+  files: number;
+  types: number;
+  methods: number;
+  languages: string[];
+}
+
+function summarizeModule(node: ModuleExplorerNode): ModuleContentsSummary {
+  const summary: ModuleContentsSummary = { files: 0, types: 0, methods: 0, languages: [] };
+  const languages = new Set<string>();
+  visitNode(node, (current) => {
+    if (current.kind === 'file') summary.files += 1;
+    if (['class', 'interface', 'record', 'struct', 'enum'].includes(current.kind)) summary.types += 1;
+    if (['method', 'constructor', 'function'].includes(current.kind)) summary.methods += 1;
+    if (current.language) languages.add(current.language);
+  });
+  summary.languages = [...languages].sort((left, right) => left.localeCompare(right));
+  return summary;
+}
+
+function containsNode(root: ModuleExplorerNode, id: string): boolean {
+  let found = false;
+  visitNode(root, (node) => {
+    if (node.id === id) found = true;
+  });
+  return found;
+}
+
+function visitNode(node: ModuleExplorerNode, visit: (node: ModuleExplorerNode) => void): void {
+  visit(node);
+  node.children.forEach((child) => visitNode(child, visit));
 }
 
 function activeWorkspace(

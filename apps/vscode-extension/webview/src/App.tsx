@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useReducer, useRef, useState } from 'react';
+import { Settings2 } from 'lucide-react';
 import type { RepositoryStatus, ServiceStatus } from '../../src/ui-types';
 import type { ModuleExplorerMode, ModuleExplorerNode } from '../../src/ui-types';
 import {
@@ -9,7 +10,7 @@ import {
   type WorkflowStage,
   type WorkflowState,
 } from '@forexplore/workflow-core';
-import type { PanelInitPayload } from '../../src/protocol/messages';
+import type { PanelInitPayload, PanelSettingsPresentation } from '../../src/protocol/messages';
 import { AdaptationStage } from './components/AdaptationStage';
 import { CandidatesStage } from './components/CandidatesStage';
 import { FooterStatus } from './components/FooterStatus';
@@ -17,6 +18,7 @@ import { PatchStage } from './components/PatchStage';
 import { RequirementStage } from './components/RequirementStage';
 import { StepRail } from './components/StepRail';
 import { ModuleWorkspace } from './components/ModuleWorkspace';
+import { SettingsPanel } from './components/SettingsPanel';
 import { errorEvent } from './errors';
 import { createMessageBus, type MessageBus } from './vscode-api';
 
@@ -32,9 +34,12 @@ export default function App() {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [refreshingExplorer, setRefreshingExplorer] = useState(false);
   const [visibleStep, setVisibleStep] = useState<WorkflowStage>('target');
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsSaving, setSettingsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const pendingRef = useRef<WorkflowState['pending']>(null);
   const targetIdRef = useRef<string | null>(null);
+  const settingsRef = useRef<PanelSettingsPresentation>({ repositoryPaths: [], topK: 4 });
   pendingRef.current = state.pending;
   targetIdRef.current = state.target?.id ?? null;
 
@@ -43,6 +48,7 @@ export default function App() {
     return bus.subscribe((message) => {
       switch (message.type) {
         case 'INIT':
+          settingsRef.current = message.payload.settings;
           setPayload(message.payload);
           setRepositoryStatuses(message.payload.repositoryStatuses);
           setServiceStatus(message.payload.serviceStatus);
@@ -53,6 +59,7 @@ export default function App() {
             dispatch({ type: 'SELECT_TARGET', target: message.payload.target });
             setVisibleStep('requirement');
           }
+          dispatch({ type: 'SET_TOP_K', value: message.payload.settings.topK });
           break;
         case 'SEARCH_RESULT':
           dispatch({ type: 'SEARCH_SUCCESS', candidates: message.candidates });
@@ -82,14 +89,24 @@ export default function App() {
           setPayload((current) => current ? { ...current, target: message.target } : current);
           if (targetIdRef.current !== message.target.id) {
             dispatch({ type: 'SELECT_TARGET', target: message.target });
+            dispatch({ type: 'SET_TOP_K', value: settingsRef.current.topK });
             setVisibleStep('requirement');
           }
           setExplorerMode('target');
           setSelectedNodeId(null);
+          setSettingsOpen(false);
+          break;
+        case 'SETTINGS_UPDATED':
+          settingsRef.current = message.settings;
+          setPayload((current) => current ? { ...current, settings: message.settings } : current);
+          dispatch({ type: 'SET_TOP_K', value: message.settings.topK });
+          setSettingsSaving(false);
+          setSettingsOpen(false);
           break;
         case 'ERROR': {
           setError(message.message);
           setRefreshingExplorer(false);
+          setSettingsSaving(false);
           const event = errorEvent(pendingRef.current, message.message);
           if (event) dispatch(event);
           break;
@@ -145,14 +162,24 @@ export default function App() {
     bus.post({ type: 'OPEN_TARGET' });
   }
 
+  function handleCopyTargetPath(): void {
+    bus.post({ type: 'COPY_TARGET_PATH' });
+  }
+
+  function handleRevealTargetInExplorer(): void {
+    bus.post({ type: 'REVEAL_TARGET_IN_EXPLORER' });
+  }
+
   function handleRefreshModuleExplorer(): void {
     setError(null);
     setRefreshingExplorer(true);
     bus.post({ type: 'REFRESH_MODULE_EXPLORER' });
   }
 
-  function handleOpenRepositorySettings(): void {
-    bus.post({ type: 'OPEN_REPOSITORY_SETTINGS' });
+  function handleSaveSettings(settings: PanelSettingsPresentation): void {
+    setError(null);
+    setSettingsSaving(true);
+    bus.post({ type: 'SAVE_SETTINGS', settings });
   }
 
   function handleSelectWorkspaceTarget(targetId: string): void {
@@ -162,6 +189,7 @@ export default function App() {
   }
 
   function handleExplorerModeChange(mode: ModuleExplorerMode): void {
+    setSettingsOpen(false);
     setExplorerMode(mode);
     setSelectedNodeId(null);
     if (
@@ -176,6 +204,7 @@ export default function App() {
   function handleStepChange(step: WorkflowStage): void {
     if (getStepStatus(step, state.stage) === 'upcoming') return;
     setExplorerMode('target');
+    setSettingsOpen(false);
     setVisibleStep(step);
   }
 
@@ -201,6 +230,14 @@ export default function App() {
           activeStep={visibleStep}
           onStepChange={handleStepChange}
         />
+        <button
+          type="button"
+          className={`header-settings-button${settingsOpen ? ' is-active' : ''}`}
+          onClick={() => setSettingsOpen((open) => !open)}
+          aria-pressed={settingsOpen}
+        >
+          <Settings2 size={14} /> 设置
+        </button>
       </header>
 
       <ModuleWorkspace
@@ -212,10 +249,11 @@ export default function App() {
         refreshing={refreshingExplorer}
         onModeChange={handleExplorerModeChange}
         onHistoryChange={(id) => { setHistoryId(id); setSelectedNodeId(null); }}
-        onNodeSelect={(node: ModuleExplorerNode) => setSelectedNodeId(node.id)}
+        onNodeSelect={(node: ModuleExplorerNode) => { setSelectedNodeId(node.id); setSettingsOpen(false); }}
         onTargetSelect={handleSelectWorkspaceTarget}
         onRefresh={handleRefreshModuleExplorer}
-        onOpenHistorySettings={handleOpenRepositorySettings}
+        onOpenSettings={() => setSettingsOpen(true)}
+        settingsOpen={settingsOpen}
       >
         {error ? (
           <div className="error-banner" role="alert">
@@ -223,41 +261,54 @@ export default function App() {
           </div>
         ) : null}
 
-        <main className="stage-body">
-        {visibleStep === 'requirement' ? (
-          <RequirementStage
-            state={state}
-            target={state.target}
-            dispatch={dispatch}
+        {settingsOpen ? (
+          <SettingsPanel
+            topK={payload.settings.topK}
+            repositoryPaths={payload.settings.repositoryPaths}
             repositoryStatuses={repositoryStatuses}
-            onSearch={handleSearch}
+            saving={settingsSaving}
             onCheckRepositories={handleCheckRepositories}
+            onSave={handleSaveSettings}
+            onCancel={() => setSettingsOpen(false)}
           />
-        ) : null}
+        ) : (
+          <main className="stage-body">
+            {visibleStep === 'requirement' ? (
+              <RequirementStage
+                key={state.target.id}
+                state={state}
+                target={state.target}
+                dispatch={dispatch}
+                onSearch={handleSearch}
+                onCopyTargetPath={handleCopyTargetPath}
+                onRevealTarget={handleRevealTargetInExplorer}
+              />
+            ) : null}
 
-        {visibleStep === 'candidates' ? (
-          <CandidatesStage
-            state={state}
-            dispatch={dispatch}
-            adaptationProvider={payload.adaptationProvider}
-            onSelectCandidate={handleSelectCandidate}
-            onAdapt={handleAdapt}
-          />
-        ) : null}
+            {visibleStep === 'candidates' ? (
+              <CandidatesStage
+                state={state}
+                dispatch={dispatch}
+                adaptationProvider={payload.adaptationProvider}
+                onSelectCandidate={handleSelectCandidate}
+                onAdapt={handleAdapt}
+              />
+            ) : null}
 
-        {visibleStep === 'adaptation' ? (
-          <AdaptationStage state={state} candidate={candidate} />
-        ) : null}
+            {visibleStep === 'adaptation' ? (
+              <AdaptationStage state={state} candidate={candidate} />
+            ) : null}
 
-        {visibleStep === 'patch' && state.adaptation ? (
-          <PatchStage
-            state={state}
-            onApply={handleApply}
-            onBack={() => dispatch({ type: 'RETURN_TO_CANDIDATES' })}
-            onOpenTarget={handleOpenTarget}
-          />
-        ) : null}
-        </main>
+            {visibleStep === 'patch' && state.adaptation ? (
+              <PatchStage
+                state={state}
+                onApply={handleApply}
+                onBack={() => dispatch({ type: 'RETURN_TO_CANDIDATES' })}
+                onOpenTarget={handleOpenTarget}
+              />
+            ) : null}
+          </main>
+        )}
       </ModuleWorkspace>
 
       <FooterStatus

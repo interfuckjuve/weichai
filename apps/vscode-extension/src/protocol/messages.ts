@@ -14,11 +14,17 @@ import type {
 export interface PanelInitPayload {
   target: ModuleTarget;
   workspaceRoot: string;
+  settings: PanelSettingsPresentation;
   repositoryStatuses: RepositoryStatus[];
   serviceStatus: ServiceStatus;
   moduleExplorer: ModuleExplorerPresentation;
   searchProvider: 'SeekDB';
   adaptationProvider: 'DeepSeek';
+}
+
+export interface PanelSettingsPresentation {
+  repositoryPaths: string[];
+  topK: number;
 }
 
 /** Messages the extension host posts into the Webview. */
@@ -31,6 +37,7 @@ export type HostToWebviewMessage =
   | { type: 'SERVICE_STATUS'; status: ServiceStatus }
   | { type: 'MODULE_EXPLORER'; explorer: ModuleExplorerPresentation }
   | { type: 'TARGET_SELECTED'; target: ModuleTarget }
+  | { type: 'SETTINGS_UPDATED'; settings: PanelSettingsPresentation }
   | { type: 'ERROR'; message: string };
 
 /**
@@ -49,8 +56,10 @@ export type WebviewToHostMessage =
   | { type: 'APPLY_CURRENT_RUN' }
   | { type: 'CHECK_REPOSITORIES' }
   | { type: 'REFRESH_MODULE_EXPLORER' }
-  | { type: 'OPEN_REPOSITORY_SETTINGS' }
+  | { type: 'SAVE_SETTINGS'; settings: PanelSettingsPresentation }
   | { type: 'SELECT_WORKSPACE_TARGET'; targetId: string }
+  | { type: 'COPY_TARGET_PATH' }
+  | { type: 'REVEAL_TARGET_IN_EXPLORER' }
   | { type: 'OPEN_TARGET' };
 
 const hostMessageTypes = new Set<string>([
@@ -62,6 +71,7 @@ const hostMessageTypes = new Set<string>([
   'SERVICE_STATUS',
   'MODULE_EXPLORER',
   'TARGET_SELECTED',
+  'SETTINGS_UPDATED',
   'ERROR',
 ]);
 
@@ -74,9 +84,15 @@ export function isWebviewToHostMessage(value: unknown): value is WebviewToHostMe
     case 'APPLY_CURRENT_RUN':
     case 'CHECK_REPOSITORIES':
     case 'REFRESH_MODULE_EXPLORER':
-    case 'OPEN_REPOSITORY_SETTINGS':
+    case 'COPY_TARGET_PATH':
+    case 'REVEAL_TARGET_IN_EXPLORER':
     case 'OPEN_TARGET':
       return hasOnlyKeys(message, ['type']);
+    case 'SAVE_SETTINGS':
+      return (
+        hasOnlyKeys(message, ['type', 'settings']) &&
+        isPanelSettings(message.settings)
+      );
     case 'START_SEARCH':
       return (
         hasOnlyKeys(message, ['type', 'requirement', 'topK']) &&
@@ -110,6 +126,23 @@ export function isWebviewToHostMessage(value: unknown): value is WebviewToHostMe
     default:
       return false;
   }
+}
+
+function isPanelSettings(value: unknown): value is PanelSettingsPresentation {
+  if (typeof value !== 'object' || value === null) return false;
+  const settings = value as Record<string, unknown>;
+  return (
+    hasOnlyKeys(settings, ['repositoryPaths', 'topK']) &&
+    Array.isArray(settings.repositoryPaths) &&
+    settings.repositoryPaths.length <= 20 &&
+    settings.repositoryPaths.every(
+      (path) => typeof path === 'string' && path.trim().length > 0 && path.length <= 1_000,
+    ) &&
+    typeof settings.topK === 'number' &&
+    Number.isInteger(settings.topK) &&
+    settings.topK >= 1 &&
+    settings.topK <= 10
+  );
 }
 
 function hasOnlyKeys(value: Record<string, unknown>, keys: string[]): boolean {

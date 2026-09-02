@@ -1,9 +1,19 @@
 import { Check } from 'lucide-react';
 import {
   getStepStatus,
-  workflowSteps,
   type WorkflowStage,
 } from '@forexplore/workflow-core';
+
+const panelSteps: Array<{
+  id: WorkflowStage;
+  label: string;
+  shortLabel: string;
+}> = [
+  { id: 'requirement', label: '定义任务', shortLabel: '01' },
+  { id: 'candidates', label: '选择方案', shortLabel: '02' },
+  { id: 'adaptation', label: '翻译 / 桥接', shortLabel: '03' },
+  { id: 'patch', label: '校验与回填', shortLabel: '04' },
+];
 
 interface StepRailProps {
   stage: WorkflowStage;
@@ -14,7 +24,7 @@ interface StepRailProps {
 export function StepRail({ stage, activeStep, onStepChange }: StepRailProps) {
   return (
     <nav className="step-rail" aria-label="工作流进度">
-      {workflowSteps.map((step, index) => {
+      {panelSteps.map((step, index) => {
         const status = getStepStatus(step.id, stage);
         const navigable = status !== 'upcoming';
         return (
@@ -36,7 +46,7 @@ export function StepRail({ stage, activeStep, onStepChange }: StepRailProps) {
               </span>
               <span className="step-label">{step.label}</span>
             </button>
-            {index < workflowSteps.length - 1 ? <span className="step-line" /> : null}
+            {index < panelSteps.length - 1 ? <span className="step-line" /> : null}
           </div>
         );
       })}

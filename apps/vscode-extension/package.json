@@ -104,6 +104,13 @@
           "default": [],
           "description": "历史代码仓的本地目录。未配置时翻译面板会提示添加路径；本地可读不代表目录已被远端检索服务索引。"
         },
+        "forexplore.topK": {
+          "type": "number",
+          "default": 4,
+          "minimum": 1,
+          "maximum": 10,
+          "description": "每次检索返回的候选方案数量。"
+        },
         "forexplore.retrievalApiUrl": {
           "type": "string",
           "default": "http://127.0.0.1:8787",
