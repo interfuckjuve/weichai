@@ -4,11 +4,52 @@ ForeXplore 将企业已有实现作为迁移证据：在任意受支持语言的
 
 当前真实自动迁移能力边界是 **`translate` 策略下的 Java → C#**。它不是通用代码生成器；候选排序分也不是正确率或兼容概率。
 
+## 01B 目标工作区模块划分
+
+01B 对当前待处理的目标工程复用 01A 的静态分析、开放语言 adapter registry、统一 IR、Module Discovery Agent 和第一道模块边界人审。接受边界后，宿主再对每个 callable 生成静态实现状态，并确定性聚合到 class、file、module 和 workspace：
+
+- `implemented`：检测到非占位实现体；不代表业务行为正确。
+- `unimplemented`：检测到高确定性的显式 stub。
+- `partial`：检测到 TODO、占位返回等不完整迹象。
+- `unknown`：证据不足或当前语言没有实现状态 detector。
+- `not-applicable`：接口、abstract/extern 声明或明确排除对象，不进入完成率分母。
+
+使用顺序：
+
+1. **ForeXplore: 初始化 01B 目标工作区**：固定分析快照并生成模块边界提案；证据不足时停止，不会把目标骨架发布为来源知识。
+2. **ForeXplore: 审阅 01B 目标模块边界**：接受 Gate 1 后才建立内容寻址的实现状态目录。
+3. **ForeXplore: 打开 01B 目标工作区**：浏览 module → file → type → callable，按五态搜索/筛选；只有当前快照中宿主可解析的 concrete callable 可进入翻译。
+4. 在树中先选择方法核对证据，再显式点击“开始翻译”。Top-1 候选仍不会被自动选择。
+5. 若仅方法体变化，刷新会进入 `body-only-compatible`。运行 **ForeXplore: 重映射 01B 方法体兼容变更** 只会生成绑定新 IR 的边界提案；仍需再次 Gate 1 人审并重新检测状态。结构变化则必须重新发现和人审。
+
+若 Gate 1 已接受但 detector 临时失败，运行 **ForeXplore: 重试 01B 实现状态检测**。宿主会先重新校验工作区仍是同一快照；只重试状态清单，不重新伪造审批。01B 记录保存在扩展的 Host-owned 本地存储中，扩展重启后仍会在打开/启动时重新扫描并验证 freshness。
+
+写回或恢复文件后，旧 01B 快照立即失效，后续检索、适配和再次写回都会由宿主复验并拒绝旧 snapshot/hash/entity。01B 不运行 Summary Agent、第二道人审、SQLite knowledge registry、SeekDB module active head、发布补偿或显式撤销；这些只属于 01A 存量仓知识生命周期。
+
+## 存量仓模块知识入库
+
+仓库分析采用开放 `LanguageId` 和可注册 adapter；这使入库契约可扩展，但不代表每种语言都有相同的语义深度，也不扩大上述 Java → C# 迁移边界。完整入库和撤销按五个受信任命令推进：
+
+- **ForeXplore: 索引模块迁移仓库**：固定工作区快照，生成 profile、analysis shards、统一 IR 和 Module Discovery proposal；证据不足时进入 `partial`，充分时停在 `awaiting-module-review`。
+- **ForeXplore: 审阅仓库模块边界**：第一道人审，只批准文件/实体/API/依赖的模块归属；接受后自动启动证据收集和 Summary Agent，不能直接发布。
+- **ForeXplore: 生成模块知识摘要提案**：重试 Summary Agent 阶段；每模块提案必须绑定有界 EvidenceBundle，完成后停在 `awaiting-summary-review`。
+- **ForeXplore: 审阅并发布模块知识**：第二道人审，逐模块 accept/revise/reject。全部接受后才写本地不可变知识、SQLite publication registry，并向独立 SeekDB 模块表 stage/validate/CAS activate；修订只重跑相应模块。
+- **ForeXplore: 撤销当前模块知识发布**：只对 `ready` 发布执行逻辑撤销；先从正式模块索引移除当前代，再同步本地 SQLite 和不可变 manifest，存在前代时恢复前代。历史制品不物理删除。
+
+模块索引写入默认关闭。检索服务与扩展宿主必须分别拥有同一令牌：
+
+```powershell
+$env:RETRIEVAL_MODULE_INDEX_TOKEN = '<random-secret>'
+$env:FOREXPLORE_MODULE_INDEX_WRITER_TOKEN = $env:RETRIEVAL_MODULE_INDEX_TOKEN
+```
+
+令牌只从进程环境读取，不接受工作区设置，以免仓库内容为自己授予发布权限。正式查询还受服务端 `RETRIEVAL_ALLOWED_REPOSITORIES` 限制。发布作用域是 `(repositoryId, channel)`；默认 channel 为 `branch:main`，发布前仍会要求人工确认。
+
 ## 模块迁移计划
 
-模块级迁移计划由 VS Code 扩展宿主负责，不经 Webview 提交源码、计划或写入请求。当前提供六个受信任命令：
+模块级迁移计划由 VS Code 扩展宿主负责，不经 Webview 提交源码、计划或写入请求。迁移执行部分提供六个受信任命令：
 
-- **ForeXplore: 索引模块迁移仓库**：对本地工作区执行 Java/C# 静态分析，并把不可变快照写入 `.forexplore/analysis/<snapshotId>.json`。默认收集可复现的语法证据；只有受信任的 JDK/Roslyn 绑定适配器明确确认的精确边才会标记为语义证据，编译器可用性探测不会提升证据等级。
+- **ForeXplore: 索引模块迁移仓库**：对本地工作区执行已注册语言 adapter 的静态分析，并把不可变快照写入 `.forexplore/analysis/<snapshotId>.json`。默认收集可复现的语法证据；只有受信任的深分析 adapter 明确确认的精确边才会标记为语义证据，编译器可用性探测不会提升证据等级。
 - **ForeXplore: 审阅模块迁移计划**：只向适配服务发送 `snapshotId`、目标和不可变约束；服务端从自己持有的分析制品读取证据。扩展宿主验证 Agenticodex 提案、确定性生成波次，并在只读文档中展示计划和证据。
 - **ForeXplore: 审阅下一迁移波次**：只有整份计划已对同一快照审批后才会展示依赖已提交的下一波次。该命令只显示调度、静态证据和可供后续补丁审阅的范围；它不创建波次审批、不准备补丁，也不提交代码。
 - **ForeXplore: 导入并准备下一迁移波次**：从本机文件选择器读取严格的仅补丁 JSON，在隔离 worktree 中运行宿主范围检查和本地联合验证，并生成待审阅的 `preparedHash`。
@@ -94,8 +135,8 @@ ForeXplore 将企业已有实现作为迁移证据：在任意受支持语言的
 
 1. 在仓库根目录运行 `npm run dev:extension`。脚本会启动 SeekDB、两个本地服务，并打开 Extension Development Host。
 2. 在开发宿主中打开目标工作区；默认夹具是 Java 工程 `fixtures/target-system/commons-fileupload-java-skeleton`。
-3. 在 `src/main/java/org/apache/commons/fileupload/FileUploadBase.java` 选择 `parseRequest(RequestContext)`、`getItemIterator(RequestContext)` 或其他待实现方法，运行 **ForeXplore: 开始代码翻译**。
-4. 输入需求并检索全部语料候选。任意已支持语言的候选均可继续生成目标语言补丁。
+3. 若要使用 01B，依次运行初始化、模块边界人审和打开目标工作区命令，再从目标树中显式启动某个方法；也可继续直接在编辑器中选择目标方法并运行 **ForeXplore: 开始代码翻译**。
+4. 输入需求并检索语料候选。只有真实 capability matrix 支持的语言对才能继续生成目标语言补丁；当前真实边界仍是 Java → C#。
 
 插件只调用真实的 SeekDB 检索服务和语言无关的适配服务。任一服务不可用时，插件会报错，不会回退到本地样例。
 
@@ -127,6 +168,7 @@ npm run dev:adaptation
   "forexplore.executionMode": "real",
   "forexplore.retrievalApiUrl": "http://127.0.0.1:8787",
   "forexplore.adaptationApiUrl": "http://127.0.0.1:8788",
+  "forexplore.repositoryKnowledgeChannel": "branch:main",
   "forexplore.repositoryPaths": [
     "E:/CS/devsys/weichai/fixtures/code-corpus"
   ]
@@ -164,8 +206,8 @@ npm run test:integration --workspace forexplore-vscode
 
 ## 消息协议
 
-Webview → 宿主：`READY`、`START_SEARCH`、`SELECT_CANDIDATE`、`START_ADAPT`、`APPLY_CURRENT_RUN`、`CHECK_REPOSITORIES`、`OPEN_TARGET`。
+Webview → 宿主：`READY`、`REFRESH_TARGET_WORKSPACE`、`SELECT_TARGET_ENTITY`、`START_TARGET_TRANSLATION`、`START_SEARCH`、`SELECT_CANDIDATE`、`START_ADAPT`、`APPLY_CURRENT_RUN`、`CHECK_REPOSITORIES`、`OPEN_TARGET`。
 
-宿主 → Webview：`INIT`、`SEARCH_RESULT`、`ADAPT_RESULT`、`APPLY_RESULT`、`REPOSITORY_STATUS`、`SERVICE_STATUS`、`ERROR`。
+宿主 → Webview：`INIT`、`TARGET_WORKSPACE_SNAPSHOT`、`TARGET_WORKSPACE_REFRESHING`、`TARGET_WORKSPACE_INVALIDATED`、`TARGET_ENTITY_SELECTED`、`SEARCH_RESULT`、`ADAPT_RESULT`、`APPLY_RESULT`、`REPOSITORY_STATUS`、`SERVICE_STATUS`、`ERROR`。
 
 共享类型和状态机在 monorepo 的 `@forexplore/contracts`、`@forexplore/workflow-core` 中维护；打包时 Webview 与扩展宿主会将所需代码纳入 VSIX 构建产物。

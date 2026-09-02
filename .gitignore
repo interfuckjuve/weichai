@@ -10,7 +10,18 @@ coverage/
 *.tsbuildinfo
 .vscode-test/
 *.vsix
-.forexplore/
+# ForeXplore's durable architecture artifacts are reviewable repository
+# evidence. Checkpoints and any other local scratch data remain untracked.
+.forexplore/*
+!.forexplore/module-summary.json
+!.forexplore/analysis/
+!.forexplore/analysis/**
+!.forexplore/ingestion/
+!.forexplore/ingestion/**
+!.forexplore/modules/
+!.forexplore/modules/**
+!.forexplore/runs/
+!.forexplore/runs/**
 
 # Local environment files
 .env

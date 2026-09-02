@@ -17,6 +17,27 @@ describe('loadConfig', () => {
     ).toThrow('RETRIEVAL_ALLOWED_REPOSITORIES contains an invalid repository identifier');
   });
 
+  it('keeps the module projection physically distinct from the symbol table', () => {
+    expect(loadConfig({}).seekdb).toMatchObject({
+      table: 'code_symbols',
+      moduleKnowledgeTable: 'module_knowledge',
+    });
+    expect(() => loadConfig({
+      SEEKDB_TABLE: 'shared_index',
+      SEEKDB_MODULE_KNOWLEDGE_TABLE: 'shared_index',
+    })).toThrow('must differ from SEEKDB_TABLE');
+  });
+
+  it('loads and trims the module writer token and request-size guard', () => {
+    expect(loadConfig({
+      RETRIEVAL_MODULE_INDEX_TOKEN: '  writer-secret  ',
+      RETRIEVAL_MODULE_INDEX_MAX_BODY_BYTES: '4096',
+    })).toMatchObject({
+      moduleIndexToken: 'writer-secret',
+      moduleIndexMaxBodyBytes: 4096,
+    });
+  });
+
   it('requests dimensions by default for the default OpenAI embedding model', () => {
     const config = loadConfig({
       SEEKDB_EMBEDDING_PROVIDER: 'openai',

@@ -4,6 +4,11 @@ This service is the production `CodeSearchPort` boundary for ForeXplore. It
 stores code-symbol documents in [SeekDB](https://github.com/oceanbase/seekdb)
 and exposes the stable workflow search contract over HTTP.
 
+It also owns a physically separate functional-module projection. Module Wiki
+documents never enter the class/function table: they are staged by immutable
+knowledge publication and generation, validated, then exposed only while that
+generation is the active `(repositoryId, channel)` head.
+
 ## Hybrid retrieval
 
 The service always runs vector and full-text queries in parallel, fuses them with
@@ -25,6 +30,32 @@ The schema uses SeekDB's `VECTOR`, `VECTOR INDEX ... TYPE=hnsw`,
 `FULLTEXT INDEX`, and `ORDER BY cosine_distance(...) APPROXIMATE` features.
 All query values and filters are parameterized; only validated SQL identifiers
 and generated vector hex literals are interpolated.
+
+## Module knowledge projection
+
+`SEEKDB_MODULE_KNOWLEDGE_TABLE` names the independent module-document table.
+Two adjacent control tables retain immutable generations and the active head;
+none of these tables aliases or clears `SEEKDB_TABLE`.
+
+```text
+reviewed staged publication
+  -> embed and stage one document per module
+  -> validate document count, module IDs and projection hash
+  -> return RepositoryModuleIndexReceipt(status=validated)
+  -> compare-and-swap active generation
+  -> searchable
+```
+
+Queries join module documents to the active head and generation in SeekDB.
+They also require reviewed boundary and narrative states plus an exact
+repository/channel and deployment-authorized ACL scope. A staged, superseded,
+withdrawn, or tombstoned generation therefore cannot leak into results.
+
+Activation and withdrawal are idempotent for an outbox/reconciler. Withdrawal
+is logical and restores the superseded generation when available. Tombstoning
+is permitted only after a generation is inactive. There is deliberately no
+module-index `clear()` operation; physical retention/cleanup is a separate
+policy concern.
 
 ## Start locally
 
@@ -152,6 +183,66 @@ searchable on supported SeekDB versions.
 - `GET /health` checks the SeekDB connection.
 - `POST /v1/search` accepts `SearchRequest` from `@forexplore/contracts` and
   returns `{ "candidates": SearchCandidate[] }`.
+- `POST /v1/module-knowledge/search` searches only the active reviewed module
+  publication for one repository/channel and returns the shared
+  `RepositoryModuleKnowledgeSearchResult` contract.
+- `POST /v1/module-knowledge/generations/stage` embeds and validates a staged
+  `RepositoryKnowledgePublication` projection.
+- `POST /v1/module-knowledge/generations/validate` revalidates a persisted
+  generation and returns its durable `RepositoryModuleIndexReceipt`.
+- `POST /v1/module-knowledge/generations/head` reads the authenticated active
+  head for a repository/channel, including its publication payload hash, so a
+  coordinator can fail closed on local/remote drift.
+- `POST /v1/module-knowledge/generations/activate` performs a generation CAS.
+- `POST /v1/module-knowledge/generations/withdraw` logically withdraws the
+  expected active generation and restores its predecessor when available.
+- `POST /v1/module-knowledge/generations/tombstone` makes an inactive
+  generation unavailable for future activation without deleting its rows.
+
+Module-index lifecycle control endpoints (including head reads) require
+`Authorization: Bearer $RETRIEVAL_MODULE_INDEX_TOKEN`. When the token is empty,
+all control endpoints fail closed. Search still uses the deployment-owned
+`RETRIEVAL_ALLOWED_REPOSITORIES` boundary. Staging has its own bounded request
+limit (`RETRIEVAL_MODULE_INDEX_MAX_BODY_BYTES`, 16 MiB by default); ordinary
+search requests remain capped at 1 MiB.
+
+The VS Code publisher reads its credential only from
+`FOREXPLORE_MODULE_INDEX_WRITER_TOKEN`; local deployments must set it to the
+same value as `RETRIEVAL_MODULE_INDEX_TOKEN`. Neither side reads this authority
+from workspace settings. An unset or mismatched token leaves accepted content
+in `publishing-knowledge` instead of silently activating it.
+
+The module query shape is independent from symbol matching:
+
+```json
+{
+  "query": "order creation and status transitions",
+  "repositoryId": "acme/orders",
+  "channel": "branch:main",
+  "repositoryScopes": ["acme/orders"],
+  "topK": 5,
+  "languageIds": ["typescript"],
+  "capabilities": ["order management"]
+}
+```
+
+`repositoryScopes` is required by the shared module-search contract and must be
+a non-empty subset of the deployment-owned allow-list that includes
+`repositoryId`; the HTTP boundary never invents client authority. A staged
+publication, its request envelope, and every projected document must carry the
+same canonical ACL. Results retain `publicationId`,
+`publicationGeneration`, `channel`, narrative/boundary status, evidence
+artifact IDs and content hashes so the next retrieval layer can trace every
+module hit before performing symbol or implementation-slice recall.
+
+Each durable index receipt also records a non-secret indexer identity in
+`storeId`: module projection version, embedding provider/model/dimension, and a
+configuration hash. That hash is included in the generation content hash (and
+each document projection hash), so changing embedding or projection settings
+cannot silently reuse an older generation. Credentials are never recorded.
+The production runtime compares the active receipt with its current indexer
+identity and fails search closed until an incompatible generation is rebuilt
+and activated.
 
 ### SearchRequest fields
 

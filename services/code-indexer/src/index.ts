@@ -21,11 +21,21 @@ export type {
   CompilerProbeRequest,
   CompilerProbeResult,
   CompilerProbeStatus,
+  ImportReference,
+  RepositoryAnalysisDiagnosticReporter,
+  RepositoryAnalysisSourceFile,
+  RepositoryLanguageAdapter,
+  RepositoryLanguageAdapterDescriptor,
+  RepositoryLanguageAnalysis,
+  RepositoryLanguageReference,
   SemanticDependencyBinding,
 } from './repository-analysis.js';
 export {
   analyzeRepository,
+  createDefaultRepositoryLanguageRegistry,
+  createGenericRepositoryLanguageAdapter,
   readRepositoryAnalysisArtifact,
+  RepositoryLanguageRegistry,
   repositoryAnalysisContentHash,
   repositoryAnalysisArtifactDirectory,
   repositoryAnalysisArtifactPath,
@@ -34,6 +44,25 @@ export {
   verifyRepositoryStaticAnalysis,
   writeRepositoryAnalysisArtifact,
 } from './repository-analysis.js';
+export type { RepositoryStaticAnalysisBridgeArtifacts } from './repository-ingestion-bridge.js';
+export {
+  bridgeRepositoryStaticAnalysis,
+  repositoryIngestionBridgeHash,
+  repositoryIngestionBridgeVersion,
+  repositoryStaticAnalysisToUnifiedIr,
+} from './repository-ingestion-bridge.js';
+export type {
+  AssessRepositoryImplementationsRequest,
+  RepositoryImplementationDetectionInput,
+  RepositoryImplementationDetectionResult,
+  RepositoryImplementationDetector,
+} from './implementation-assessment.js';
+export {
+  assessRepositoryImplementations,
+  createDefaultRepositoryImplementationDetectorRegistry,
+  implementationAssessmentDetectorVersion,
+  RepositoryImplementationDetectorRegistry,
+} from './implementation-assessment.js';
 
 async function sourceFiles(root: string): Promise<string[]> {
   const files: string[] = [];

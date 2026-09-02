@@ -127,10 +127,50 @@ export type { AdaptationServiceConfig } from "./config";
 export { createHttpServer } from "./http-server";
 export type {
   HttpServerOptions,
+  ModuleDiscoveryHttpConstraint,
+  ModuleDiscoveryHttpRequest,
   ModulePlanHttpRequest,
   StaticAnalysisSnapshotStore,
 } from "./http-server";
 export type { RepositoryArchitecturePort } from "@forexplore/workflow-core";
+
+export {
+  ModuleDiscoveryAgent,
+  buildModuleDiscoveryMessages,
+  materializeModuleDiscoveryProposal,
+  parseModuleDiscoveryDraft,
+  repositoryStaticAnalysisToUnifiedIr,
+  validateModuleDiscoveryDraft,
+  validateModuleDiscoveryProposal,
+  validateModuleDiscoveryRequest,
+} from "./module-discovery-agent";
+
+export {
+  ModuleSummaryAgent,
+  buildModuleSummaryMessages,
+  moduleSummaryAgentVersion,
+  moduleSummaryPromptTemplateId,
+  moduleSummaryPromptTemplateVersion,
+  parseModuleSummaryDraft,
+  validateModuleSummaryRequest,
+} from "./module-summary-agent";
+export type {
+  ModuleSummaryAgentOptions,
+  ModuleSummaryDraft,
+  ModuleSummaryMessage,
+  ModuleSummaryModelClient,
+  ModuleSummaryPort,
+  ModuleSummaryRequest,
+} from "./module-summary-agent";
+export type {
+  ModuleDiscoveryAgentOptions,
+  ModuleDiscoveryDraft,
+  ModuleDiscoveryMessage,
+  ModuleDiscoveryModelClient,
+  ModuleDiscoveryPort,
+  ModuleDiscoveryRequest,
+  RepositoryStaticAnalysisIrBridge,
+} from "./module-discovery-agent";
 
 export { FileStaticAnalysisSnapshotStore } from "./analysis-snapshot-store";
 export type { FileStaticAnalysisSnapshotStoreOptions } from "./analysis-snapshot-store";

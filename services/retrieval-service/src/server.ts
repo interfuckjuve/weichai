@@ -1,21 +1,14 @@
 import 'dotenv/config';
 import { loadConfig } from './config.js';
-import { createHttpServer } from './http-server.js';
-import { createRuntime } from './runtime.js';
+import { createConfiguredHttpServer } from './runtime.js';
 
 const config = loadConfig();
-const { store, engine } = createRuntime(config);
+const { server, runtime } = createConfiguredHttpServer(config);
+const { store, moduleStore } = runtime;
 
 if (config.autoMigrate) {
-  await store.initialize();
+  await Promise.all([store.initialize(), moduleStore.initialize()]);
 }
-
-const server = createHttpServer({
-  engine,
-  store,
-  corsOrigin: config.corsOrigin,
-  allowedRepositories: config.allowedRepositories,
-});
 
 server.listen(config.port, config.host, () => {
   console.log(`Retrieval service listening on http://${config.host}:${config.port}`);
@@ -26,7 +19,7 @@ async function shutdown(): Promise<void> {
     server.close((error) => (error ? reject(error) : resolve()));
     server.closeIdleConnections();
   });
-  await store.close();
+  await Promise.all([store.close(), moduleStore.close()]);
 }
 
 function requestShutdown(): void {

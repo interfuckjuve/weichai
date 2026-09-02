@@ -24,7 +24,16 @@
     "onCommand:forexplore.checkRepositories",
     "onCommand:forexplore.reindex",
     "onCommand:forexplore.restoreLastCheckpoint",
+    "onCommand:forexplore.initializeTargetWorkspace",
+    "onCommand:forexplore.reviewTargetWorkspaceModules",
+    "onCommand:forexplore.openTargetWorkspace",
+    "onCommand:forexplore.rebaseTargetWorkspaceBodyOnly",
+    "onCommand:forexplore.retryTargetWorkspaceInventory",
     "onCommand:forexplore.indexModuleMigrationRepository",
+    "onCommand:forexplore.reviewRepositoryModuleBoundaries",
+    "onCommand:forexplore.generateRepositoryModuleSummaries",
+    "onCommand:forexplore.reviewRepositoryModuleKnowledge",
+    "onCommand:forexplore.withdrawRepositoryModuleKnowledge",
     "onCommand:forexplore.reviewModuleMigrationPlan",
     "onCommand:forexplore.reviewModuleMigrationWave",
     "onCommand:forexplore.prepareModuleMigrationWave",
@@ -54,8 +63,44 @@
         "title": "ForeXplore: 恢复最近一次回填"
       },
       {
+        "command": "forexplore.initializeTargetWorkspace",
+        "title": "ForeXplore: 初始化 01B 目标工作区"
+      },
+      {
+        "command": "forexplore.reviewTargetWorkspaceModules",
+        "title": "ForeXplore: 审阅 01B 目标模块边界"
+      },
+      {
+        "command": "forexplore.openTargetWorkspace",
+        "title": "ForeXplore: 打开 01B 目标工作区"
+      },
+      {
+        "command": "forexplore.rebaseTargetWorkspaceBodyOnly",
+        "title": "ForeXplore: 重映射 01B 方法体兼容变更"
+      },
+      {
+        "command": "forexplore.retryTargetWorkspaceInventory",
+        "title": "ForeXplore: 重试 01B 实现状态检测"
+      },
+      {
         "command": "forexplore.indexModuleMigrationRepository",
         "title": "ForeXplore: 索引模块迁移仓库"
+      },
+      {
+        "command": "forexplore.reviewRepositoryModuleBoundaries",
+        "title": "ForeXplore: 审阅仓库模块边界"
+      },
+      {
+        "command": "forexplore.generateRepositoryModuleSummaries",
+        "title": "ForeXplore: 生成模块知识摘要提案"
+      },
+      {
+        "command": "forexplore.reviewRepositoryModuleKnowledge",
+        "title": "ForeXplore: 审阅并发布模块知识"
+      },
+      {
+        "command": "forexplore.withdrawRepositoryModuleKnowledge",
+        "title": "ForeXplore: 撤销当前模块知识发布"
       },
       {
         "command": "forexplore.reviewModuleMigrationPlan",
@@ -92,7 +137,9 @@
       "properties": {
         "forexplore.executionMode": {
           "type": "string",
-          "enum": ["real"],
+          "enum": [
+            "real"
+          ],
           "default": "real",
           "description": "调用本地 SeekDB 检索服务和语言无关的适配服务；两个服务都必须健康。"
         },
@@ -101,7 +148,9 @@
           "items": {
             "type": "string"
           },
-          "default": ["E:/CS/devsys/weichai/fixtures/code-corpus"],
+          "default": [
+            "E:/CS/devsys/weichai/fixtures/code-corpus"
+          ],
           "description": "仅检查本地目录是否可读，不能证明该目录已被远端检索服务索引。真实检索范围由服务端部署配置决定。"
         },
         "forexplore.retrievalApiUrl": {
@@ -114,6 +163,13 @@
           "default": "http://127.0.0.1:8788",
           "description": "语言无关翻译服务地址。"
         },
+        "forexplore.repositoryKnowledgeChannel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "default": "branch:main",
+          "description": "模块知识激活范围中的分支/发布通道。发布前仍会要求人工确认。"
+        },
         "forexplore.moduleWaveValidationCommands": {
           "type": "array",
           "scope": "machine",
@@ -121,15 +177,36 @@
           "description": "仅由本地 VS Code 宿主在隔离波次 worktree 中执行的联合验证命令。未配置时模块波次准备会被阻止。",
           "items": {
             "type": "object",
-            "required": ["id", "label", "executable"],
+            "required": [
+              "id",
+              "label",
+              "executable"
+            ],
             "properties": {
-              "id": { "type": "string" },
-              "label": { "type": "string" },
-              "executable": { "type": "string" },
-              "args": { "type": "array", "items": { "type": "string" } },
-              "cwd": { "type": "string" },
-              "required": { "type": "boolean" },
-              "timeoutMs": { "type": "number" }
+              "id": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              },
+              "executable": {
+                "type": "string"
+              },
+              "args": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "cwd": {
+                "type": "string"
+              },
+              "required": {
+                "type": "boolean"
+              },
+              "timeoutMs": {
+                "type": "number"
+              }
             },
             "additionalProperties": false
           }
@@ -147,20 +224,22 @@
     "package": "vsce package --no-dependencies --allow-missing-repository"
   },
   "dependencies": {
-    "@forexplore/adaptation-service": "0.1.0",
     "@forexplore/adaptation-http-adapter": "0.1.0",
+    "@forexplore/adaptation-service": "0.1.0",
     "@forexplore/code-indexer": "0.1.0",
     "@forexplore/contracts": "0.1.0",
     "@forexplore/seekdb-adapter": "0.1.0",
     "@forexplore/workflow-core": "0.1.0",
     "lucide-react": "^1.24.0",
     "react": "^19.2.7",
-    "react-dom": "^19.2.7"
+    "react-dom": "^19.2.7",
+    "sql.js": "^1.14.2"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
+    "@types/sql.js": "^1.4.11",
     "@types/vscode": "^1.90.0",
     "@vitejs/plugin-react": "^6.0.3",
     "@vscode/test-electron": "^2.4.1",

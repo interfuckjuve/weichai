@@ -22,6 +22,9 @@ export interface RetrievalConfig {
    * full index during local setup or a misconfigured deployment.
    */
   allowedRepositories: string[];
+  /** Bearer token for publication/index lifecycle mutations; empty disables writes. */
+  moduleIndexToken: string;
+  moduleIndexMaxBodyBytes: number;
   autoMigrate: boolean;
   seekdb: {
     host: string;
@@ -30,6 +33,8 @@ export interface RetrievalConfig {
     password: string;
     database: string;
     table: string;
+    /** Dedicated functional-module projection; never aliases the symbol table. */
+    moduleKnowledgeTable: string;
     vectorDimension: number;
   };
   embedding:
@@ -148,11 +153,32 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RetrievalConfi
     throw new Error('DEEPSEEK_API_KEY is required for the DeepSeek rerank provider.');
   }
 
+  const symbolTable = identifier(env.SEEKDB_TABLE, 'code_symbols', 'SEEKDB_TABLE');
+  const moduleKnowledgeTable = identifier(
+    env.SEEKDB_MODULE_KNOWLEDGE_TABLE,
+    'module_knowledge',
+    'SEEKDB_MODULE_KNOWLEDGE_TABLE',
+  );
+  if (moduleKnowledgeTable === symbolTable) {
+    throw new Error('SEEKDB_MODULE_KNOWLEDGE_TABLE must differ from SEEKDB_TABLE.');
+  }
+  if (moduleKnowledgeTable.length > 52) {
+    throw new Error(
+      'SEEKDB_MODULE_KNOWLEDGE_TABLE must be at most 52 characters so lifecycle table names remain valid.',
+    );
+  }
+
   return {
     host: env.RETRIEVAL_HOST?.trim() || '127.0.0.1',
     port: positiveInteger(env.RETRIEVAL_PORT, 8787, 'RETRIEVAL_PORT'),
     corsOrigin: env.RETRIEVAL_CORS_ORIGIN?.trim() || '*',
     allowedRepositories: allowedRepositories(env.RETRIEVAL_ALLOWED_REPOSITORIES),
+    moduleIndexToken: env.RETRIEVAL_MODULE_INDEX_TOKEN?.trim() || '',
+    moduleIndexMaxBodyBytes: positiveInteger(
+      env.RETRIEVAL_MODULE_INDEX_MAX_BODY_BYTES,
+      16 * 1024 * 1024,
+      'RETRIEVAL_MODULE_INDEX_MAX_BODY_BYTES',
+    ),
     autoMigrate: boolean(env.SEEKDB_AUTO_MIGRATE, true),
     seekdb: {
       host: env.SEEKDB_HOST?.trim() || '127.0.0.1',
@@ -160,7 +186,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RetrievalConfi
       user: env.SEEKDB_USER?.trim() || 'root',
       password: env.SEEKDB_PASSWORD || '',
       database: identifier(env.SEEKDB_DATABASE, 'forexplore', 'SEEKDB_DATABASE'),
-      table: identifier(env.SEEKDB_TABLE, 'code_symbols', 'SEEKDB_TABLE'),
+      table: symbolTable,
+      moduleKnowledgeTable,
       vectorDimension: dimension,
     },
     embedding,

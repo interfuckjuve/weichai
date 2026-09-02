@@ -7,8 +7,41 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $extensionRoot = Join-Path $repoRoot 'apps/vscode-extension'
 $composeFile = Join-Path $repoRoot 'services/retrieval-service/docker-compose.yml'
+$retrievalEnvFile = Join-Path $repoRoot 'services/retrieval-service/.env'
 
 Set-Location -LiteralPath $repoRoot
+
+# The retrieval service and extension are separate processes but must share
+# one module-index writer secret. Prefer explicit process environment, then
+# mirror the retrieval service's local .env value into the extension host.
+$extensionWriterToken = $env:FOREXPLORE_MODULE_INDEX_WRITER_TOKEN
+$retrievalWriterToken = $env:RETRIEVAL_MODULE_INDEX_TOKEN
+if ($extensionWriterToken -and $retrievalWriterToken -and
+    $extensionWriterToken.Trim() -ne $retrievalWriterToken.Trim()) {
+  throw 'FOREXPLORE_MODULE_INDEX_WRITER_TOKEN and RETRIEVAL_MODULE_INDEX_TOKEN must match.'
+}
+if (-not $extensionWriterToken -and $retrievalWriterToken) {
+  $extensionWriterToken = $retrievalWriterToken.Trim()
+}
+if (-not $retrievalWriterToken -and $extensionWriterToken) {
+  $retrievalWriterToken = $extensionWriterToken.Trim()
+}
+if (-not $extensionWriterToken -and (Test-Path -LiteralPath $retrievalEnvFile -PathType Leaf)) {
+  $tokenReader = @'
+const { config } = require('dotenv');
+config({ path: process.argv[1], quiet: true });
+process.stdout.write(process.env.RETRIEVAL_MODULE_INDEX_TOKEN || '');
+'@
+  $extensionWriterToken = [string](& node -e $tokenReader $retrievalEnvFile)
+  $extensionWriterToken = $extensionWriterToken.Trim()
+  $retrievalWriterToken = $extensionWriterToken
+}
+if ($extensionWriterToken) {
+  $env:FOREXPLORE_MODULE_INDEX_WRITER_TOKEN = $extensionWriterToken
+  $env:RETRIEVAL_MODULE_INDEX_TOKEN = $retrievalWriterToken
+} else {
+  Write-Warning 'Module-index writer token is unset; reviewed knowledge publication will fail closed.'
+}
 
 function Ensure-VsCodeExtension {
   param(

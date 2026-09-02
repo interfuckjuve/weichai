@@ -4,6 +4,8 @@ import { createHttpServer } from './http-server.js';
 import { AdaptationAdapter } from './adaptation-adapter.js';
 import { ArchitectAgent } from './architect-agent.js';
 import { FileStaticAnalysisSnapshotStore } from './analysis-snapshot-store.js';
+import { ModuleDiscoveryAgent } from './module-discovery-agent.js';
+import { ModuleSummaryAgent } from './module-summary-agent.js';
 import { TranslationVerifierAdapter } from './verification-adapter.js';
 
 const config = loadConfig();
@@ -25,6 +27,8 @@ const adapter = new AdaptationAdapter({
 const server = createHttpServer({
   adapter,
   architecturePort: new ArchitectAgent({ apiKey: config.apiKey }),
+  moduleDiscoveryPort: new ModuleDiscoveryAgent({ apiKey: config.apiKey }),
+  moduleSummaryPort: new ModuleSummaryAgent({ apiKey: config.apiKey }),
   staticAnalysisSnapshots: new FileStaticAnalysisSnapshotStore({
     analysisRoot: config.analysisRoot,
   }),

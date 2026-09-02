@@ -1,5 +1,12 @@
 # ForeXplore 项目介绍
 
+> 代码仓入库层现已扩展为开放 `LanguageId`、运行时分析适配器、统一 IR、入库时
+> `ModuleDiscoveryAgent` 和 LLMwiki 风格模块知识制品；它与仍按语言对授权的迁移执行层
+> 相互独立。四阶段实现与剩余门禁详见
+> [《语言无关的代码仓入库与模块知识架构》](./architecture/language-neutral-repository-ingestion.md)；
+> 本阶段明确的模块处理范围与下游 Bundle 边界见
+> [《存量代码仓模块划分与知识发布：工程边界》](./architecture/repository-module-processing-boundary.md)。
+
 ## 1. 项目定位
 
 ForeXplore 是一个面向软件模块复用的开源工作流框架。它把已有代码仓库中的实现，与目标软件系统中的 `class` 或 `function` 建立关联，帮助开发者完成以下过程：
@@ -210,22 +217,22 @@ packages/mock-adapters        production adapters
 
 当前仓库已经完成：
 
-- React/Vite 工作流 GUI。
-- `class` / `function` 粒度的静态模块树。
-- 目标选择、需求输入、Top-K 候选对比和人工备注交互。
-- 工作流状态机以及检索、适配、回填端口。
-- 翻译、桥接、包装和直接复用策略的数据契约。
-- 接口映射、验证结果和文件 diff 的展示。
-- 从模块选择到 Mock 回填的端到端测试。
+- React/Vite 工作流 GUI 和 VS Code Webview，支持目标选择、Top-K 候选、人工明确选择、验证记录和文件 diff。
+- SeekDB 符号级向量/全文混合检索；原 `code_symbols` 投影继续保留。
+- 存量仓 01A 的开放语言分析 registry、统一 IR、Module Discovery、两道人审、模块 Wiki、SQLite publication registry、独立 SeekDB 模块 active head、发布补偿和显式撤销骨架。
+- 目标工作区 01B：复用 01A 分析/模块发现与 Gate 1，生成 module/file/type/callable 五态实现状态目录，并从 reviewed callable 进入既有符号检索/翻译流程。
+- `target → requirement → candidates → adaptation → patch → complete` 状态机以及可替换检索、适配和回填端口。
+- Java → C# 的真实 `translate` 链路、独立编译和目标 skeleton 集成编译，以及有限次数的编译错误修复。
+- 受保护的本地写回、检查点恢复，以及模块迁移波次的隔离 Git transaction 骨架。
 
-当前仍属于 Mock 或预留边界的部分包括：
+当前仍未完整实现或必须按原型口径描述的部分包括：
 
-- 真实工程的符号解析和增量索引。
-- 面向大规模多语言代码仓的召回与重排服务。
-- 基于模型或规则的代码翻译与桥接生成。
-- 编译、测试、安全与许可证验证执行器。
-- 对真实工作区的事务写入和恢复机制。
-- VS Code、Trae 或其他 IDE 的正式集成。
+- 01B 目标模块与 01A 来源模块的匹配、模块/符号融合召回、人工来源选择制品和最小可迁移实现切片。
+- Java → C# 之外的真实迁移语言对，以及 `bridge`、`wrap`、`reuse` 的真实适配实现。
+- 业务行为、并发、超时、取消、幂等和错误语义的独立验证闭环；当前编译通过不能证明这些语义正确。
+- 完整的多文件原子回填、并发工作区修改处理和通用回滚；现有安全边界仍需继续加固。
+- 生产级多租户 ACL/RBAC、完整 DLP、许可证治理、大仓增量调度和真实 SeekDB 故障演练。
+- 01B append-only 历史快照账本和历史 UI；当前只持久化并 CAS 保护每个 workspace 的 current Host record。
 
 ## 10. 设计原则
 

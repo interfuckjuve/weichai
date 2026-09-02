@@ -1,4 +1,5 @@
-import type { Language } from './module';
+import type { LanguageId } from './language-id';
+import type { AnalysisCapability } from './repository-ingestion';
 import type { ValidationRecord } from './validation';
 
 /**
@@ -14,6 +15,8 @@ export type StaticFileRole =
   | 'test'
   | 'generated'
   | 'configuration'
+  | 'documentation'
+  | 'asset'
   | 'other';
 
 export interface StaticAnalysisFile {
@@ -21,7 +24,8 @@ export interface StaticAnalysisFile {
   path: string;
   sha256: string;
   role: StaticFileRole;
-  language?: Language;
+  /** Open-ended analyser-owned language identifier. */
+  language?: LanguageId;
   project?: string;
 }
 
@@ -41,6 +45,23 @@ export type StaticSymbolKind =
   | 'property'
   | 'unknown';
 
+/** Language-neutral visibility facts retained by the static-analysis snapshot. */
+export type StaticSymbolVisibility =
+  | 'public'
+  | 'protected'
+  | 'internal'
+  | 'package'
+  | 'private'
+  | 'unknown';
+
+/** Lightweight callable shape. Parsers must omit details they cannot establish. */
+export interface StaticSymbolParameter {
+  name: string;
+  type?: string;
+  required?: boolean;
+  variadic?: boolean;
+}
+
 export interface StaticSourceRange {
   path: string;
   startLine: number;
@@ -55,10 +76,20 @@ export interface StaticSymbol {
   name: string;
   qualifiedName: string;
   kind: StaticSymbolKind;
-  language: Language;
+  /** Open-ended analyser-owned language identifier. */
+  language: LanguageId;
   path: string;
   range?: StaticSourceRange;
   signature?: string;
+  /** Declared visibility, or `unknown` when the adapter cannot establish it. */
+  visibility?: StaticSymbolVisibility;
+  /** Explicit export fact for module-oriented languages; absence means unknown. */
+  exported?: boolean;
+  /** Stable ID of the declaring type/module when it was established syntactically. */
+  containerSymbolId?: string;
+  parameters?: StaticSymbolParameter[];
+  /** Adapter-owned normalized return type/shape when it can be parsed. */
+  returnShape?: string;
   project?: string;
   /** True when this symbol belongs to a test file or test-only type. */
   testOnly?: boolean;
@@ -117,10 +148,22 @@ export interface StaticAnalysisDiagnostic {
 }
 
 export interface RepositoryIdentity {
+  /** Stable host-owned logical identity when one is available. */
+  id?: string;
   /** Root is informational only; all artifact paths remain relative. */
   root?: string;
   remote?: string;
   revision?: string;
+}
+
+/** Immutable identity and capability declaration for one repository analyser. */
+export interface RepositoryStaticAnalysisAdapterDescriptor {
+  id: string;
+  version: string;
+  languageId: LanguageId;
+  capabilities: AnalysisCapability[];
+  configurationHash?: string;
+  analysisLevel: 'deep' | 'generic';
 }
 
 /**
@@ -134,6 +177,8 @@ export interface RepositoryStaticAnalysis {
   analyzerVersion: string;
   createdAt: string;
   repository: RepositoryIdentity;
+  /** Optional for compatibility with 1.0 snapshots; current analysers always emit it. */
+  analysisAdapters?: RepositoryStaticAnalysisAdapterDescriptor[];
   files: StaticAnalysisFile[];
   symbols: StaticSymbol[];
   dependencies: DependencyEdge[];

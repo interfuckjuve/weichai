@@ -9,6 +9,10 @@ import type {
   ValidationRecord,
 } from '@forexplore/contracts';
 import {
+  analyzeRepository,
+  writeRepositoryAnalysisArtifact,
+} from '@forexplore/code-indexer';
+import {
   applyHunksStrict,
   canApplyAdaptation,
   evaluateValidationGate,
@@ -20,6 +24,7 @@ import {
   ModuleMigrationPreviewProvider,
   moduleMigrationPreviewScheme,
 } from './module-migration-host';
+import { requestRepositoryModuleDiscovery } from './module-discovery-client';
 import type { ModuleWaveExecutionPort } from './module-wave-execution-host';
 import type { ModuleMigrationWaveRecoveryPort } from './module-migration-recovery';
 import { TranslationPanel } from './panel';
@@ -30,7 +35,23 @@ import type {
 import { RepositoryHealthCheck } from './repository-health';
 import { decorateRepositoryStatuses } from './repository-status';
 import { ServiceManager } from './service-manager';
+import { loadSettings } from './settings';
 import { buildModuleTarget } from './target-builder';
+import {
+  TargetWorkspaceHost,
+  type TargetWorkspaceHostRecord,
+} from './target-workspace-host';
+import { LocalTargetWorkspaceImplementationInventory } from './target-workspace-implementation-inventory';
+import { FileSystemTargetWorkspaceHostStore } from './target-workspace-store';
+import {
+  assertTargetWorkspaceSelection,
+  moduleTargetFromTargetWorkspaceContext,
+  projectTargetWorkspace,
+} from './target-workspace-projection';
+import type {
+  TargetWorkspaceSelectionIdentity,
+  TargetWorkspaceSnapshot,
+} from './protocol/messages';
 import type { RepositoryStatus } from './ui-types';
 
 // Keep the transaction implementation bundled by esbuild without making the
@@ -49,6 +70,7 @@ interface ExtensionHost {
   context: vscode.ExtensionContext;
   services: ServiceManager;
   health: RepositoryHealthCheck;
+  targetWorkspaces: TargetWorkspaceHost;
 }
 
 interface ActiveMigrationRun {
@@ -63,6 +85,13 @@ interface ActiveMigrationRun {
   /** Null until the user expressly clicks a candidate in this run. */
   selectedCandidateId: string | null;
   adaptation: AdaptationResult | null;
+  /** Present only when 01B, rather than an editor selection, chose this target. */
+  targetWorkspaceSelection?: TargetWorkspaceSelectionIdentity & { workspaceId: string };
+}
+
+interface ActiveTargetWorkspacePanel {
+  workspaceFolder: vscode.WorkspaceFolder;
+  projection: TargetWorkspaceSnapshot;
 }
 
 interface LastCheckpoint {
@@ -72,6 +101,8 @@ interface LastCheckpoint {
 }
 
 let activeRun: ActiveMigrationRun | null = null;
+let activeTargetWorkspacePanel: ActiveTargetWorkspacePanel | null = null;
+let targetSelectionEpoch = 0;
 
 export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel('ForeXplore');
@@ -86,6 +117,32 @@ export function activate(context: vscode.ExtensionContext): void {
     waveRecovery: new GitWaveTransaction(),
     waveExecution: new ModuleWaveExecutionCoordinator(),
   });
+  const targetWorkspaces = new TargetWorkspaceHost({
+    store: new FileSystemTargetWorkspaceHostStore({
+      storageDirectory: path.join(context.globalStorageUri.fsPath, 'target-workspaces'),
+    }),
+    implementationInventory: new LocalTargetWorkspaceImplementationInventory(),
+    analyze: async (request) => {
+      const analysis = await analyzeRepository(request);
+      // The separately deployed Module Discovery service reads the same
+      // immutable sidecar by snapshot ID. Persist before sending that ID.
+      await writeRepositoryAnalysisArtifact(request.root, analysis);
+      return analysis;
+    },
+    discoverModules: async (request, signal) => {
+      const status = await services.refresh();
+      if (status.adaptation !== 'connected') {
+        throw new Error(status.message ?? '模块发现服务尚未就绪。');
+      }
+      return requestRepositoryModuleDiscovery(
+        loadSettings().adaptationApiUrl,
+        request,
+        undefined,
+        signal,
+      );
+    },
+  });
+  const extensionHost: ExtensionHost = { context, services, health, targetWorkspaces };
 
   context.subscriptions.push(
     output,
@@ -95,10 +152,10 @@ export function activate(context: vscode.ExtensionContext): void {
       moduleMigrationPreviews,
     ),
     vscode.commands.registerCommand('forexplore.startTranslation', () =>
-      startTranslation(context, services, health),
+      startTranslation(extensionHost),
     ),
     vscode.commands.registerCommand('forexplore.showPanel', () =>
-      showPanel(context, services, health),
+      showPanel(extensionHost),
     ),
     vscode.commands.registerCommand('forexplore.checkRepositories', async () => {
       const statuses = await refreshRepositoryStatus(services, health);
@@ -116,10 +173,37 @@ export function activate(context: vscode.ExtensionContext): void {
       void repositories;
     }),
     vscode.commands.registerCommand('forexplore.restoreLastCheckpoint', () =>
-      restoreLastCheckpoint(context),
+      restoreLastCheckpoint(extensionHost),
+    ),
+    vscode.commands.registerCommand('forexplore.initializeTargetWorkspace', () =>
+      initializeTargetWorkspace(extensionHost, moduleMigrationPreviews),
+    ),
+    vscode.commands.registerCommand('forexplore.reviewTargetWorkspaceModules', () =>
+      reviewTargetWorkspaceModules(extensionHost, moduleMigrationPreviews),
+    ),
+    vscode.commands.registerCommand('forexplore.openTargetWorkspace', () =>
+      openTargetWorkspace(extensionHost),
+    ),
+    vscode.commands.registerCommand('forexplore.rebaseTargetWorkspaceBodyOnly', () =>
+      rebaseTargetWorkspaceBodyOnly(extensionHost, moduleMigrationPreviews),
+    ),
+    vscode.commands.registerCommand('forexplore.retryTargetWorkspaceInventory', () =>
+      retryTargetWorkspaceInventory(extensionHost),
     ),
     vscode.commands.registerCommand('forexplore.indexModuleMigrationRepository', () =>
       moduleMigration.indexRepository(),
+    ),
+    vscode.commands.registerCommand('forexplore.reviewRepositoryModuleBoundaries', () =>
+      moduleMigration.reviewRepositoryModuleBoundaries(),
+    ),
+    vscode.commands.registerCommand('forexplore.generateRepositoryModuleSummaries', () =>
+      moduleMigration.generateRepositoryModuleSummaries(),
+    ),
+    vscode.commands.registerCommand('forexplore.reviewRepositoryModuleKnowledge', () =>
+      moduleMigration.reviewRepositoryModuleKnowledge(),
+    ),
+    vscode.commands.registerCommand('forexplore.withdrawRepositoryModuleKnowledge', () =>
+      moduleMigration.withdrawRepositoryModuleKnowledge(),
     ),
     vscode.commands.registerCommand('forexplore.reviewModuleMigrationPlan', () =>
       moduleMigration.reviewPlan(),
@@ -148,14 +232,16 @@ export function activate(context: vscode.ExtensionContext): void {
 }
 
 export function deactivate(): void {
+  targetSelectionEpoch += 1;
   activeRun = null;
+  activeTargetWorkspacePanel = null;
 }
 
 async function startTranslation(
-  context: vscode.ExtensionContext,
-  services: ServiceManager,
-  health: RepositoryHealthCheck,
+  host: ExtensionHost,
 ): Promise<void> {
+  targetSelectionEpoch += 1;
+  const { context, services, health } = host;
   const editor = vscode.window.activeTextEditor;
   if (!editor) {
     void vscode.window.showInformationMessage('请先打开并选中一个目标方法。');
@@ -225,16 +311,14 @@ async function startTranslation(
     },
     {
       onMessage: (message) => {
-        void handlePanelMessage({ context, services, health }, message);
+        void handlePanelMessage(host, message);
       },
     },
   );
 }
 
 async function showPanel(
-  context: vscode.ExtensionContext,
-  services: ServiceManager,
-  health: RepositoryHealthCheck,
+  host: ExtensionHost,
 ): Promise<void> {
   if (TranslationPanel.current && activeRun) {
     TranslationPanel.current.panel.reveal(vscode.ViewColumn.Beside);
@@ -242,10 +326,413 @@ async function showPanel(
   }
   const editor = vscode.window.activeTextEditor;
   if (editor && !editor.selection.isEmpty) {
-    await startTranslation(context, services, health);
+    await startTranslation(host);
+    return;
+  }
+  if (activeTargetWorkspacePanel) {
+    await showTargetWorkspacePanel(host, activeTargetWorkspacePanel);
     return;
   }
   void vscode.window.showInformationMessage('请先在受支持语言文件中选中待实现的目标方法。');
+}
+
+async function initializeTargetWorkspace(
+  host: ExtensionHost,
+  previews: ModuleMigrationPreviewProvider,
+): Promise<void> {
+  try {
+    const workspaceFolder = await selectTargetWorkspaceFolder();
+    if (!workspaceFolder) return;
+    const workspaceId = workspaceFolder.uri.toString();
+    const record = await vscode.window.withProgress<TargetWorkspaceHostRecord>(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: 'ForeXplore: 正在分析 01B 目标工作区并提出模块边界',
+      },
+      () => host.targetWorkspaces.initialize({
+        workspaceId,
+        repositoryRoot: workspaceFolder.uri.fsPath,
+        repositoryId: `target-${sha256(Buffer.from(workspaceId, 'utf8')).slice(0, 24)}`,
+      }),
+    );
+    await previews.show('01B target workspace module discovery', {
+      role: record.role,
+      stage: record.stage,
+      workspaceId: record.workspaceId,
+      readiness: record.readiness,
+      analysis: {
+        snapshotId: record.latest.analysis.snapshotId,
+        contentHash: record.latest.analysis.contentHash,
+        analyzerVersion: record.latest.analysis.analyzerVersion,
+      },
+      unifiedIr: {
+        id: record.latest.ir.id,
+        contentHash: record.latest.ir.contentHash,
+        fileCount: record.latest.ir.files.length,
+        entityCount: record.latest.ir.entities.length,
+      },
+      proposal: record.discovery?.proposal,
+      draftCatalog: record.discovery?.draftCatalog,
+      boundary: '01B stops after Gate 1 and implementation inventory; it never publishes target skeletons to SeekDB.',
+    });
+    if (record.stage === 'awaiting-module-review') {
+      void vscode.window.showInformationMessage(
+        '01B 已复用 01A 分析和模块发现，当前停在目标模块边界人审；尚未生成可用目标树。',
+      );
+    } else if (record.stage === 'analysis-partial') {
+      void vscode.window.showWarningMessage(
+        '目标工作区分析证据不足，未调用模块 Agent。请检查语言 adapter/readiness 诊断。',
+      );
+    } else if (record.stage === 'reviewed') {
+      await openReviewedTargetWorkspace(host, workspaceFolder, record);
+    } else if (record.stage === 'status-inventory-failed') {
+      void vscode.window.showWarningMessage(
+        '模块边界已接受，但实现状态检测失败。请运行“ForeXplore: 重试 01B 实现状态检测”。',
+      );
+    }
+  } catch (error) {
+    void vscode.window.showErrorMessage(errorMessage(error, '01B 目标工作区初始化失败'));
+  }
+}
+
+async function reviewTargetWorkspaceModules(
+  host: ExtensionHost,
+  previews: ModuleMigrationPreviewProvider,
+): Promise<void> {
+  try {
+    const workspaceFolder = await selectTargetWorkspaceFolder();
+    if (!workspaceFolder) return;
+    const workspaceId = workspaceFolder.uri.toString();
+    const record = await host.targetWorkspaces.get(workspaceId);
+    if (!record?.discovery || record.stage !== 'awaiting-module-review') {
+      throw new Error(`目标工作区不在 Gate 1 审阅阶段：${record?.stage ?? 'not-initialized'}。`);
+    }
+    await previews.show('01B target workspace Gate 1 review', {
+      warning: '本次只审批目标模块边界；不会生成 Summary、不会进入 SQLite registry 或 SeekDB active head。',
+      proposal: record.discovery.proposal,
+      draftCatalog: record.discovery.draftCatalog,
+      unassignedFileIds: record.discovery.draftCatalog.unassignedFileIds,
+      overlappingFileIds: record.discovery.draftCatalog.overlappingFileIds,
+    });
+    const choice = await vscode.window.showWarningMessage(
+      '请核对目标模块、文件归属、shared/unassigned、API 与依赖。接受后才会生成实现状态目录。',
+      { modal: true },
+      '接受目标模块边界',
+      '要求重新划分',
+      '拒绝目标模块边界',
+    );
+    if (!choice) return;
+    const reviewerId = await vscode.window.showInputBox({
+      title: '01B Gate 1 审批人',
+      prompt: '输入可审计的审批人标识。',
+      validateInput: (value) => value.trim() ? undefined : '审批人标识不能为空。',
+    });
+    if (reviewerId === undefined) return;
+    const comment = await vscode.window.showInputBox({
+      title: '01B Gate 1 审阅备注（可选）',
+      prompt: '记录接受依据、修订要求或拒绝原因。',
+    });
+    if (comment === undefined) return;
+    const proposal = record.discovery.proposal;
+    const reviewed = await host.targetWorkspaces.submitGate1({
+      workspaceId,
+      expectedProposalId: proposal.id,
+      expectedProposalHash: proposal.contentHash,
+      expectedIrId: record.latest.ir.id,
+      expectedIrHash: record.latest.ir.contentHash,
+      decision: choice === '接受目标模块边界'
+        ? 'accept'
+        : choice === '要求重新划分'
+          ? 'revise'
+          : 'reject',
+      reviewerId: reviewerId.trim(),
+      ...(comment.trim() ? { comment: comment.trim() } : {}),
+    });
+    if (reviewed.stage === 'reviewed') {
+      await openReviewedTargetWorkspace(host, workspaceFolder, reviewed);
+      return;
+    }
+    activeTargetWorkspacePanel = null;
+    void vscode.window.showInformationMessage(
+      reviewed.stage === 'revision-required'
+        ? '本轮目标模块提案已关闭。请调整代码/约束并重新初始化；旧边界和 assessment 不会继续使用。'
+        : '本轮目标模块提案已拒绝，未生成目标树。',
+    );
+  } catch (error) {
+    void vscode.window.showErrorMessage(errorMessage(error, '01B Gate 1 审阅失败'));
+  }
+}
+
+async function openTargetWorkspace(host: ExtensionHost): Promise<void> {
+  try {
+    const workspaceFolder = await selectTargetWorkspaceFolder();
+    if (!workspaceFolder) return;
+    const workspaceId = workspaceFolder.uri.toString();
+    const stored = await host.targetWorkspaces.get(workspaceId);
+    if (!stored) {
+      throw new Error('目标工作区尚未初始化。请先运行“ForeXplore: 初始化 01B 目标工作区”。');
+    }
+    const record = await host.targetWorkspaces.refresh(workspaceId);
+    if (record.stage !== 'reviewed' || !record.accepted?.snapshot) {
+      const previous = activeTargetWorkspacePanel;
+      if (previous?.projection.workspaceId === workspaceId) {
+        publishTargetWorkspaceInvalidation(
+          previous.projection,
+          record.failure ?? `目标工作区已经变为 ${record.stage}。`,
+        );
+      }
+      throw new Error(`目标工作区尚无 current 目录：${record.stage}。`);
+    }
+    await openReviewedTargetWorkspace(host, workspaceFolder, record);
+  } catch (error) {
+    void vscode.window.showErrorMessage(errorMessage(error, '无法打开 01B 目标工作区'));
+  }
+}
+
+async function retryTargetWorkspaceInventory(host: ExtensionHost): Promise<void> {
+  try {
+    const workspaceFolder = await selectTargetWorkspaceFolder();
+    if (!workspaceFolder) return;
+    const workspaceId = workspaceFolder.uri.toString();
+    const stored = await host.targetWorkspaces.get(workspaceId);
+    if (!stored || stored.stage !== 'status-inventory-failed') {
+      throw new Error(`目标工作区没有可重试的实现状态检测：${stored?.stage ?? 'not-initialized'}。`);
+    }
+    const refreshed = await host.targetWorkspaces.refresh(workspaceId);
+    if (refreshed.stage !== 'status-inventory-failed') {
+      throw new Error(`重试前工作区快照已变化，当前状态为 ${refreshed.stage}；不能沿用旧 Gate 1。`);
+    }
+    const reviewed = await vscode.window.withProgress<TargetWorkspaceHostRecord>(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: 'ForeXplore: 正在重试 01B 实现状态检测',
+      },
+      () => host.targetWorkspaces.rebuildImplementationInventory(workspaceId),
+    );
+    await openReviewedTargetWorkspace(host, workspaceFolder, reviewed);
+  } catch (error) {
+    void vscode.window.showErrorMessage(errorMessage(error, '01B 实现状态检测重试失败'));
+  }
+}
+
+async function rebaseTargetWorkspaceBodyOnly(
+  host: ExtensionHost,
+  previews: ModuleMigrationPreviewProvider,
+): Promise<void> {
+  try {
+    const workspaceFolder = await selectTargetWorkspaceFolder();
+    if (!workspaceFolder) return;
+    const workspaceId = workspaceFolder.uri.toString();
+    const existing = await host.targetWorkspaces.get(workspaceId);
+    if (!existing) {
+      throw new Error('目标工作区尚未初始化。');
+    }
+    // Re-read the real workspace before presenting the rebase confirmation. The
+    // Host repeats the binding checks during the mutation, so a concurrent edit
+    // still fails closed after the modal is opened.
+    const record = await host.targetWorkspaces.refresh(workspaceId);
+    const accepted = record?.accepted;
+    if (
+      !record ||
+      record.stage !== 'body-only-compatible' ||
+      record.freshness?.status !== 'body-only-compatible' ||
+      !accepted?.snapshot
+    ) {
+      throw new Error(`目标工作区不满足方法体兼容 rebase 条件：${record?.stage ?? 'not-initialized'}。`);
+    }
+    const choice = await vscode.window.showWarningMessage(
+      '声明结构未变化，但旧实现状态已经过期。将旧模块边界映射到新 IR 并产生一份新的 Gate 1 提案；必须再次人审后才会重算状态。',
+      { modal: true },
+      '生成 rebase 提案',
+    );
+    if (choice !== '生成 rebase 提案') return;
+    const rebased = await host.targetWorkspaces.rebaseBodyOnly({
+      workspaceId,
+      expectedModuleSnapshotId: accepted.snapshot.id,
+      expectedModuleSnapshotHash: accepted.snapshot.contentHash,
+      expectedCatalogId: accepted.catalog.id,
+      expectedCatalogHash: accepted.catalog.contentHash,
+      expectedLatestAnalysisSnapshotId: record.latest.analysis.snapshotId,
+      expectedLatestIrId: record.latest.ir.id,
+      expectedLatestIrHash: record.latest.ir.contentHash,
+    });
+    activeRun = null;
+    activeTargetWorkspacePanel = null;
+    await previews.show('01B target workspace body-only rebase proposal', {
+      warning: 'rebase 只复用边界意图，不复用旧 assessment；本提案仍需 Gate 1 人审。',
+      freshness: record.freshness,
+      proposal: rebased.discovery?.proposal,
+      draftCatalog: rebased.discovery?.draftCatalog,
+    });
+    void vscode.window.showInformationMessage(
+      '已生成绑定新 IR 的模块边界提案。请运行“ForeXplore: 审阅 01B 目标模块边界”。',
+    );
+  } catch (error) {
+    void vscode.window.showErrorMessage(errorMessage(error, '01B 方法体兼容 rebase 失败'));
+  }
+}
+
+async function openReviewedTargetWorkspace(
+  host: ExtensionHost,
+  workspaceFolder: vscode.WorkspaceFolder,
+  record: TargetWorkspaceHostRecord,
+): Promise<void> {
+  targetSelectionEpoch += 1;
+  const projection = projectTargetWorkspace({ record, workspaceName: workspaceFolder.name });
+  const panelState = { workspaceFolder, projection };
+  activeTargetWorkspacePanel = panelState;
+  activeRun = null;
+  await showTargetWorkspacePanel(host, panelState);
+}
+
+async function showTargetWorkspacePanel(
+  host: ExtensionHost,
+  panelState: ActiveTargetWorkspacePanel,
+): Promise<void> {
+  const serviceStatus = await host.services.refresh();
+  const repositoryStatuses = await refreshRepositoryStatus(host.services, host.health);
+  const runtime = host.services.getRuntimePresentation();
+  await TranslationPanel.createOrShow(
+    host.context,
+    {
+      targetWorkspace: panelState.projection,
+      workspaceRoot: panelState.workspaceFolder.uri.fsPath,
+      repositoryStatuses,
+      serviceStatus,
+      searchProvider: runtime.searchProvider,
+      adaptationProvider: runtime.adaptationProvider,
+    },
+    { onMessage: (message) => void handlePanelMessage(host, message) },
+  );
+}
+
+async function refreshTargetWorkspace(
+  host: ExtensionHost,
+  message: Extract<WebviewToHostMessage, { type: 'REFRESH_TARGET_WORKSPACE' }>,
+): Promise<void> {
+  try {
+    const panelState = activeTargetWorkspacePanel;
+    if (!panelState) throw new Error('当前面板没有已审的 01B 目标工作区。');
+    if (
+      message.expectedSnapshotId &&
+      (message.expectedSnapshotId !== panelState.projection.snapshotId ||
+        message.expectedContentHash !== panelState.projection.contentHash)
+    ) {
+      throw new Error('目标工作区刷新请求基于旧快照。');
+    }
+    publish({
+      type: 'TARGET_WORKSPACE_REFRESHING',
+      previousSnapshotId: panelState.projection.snapshotId,
+      previousContentHash: panelState.projection.contentHash,
+    });
+    const refreshed = await host.targetWorkspaces.refresh(panelState.projection.workspaceId);
+    if (refreshed.stage === 'reviewed' && refreshed.accepted?.snapshot) {
+      const projection = projectTargetWorkspace({
+        record: refreshed,
+        workspaceName: panelState.workspaceFolder.name,
+      });
+      activeTargetWorkspacePanel = { ...panelState, projection };
+      publish({ type: 'TARGET_WORKSPACE_SNAPSHOT', snapshot: projection });
+      return;
+    }
+    const reason = refreshed.freshness?.reasonCodes.join('、') ||
+      refreshed.failure ||
+      `目标工作区处于 ${refreshed.stage}`;
+    publishTargetWorkspaceInvalidation(panelState.projection, reason);
+  } catch (error) {
+    publishError(errorMessage(error, '刷新 01B 目标工作区失败'));
+  }
+}
+
+async function selectTargetWorkspaceEntity(
+  host: ExtensionHost,
+  message: Extract<WebviewToHostMessage, {
+    type: 'SELECT_TARGET_ENTITY' | 'START_TARGET_TRANSLATION';
+  }>,
+  activateWorkflow: boolean,
+): Promise<void> {
+  const requestEpoch = ++targetSelectionEpoch;
+  if (activateWorkflow) activeRun = null;
+  try {
+    const panelState = activeTargetWorkspacePanel;
+    if (!panelState) throw new Error('当前面板没有已审的 01B 目标工作区。');
+    assertTargetWorkspaceSelection(panelState.projection, message);
+    if (activateWorkflow) {
+      await refreshTargetWorkspaceBinding(host, {
+        workspaceId: panelState.projection.workspaceId,
+        snapshotId: message.snapshotId,
+        contentHash: message.contentHash,
+      });
+      if (requestEpoch !== targetSelectionEpoch) return;
+    }
+    const context = await host.targetWorkspaces.getTargetContext({
+      workspaceId: panelState.projection.workspaceId,
+      snapshotId: message.snapshotId,
+      snapshotHash: message.contentHash,
+      entityId: message.entityId,
+    });
+    if (requestEpoch !== targetSelectionEpoch) return;
+    const target = moduleTargetFromTargetWorkspaceContext(context);
+    if (activateWorkflow) {
+      const relativeParts = target.path.replaceAll('\\', '/').split('/').filter(Boolean);
+      const targetUri = vscode.Uri.joinPath(panelState.workspaceFolder.uri, ...relativeParts);
+      const openDocument = vscode.workspace.textDocuments.find(
+        (document) => document.uri.toString() === targetUri.toString(),
+      );
+      if (openDocument?.isDirty) {
+        throw new Error('目标文件有未保存编辑；请保存并刷新目标工作区。');
+      }
+      const originalBytes = await vscode.workspace.fs.readFile(targetUri);
+      if (!context.file || sha256(originalBytes) !== context.file.contentHash) {
+        throw new Error('目标文件在刷新与启动之间发生变化；请刷新 01B 目标工作区后重试。');
+      }
+      if (requestEpoch !== targetSelectionEpoch) return;
+      activeRun = {
+        workspaceFolder: panelState.workspaceFolder,
+        targetUri,
+        target,
+        originalSha256: sha256(originalBytes),
+        originalContent: Buffer.from(originalBytes).toString('utf8'),
+        requirement: '',
+        candidates: [],
+        selectedCandidateId: null,
+        adaptation: null,
+        targetWorkspaceSelection: {
+          workspaceId: panelState.projection.workspaceId,
+          snapshotId: message.snapshotId,
+          contentHash: message.contentHash,
+          nodeId: message.nodeId,
+          entityId: message.entityId,
+        },
+      };
+    }
+    publish({
+      type: 'TARGET_ENTITY_SELECTED',
+      selection: message,
+      target,
+      activateWorkflow,
+    });
+  } catch (error) {
+    publishError(errorMessage(error, '01B 目标选择无效'));
+  }
+}
+
+async function selectTargetWorkspaceFolder(): Promise<vscode.WorkspaceFolder | undefined> {
+  const folders = vscode.workspace.workspaceFolders ?? [];
+  if (folders.length === 0) {
+    void vscode.window.showInformationMessage('请先打开目标工作区。');
+    return undefined;
+  }
+  if (folders.length === 1) return folders[0];
+  const selected = await vscode.window.showQuickPick(
+    folders.map((folder) => ({
+      label: folder.name,
+      description: folder.uri.fsPath,
+      folder,
+    })),
+    { title: '选择 01B 目标工作区', placeHolder: '目标工作区只生成本次迁移目录，不发布到 SeekDB。' },
+  );
+  return selected?.folder;
 }
 
 async function handlePanelMessage(
@@ -258,6 +745,15 @@ async function handlePanelMessage(
     case 'START_SEARCH':
       await startSearch(host, message);
       return;
+    case 'REFRESH_TARGET_WORKSPACE':
+      await refreshTargetWorkspace(host, message);
+      return;
+    case 'SELECT_TARGET_ENTITY':
+      await selectTargetWorkspaceEntity(host, message, false);
+      return;
+    case 'START_TARGET_TRANSLATION':
+      await selectTargetWorkspaceEntity(host, message, true);
+      return;
     case 'SELECT_CANDIDATE':
       selectCandidate(message.candidateId);
       return;
@@ -265,7 +761,7 @@ async function handlePanelMessage(
       await startAdaptation(host, message.decisionNotes);
       return;
     case 'APPLY_CURRENT_RUN':
-      await applyCurrentRun(host.context);
+      await applyCurrentRun(host);
       return;
     case 'CHECK_REPOSITORIES':
       await refreshPanelStatus(host);
@@ -282,7 +778,7 @@ async function startSearch(
 ): Promise<void> {
   try {
     const run = requireActiveRun();
-    await assertTargetUnchanged(run);
+    await assertTargetUnchanged(run, host);
     const status = await host.services.refresh();
     publish({ type: 'SERVICE_STATUS', status });
     const runtime = host.services.getRuntimePorts();
@@ -325,7 +821,7 @@ async function startAdaptation(host: ExtensionHost, decisionNotes: string): Prom
   try {
     const run = requireActiveRun();
     const candidate = selectedRunCandidate(run);
-    await assertTargetUnchanged(run);
+    await assertTargetUnchanged(run, host);
     const status = await host.services.refresh();
     publish({ type: 'SERVICE_STATUS', status });
     const runtime = host.services.getRuntimePorts();
@@ -344,8 +840,9 @@ async function startAdaptation(host: ExtensionHost, decisionNotes: string): Prom
   }
 }
 
-async function applyCurrentRun(context: vscode.ExtensionContext): Promise<void> {
+async function applyCurrentRun(host: ExtensionHost): Promise<void> {
   try {
+    const { context } = host;
     const run = requireActiveRun();
     const adaptation = run.adaptation;
     if (!adaptation) throw new Error('尚未生成当前迁移运行的补丁。');
@@ -354,7 +851,7 @@ async function applyCurrentRun(context: vscode.ExtensionContext): Promise<void> 
       const labels = gate.blockers.map((record) => record.label).join('、');
       throw new Error(`必需验证未通过或尚未验证：${labels || '缺少可写回补丁'}。`);
     }
-    await assertTargetUnchanged(run);
+    await assertTargetUnchanged(run, host);
     const referenceFree = adaptation.validation.some(
       (record) => record.id === 'reference-candidate',
     );
@@ -382,12 +879,14 @@ async function applyCurrentRun(context: vscode.ExtensionContext): Promise<void> 
       targetPath: run.target.path,
     });
     publish({ type: 'APPLY_RESULT', result });
+    await invalidateTargetWorkspaceAfterMutation(host, run, '目标补丁已写回；旧实现状态证据不再是当前状态。');
   } catch (error) {
     publishError(errorMessage(error, '回填失败'));
   }
 }
 
-async function restoreLastCheckpoint(context: vscode.ExtensionContext): Promise<void> {
+async function restoreLastCheckpoint(host: ExtensionHost): Promise<void> {
+  const { context } = host;
   const checkpoint = context.workspaceState.get<LastCheckpoint>('forexplore.lastCheckpoint');
   const run = activeRun;
   if (!checkpoint || !run) {
@@ -414,6 +913,7 @@ async function restoreLastCheckpoint(context: vscode.ExtensionContext): Promise<
       allowedTargetPath: run.target.path,
     }).restore(checkpoint.checkpointId);
     await context.workspaceState.update('forexplore.lastCheckpoint', undefined);
+    await invalidateTargetWorkspaceAfterMutation(host, run, '目标文件已从检查点恢复；请刷新 01B 快照后继续。');
     void vscode.window.showInformationMessage(`已恢复 ${result.appliedFiles.join('、')}。`);
   } catch (error) {
     void vscode.window.showErrorMessage(errorMessage(error, '恢复失败'));
@@ -542,7 +1042,19 @@ function selectedRunCandidate(run: ActiveMigrationRun): SearchCandidate {
   return candidate;
 }
 
-async function assertTargetUnchanged(run: ActiveMigrationRun): Promise<void> {
+async function assertTargetUnchanged(
+  run: ActiveMigrationRun,
+  host: ExtensionHost,
+): Promise<void> {
+  if (run.targetWorkspaceSelection) {
+    await refreshTargetWorkspaceBinding(host, run.targetWorkspaceSelection);
+    await host.targetWorkspaces.getTargetContext({
+      workspaceId: run.targetWorkspaceSelection.workspaceId,
+      snapshotId: run.targetWorkspaceSelection.snapshotId,
+      snapshotHash: run.targetWorkspaceSelection.contentHash,
+      entityId: run.targetWorkspaceSelection.entityId,
+    });
+  }
   const openDocument = vscode.workspace.textDocuments.find(
     (document) => document.uri.toString() === run.targetUri.toString(),
   );
@@ -552,6 +1064,86 @@ async function assertTargetUnchanged(run: ActiveMigrationRun): Promise<void> {
   const current = await vscode.workspace.fs.readFile(run.targetUri);
   if (sha256(current) !== run.originalSha256) {
     throw new Error('目标文件已在本次迁移开始后发生变化；请重新启动迁移以生成新快照。');
+  }
+}
+
+async function refreshTargetWorkspaceBinding(
+  host: ExtensionHost,
+  selection: { workspaceId: string; snapshotId: string; contentHash: string },
+): Promise<TargetWorkspaceHostRecord> {
+  const refreshed = await host.targetWorkspaces.refresh(selection.workspaceId);
+  const snapshot = refreshed.accepted?.snapshot;
+  if (
+    refreshed.stage === 'reviewed' &&
+    snapshot?.id === selection.snapshotId &&
+    snapshot.contentHash === selection.contentHash
+  ) {
+    return refreshed;
+  }
+  const reason = refreshed.failure ??
+    `目标工作区已经变为 ${refreshed.stage}，旧 snapshot/entity 不再可用。`;
+  const panelState = activeTargetWorkspacePanel;
+  if (
+    panelState?.projection.workspaceId === selection.workspaceId &&
+    panelState.projection.snapshotId === selection.snapshotId &&
+    panelState.projection.contentHash === selection.contentHash
+  ) {
+    publishTargetWorkspaceInvalidation(panelState.projection, reason);
+  }
+  throw new Error(reason);
+}
+
+function publishTargetWorkspaceInvalidation(
+  snapshot: TargetWorkspaceSnapshot,
+  reason: string,
+): void {
+  const staleProjection: TargetWorkspaceSnapshot = {
+    ...snapshot,
+    freshness: 'stale',
+    staleReason: reason,
+  };
+  if (
+    activeTargetWorkspacePanel?.projection.snapshotId === snapshot.snapshotId &&
+    activeTargetWorkspacePanel.projection.contentHash === snapshot.contentHash
+  ) {
+    activeTargetWorkspacePanel = {
+      ...activeTargetWorkspacePanel,
+      projection: staleProjection,
+    };
+  }
+  publish({
+    type: 'TARGET_WORKSPACE_INVALIDATED',
+    invalidation: {
+      snapshotId: snapshot.snapshotId,
+      contentHash: snapshot.contentHash,
+      reason,
+      detectedAt: new Date().toISOString(),
+    },
+  });
+}
+
+async function invalidateTargetWorkspaceAfterMutation(
+  host: ExtensionHost,
+  run: ActiveMigrationRun,
+  reason: string,
+): Promise<void> {
+  const selection = run.targetWorkspaceSelection;
+  if (!selection) return;
+  const panelState = activeTargetWorkspacePanel;
+  if (
+    panelState &&
+    panelState.projection.workspaceId === selection.workspaceId &&
+    panelState.projection.snapshotId === selection.snapshotId &&
+    panelState.projection.contentHash === selection.contentHash
+  ) {
+    publishTargetWorkspaceInvalidation(panelState.projection, reason);
+  }
+  try {
+    await host.targetWorkspaces.refresh(selection.workspaceId);
+  } catch (error) {
+    // The write/restore already succeeded. Keep the UI fail-closed and report
+    // refresh failure separately instead of misreporting the mutation itself.
+    publishError(errorMessage(error, '目标文件已变化，但 01B 快照刷新失败'));
   }
 }
 
