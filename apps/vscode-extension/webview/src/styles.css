@@ -2157,6 +2157,9 @@ button:disabled {
 
   .target-workspace-detail {
     min-height: 240px;
+  }
+}
+
 /* 01A / 01B module workspace */
 
 .module-layout {
