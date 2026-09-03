@@ -26,6 +26,7 @@
     "build:retrieval": "npm run build --workspace @forexplore/retrieval-service",
     "build:adaptation": "npm run build --workspace @forexplore/adaptation-service",
     "build:mcp": "npm run build --workspace @forexplore/adaptation-mcp-server",
-    "test": "npm run test --workspace @forexplore/workspace-adapters && npm run test --workspace @forexplore/workflow-core && npm run test --workspace @forexplore/code-indexer && npm run test --workspace @forexplore/seekdb-adapter && npm run test --workspace @forexplore/adaptation-http-adapter && npm run test --workspace @forexplore/retrieval-service && npm run test --workspace @forexplore/adaptation-service && npm run test --workspace @forexplore/adaptation-mcp-server && npm run test --workspace @forexplore/workflow-web && npm run test --workspace forexplore-vscode"
+    "test": "npm run test --workspace @forexplore/workspace-adapters && npm run test --workspace @forexplore/workflow-core && npm run test --workspace @forexplore/code-indexer && npm run test --workspace @forexplore/seekdb-adapter && npm run test --workspace @forexplore/adaptation-http-adapter && npm run test --workspace @forexplore/retrieval-service && npm run test --workspace @forexplore/adaptation-service && npm run test --workspace @forexplore/adaptation-mcp-server && npm run test --workspace @forexplore/workflow-web && npm run test --workspace forexplore-vscode && npm run test --workspace @forexplore/translation-verifier",
+    "e2e": "npm run e2e --workspace @forexplore/translation-verifier"
   }
 }

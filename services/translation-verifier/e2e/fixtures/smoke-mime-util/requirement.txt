@@ -1,0 +1,1 @@
+解码 MIME 编码文本(如 =?UTF-8?B?...?= 的 base64 或 =?UTF-8?Q?...?= 的 quoted-printable 形式),非编码文本原样返回;编码格式非法或输入为 null 时抛异常
