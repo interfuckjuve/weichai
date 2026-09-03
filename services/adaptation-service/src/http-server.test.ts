@@ -1,21 +1,39 @@
 import type { AddressInfo } from 'node:net';
 import type {
   AdaptationRequest,
+  AdaptationResultV2,
   AdaptationResult,
   ModuleMigrationProposal,
+  MigrationRuntimeCapabilitySnapshot,
   RepositoryArchitectureRequest,
   RepositoryStaticAnalysis,
   SearchCandidate,
 } from '@forexplore/contracts';
 import type {
   CodeAdaptationPort,
+  MigrationExecutionV2ValidationContext,
   RepositoryArchitecturePort,
+} from '@forexplore/workflow-core';
+import {
+  materializeMigrationRuntimeCapabilitySnapshot,
+  validateAdaptationResultV2,
 } from '@forexplore/workflow-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createHttpServer,
+  type MigrationExecutionV2ArtifactStore,
   type StaticAnalysisSnapshotStore,
 } from './http-server';
+import {
+  AdaptationAdapterV2,
+  type CodeAdaptationPortV2,
+} from './adaptation-adapter-v2';
+import {
+  adaptationV2GeneratedContent,
+  adaptationV2TestNow,
+  createAdaptationV2TestFixture,
+} from './adaptation-v2-test-support';
+import { createAdaptationRuntimeCapabilitySnapshot } from './runtime-capability-snapshot';
 
 const servers: ReturnType<typeof createHttpServer>[] = [];
 
@@ -35,6 +53,9 @@ async function listen(
   options: {
     architecturePort?: RepositoryArchitecturePort;
     staticAnalysisSnapshots?: StaticAnalysisSnapshotStore;
+    runtimeCapabilitySnapshot?: MigrationRuntimeCapabilitySnapshot;
+    adapterV2?: CodeAdaptationPortV2;
+    migrationExecutionV2Artifacts?: MigrationExecutionV2ArtifactStore;
   } = {},
 ): Promise<string> {
   const server = createHttpServer({
@@ -161,6 +182,65 @@ const modulePlan: ModuleMigrationProposal = {
   risks: [],
 };
 
+function deterministicAdapterV2(
+  runtimeCapabilities: MigrationRuntimeCapabilitySnapshot,
+): CodeAdaptationPortV2 {
+  return new AdaptationAdapterV2({
+    runtimeCapabilities,
+    analyzer: {
+      providerId: 'forexplore.analyzer.deepseek',
+      providerVersion: '1.0.0',
+      analyze: async () => ({
+        schemaVersion: '1.0',
+        behavior: ['Normalize text.'],
+        targetConstraints: ['Keep sibling function.'],
+        mappings: [],
+        risks: [],
+        unresolved: [],
+      }),
+    },
+    planner: {
+      providerId: 'forexplore.planner.deepseek',
+      providerVersion: '1.0.0',
+      plan: async () => ({
+        schemaVersion: '1.0',
+        steps: ['Replace the approved declaration.'],
+        preservedFacts: [],
+        expectedTargetChanges: ['normalize'],
+        validationFocus: ['behavior'],
+        unresolved: [],
+      }),
+    },
+    translator: {
+      providerId: 'forexplore.translator.deepseek',
+      providerVersion: '1.0.0',
+      strategy: 'translate',
+      translate: async () => ({
+        schemaVersion: '1.0',
+        generatedContent: adaptationV2GeneratedContent,
+        completedSteps: ['translated'],
+        unresolved: [],
+      }),
+    },
+    verifier: {
+      providerId: 'forexplore.translation-verifier.differential',
+      providerVersion: '1.0.0',
+      verify: async () => ({
+        status: 'pass',
+        summary: 'Controlled local test-fixture verifier passed.',
+        artifactPath: '.forexplore/evidence/http-v2.json',
+      }),
+    },
+    compiler: {
+      capability: (languageId) => languageId === 'python'
+        ? { providerId: 'forexplore.compiler.python', providerVersion: '1.0.0' }
+        : undefined,
+      validate: () => ({ status: 'pass', summary: 'Python syntax fixture passed.' }),
+    },
+    now: () => adaptationV2TestNow,
+  });
+}
+
 describe('adaptation HTTP API', () => {
   it('serves health check', async () => {
     const adapter: CodeAdaptationPort = { adapt: vi.fn() };
@@ -169,6 +249,211 @@ describe('adaptation HTTP API', () => {
     const response = await fetch(`${url}/health`);
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ status: 'ok', provider: 'deepseek' });
+  });
+
+  it('always serves a validated runtime capability snapshot', async () => {
+    const adapter: CodeAdaptationPort = { adapt: vi.fn() };
+    const emptyUrl = await listen(adapter);
+
+    const emptyResponse = await fetch(`${emptyUrl}/v2/runtime-capabilities`);
+    expect(emptyResponse.status).toBe(200);
+    expect(await emptyResponse.json()).toEqual(expect.objectContaining({
+      schemaVersion: '2.0',
+      id: expect.stringMatching(/^migration-runtime-capabilities:/),
+      routes: [],
+      contentHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+    }));
+
+    const snapshot = createAdaptationRuntimeCapabilitySnapshot({
+      createdAt: '2026-09-02T00:00:00.000Z',
+      analysisExecution: 'trusted-host',
+      verifierExecution: 'trusted-isolated',
+      workspaceMutationExecution: 'trusted-host',
+    });
+    const configuredUrl = await listen(adapter, { runtimeCapabilitySnapshot: snapshot });
+    const configuredResponse = await fetch(`${configuredUrl}/v2/runtime-capabilities`);
+    expect(configuredResponse.status).toBe(200);
+    expect(await configuredResponse.json()).toEqual(snapshot);
+    expect(adapter.adapt).not.toHaveBeenCalled();
+  });
+
+  it('rejects a tampered runtime capability snapshot before listening', () => {
+    const adapter: CodeAdaptationPort = { adapt: vi.fn() };
+    const snapshot = createAdaptationRuntimeCapabilitySnapshot({
+      createdAt: '2026-09-02T00:00:00.000Z',
+      analysisExecution: 'trusted-host',
+      verifierExecution: 'trusted-isolated',
+      workspaceMutationExecution: 'trusted-host',
+    });
+    const tampered = structuredClone(snapshot);
+    tampered.contentHash = '0'.repeat(64);
+
+    expect(() => createHttpServer({
+      adapter,
+      runtimeCapabilitySnapshot: tampered,
+    })).toThrow('Runtime capability snapshot hash or canonical structure is invalid');
+  });
+
+  it('returns production route unavailability as a structured 409 capability fact', async () => {
+    const fixture = createAdaptationV2TestFixture();
+    const productionSnapshot = createAdaptationRuntimeCapabilitySnapshot({
+      createdAt: adaptationV2TestNow,
+      analysisExecution: 'disabled',
+      verifierExecution: 'disabled',
+      workspaceMutationExecution: 'disabled',
+    });
+    const adapter: CodeAdaptationPort = { adapt: vi.fn() };
+    const adapterV2: CodeAdaptationPortV2 = { adapt: vi.fn() };
+    const url = await listen(adapter, {
+      runtimeCapabilitySnapshot: productionSnapshot,
+      adapterV2,
+    });
+
+    const response = await fetch(`${url}/v2/adapt`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(fixture.request),
+    });
+    const body = await response.json() as Record<string, unknown>;
+
+    expect(response.status).toBe(409);
+    expect(body).toMatchObject({
+      schemaVersion: '2.0',
+      code: 'MIGRATION_ROUTE_UNAVAILABLE',
+      routeId: fixture.request.route.routeId,
+      reasonCodes: expect.arrayContaining([
+        'behavior-validation:behavior-verifier-execution-disabled',
+      ]),
+    });
+    expect(adapterV2.adapt).not.toHaveBeenCalled();
+    expect(adapter.adapt).not.toHaveBeenCalled();
+  });
+
+  it('executes POST /v2/adapt only after resolving and validating server-owned artifacts', async () => {
+    const fixture = createAdaptationV2TestFixture();
+    expect(fixture.serviceRuntime.routes.find((route) => route.id === fixture.route.id)?.availability)
+      .toMatchObject({ status: 'unavailable' });
+    expect(fixture.runtime.routes.find((route) => route.id === fixture.route.id)?.availability)
+      .toMatchObject({ status: 'available' });
+    const adapter: CodeAdaptationPort = { adapt: vi.fn() };
+    const adapterV2 = deterministicAdapterV2(fixture.serviceRuntime);
+    const adapterSpy = vi.spyOn(adapterV2, 'adapt');
+    const migrationExecutionV2Artifacts: MigrationExecutionV2ArtifactStore = {
+      getArtifacts: vi.fn(async () => fixture.serverArtifacts),
+    };
+    const url = await listen(adapter, {
+      runtimeCapabilitySnapshot: fixture.serviceRuntime,
+      adapterV2,
+      migrationExecutionV2Artifacts,
+    });
+
+    const response = await fetch(`${url}/v2/adapt`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(fixture.request),
+    });
+    const body = await response.json() as AdaptationResultV2;
+
+    expect(response.status).toBe(200);
+    expect(validateAdaptationResultV2(body, fixture.request, fixture.validationContext)).toBe(body);
+    expect(migrationExecutionV2Artifacts.getArtifacts).toHaveBeenCalledWith(
+      expect.objectContaining({
+        requestId: fixture.request.id,
+        routeId: fixture.request.route.routeId,
+        sourceBundleId: fixture.sourceBundle.id,
+        targetContextId: fixture.targetContext.id,
+      }),
+      expect.any(AbortSignal),
+    );
+    expect(adapterSpy).toHaveBeenCalledWith(
+      fixture.request,
+      expect.objectContaining({ runtimeCapabilities: fixture.runtime }),
+      expect.any(AbortSignal),
+    );
+    expect(adapter.adapt).not.toHaveBeenCalled();
+  });
+
+  it('rejects request artifacts that differ from the authoritative store before V2 execution', async () => {
+    const fixture = createAdaptationV2TestFixture();
+    const adapter: CodeAdaptationPort = { adapt: vi.fn() };
+    const adapterV2: CodeAdaptationPortV2 = { adapt: vi.fn() };
+    const migrationExecutionV2Artifacts: MigrationExecutionV2ArtifactStore = {
+      getArtifacts: vi.fn(async () => fixture.serverArtifacts),
+    };
+    const url = await listen(adapter, {
+      runtimeCapabilitySnapshot: fixture.serviceRuntime,
+      adapterV2,
+      migrationExecutionV2Artifacts,
+    });
+    const tampered = structuredClone(fixture.request);
+    tampered.sourceBundle.files[0]!.content = 'preview-like untrusted replacement';
+
+    const response = await fetch(`${url}/v2/adapt`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(tampered),
+    });
+
+    expect(response.status).toBe(422);
+    expect(await response.json()).toMatchObject({
+      schemaVersion: '2.0',
+      code: 'ADAPTATION_ARTIFACT_BINDING_MISMATCH',
+      reasonCodes: ['source-bundle-mismatch'],
+    });
+    expect(adapterV2.adapt).not.toHaveBeenCalled();
+    expect(adapter.adapt).not.toHaveBeenCalled();
+  });
+
+  it('rejects a host-composed snapshot that overrides a service-owned behavior stage', async () => {
+    const serviceRuntime = createAdaptationRuntimeCapabilitySnapshot({
+      createdAt: adaptationV2TestNow,
+      analysisExecution: 'disabled',
+      verifierExecution: 'trusted-isolated',
+      workspaceMutationExecution: 'disabled',
+    });
+    const validCombined = createAdaptationRuntimeCapabilitySnapshot({
+      createdAt: adaptationV2TestNow,
+      analysisExecution: 'trusted-host',
+      verifierExecution: 'trusted-isolated',
+      workspaceMutationExecution: 'trusted-host',
+    });
+    const maliciousCombined = materializeMigrationRuntimeCapabilitySnapshot({
+      createdAt: adaptationV2TestNow,
+      routes: validCombined.routes.map((route) => ({
+        ...route,
+        stages: route.stages.map((stage) => stage.stage === 'behavior-validation'
+          ? { ...stage, providerId: 'host-overrode-behavior-verifier' }
+          : stage),
+      })),
+    });
+    const fixture = createAdaptationV2TestFixture({
+      serviceRuntime,
+      executionRuntime: maliciousCombined,
+    });
+    const adapter: CodeAdaptationPort = { adapt: vi.fn() };
+    const adapterV2: CodeAdaptationPortV2 = { adapt: vi.fn() };
+    const migrationExecutionV2Artifacts: MigrationExecutionV2ArtifactStore = {
+      getArtifacts: vi.fn(async () => fixture.serverArtifacts),
+    };
+    const url = await listen(adapter, {
+      runtimeCapabilitySnapshot: serviceRuntime,
+      adapterV2,
+      migrationExecutionV2Artifacts,
+    });
+
+    const response = await fetch(`${url}/v2/adapt`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(fixture.request),
+    });
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      schemaVersion: '2.0',
+      code: 'MIGRATION_RUNTIME_COMPOSITION_REJECTED',
+      reasonCodes: ['service-owned-stage-composition-mismatch'],
+    });
+    expect(adapterV2.adapt).not.toHaveBeenCalled();
   });
 
   it('routes adaptation requests to the adapter', async () => {

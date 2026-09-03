@@ -21,7 +21,11 @@ import type { CodeAdaptationPort } from "@forexplore/workflow-core";
 import { AnalyzerAgent } from "./analyzer";
 import {
   collectTargetContext,
+  createDefaultTargetEngineeringAdapterRegistry,
+  locateTargetPatch,
+  TargetEngineeringUnsupportedError,
   type ContextCollectorOptions,
+  type TargetEngineeringAdapterRegistry,
 } from "./context-collector";
 import {
   projectTargetContext,
@@ -51,6 +55,8 @@ export interface AdaptationAdapterOptions {
   projectRoot?: string;
   analyzer?: AdaptationAnalyzer;
   contextCollector?: AdaptationContextCollector;
+  /** Language-owned target context and patch-location capabilities. */
+  targetEngineeringRegistry?: TargetEngineeringAdapterRegistry;
   translatorRequest?: typeof globalThis.fetch;
   validator?: AdaptationValidator;
 }
@@ -85,6 +91,7 @@ export class AdaptationAdapter implements CodeAdaptationPort {
   #projectRoot?: string;
   #analyzer: AdaptationAnalyzer;
   #contextCollector: AdaptationContextCollector;
+  #targetEngineeringRegistry: TargetEngineeringAdapterRegistry;
   #translatorOptions: TranslatorModelOptions;
   #validator: AdaptationValidator;
 
@@ -92,7 +99,12 @@ export class AdaptationAdapter implements CodeAdaptationPort {
     this.#skeletonProjectPath = options.skeletonProjectPath;
     this.#projectRoot = options.projectRoot;
     this.#analyzer = options.analyzer ?? new AnalyzerAgent({ apiKey: options.apiKey });
-    this.#contextCollector = options.contextCollector ?? collectTargetContext;
+    this.#targetEngineeringRegistry =
+      options.targetEngineeringRegistry ?? createDefaultTargetEngineeringAdapterRegistry();
+    this.#contextCollector = options.contextCollector ?? ((request) => collectTargetContext({
+      ...request,
+      adapterRegistry: this.#targetEngineeringRegistry,
+    }));
     this.#translatorOptions = options.translatorRequest
       ? { apiKey: options.apiKey, request: options.translatorRequest }
       : { apiKey: options.apiKey };
@@ -203,6 +215,8 @@ export class AdaptationAdapter implements CodeAdaptationPort {
           request.target.line,
           request.target.language,
           request.target.kind,
+          this.#targetEngineeringRegistry,
+          request.target.name,
         )
       : null;
 
@@ -271,11 +285,12 @@ export class AdaptationAdapter implements CodeAdaptationPort {
           failureReason: canBuildPatch ? undefined : "target-context-unavailable",
         },
         {
-          id: "behavioral-semantics",
-          label: "Behavioral validation",
+          id: "behavior-verification-unavailable",
+          label: "Independent behavioral verification",
           status: "unverified",
-          required: false,
-          summary: "Compilation validates syntax only; behavioral semantics still require target-project tests.",
+          required: true,
+          summary: "No independent behavior verifier is attached to the deprecated V1 route; compilation alone cannot authorize write-back.",
+          failureReason: "independent-behavior-verifier-unavailable",
         },
       ],
       files: patch ? [patch] : [],
@@ -378,6 +393,9 @@ function buildFilePatch(
   targetLine?: number,
   language: Language = "Java",
   targetKind: "class" | "function" = "function",
+  targetEngineeringRegistry: TargetEngineeringAdapterRegistry =
+    createDefaultTargetEngineeringAdapterRegistry(),
+  targetName?: string,
 ): FilePatch {
   // A blind all-add patch is unsafe: callers must preserve an exact source
   // precondition and regenerate after the target changed.
@@ -385,41 +403,21 @@ function buildFilePatch(
     throw new Error("Cannot build a safe patch without target file content and line information.");
   }
 
-  // 定点 patch：用括号匹配找到原方法体范围
   const originalLines = originalContent.replace(/\r\n/g, "\n").split("\n");
-  let startIdx = Math.max(0, targetLine - 1);
-  let startsTarget = targetKind === "class"
-    ? isClassStart(originalLines[startIdx] ?? "", language)
-    : isMethodStart(originalLines[startIdx] ?? "");
-  if (!startsTarget) {
-    // Indexers may report a leading annotation or documentation line for a
-    // symbol. Resolve only contiguous declaration-prefix trivia; a real code
-    // line stops the search so an incorrect method line cannot drift away.
-    const searchLimit = Math.min(originalLines.length, startIdx + 33);
-    for (let candidate = startIdx + 1; candidate < searchLimit; candidate += 1) {
-      const matchesTarget = targetKind === "class"
-        ? isClassStart(originalLines[candidate] ?? "", language)
-        : isMethodStart(originalLines[candidate] ?? "");
-      if (matchesTarget) {
-        startIdx = candidate;
-        startsTarget = true;
-        break;
-      }
-      if (!isDeclarationPrefixTrivia(originalLines[candidate] ?? "")) break;
-    }
+  const location = locateTargetPatch(
+    language,
+    {
+      source: originalContent,
+      targetLine,
+      targetKind,
+      ...(targetName ? { targetName } : {}),
+    },
+    targetEngineeringRegistry,
+  );
+  if (location.status === "unsupported") {
+    throw new TargetEngineeringUnsupportedError(location.reason);
   }
-  if (startIdx >= originalLines.length || !startsTarget) {
-    throw new Error(
-      targetKind === "class"
-        ? "The target line must point at a class declaration before a safe patch can be built."
-        : "The target line must point at a method declaration before a safe patch can be built.",
-    );
-  }
-
-  // 找到方法体的闭合大括号
-  const endIdx = language === "Python"
-    ? findPythonMethodEnd(originalLines, startIdx)
-    : findMethodEnd(originalLines, startIdx, language);
+  const { startLine: startIdx, endLine: endIdx } = location.value;
   const removedLines = originalLines.slice(startIdx, endIdx + 1);
   if (removedLines.length === 0) {
     throw new Error("Cannot build a patch because the selected target method is empty.");
@@ -427,7 +425,7 @@ function buildFilePatch(
 
   // Model output is normalized to column zero for validation. Reapply the
   // source declaration indentation so nested members stay syntactically nested.
-  const declarationIndent = originalLines[startIdx]?.match(/^\s*/)?.[0] ?? "";
+  const declarationIndent = location.value.declarationIndentation;
   const newLines = indentGeneratedCode(newCode, declarationIndent).split("\n");
 
   // 用原方法签名作为 context 行来定位
@@ -540,240 +538,8 @@ function isInsideRoot(root: string, candidate: string): boolean {
   return Boolean(relativePath) && relativePath !== ".." && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath);
 }
 
-function isMethodStart(line: string): boolean {
-  const trimmed = line.trim();
-  if (!trimmed || /^(if|for|foreach|while|switch|catch|using|return|new|throw)\b/.test(trimmed)) {
-    return false;
-  }
-  return /\b[A-Za-z_][\w]*\s*(?:<[^>]+>)?\s*\(/.test(trimmed);
-}
-
-function isClassStart(line: string, language: Language): boolean {
-  const trimmed = line.trim();
-  if (language === "Python") return /^class\s+[A-Za-z_]\w*/.test(trimmed);
-  if (language === "Go") return /^type\s+[A-Za-z_]\w*\s+struct\b/.test(trimmed);
-  return /^\s*(?:(?:public|private|protected|internal|abstract|sealed|final|static|export|partial|pub)\s+)*(?:class|record|struct|interface)\b/.test(trimmed);
-}
-
-function isDeclarationPrefixTrivia(line: string): boolean {
-  const trimmed = line.trim();
-  return (
-    trimmed === "" ||
-    trimmed === "*/" ||
-    trimmed.startsWith("//") ||
-    trimmed.startsWith("/*") ||
-    trimmed.startsWith("*") ||
-    trimmed.startsWith("@") ||
-    trimmed.startsWith("[")
-  );
-}
-
 function sha256(content: string): string {
   return createHash("sha256").update(content, "utf8").digest("hex");
-}
-
-/**
- * Finds the closing brace for a Java/C#/TypeScript/Go/Rust declaration.
- *
- * This intentionally is not a substitute for a compiler AST. It is the
- * fail-closed fallback used before making a destructive patch: braces in
- * comments and string literals must never influence the selected range, and
- * an incomplete declaration must reject the patch rather than consume the
- * remainder of the file.
- */
-function findMethodEnd(lines: string[], startIdx: number, language: Language): number {
-  let depth = 0;
-  let started = false;
-  let state: LexicalState = "code";
-  let rawQuoteCount = 0;
-  const declarationIndentation = lines[startIdx]?.match(/^\s*/)?.[0].length ?? 0;
-
-  for (let lineIndex = startIdx; lineIndex < lines.length; lineIndex += 1) {
-    const line = lines[lineIndex] ?? "";
-    const lineIndentation = line.match(/^\s*/)?.[0].length ?? 0;
-    if (
-      started &&
-      depth === 1 &&
-      state === "code" &&
-      lineIndex > startIdx &&
-      isLikelySiblingDeclaration(line, declarationIndentation, language)
-    ) {
-      throw new Error(
-        "Cannot build a safe patch because a sibling declaration appears before the target declaration closes.",
-      );
-    }
-    for (let charIndex = 0; charIndex < line.length; charIndex += 1) {
-      const character = line[charIndex] ?? "";
-      const next = line[charIndex + 1] ?? "";
-
-      if (state === "block-comment") {
-        if (character === "*" && next === "/") {
-          state = "code";
-          charIndex += 1;
-        }
-        continue;
-      }
-
-      if (state === "single-quoted") {
-        if (character === "\\") {
-          charIndex += 1;
-        } else if (character === "'") {
-          state = "code";
-        }
-        continue;
-      }
-
-      if (state === "double-quoted" || state === "backtick") {
-        const terminator = state === "double-quoted" ? '"' : "`";
-        if (character === "\\") {
-          charIndex += 1;
-        } else if (character === terminator) {
-          state = "code";
-        }
-        continue;
-      }
-
-      if (state === "verbatim-csharp") {
-        if (character === '"' && next === '"') {
-          charIndex += 1;
-        } else if (character === '"') {
-          state = "code";
-        }
-        continue;
-      }
-
-      if (state === "raw-quoted") {
-        if (character === '"') {
-          const quoteCount = countRepeatedCharacter(line, charIndex, '"');
-          if (quoteCount >= rawQuoteCount) {
-            charIndex += rawQuoteCount - 1;
-            state = "code";
-            rawQuoteCount = 0;
-          } else {
-            charIndex += quoteCount - 1;
-          }
-        }
-        continue;
-      }
-
-      // code state
-      if (character === "/" && next === "/") {
-        break;
-      }
-      if (character === "/" && next === "*") {
-        state = "block-comment";
-        charIndex += 1;
-        continue;
-      }
-      if (character === "'") {
-        state = "single-quoted";
-        continue;
-      }
-      if (character === "`") {
-        state = "backtick";
-        continue;
-      }
-      if (character === "@" && next === '"' && language === "C#") {
-        state = "verbatim-csharp";
-        charIndex += 1;
-        continue;
-      }
-      if (
-        character === "@" &&
-        next === "$" &&
-        line[charIndex + 2] === '"' &&
-        language === "C#"
-      ) {
-        state = "verbatim-csharp";
-        charIndex += 2;
-        continue;
-      }
-      if (
-        character === "$" &&
-        next === "@" &&
-        line[charIndex + 2] === '"' &&
-        language === "C#"
-      ) {
-        state = "verbatim-csharp";
-        charIndex += 2;
-        continue;
-      }
-      if (character === '"') {
-        const quoteCount = countRepeatedCharacter(line, charIndex, '"');
-        if (quoteCount >= 3) {
-          state = "raw-quoted";
-          rawQuoteCount = quoteCount;
-          charIndex += quoteCount - 1;
-        } else {
-          state = "double-quoted";
-        }
-        continue;
-      }
-      if (character === "{") {
-        depth += 1;
-        started = true;
-      } else if (character === "}") {
-        if (!started || depth <= 0) {
-          throw new Error("Cannot build a safe patch because the target declaration has unbalanced braces.");
-        }
-        if (depth === 1 && lineIndentation < declarationIndentation) {
-          throw new Error(
-            "Cannot build a safe patch because the closing brace is outside the target declaration indentation.",
-          );
-        }
-        depth -= 1;
-        if (depth === 0) return lineIndex;
-      }
-    }
-  }
-
-  throw new Error("Cannot build a safe patch because the target declaration has no matching closing brace.");
-}
-
-type LexicalState =
-  | "code"
-  | "block-comment"
-  | "single-quoted"
-  | "double-quoted"
-  | "backtick"
-  | "verbatim-csharp"
-  | "raw-quoted";
-
-function countRepeatedCharacter(value: string, startIndex: number, character: string): number {
-  let index = startIndex;
-  while (value[index] === character) index += 1;
-  return index - startIndex;
-}
-
-function isLikelySiblingDeclaration(
-  line: string,
-  declarationIndentation: number,
-  language: Language,
-): boolean {
-  const indentation = line.match(/^\s*/)?.[0].length ?? 0;
-  if (indentation > declarationIndentation) return false;
-  const trimmed = line.trim();
-  if (!trimmed || trimmed.startsWith("//") || trimmed.startsWith("/*") || trimmed.startsWith("*")) return false;
-  if (isMethodStart(line) || isClassStart(line, language)) return true;
-  if (/^(if|for|foreach|while|switch|catch|using|return|throw|new|else|do|try|finally)\b/.test(trimmed)) {
-    return false;
-  }
-  // Covers fields/properties at the same declaration nesting level. This is
-  // intentionally conservative: refusing an ambiguous patch is safer than
-  // silently deleting a sibling member.
-  return /^(?:(?:public|private|protected|internal|static|readonly|final|const|volatile|abstract|virtual|override|sealed|async|partial|export|pub)\s+)*(?:[A-Za-z_][\w<>,.?\[\]]*\s+)+[A-Za-z_][\w]*(?:\s*[=;{])/.test(trimmed);
-}
-
-function findPythonMethodEnd(lines: string[], startIdx: number): number {
-  const baseIndent = lines[startIdx]?.match(/^\s*/)?.[0].length ?? 0;
-  for (let index = startIdx + 1; index < lines.length; index += 1) {
-    const line = lines[index] ?? "";
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    const indentation = line.match(/^\s*/)?.[0].length ?? 0;
-    if (indentation <= baseIndent) return index - 1;
-  }
-  return lines.length - 1;
 }
 
 function indentGeneratedCode(code: string, indentation: string): string {

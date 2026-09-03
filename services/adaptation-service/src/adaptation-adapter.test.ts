@@ -226,6 +226,8 @@ describe("AdaptationAdapter implementation boundary", () => {
     );
     expect(result.validation.find((record) => record.id === "standalone-compile"))
       .toMatchObject({ status: "pass", command: "javac" });
+    expect(result.validation.find((record) => record.id === "behavior-verification-unavailable"))
+      .toMatchObject({ status: "unverified", required: true });
     expect(result.files).toHaveLength(1);
   });
 

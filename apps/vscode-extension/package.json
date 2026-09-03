@@ -1,7 +1,7 @@
 {
   "name": "forexplore-vscode",
-  "displayName": "ForeXplore Code Translation",
-  "description": "在 VSCode 中运行 ForeXplore 代码翻译工作流：检索相似实现、生成目标代码并以 diff 预览回填。",
+  "displayName": "ForeXplore Code Migration",
+  "description": "在 VSCode 中运行 ForeXplore 跨语言代码迁移工作流：检索历史实现、选择明确迁移路线、生成目标补丁并独立验证。",
   "version": "0.1.0",
   "publisher": "forexplore",
   "license": "MIT",
@@ -19,27 +19,38 @@
     "README.md"
   ],
   "activationEvents": [
-    "onCommand:forexplore.startTranslation",
+    "onCommand:forexplore.startLegacyTranslation",
     "onCommand:forexplore.showPanel",
     "onCommand:forexplore.checkRepositories",
     "onCommand:forexplore.reindex",
     "onCommand:forexplore.restoreLastCheckpoint",
+    "onCommand:forexplore.initializeTargetWorkspace",
+    "onCommand:forexplore.reviewTargetWorkspaceModules",
+    "onCommand:forexplore.openTargetWorkspace",
+    "onCommand:forexplore.rebaseTargetWorkspaceBodyOnly",
+    "onCommand:forexplore.retryTargetWorkspaceInventory",
     "onCommand:forexplore.indexModuleMigrationRepository",
-    "onCommand:forexplore.reviewModuleMigrationPlan",
-    "onCommand:forexplore.reviewModuleMigrationWave",
-    "onCommand:forexplore.prepareModuleMigrationWave",
-    "onCommand:forexplore.approveModuleMigrationWave",
-    "onCommand:forexplore.recoverModuleMigrationReview"
+    "onCommand:forexplore.reviewRepositoryModuleBoundaries",
+    "onCommand:forexplore.generateRepositoryModuleSummaries",
+    "onCommand:forexplore.reviewRepositoryModuleKnowledge",
+    "onCommand:forexplore.withdrawRepositoryModuleKnowledge",
+    "onCommand:forexplore.proposeModuleMapping",
+    "onCommand:forexplore.reviewModuleMapping",
+    "onCommand:forexplore.reviewLegacyModuleMigrationPlan",
+    "onCommand:forexplore.reviewLegacyModuleMigrationWave",
+    "onCommand:forexplore.prepareLegacyModuleMigrationWave",
+    "onCommand:forexplore.approveLegacyModuleMigrationWave",
+    "onCommand:forexplore.recoverLegacyModuleMigrationReview"
   ],
   "contributes": {
     "commands": [
       {
-        "command": "forexplore.startTranslation",
-        "title": "ForeXplore: 开始代码翻译"
+        "command": "forexplore.startLegacyTranslation",
+        "title": "ForeXplore Legacy: 编辑器 V1 迁移入口（兼容）"
       },
       {
         "command": "forexplore.showPanel",
-        "title": "ForeXplore: 打开翻译面板"
+        "title": "ForeXplore: 打开迁移面板"
       },
       {
         "command": "forexplore.checkRepositories",
@@ -54,34 +65,78 @@
         "title": "ForeXplore: 恢复最近一次回填"
       },
       {
+        "command": "forexplore.initializeTargetWorkspace",
+        "title": "ForeXplore: 初始化 01B 目标工作区"
+      },
+      {
+        "command": "forexplore.reviewTargetWorkspaceModules",
+        "title": "ForeXplore: 审阅 01B 目标模块边界"
+      },
+      {
+        "command": "forexplore.openTargetWorkspace",
+        "title": "ForeXplore: 打开 01B 目标工作区"
+      },
+      {
+        "command": "forexplore.rebaseTargetWorkspaceBodyOnly",
+        "title": "ForeXplore: 重映射 01B 实现体兼容变更"
+      },
+      {
+        "command": "forexplore.retryTargetWorkspaceInventory",
+        "title": "ForeXplore: 重试 01B 实现状态检测"
+      },
+      {
         "command": "forexplore.indexModuleMigrationRepository",
         "title": "ForeXplore: 索引模块迁移仓库"
       },
       {
-        "command": "forexplore.reviewModuleMigrationPlan",
-        "title": "ForeXplore: 审阅模块迁移计划"
+        "command": "forexplore.reviewRepositoryModuleBoundaries",
+        "title": "ForeXplore: 审阅仓库模块边界"
       },
       {
-        "command": "forexplore.reviewModuleMigrationWave",
-        "title": "ForeXplore: 审阅下一迁移波次"
+        "command": "forexplore.generateRepositoryModuleSummaries",
+        "title": "ForeXplore: 生成模块知识摘要提案"
       },
       {
-        "command": "forexplore.prepareModuleMigrationWave",
-        "title": "ForeXplore: 导入并准备下一迁移波次"
+        "command": "forexplore.reviewRepositoryModuleKnowledge",
+        "title": "ForeXplore: 审阅并发布模块知识"
       },
       {
-        "command": "forexplore.approveModuleMigrationWave",
-        "title": "ForeXplore: 审批并提交已准备迁移波次"
+        "command": "forexplore.withdrawRepositoryModuleKnowledge",
+        "title": "ForeXplore: 撤销当前模块知识发布"
       },
       {
-        "command": "forexplore.recoverModuleMigrationReview",
-        "title": "ForeXplore: 恢复模块迁移审阅状态"
+        "command": "forexplore.proposeModuleMapping",
+        "title": "ForeXplore: 导入跨目录模块映射提案"
+      },
+      {
+        "command": "forexplore.reviewModuleMapping",
+        "title": "ForeXplore: 审阅模块映射并物化执行 Overlay"
+      },
+      {
+        "command": "forexplore.reviewLegacyModuleMigrationPlan",
+        "title": "ForeXplore Legacy: 审阅 FunctionalModule 兼容计划"
+      },
+      {
+        "command": "forexplore.reviewLegacyModuleMigrationWave",
+        "title": "ForeXplore Legacy: 审阅下一兼容迁移波次"
+      },
+      {
+        "command": "forexplore.prepareLegacyModuleMigrationWave",
+        "title": "ForeXplore Legacy: 导入并准备兼容迁移波次"
+      },
+      {
+        "command": "forexplore.approveLegacyModuleMigrationWave",
+        "title": "ForeXplore Legacy: 审批并提交兼容迁移波次"
+      },
+      {
+        "command": "forexplore.recoverLegacyModuleMigrationReview",
+        "title": "ForeXplore Legacy: 恢复兼容迁移审阅状态"
       }
     ],
     "menus": {
       "editor/context": [
         {
-          "command": "forexplore.startTranslation",
+          "command": "forexplore.startLegacyTranslation",
           "when": "editorHasSelection && resourceScheme == file",
           "group": "forexplore@1"
         }
@@ -92,7 +147,9 @@
       "properties": {
         "forexplore.executionMode": {
           "type": "string",
-          "enum": ["real"],
+          "enum": [
+            "real"
+          ],
           "default": "real",
           "description": "调用本地 SeekDB 检索服务和语言无关的适配服务；两个服务都必须健康。"
         },
@@ -102,7 +159,7 @@
             "type": "string"
           },
           "default": [],
-          "description": "历史代码仓的本地目录。未配置时翻译面板会提示添加路径；本地可读不代表目录已被远端检索服务索引。"
+          "description": "历史代码仓的本地目录。删除路径只修改本地注册，不会撤回已经发布的模块知识。"
         },
         "forexplore.topK": {
           "type": "number",
@@ -119,7 +176,14 @@
         "forexplore.adaptationApiUrl": {
           "type": "string",
           "default": "http://127.0.0.1:8788",
-          "description": "语言无关翻译服务地址。"
+          "description": "语言无关迁移适配服务地址。"
+        },
+        "forexplore.repositoryKnowledgeChannel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "default": "branch:main",
+          "description": "模块知识激活范围中的分支/发布通道。发布前仍会要求人工确认。"
         },
         "forexplore.moduleWaveValidationCommands": {
           "type": "array",
@@ -128,15 +192,36 @@
           "description": "仅由本地 VS Code 宿主在隔离波次 worktree 中执行的联合验证命令。未配置时模块波次准备会被阻止。",
           "items": {
             "type": "object",
-            "required": ["id", "label", "executable"],
+            "required": [
+              "id",
+              "label",
+              "executable"
+            ],
             "properties": {
-              "id": { "type": "string" },
-              "label": { "type": "string" },
-              "executable": { "type": "string" },
-              "args": { "type": "array", "items": { "type": "string" } },
-              "cwd": { "type": "string" },
-              "required": { "type": "boolean" },
-              "timeoutMs": { "type": "number" }
+              "id": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              },
+              "executable": {
+                "type": "string"
+              },
+              "args": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "cwd": {
+                "type": "string"
+              },
+              "required": {
+                "type": "boolean"
+              },
+              "timeoutMs": {
+                "type": "number"
+              }
             },
             "additionalProperties": false
           }
@@ -154,20 +239,22 @@
     "package": "vsce package --no-dependencies --allow-missing-repository"
   },
   "dependencies": {
-    "@forexplore/adaptation-service": "0.1.0",
     "@forexplore/adaptation-http-adapter": "0.1.0",
+    "@forexplore/adaptation-service": "0.1.0",
     "@forexplore/code-indexer": "0.1.0",
     "@forexplore/contracts": "0.1.0",
     "@forexplore/seekdb-adapter": "0.1.0",
     "@forexplore/workflow-core": "0.1.0",
     "lucide-react": "^1.24.0",
     "react": "^19.2.7",
-    "react-dom": "^19.2.7"
+    "react-dom": "^19.2.7",
+    "sql.js": "^1.14.2"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
+    "@types/sql.js": "^1.4.11",
     "@types/vscode": "^1.90.0",
     "@vitejs/plugin-react": "^6.0.3",
     "@vscode/test-electron": "^2.4.1",

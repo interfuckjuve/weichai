@@ -1,4 +1,6 @@
 import { requireRepositoryScopes } from './repository-scope.js';
+import type { MigrationRuntimeCapabilitySnapshot } from '@forexplore/contracts';
+import { validateMigrationRuntimeCapabilitySnapshot } from '@forexplore/workflow-core';
 
 export type RerankingConfig =
   | { provider: 'none' }
@@ -22,6 +24,13 @@ export interface RetrievalConfig {
    * full index during local setup or a misconfigured deployment.
    */
   allowedRepositories: string[];
+  /** Bearer token for publication/index lifecycle mutations; empty disables writes. */
+  moduleIndexToken: string;
+  moduleIndexMaxBodyBytes: number;
+  /** Bearer token for V2 implementation-index generation mutations. */
+  implementationIndexToken: string;
+  implementationIndexMaxBodyBytes: number;
+  migrationRuntimeCapabilitySnapshot?: MigrationRuntimeCapabilitySnapshot;
   autoMigrate: boolean;
   seekdb: {
     host: string;
@@ -30,6 +39,8 @@ export interface RetrievalConfig {
     password: string;
     database: string;
     table: string;
+    /** Dedicated functional-module projection; never aliases the symbol table. */
+    moduleKnowledgeTable: string;
     vectorDimension: number;
   };
   embedding:
@@ -90,6 +101,25 @@ function deepSeekChatCompletionsUrl(env: NodeJS.ProcessEnv): string {
   return `${apiBase}/chat/completions`;
 }
 
+function runtimeCapabilitySnapshot(
+  value: string | undefined,
+): MigrationRuntimeCapabilitySnapshot | undefined {
+  if (!value?.trim()) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error('RETRIEVAL_MIGRATION_RUNTIME_CAPABILITY_SNAPSHOT_JSON must be valid JSON.');
+  }
+  try {
+    return validateMigrationRuntimeCapabilitySnapshot(parsed as MigrationRuntimeCapabilitySnapshot);
+  } catch (error) {
+    throw new Error(
+      `RETRIEVAL_MIGRATION_RUNTIME_CAPABILITY_SNAPSHOT_JSON is invalid: ${error instanceof Error ? error.message : 'unknown error'}`,
+    );
+  }
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): RetrievalConfig {
   const dimension = positiveInteger(
     env.SEEKDB_VECTOR_DIMENSION,
@@ -148,11 +178,46 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RetrievalConfi
     throw new Error('DEEPSEEK_API_KEY is required for the DeepSeek rerank provider.');
   }
 
+  const symbolTable = identifier(env.SEEKDB_TABLE, 'code_symbols', 'SEEKDB_TABLE');
+  const moduleKnowledgeTable = identifier(
+    env.SEEKDB_MODULE_KNOWLEDGE_TABLE,
+    'module_knowledge',
+    'SEEKDB_MODULE_KNOWLEDGE_TABLE',
+  );
+  if (moduleKnowledgeTable === symbolTable) {
+    throw new Error('SEEKDB_MODULE_KNOWLEDGE_TABLE must differ from SEEKDB_TABLE.');
+  }
+  if (moduleKnowledgeTable.length > 52) {
+    throw new Error(
+      'SEEKDB_MODULE_KNOWLEDGE_TABLE must be at most 52 characters so lifecycle table names remain valid.',
+    );
+  }
+  const configuredRuntimeCapabilities = runtimeCapabilitySnapshot(
+    env.RETRIEVAL_MIGRATION_RUNTIME_CAPABILITY_SNAPSHOT_JSON,
+  );
+
   return {
     host: env.RETRIEVAL_HOST?.trim() || '127.0.0.1',
     port: positiveInteger(env.RETRIEVAL_PORT, 8787, 'RETRIEVAL_PORT'),
     corsOrigin: env.RETRIEVAL_CORS_ORIGIN?.trim() || '*',
     allowedRepositories: allowedRepositories(env.RETRIEVAL_ALLOWED_REPOSITORIES),
+    moduleIndexToken: env.RETRIEVAL_MODULE_INDEX_TOKEN?.trim() || '',
+    moduleIndexMaxBodyBytes: positiveInteger(
+      env.RETRIEVAL_MODULE_INDEX_MAX_BODY_BYTES,
+      16 * 1024 * 1024,
+      'RETRIEVAL_MODULE_INDEX_MAX_BODY_BYTES',
+    ),
+    implementationIndexToken: env.RETRIEVAL_IMPLEMENTATION_INDEX_TOKEN?.trim() || '',
+    implementationIndexMaxBodyBytes: positiveInteger(
+      env.RETRIEVAL_IMPLEMENTATION_INDEX_MAX_BODY_BYTES,
+      32 * 1024 * 1024,
+      'RETRIEVAL_IMPLEMENTATION_INDEX_MAX_BODY_BYTES',
+    ),
+    ...(configuredRuntimeCapabilities
+      ? {
+          migrationRuntimeCapabilitySnapshot: configuredRuntimeCapabilities,
+        }
+      : {}),
     autoMigrate: boolean(env.SEEKDB_AUTO_MIGRATE, true),
     seekdb: {
       host: env.SEEKDB_HOST?.trim() || '127.0.0.1',
@@ -160,7 +225,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RetrievalConfi
       user: env.SEEKDB_USER?.trim() || 'root',
       password: env.SEEKDB_PASSWORD || '',
       database: identifier(env.SEEKDB_DATABASE, 'forexplore', 'SEEKDB_DATABASE'),
-      table: identifier(env.SEEKDB_TABLE, 'code_symbols', 'SEEKDB_TABLE'),
+      table: symbolTable,
+      moduleKnowledgeTable,
       vectorDimension: dimension,
     },
     embedding,

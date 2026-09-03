@@ -5,28 +5,36 @@ import { promisify } from 'node:util';
 import path from 'node:path';
 import {
   moduleMigrationSchemaVersion,
+  type AnalysisCapability,
   type DependencyEdge,
   type DependencyEvidenceLevel,
   type DependencyKind,
   type DependencyResolutionStatus,
   type Language,
+  type LanguageId,
   type RepositoryStaticAnalysis,
+  type RepositoryStaticAnalysisAdapterDescriptor,
   type StaticAnalysisDiagnostic,
   type StaticAnalysisFile,
   type StaticSourceRange,
   type StaticSymbol,
   type StaticSymbolKind,
+  type StaticSymbolParameter,
+  type StaticSymbolVisibility,
 } from '@forexplore/contracts';
+import { extractSymbols } from './extractor.js';
 import { probeSystemCompilerSemantics } from './semantic-compiler-probe.js';
 
 const execFileAsync = promisify(execFile);
+const safeRepositoryId = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
+const safeAnalysisAdapterId = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 
 /**
  * Syntax is always collected deterministically. When explicitly enabled, a
  * JDK Compiler API or Roslyn/MSBuildWorkspace helper may confirm individual
  * existing edges; unavailable tooling never upgrades syntactic evidence.
  */
-export const repositoryAnalysisVersion = 'forexplore-code-indexer/1.1.0-semantic';
+export const repositoryAnalysisVersion = 'forexplore-code-indexer/1.3.0-api-surface';
 export const repositoryAnalysisArtifactDirectory = '.forexplore/analysis';
 
 export type CompilerProbeStatus = 'available' | 'unavailable' | 'failed';
@@ -80,6 +88,8 @@ export interface CompilerProbe {
 export interface AnalyzeRepositoryRequest {
   /** Absolute or relative repository root. */
   root: string;
+  /** Optional stable logical identity supplied by a trusted repository registry. */
+  repositoryId?: string;
   /** Include test files and their source associations. Defaults to true. */
   includeTests?: boolean;
   /**
@@ -96,20 +106,30 @@ export interface AnalyzeRepositoryRequest {
   semanticEnrichment?: boolean;
   /** Inject a trusted compiler binding adapter; supplying one enables probing. */
   compilerProbe?: CompilerProbe;
+  /** Runtime language routing. Defaults to the built-in six-language registry. */
+  languageRegistry?: RepositoryLanguageRegistry;
 }
 
-interface RepositoryFile {
+export interface RepositoryAnalysisSourceFile {
   absolutePath: string;
   content: string;
-  language?: Language;
+  /** Open-ended adapter identity used by discovery, routing, and project ownership. */
+  languageId?: LanguageId;
   masked: string;
   path: string;
   project?: string;
+  projectLanguageId?: LanguageId;
   role: StaticAnalysisFile['role'];
   sha256: string;
 }
 
-interface ImportReference {
+type RepositoryParserDialect = CompilerProbeRequest['language'];
+type RepositoryFile = RepositoryAnalysisSourceFile & {
+  /** Private parser implementation detail; never serialized into artifacts. */
+  dialect?: RepositoryParserDialect;
+};
+
+export interface ImportReference {
   range: StaticSourceRange;
   targetReference: string;
 }
@@ -120,6 +140,165 @@ interface TypeReference {
   range: StaticSourceRange;
   sourceSymbolId?: string;
   targetReference: string;
+}
+
+export interface RepositoryLanguageReference {
+  kind: DependencyKind;
+  namespaceOrPackage?: string;
+  range: StaticSourceRange;
+  sourceSymbolId?: string;
+  targetReference: string;
+}
+
+export interface RepositoryLanguageAnalysis {
+  file: RepositoryAnalysisSourceFile;
+  imports: ImportReference[];
+  namespaceOrPackage?: string;
+  references: RepositoryLanguageReference[];
+  symbols: StaticSymbol[];
+}
+
+export type RepositoryAnalysisDiagnosticReporter = (
+  input: Omit<StaticAnalysisDiagnostic, 'id'>,
+) => void;
+
+export interface RepositoryLanguageAdapter {
+  /** Stable implementation identity. Changing parser behaviour requires a new version. */
+  id: string;
+  version: string;
+  /** Stable, open-ended registry key (for example `java` or `kotlin`). */
+  languageId: LanguageId;
+  /** Capability declaration; completion is still evaluated for each analysed segment. */
+  capabilities: readonly AnalysisCapability[];
+  /** Hash of non-versioned adapter configuration which can affect deterministic output. */
+  configurationHash: string;
+  fileExtensions: readonly string[];
+  configurationFileNames?: readonly string[];
+  configurationFileExtensions?: readonly string[];
+  analysisLevel: 'deep' | 'generic';
+  compilerProbeLanguage?: CompilerProbeRequest['language'];
+  analyze(
+    file: RepositoryAnalysisSourceFile,
+    reportDiagnostic: RepositoryAnalysisDiagnosticReporter,
+  ): RepositoryLanguageAnalysis;
+}
+
+export interface RepositoryLanguageAdapterDescriptor {
+  id: string;
+  version: string;
+  languageId: LanguageId;
+  capabilities: AnalysisCapability[];
+  configurationHash: string;
+  analysisLevel: RepositoryLanguageAdapter['analysisLevel'];
+  fileExtensions: string[];
+  configurationFileNames: string[];
+  configurationFileExtensions: string[];
+  compilerProbeLanguage?: CompilerProbeRequest['language'];
+}
+
+/** Runtime registry keeps language discovery and parsing out of the core pipeline. */
+export class RepositoryLanguageRegistry {
+  readonly #byAdapterId = new Map<string, RepositoryLanguageAdapter>();
+  readonly #byLanguageId = new Map<LanguageId, RepositoryLanguageAdapter>();
+  readonly #byExtension = new Map<string, RepositoryLanguageAdapter>();
+  readonly #configurationByName = new Map<string, RepositoryLanguageAdapter>();
+  readonly #configurationByExtension = new Map<string, RepositoryLanguageAdapter>();
+
+  constructor(adapters: readonly RepositoryLanguageAdapter[] = []) {
+    for (const adapter of adapters) this.register(adapter);
+  }
+
+  register(adapter: RepositoryLanguageAdapter): this {
+    if (!safeAnalysisAdapterId.test(adapter.id)) {
+      throw new Error('Repository language adapter must declare a safe stable id.');
+    }
+    if (!adapter.version.trim()) {
+      throw new Error(`Repository language adapter must declare a version: ${adapter.id}`);
+    }
+    if (!adapter.configurationHash.trim()) {
+      throw new Error(`Repository language adapter must declare a configuration hash: ${adapter.id}`);
+    }
+    if (!adapter.languageId.trim()) {
+      throw new Error('Repository language adapter must declare a non-empty languageId.');
+    }
+    if (this.#byAdapterId.has(adapter.id)) {
+      throw new Error(`Repository language adapter ID is already registered: ${adapter.id}`);
+    }
+    if (this.#byLanguageId.has(adapter.languageId)) {
+      throw new Error(`Repository language adapter is already registered: ${adapter.languageId}`);
+    }
+    if (adapter.fileExtensions.length === 0) {
+      throw new Error(`Repository language adapter must declare a source extension: ${adapter.languageId}`);
+    }
+    this.#byAdapterId.set(adapter.id, adapter);
+    this.#byLanguageId.set(adapter.languageId, adapter);
+    for (const extension of adapter.fileExtensions) {
+      this.#registerRoute(this.#byExtension, extension, adapter, 'source extension');
+    }
+    for (const name of adapter.configurationFileNames ?? []) {
+      this.#registerRoute(this.#configurationByName, name, adapter, 'configuration file');
+    }
+    for (const extension of adapter.configurationFileExtensions ?? []) {
+      this.#registerRoute(this.#configurationByExtension, extension, adapter, 'configuration extension');
+    }
+    return this;
+  }
+
+  adapterForLanguageId(languageId: LanguageId): RepositoryLanguageAdapter | undefined {
+    return this.#byLanguageId.get(languageId);
+  }
+
+  adapterForSourcePath(filePath: string): RepositoryLanguageAdapter | undefined {
+    return this.#byExtension.get(path.extname(filePath).toLowerCase());
+  }
+
+  adapterForConfigurationPath(filePath: string): RepositoryLanguageAdapter | undefined {
+    const normalized = filePath.replaceAll('\\', '/').toLowerCase();
+    const name = normalized.split('/').at(-1) ?? normalized;
+    return this.#configurationByName.get(name) ?? this.#configurationByExtension.get(path.extname(name));
+  }
+
+  adapters(): RepositoryLanguageAdapter[] {
+    return [...this.#byLanguageId.values()].sort((left, right) => compareText(left.id, right.id));
+  }
+
+  /** Canonical descriptors are safe to persist in immutable analysis evidence. */
+  descriptors(): RepositoryLanguageAdapterDescriptor[] {
+    return this.adapters().map((adapter) => ({
+      id: adapter.id,
+      version: adapter.version,
+      languageId: adapter.languageId,
+      capabilities: sortedUnique(adapter.capabilities),
+      configurationHash: adapter.configurationHash,
+      analysisLevel: adapter.analysisLevel,
+      fileExtensions: normalizedRoutes(adapter.fileExtensions),
+      configurationFileNames: normalizedRoutes(adapter.configurationFileNames ?? []),
+      configurationFileExtensions: normalizedRoutes(adapter.configurationFileExtensions ?? []),
+      ...(adapter.compilerProbeLanguage
+        ? { compilerProbeLanguage: adapter.compilerProbeLanguage }
+        : {}),
+    }));
+  }
+
+  /** Stable identity of the complete registered adapter set and routing configuration. */
+  fingerprint(): string {
+    return sha256(canonicalJson(this.descriptors()));
+  }
+
+  #registerRoute(
+    routes: Map<string, RepositoryLanguageAdapter>,
+    rawKey: string,
+    adapter: RepositoryLanguageAdapter,
+    kind: string,
+  ): void {
+    const key = rawKey.toLowerCase();
+    if (!key.trim()) throw new Error(`Repository language ${kind} must not be empty.`);
+    const existing = routes.get(key);
+    if (existing) {
+      throw new Error(`Repository language ${kind} ${rawKey} is already owned by ${existing.languageId}.`);
+    }
+    routes.set(key, adapter);
+  }
 }
 
 interface ParsedType {
@@ -176,14 +355,6 @@ const ignoredDirectoryNames = new Set([
   'target',
 ]);
 
-const configurationNames = new Set([
-  'build.gradle',
-  'build.gradle.kts',
-  'pom.xml',
-  'settings.gradle',
-  'settings.gradle.kts',
-]);
-
 const javaPrimitives = new Set([
   'boolean',
   'byte',
@@ -222,6 +393,24 @@ function compareText(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
+function sortedUnique<T extends string>(values: Iterable<T>): T[] {
+  return [...new Set(values)].sort(compareText);
+}
+
+function normalizedRoutes(values: Iterable<string>): string[] {
+  return sortedUnique([...values].map((value) => value.trim().toLowerCase()).filter(Boolean));
+}
+
+function defaultLanguageAdapterId(languageId: LanguageId): string {
+  const slug = languageId
+    .normalize('NFKD')
+    .replace(/[^A-Za-z0-9._:-]+/g, '-')
+    .replace(/^[^A-Za-z0-9]+/, '')
+    .replace(/-+/g, '-')
+    .slice(0, 160) || 'language';
+  return `forexplore.repository-language:${slug}-${sha256(languageId).slice(0, 12)}`;
+}
+
 function sha256(value: string | Uint8Array): string {
   return createHash('sha256').update(value).digest('hex');
 }
@@ -239,28 +428,14 @@ function canonicalPath(root: string, absolutePath: string): string {
   return relative.replaceAll('\\', '/');
 }
 
-function languageForPath(relativePath: string): Language | undefined {
-  if (relativePath.toLowerCase().endsWith('.java')) return 'Java';
-  if (relativePath.toLowerCase().endsWith('.cs')) return 'C#';
-  return undefined;
-}
-
-function isConfigurationPath(relativePath: string): boolean {
-  const normalized = relativePath.toLowerCase();
-  const name = normalized.split('/').at(-1) ?? normalized;
-  return (
-    normalized.endsWith('.csproj') ||
-    normalized.endsWith('.sln') ||
-    configurationNames.has(name)
-  );
-}
-
 function isTestFile(relativePath: string): boolean {
   const normalized = relativePath.replaceAll('\\', '/').toLowerCase();
   const name = normalized.split('/').at(-1) ?? normalized;
-  const stem = name.replace(/\.(?:java|cs)$/, '');
+  const stem = name.replace(/\.[^.]+$/, '');
   return (
     normalized.split('/').some((part) => part === 'test' || part === 'tests') ||
+    name.startsWith('test_') ||
+    stem.endsWith('_test') ||
     stem.endsWith('test') ||
     stem.endsWith('tests') ||
     stem.endsWith('.test') ||
@@ -283,9 +458,31 @@ function isGeneratedFile(relativePath: string): boolean {
   );
 }
 
-function roleForPath(relativePath: string, language: Language | undefined): StaticAnalysisFile['role'] {
-  if (isConfigurationPath(relativePath)) return 'configuration';
-  if (!language) return 'other';
+function roleForPath(
+  relativePath: string,
+  languageId: LanguageId | undefined,
+  configurationLanguageId: LanguageId | undefined,
+): StaticAnalysisFile['role'] {
+  const normalized = relativePath.replaceAll('\\', '/').toLowerCase();
+  const name = normalized.split('/').at(-1) ?? normalized;
+  const extension = path.posix.extname(name);
+  if (
+    configurationLanguageId ||
+    [
+      '.editorconfig', '.gitattributes', '.gitignore', '.npmrc',
+      'dockerfile', 'makefile', 'compose.yaml', 'compose.yml',
+    ].includes(name) ||
+    ['.json', '.toml', '.yaml', '.yml'].includes(extension)
+  ) return 'configuration';
+  if (
+    /^(readme|changelog|contributing|license|notice)(\.|$)/.test(name) ||
+    ['.md', '.mdx', '.rst', '.adoc'].includes(extension)
+  ) return 'documentation';
+  if (
+    ['.bmp', '.gif', '.ico', '.jpeg', '.jpg', '.png', '.svg', '.webp', '.woff', '.woff2']
+      .includes(extension)
+  ) return 'asset';
+  if (!languageId) return 'other';
   if (isTestFile(relativePath)) return 'test';
   if (isGeneratedFile(relativePath)) return 'generated';
   return 'source';
@@ -309,6 +506,7 @@ async function discoverFiles(
   root: string,
   includeTests: boolean,
   diagnostics: StaticAnalysisDiagnostic[],
+  languageRegistry: RepositoryLanguageRegistry,
 ): Promise<RepositoryFile[]> {
   const files: RepositoryFile[] = [];
 
@@ -342,20 +540,25 @@ async function discoverFiles(
       if (!entry.isFile()) continue;
 
       const relativePath = canonicalPath(root, absolutePath);
-      const language = languageForPath(relativePath);
-      if (!language && !isConfigurationPath(relativePath)) continue;
-      const role = roleForPath(relativePath, language);
+      const sourceAdapter = languageRegistry.adapterForSourcePath(relativePath);
+      const configurationAdapter = languageRegistry.adapterForConfigurationPath(relativePath);
+      const languageId = sourceAdapter?.languageId;
+      const projectLanguageId = configurationAdapter?.languageId;
+      const role = roleForPath(relativePath, languageId, projectLanguageId);
       if (role === 'test' && !includeTests) continue;
 
       try {
         const bytes = await readFile(absolutePath);
-        const content = bytes.toString('utf8');
+        // Non-source files participate in inventory/content identity without
+        // being decoded or offered to a language parser/model as source text.
+        const content = languageId || projectLanguageId ? bytes.toString('utf8') : '';
         files.push({
           absolutePath,
           content,
-          language,
-          masked: language ? maskCommentsAndLiterals(content) : content,
+          languageId,
+          masked: languageId ? maskCommentsAndLiterals(content) : content,
           path: relativePath,
+          projectLanguageId,
           role,
           sha256: sha256(bytes),
         });
@@ -371,6 +574,14 @@ async function discoverFiles(
   }
 
   await visit(root);
+  const unclassifiedCount = files.filter((file) => file.languageId === undefined).length;
+  if (unclassifiedCount > 0) {
+    diagnostic(diagnostics, {
+      severity: 'info',
+      code: 'UNCLASSIFIED_REPOSITORY_FILES',
+      message: `${unclassifiedCount} repository file(s) were preserved in the inventory without a registered language analyser; no symbol or dependency semantics were inferred for them.`,
+    });
+  }
   return files.sort((left, right) => compareText(left.path, right.path));
 }
 
@@ -409,6 +620,43 @@ function maskCommentsAndLiterals(source: string): string {
       mask(index, stop);
       index = stop;
       continue;
+    }
+    if (current === '\'' && next === '\'' && third === '\'') {
+      const end = source.indexOf("'''", index + 3);
+      const stop = end === -1 ? source.length : end + 3;
+      mask(index, stop);
+      index = stop;
+      continue;
+    }
+    if (current === '`') {
+      let cursor = index + 1;
+      while (cursor < source.length) {
+        if (source[cursor] === '\\') {
+          cursor += 2;
+          continue;
+        }
+        if (source[cursor] === '`') {
+          cursor += 1;
+          break;
+        }
+        cursor += 1;
+      }
+      mask(index, cursor);
+      index = cursor;
+      continue;
+    }
+    if (current === 'r') {
+      const rawStart = source.slice(index).match(/^r(#+)?"/);
+      if (rawStart) {
+        const hashes = rawStart[1] ?? '';
+        const terminator = `"${hashes}`;
+        const contentStart = index + rawStart[0].length;
+        const end = source.indexOf(terminator, contentStart);
+        const stop = end === -1 ? source.length : end + terminator.length;
+        mask(index, stop);
+        index = stop;
+        continue;
+      }
     }
     if (current === '@' && next === '"') {
       let cursor = index + 2;
@@ -505,6 +753,169 @@ function matchingBrace(masked: string, opening: number): number | undefined {
 
 function normalizeSignature(value: string): string {
   return value.replace(/\s+/g, ' ').trim().slice(0, 1000);
+}
+
+function declarationLinePrefix(file: RepositoryFile, offset: number): string {
+  const lineStart = Math.max(0, file.masked.lastIndexOf('\n', Math.max(0, offset - 1)) + 1);
+  return file.masked.slice(lineStart, offset);
+}
+
+function explicitVisibility(value: string): StaticSymbolVisibility | undefined {
+  const tokens = new Set(value.match(/[A-Za-z_-]+/g)?.map((token) => token.toLowerCase()) ?? []);
+  // Preserve the narrowest fact for combined C# access modifiers.
+  if (tokens.has('private')) return 'private';
+  if (tokens.has('public')) return 'public';
+  if (tokens.has('protected')) return 'protected';
+  if (tokens.has('internal')) return 'internal';
+  return undefined;
+}
+
+function deepDeclarationVisibility(
+  file: RepositoryFile,
+  offset: number,
+  category: 'type' | 'member',
+  nested: boolean,
+  interfaceMember = false,
+): StaticSymbolVisibility {
+  const declared = explicitVisibility(declarationLinePrefix(file, offset));
+  if (declared) return declared;
+  if (interfaceMember) return 'public';
+  if (file.dialect === 'Java') return 'package';
+  if (file.dialect === 'C#') {
+    if (category === 'type') return nested ? 'private' : 'internal';
+    return 'private';
+  }
+  return 'unknown';
+}
+
+function splitTopLevelParameters(value: string): string[] {
+  const result: string[] = [];
+  let start = 0;
+  let depth = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+    if ('<([{'.includes(character ?? '')) depth += 1;
+    else if ('>)]}'.includes(character ?? '')) depth = Math.max(0, depth - 1);
+    else if (character === ',' && depth === 0) {
+      result.push(value.slice(start, index));
+      start = index + 1;
+    }
+  }
+  result.push(value.slice(start));
+  return result.map((entry) => entry.trim()).filter(Boolean);
+}
+
+function closingParenthesis(value: string, opening: number): number | undefined {
+  let depth = 0;
+  for (let index = opening; index < value.length; index += 1) {
+    if (value[index] === '(') depth += 1;
+    else if (value[index] === ')') {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+  }
+  return undefined;
+}
+
+function parameterShape(
+  rawValue: string,
+  languageId: LanguageId,
+): StaticSymbolParameter | undefined {
+  const withoutAnnotations = rawValue
+    .replace(/@[A-Za-z_$][\w$]*(?:\([^)]*\))?\s*/g, '')
+    .trim();
+  const equals = withoutAnnotations.indexOf('=');
+  const declaration = (equals === -1 ? withoutAnnotations : withoutAnnotations.slice(0, equals)).trim();
+  const required = equals === -1;
+  const variadic = /\.\.\.|\bparams\b/.test(declaration);
+  const language = languageId.toLowerCase();
+
+  if (language === 'typescript' || language === 'python' || language === 'rust') {
+    const separator = declaration.indexOf(':');
+    if (separator !== -1) {
+      const rawName = declaration.slice(0, separator).trim().replace(/^(?:mut|ref|out|in)\s+/, '');
+      const name = rawName.replace(/^\.\.\./, '').replace(/\?$/, '').trim();
+      if (!/^[A-Za-z_$][\w$]*$/.test(name)) return undefined;
+      const type = declaration.slice(separator + 1).trim();
+      return {
+        name,
+        ...(type ? { type } : {}),
+        required: required && !/\?$/.test(rawName),
+        ...(variadic ? { variadic: true } : {}),
+      };
+    }
+    const name = declaration.replace(/^\.\.\./, '').replace(/\?$/, '').trim();
+    if (/^[A-Za-z_$][\w$]*$/.test(name)) {
+      return { name, required, ...(variadic ? { variadic: true } : {}) };
+    }
+  }
+
+  if (language === 'go') {
+    const goMatch = /^(?:\.\.\.)?([A-Za-z_]\w*)\s*(.*)$/.exec(declaration);
+    if (goMatch?.[1]) {
+      const type = goMatch[2]?.trim();
+      return {
+        name: goMatch[1],
+        ...(type ? { type } : {}),
+        required: true,
+        ...(variadic ? { variadic: true } : {}),
+      };
+    }
+  }
+
+  const normalized = declaration
+    .replace(/\b(?:final|this|ref|out|in|params)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const match = /(?:^|\s)([A-Za-z_$][\w$]*)$/.exec(normalized);
+  if (!match?.[1]) return undefined;
+  const type = normalized.slice(0, normalized.length - match[1].length).trim().replace(/\.\.\.$/, '');
+  return {
+    name: match[1],
+    ...(type ? { type } : {}),
+    required,
+    ...(variadic ? { variadic: true } : {}),
+  };
+}
+
+function callableShape(
+  signature: string,
+  languageId: LanguageId,
+  name: string,
+): { parameters?: StaticSymbolParameter[]; returnShape?: string } {
+  const nameExpression = new RegExp(`\\b${name.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}\\s*\\(`);
+  const nameMatch = nameExpression.exec(signature);
+  const opening = nameMatch ? signature.indexOf('(', nameMatch.index) : signature.indexOf('(');
+  if (opening === -1) return {};
+  const closing = closingParenthesis(signature, opening);
+  if (closing === undefined) return {};
+  const parameters = splitTopLevelParameters(signature.slice(opening + 1, closing))
+    .map((entry) => parameterShape(entry, languageId))
+    .filter((entry): entry is StaticSymbolParameter => entry !== undefined);
+  const language = languageId.toLowerCase();
+  const suffix = signature.slice(closing + 1).trim();
+  let returnShape: string | undefined;
+  if (language === 'python' || language === 'rust') {
+    returnShape = /->\s*([^:{]+(?:<[^>]+>)?)/.exec(suffix)?.[1]?.trim();
+    if (language === 'rust' && !returnShape) returnShape = '()';
+  } else if (language === 'typescript') {
+    returnShape = /^:\s*([^={;]+)/.exec(suffix)?.[1]?.trim();
+  } else if (language === 'go') {
+    returnShape = suffix.replace(/\{[\s\S]*$/, '').trim() || 'void';
+  } else {
+    const prefix = signature.slice(0, nameMatch?.index ?? opening)
+      .replace(/@[A-Za-z_$][\w$]*(?:\([^)]*\))?\s*/g, '')
+      .replace(/\b(?:public|protected|private|internal|static|final|abstract|virtual|override|async|synchronized|sealed|new|extern|unsafe|partial|default|native|strictfp)\b/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    returnShape = prefix.split(' ').at(-1) || undefined;
+  }
+  return {
+    ...(parameters.length > 0 || signature.slice(opening + 1, closing).trim() === ''
+      ? { parameters }
+      : {}),
+    ...(returnShape ? { returnShape } : {}),
+  };
 }
 
 function symbolId(
@@ -633,7 +1044,7 @@ function typeReferencesFromHeader(
     }
   };
 
-  if (file.language === 'Java') {
+  if (file.dialect === 'Java') {
     const extendsMatch = /\bextends\s+([\s\S]*?)(?=\bimplements\b|$)/.exec(header);
     if (extendsMatch?.[1] && extendsMatch.index !== undefined) {
       const start = headerStart + extendsMatch.index + extendsMatch[0].indexOf(extendsMatch[1]);
@@ -655,13 +1066,19 @@ function typeReferencesFromHeader(
   return references;
 }
 
-function parseTypes(file: RepositoryFile, diagnostics: StaticAnalysisDiagnostic[]): ParsedFile {
+function parseTypes(
+  file: RepositoryFile,
+  reportDiagnostic: RepositoryAnalysisDiagnosticReporter,
+): ParsedFile {
+  if (!file.languageId || !file.dialect) {
+    throw new Error('Deep repository analysis requires languageId and an internal parser dialect.');
+  }
   const starts = lineStarts(file.content);
-  const imports = file.language === 'Java'
+  const imports = file.dialect === 'Java'
     ? parseJavaImports(file, starts)
     : parseCsharpImports(file, starts);
-  const javaPackage = file.language === 'Java' ? packageName(file) : undefined;
-  const namespaces = file.language === 'C#' ? findNamespaceDeclarations(file) : [];
+  const javaPackage = file.dialect === 'Java' ? packageName(file) : undefined;
+  const namespaces = file.dialect === 'C#' ? findNamespaceDeclarations(file) : [];
   const namespaceOrPackage = javaPackage?.name ?? namespaces[0]?.name;
   const types: ParsedType[] = [];
 
@@ -677,7 +1094,7 @@ function parseTypes(file: RepositoryFile, diagnostics: StaticAnalysisDiagnostic[
       symbol: {
         id: symbolId(file, 'package', javaPackage.name, javaPackage.offset),
         kind: 'package',
-        language: 'Java',
+        language: file.languageId,
         name: javaPackage.name.split('.').at(-1) ?? javaPackage.name,
         qualifiedName: javaPackage.name,
         path: file.path,
@@ -702,7 +1119,7 @@ function parseTypes(file: RepositoryFile, diagnostics: StaticAnalysisDiagnostic[
       symbol: {
         id: symbolId(file, 'namespace', declaration.name, declaration.start),
         kind: 'namespace',
-        language: 'C#',
+        language: file.languageId,
         name: declaration.name.split('.').at(-1) ?? declaration.name,
         qualifiedName: declaration.name,
         path: file.path,
@@ -715,34 +1132,47 @@ function parseTypes(file: RepositoryFile, diagnostics: StaticAnalysisDiagnostic[
     });
   }
 
-  const expression = file.language === 'Java'
+  const expression = file.dialect === 'Java'
     ? /(?:\b(class|interface|enum|record)\s+|@interface\s+)([A-Za-z_$][\w$]*)\b/g
     : /\b(class|interface|struct|enum|record)\s+(?:(?:class|struct)\s+)?([A-Za-z_][\w]*)\b/g;
   for (const match of file.masked.matchAll(expression)) {
     const name = match[2];
     if (!name || match.index === undefined) continue;
-    const keyword = match[1] ?? (file.language === 'Java' ? '@interface' : 'unknown');
+    const keyword = match[1] ?? (file.dialect === 'Java' ? '@interface' : 'unknown');
     const start = match.index;
     const headerEnd = declarationEnd(file.masked, start);
     const opening = file.masked[headerEnd] === '{' ? headerEnd : undefined;
     const endOffset = opening === undefined
       ? headerEnd
       : (matchingBrace(file.masked, opening) ?? headerEnd) + 1;
-    const namespace = file.language === 'Java'
+    const namespace = file.dialect === 'Java'
       ? namespaceOrPackage
       : namespaceAt(namespaces, start);
     const kind = typeKind(keyword);
-    const qualified = qualifiedName(namespace, name);
+    const owner = types
+      .filter((candidate) =>
+        !['package', 'namespace'].includes(candidate.symbol.kind) &&
+        candidate.headerStart < start &&
+        start < candidate.endOffset,
+      )
+      .sort((left, right) =>
+        (left.endOffset - left.headerStart) - (right.endOffset - right.headerStart),
+      )[0];
+    const qualified = owner
+      ? `${owner.symbol.qualifiedName}.${name}`
+      : qualifiedName(namespace, name);
     const symbol: StaticSymbol = {
       id: symbolId(file, kind, qualified, start),
       kind,
-      language: file.language as Language,
+      language: file.languageId,
       name,
       qualifiedName: qualified,
       path: file.path,
       project: file.project,
       range: rangeForOffsets(file, starts, start, endOffset),
       signature: normalizeSignature(file.content.slice(start, headerEnd)),
+      visibility: deepDeclarationVisibility(file, start, 'type', owner !== undefined),
+      ...(owner ? { containerSymbolId: owner.symbol.id } : {}),
       testOnly: file.role === 'test',
     };
     const header = file.masked.slice(start, headerEnd);
@@ -758,8 +1188,8 @@ function parseTypes(file: RepositoryFile, diagnostics: StaticAnalysisDiagnostic[
     });
   }
 
-  if (file.language && unmatchedBraces(file.masked)) {
-    diagnostic(diagnostics, {
+  if (unmatchedBraces(file.masked)) {
+    reportDiagnostic({
       severity: 'warn',
       code: 'UNBALANCED_BRACES',
       message: 'Source has unbalanced braces; dependency results are syntactic and may be incomplete.',
@@ -784,7 +1214,7 @@ function unmatchedBraces(masked: string): boolean {
 
 function parseMethodsAndSignatureReferences(parsed: ParsedFile): { references: TypeReference[]; symbols: StaticSymbol[] } {
   const { file, types } = parsed;
-  if (!file.language) return { references: [], symbols: [] };
+  if (!file.languageId || !file.dialect) return { references: [], symbols: [] };
   const starts = lineStarts(file.content);
   const typeDeclarations = types.filter((type) => type.symbol.kind !== 'package' && type.symbol.kind !== 'namespace');
   const methods: StaticSymbol[] = [];
@@ -816,35 +1246,129 @@ function parseMethodsAndSignatureReferences(parsed: ParsedFile): { references: T
     });
   }
 
-  const methodPattern = /\b(?:public|protected|private|internal|static|final|abstract|virtual|override|async|synchronized|sealed|new|extern|unsafe|partial|default|native|strictfp|\s)+(?:[A-Za-z_$][\w$<>.?\[\],\s]*\s+)([A-Za-z_$][\w$]*)\s*\([^;{}()]*\)\s*(?:throws\s+[^{};]+)?\{/g;
-  for (const match of file.masked.matchAll(methodPattern)) {
-    if (!match[1] || match.index === undefined) continue;
-    const owner = enclosingType(match.index);
-    if (!owner) continue;
-    const name = match[1];
-    if (['if', 'for', 'while', 'switch', 'catch', 'foreach', 'using'].includes(name)) continue;
-    const opening = match.index + match[0].lastIndexOf('{');
-    const endOffset = (matchingBrace(file.masked, opening) ?? opening) + 1;
-    const qualified = `${owner.symbol.qualifiedName}.${name}`;
+  const addCallable = (input: {
+    startOffset: number;
+    name: string;
+    nameOffset: number;
+    signatureEndOffset: number;
+    endOffset: number;
+    kind?: 'method' | 'constructor';
+  }): void => {
+    const owner = enclosingType(input.startOffset);
+    if (!owner || methodNameOffsets.has(input.nameOffset)) return;
+    if (input.kind === 'constructor' && input.name !== owner.symbol.name) return;
+    if (['if', 'for', 'while', 'switch', 'catch', 'foreach', 'using'].includes(input.name)) return;
+    methodNameOffsets.add(input.nameOffset);
+    // Java and C# do not allow a regular method to have the declaring type's
+    // name. The broad legacy method matcher can therefore be normalized here
+    // instead of minting a duplicate method identity for constructors.
+    const kind = input.kind ?? (input.name === owner.symbol.name ? 'constructor' : 'method');
+    const qualified = `${owner.symbol.qualifiedName}.${input.name}`;
+    const signature = normalizeSignature(
+      file.content.slice(input.startOffset, input.signatureEndOffset),
+    );
     const method: StaticSymbol = {
-      id: symbolId(file, 'method', qualified, match.index),
-      kind: 'method',
-      language: file.language,
-      name,
+      id: symbolId(file, kind, qualified, input.startOffset),
+      kind,
+      language: file.languageId!,
+      name: input.name,
       qualifiedName: qualified,
       path: file.path,
       project: file.project,
-      range: rangeForOffsets(file, starts, match.index, endOffset),
-      signature: normalizeSignature(file.content.slice(match.index, opening)),
+      range: rangeForOffsets(file, starts, input.startOffset, input.endOffset),
+      signature,
+      visibility: deepDeclarationVisibility(
+        file,
+        input.nameOffset,
+        'member',
+        true,
+        owner.symbol.kind === 'interface',
+      ),
+      containerSymbolId: owner.symbol.id,
+      ...(kind === 'method' ? callableShape(signature, file.languageId!, input.name) : {}),
       testOnly: file.role === 'test',
     };
     methods.push(method);
-    const nameOffset = match.index + match[0].lastIndexOf(name);
     methodRanges.push({
-      endOffset,
-      nameOffset,
-      startOffset: match.index,
+      endOffset: input.endOffset,
+      nameOffset: input.nameOffset,
+      startOffset: input.startOffset,
       symbol: method,
+    });
+  };
+
+  const methodPatterns = [
+    /^[ \t]*(?:(?:public|protected|private|internal|static|final|abstract|virtual|override|async|synchronized|sealed|new|extern|unsafe|partial|default|native|strictfp)\s+)*(?:<[^>\n]+>\s+)?[A-Za-z_$][\w$<>.?\[\],]*\s+([A-Za-z_$][\w$]*)\s*\([^;{}()]*\)\s*(?:throws\s+[^{};]+)?\{/gm,
+    /\b(?:public|protected|private|internal|static|final|abstract|virtual|override|async|synchronized|sealed|new|extern|unsafe|partial|default|native|strictfp|\s)+(?:[A-Za-z_$][\w$<>.?\[\],\s]*\s+)([A-Za-z_$][\w$]*)\s*\([^;{}()]*\)\s*(?:throws\s+[^{};]+)?\{/g,
+  ];
+  const methodNameOffsets = new Set<number>();
+  for (const methodPattern of methodPatterns) {
+    for (const match of file.masked.matchAll(methodPattern)) {
+      if (!match[1] || match.index === undefined) continue;
+      const name = match[1];
+      const nameOffset = match.index + match[0].lastIndexOf(name);
+      const opening = match.index + match[0].lastIndexOf('{');
+      const endOffset = (matchingBrace(file.masked, opening) ?? opening) + 1;
+      addCallable({
+        startOffset: match.index,
+        name,
+        nameOffset,
+        signatureEndOffset: opening,
+        endOffset,
+      });
+    }
+  }
+
+  // Constructors, expression-bodied C# methods, and declaration-only
+  // interface/abstract methods are part of the target workspace inventory too.
+  // Keeping them in the same StaticSymbol/IR path means 01B does not invent a
+  // second parser or a second symbol identity scheme.
+  const constructorPattern = /^[ \t]*(?:(?:public|protected|private|internal|static|extern|unsafe)\s+)*([A-Za-z_$][\w$]*)\s*\([^;{}()]*\)\s*(?:throws\s+[^{};]+)?\{/gm;
+  for (const match of file.masked.matchAll(constructorPattern)) {
+    if (!match[1] || match.index === undefined) continue;
+    const name = match[1];
+    const nameOffset = match.index + match[0].lastIndexOf(name);
+    const opening = match.index + match[0].lastIndexOf('{');
+    const endOffset = (matchingBrace(file.masked, opening) ?? opening) + 1;
+    addCallable({
+      startOffset: match.index,
+      name,
+      nameOffset,
+      signatureEndOffset: opening,
+      endOffset,
+      kind: 'constructor',
+    });
+  }
+
+  if (file.dialect === 'C#') {
+    const expressionBodyPattern = /^[ \t]*(?:(?:public|protected|private|internal|static|virtual|override|async|sealed|new|unsafe|partial)\s+)*(?:<[^>\n]+>\s+)?[A-Za-z_$][\w$<>.?\[\],]*\s+([A-Za-z_$][\w$]*)\s*\([^;{}()]*\)\s*=>[^;]*;/gm;
+    for (const match of file.masked.matchAll(expressionBodyPattern)) {
+      if (!match[1] || match.index === undefined) continue;
+      const name = match[1];
+      const nameOffset = match.index + match[0].lastIndexOf(name);
+      const arrow = match.index + match[0].indexOf('=>');
+      addCallable({
+        startOffset: match.index,
+        name,
+        nameOffset,
+        signatureEndOffset: arrow,
+        endOffset: match.index + match[0].length,
+      });
+    }
+  }
+
+  const declarationOnlyPattern = /^[ \t]*(?:(?:public|protected|private|internal|static|final|abstract|virtual|override|async|synchronized|sealed|new|extern|unsafe|partial|default|native|strictfp)\s+)*(?:<[^>\n]+>\s+)?[A-Za-z_$][\w$<>.?\[\],]*\s+([A-Za-z_$][\w$]*)\s*\([^;{}()]*\)\s*(?:throws\s+[^{};]+)?;/gm;
+  for (const match of file.masked.matchAll(declarationOnlyPattern)) {
+    if (!match[1] || match.index === undefined) continue;
+    const name = match[1];
+    const nameOffset = match.index + match[0].lastIndexOf(name);
+    const semicolon = match.index + match[0].lastIndexOf(';');
+    addCallable({
+      startOffset: match.index,
+      name,
+      nameOffset,
+      signatureEndOffset: semicolon,
+      endOffset: semicolon + 1,
     });
   }
 
@@ -861,7 +1385,7 @@ function parseMethodsAndSignatureReferences(parsed: ParsedFile): { references: T
   // declaration patterns intentionally remain conservative: local variables
   // inside a method are ignored by the enclosing-method check below.
   const memberSymbols: StaticSymbol[] = [];
-  const memberDeclarations = file.language === 'Java'
+  const memberDeclarations = file.dialect === 'Java'
     ? /^[ \t]*(?:(?:public|protected|private|static|final|volatile|transient|synchronized|native|abstract|strictfp)\s+)*([A-Za-z_$][\w$]*(?:\s*<[^;\n{}()]*>)?(?:\s*\[\])?)\s+([A-Za-z_$][\w$]*)\s*(?==|;|,)/gm
     : /^[ \t]*(?:(?:public|protected|private|internal|static|readonly|const|volatile|new|unsafe|required|abstract|virtual|override|sealed|extern|partial)\s+)*([A-Za-z_][\w]*(?:\s*<[^;\n{}()]*>)?(?:\s*\[\])?)\s+([A-Za-z_][\w]*)\s*(?==|;|,)/gm;
   for (const match of file.masked.matchAll(memberDeclarations)) {
@@ -876,19 +1400,28 @@ function parseMethodsAndSignatureReferences(parsed: ParsedFile): { references: T
     const member: StaticSymbol = {
       id: symbolId(file, 'field', qualified, nameOffset),
       kind: 'field',
-      language: file.language,
+      language: file.languageId,
       name,
       qualifiedName: qualified,
       path: file.path,
       project: file.project,
       range: rangeForOffsets(file, starts, match.index, nameOffset + name.length),
       signature: normalizeSignature(file.content.slice(match.index, nameOffset + name.length)),
+      returnShape: normalizeSignature(match[1]),
+      visibility: deepDeclarationVisibility(
+        file,
+        nameOffset,
+        'member',
+        true,
+        owner.symbol.kind === 'interface',
+      ),
+      containerSymbolId: owner.symbol.id,
       testOnly: file.role === 'test',
     };
     memberSymbols.push(member);
   }
 
-  if (file.language === 'C#') {
+  if (file.dialect === 'C#') {
     const propertyPattern = /^[ \t]*(?:(?:public|protected|private|internal|static|readonly|new|abstract|virtual|override|sealed|partial|required)\s+)*([A-Za-z_][\w]*(?:\s*<[^;\\n{}()]*>)?(?:\s*\[\])?)\s+([A-Za-z_][\w]*)\s*\{(?=[^{}]*(?:\bget\b|\bset\b|\binit\b))/gm;
     for (const match of file.masked.matchAll(propertyPattern)) {
       if (!match[1] || !match[2] || match.index === undefined) continue;
@@ -902,13 +1435,22 @@ function parseMethodsAndSignatureReferences(parsed: ParsedFile): { references: T
       const property: StaticSymbol = {
         id: symbolId(file, 'property', qualified, nameOffset),
         kind: 'property',
-        language: file.language,
+        language: file.languageId,
         name,
         qualifiedName: qualified,
         path: file.path,
         project: file.project,
         range: rangeForOffsets(file, starts, match.index, nameOffset + name.length),
         signature: normalizeSignature(file.content.slice(match.index, nameOffset + name.length)),
+        returnShape: normalizeSignature(match[1]),
+        visibility: deepDeclarationVisibility(
+          file,
+          nameOffset,
+          'member',
+          true,
+          owner.symbol.kind === 'interface',
+        ),
+        containerSymbolId: owner.symbol.id,
         testOnly: file.role === 'test',
       };
       memberSymbols.push(property);
@@ -967,11 +1509,347 @@ function parseMethodsAndSignatureReferences(parsed: ParsedFile): { references: T
   return { references, symbols: [...methods, ...memberSymbols] };
 }
 
-function projectLanguage(file: RepositoryFile): Language | undefined {
-  const normalized = file.path.toLowerCase();
-  if (normalized.endsWith('.csproj') || normalized.endsWith('.sln')) return 'C#';
-  if (isConfigurationPath(file.path)) return 'Java';
-  return undefined;
+function deepRepositoryLanguageAnalysis(
+  file: RepositoryFile,
+  reportDiagnostic: RepositoryAnalysisDiagnosticReporter,
+): RepositoryLanguageAnalysis {
+  const parsed = parseTypes(file, reportDiagnostic);
+  const methodAnalysis = parseMethodsAndSignatureReferences(parsed);
+  const { dialect: _dialect, ...sourceFile } = file;
+  return {
+    file: sourceFile,
+    imports: parsed.imports,
+    ...(parsed.namespaceOrPackage ? { namespaceOrPackage: parsed.namespaceOrPackage } : {}),
+    references: [
+      ...parsed.types.flatMap((type) => type.typeReferences),
+      ...methodAnalysis.references,
+    ],
+    symbols: [
+      ...parsed.types.map((type) => type.symbol),
+      ...methodAnalysis.symbols,
+    ],
+  };
+}
+
+function createDeepRepositoryLanguageAdapter(input: {
+  id?: string;
+  version?: string;
+  languageId: LanguageId;
+  dialect: RepositoryParserDialect;
+  fileExtensions: readonly string[];
+  configurationFileNames?: readonly string[];
+  configurationFileExtensions?: readonly string[];
+  capabilities?: readonly AnalysisCapability[];
+  configurationHash?: string;
+}): RepositoryLanguageAdapter {
+  const capabilities = input.capabilities ?? [
+    'file-inventory',
+    'symbol-index',
+    'api-surface',
+    'dependency-graph',
+    'semantic-binding',
+    'test-association',
+    ...(input.configurationFileNames || input.configurationFileExtensions
+      ? ['project-model' as const]
+      : []),
+  ];
+  const configurationHash = input.configurationHash ?? sha256(canonicalJson({
+    dialect: input.dialect,
+    fileExtensions: normalizedRoutes(input.fileExtensions),
+    configurationFileNames: normalizedRoutes(input.configurationFileNames ?? []),
+    configurationFileExtensions: normalizedRoutes(input.configurationFileExtensions ?? []),
+  }));
+  return {
+    id: input.id ?? defaultLanguageAdapterId(input.languageId),
+    version: input.version ?? '1.0.0-deep',
+    languageId: input.languageId,
+    capabilities: sortedUnique(capabilities),
+    configurationHash,
+    fileExtensions: input.fileExtensions,
+    ...(input.configurationFileNames
+      ? { configurationFileNames: input.configurationFileNames }
+      : {}),
+    ...(input.configurationFileExtensions
+      ? { configurationFileExtensions: input.configurationFileExtensions }
+      : {}),
+    analysisLevel: 'deep',
+    compilerProbeLanguage: input.dialect,
+    analyze(file, reportDiagnostic) {
+      return deepRepositoryLanguageAnalysis(
+        { ...file, dialect: input.dialect },
+        reportDiagnostic,
+      );
+    },
+  };
+}
+
+function genericQualifiedName(file: RepositoryAnalysisSourceFile, name: string): string {
+  const moduleName = file.path
+    .replace(/\.[^/.]+$/, '')
+    .replaceAll('/', '.');
+  return moduleName ? `${moduleName}.${name}` : name;
+}
+
+interface GenericSymbolMatch {
+  kind: 'class' | 'function';
+  line: number;
+  name: string;
+  signature: string;
+}
+
+const builtInExtractorDialects: Readonly<Record<string, Language>> = {
+  typescript: 'TypeScript',
+  python: 'Python',
+  rust: 'Rust',
+  go: 'Go',
+};
+
+function genericSymbolMatches(source: string, languageId: LanguageId): GenericSymbolMatch[] {
+  const dialect = builtInExtractorDialects[languageId.toLowerCase()];
+  if (dialect) return extractSymbols(source, dialect);
+
+  const matches: GenericSymbolMatch[] = [];
+  const lines = source.replace(/\r\n?/g, '\n').split('\n');
+  const declarations: Array<{ kind: GenericSymbolMatch['kind']; pattern: RegExp }> = [
+    {
+      kind: 'class',
+      pattern: /\b(?:class|interface|record|struct|enum|trait|type)\s+([A-Za-z_$][\w$]*)/,
+    },
+    {
+      kind: 'function',
+      pattern: /\b(?:function|def|fn|func)\s+([A-Za-z_$][\w$]*)\s*(?:<[^>]*>)?\s*\(/,
+    },
+  ];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? '';
+    for (const declaration of declarations) {
+      const match = declaration.pattern.exec(line);
+      if (!match?.[1]) continue;
+      matches.push({
+        kind: declaration.kind,
+        line: index + 1,
+        name: match[1],
+        signature: line.trim().replace(/\s+/g, ' ').slice(0, 1000),
+      });
+      break;
+    }
+  }
+  return matches;
+}
+
+function genericDeclarationRange(
+  file: RepositoryAnalysisSourceFile,
+  match: GenericSymbolMatch,
+): StaticSourceRange {
+  const starts = lineStarts(file.content);
+  const lineStart = starts[match.line - 1] ?? 0;
+  const lineEnd = starts[match.line] === undefined
+    ? file.content.length
+    : Math.max(lineStart, starts[match.line]! - 1);
+  const declarationStart = lineStart + ((file.content.slice(lineStart, lineEnd).match(/^\s*/) ?? [''])[0]?.length ?? 0);
+  if (file.languageId?.toLowerCase() === 'python') {
+    const lines = file.content.replace(/\r\n?/g, '\n').split('\n');
+    const startIndex = match.line - 1;
+    const baseIndent = (lines[startIndex] ?? '').length - (lines[startIndex] ?? '').trimStart().length;
+    let endLineIndex = startIndex;
+    for (let index = startIndex + 1; index < lines.length; index += 1) {
+      const line = lines[index] ?? '';
+      const indent = line.length - line.trimStart().length;
+      if (line.trim() && indent <= baseIndent) break;
+      endLineIndex = index;
+    }
+    const endLine = lines[endLineIndex] ?? '';
+    return {
+      path: file.path,
+      startLine: match.line,
+      startColumn: declarationStart - lineStart + 1,
+      endLine: endLineIndex + 1,
+      endColumn: Math.max(1, endLine.length),
+    };
+  }
+  const opening = file.masked.indexOf('{', declarationStart);
+  if (opening >= declarationStart && opening <= Math.min(file.masked.length, declarationStart + 4000)) {
+    const closing = matchingBrace(file.masked, opening);
+    if (closing !== undefined) return rangeForOffsets(file as RepositoryFile, starts, declarationStart, closing + 1);
+  }
+  return rangeForOffsets(file as RepositoryFile, starts, declarationStart, lineEnd);
+}
+
+function genericSymbolFacts(
+  languageId: LanguageId,
+  match: GenericSymbolMatch,
+): Pick<StaticSymbol, 'visibility' | 'exported' | 'parameters' | 'returnShape'> {
+  const language = languageId.toLowerCase();
+  const signature = match.signature.trim();
+  let visibility: StaticSymbolVisibility | undefined;
+  let exported: boolean | undefined;
+
+  if (language === 'typescript') {
+    const declared = explicitVisibility(signature);
+    const isMember = match.kind === 'function' && !/\bfunction\b/.test(signature);
+    visibility = declared ?? (isMember ? 'public' : undefined);
+    if (!isMember) exported = /^export\b/.test(signature);
+  } else if (language === 'rust') {
+    if (/^pub\s+/.test(signature)) exported = true;
+    else if (/^pub\s*\([^)]*\)/.test(signature)) visibility = 'internal';
+    else exported = false;
+  } else if (language === 'go') {
+    exported = /^[A-Z]/.test(match.name);
+  } else if (language === 'python') {
+    // Python has no declaration-level export keyword. This is a convention fact,
+    // and the bridge deliberately reports its surface as partial rather than exact.
+    exported = !match.name.startsWith('_');
+  } else {
+    visibility = 'unknown';
+  }
+
+  const shape = match.kind === 'function'
+    ? callableShape(match.signature, languageId, match.name)
+    : {};
+  return {
+    ...(visibility ? { visibility } : {}),
+    ...(exported !== undefined ? { exported } : {}),
+    ...shape,
+  };
+}
+
+/**
+ * Build a deterministic lightweight adapter. Known built-ins reuse the retrieval
+ * extractor; unknown language IDs still receive language-neutral declarations
+ * and an explicit capability-boundary diagnostic instead of being dropped.
+ */
+export function createGenericRepositoryLanguageAdapter(input: {
+  id?: string;
+  version?: string;
+  languageId: LanguageId;
+  fileExtensions: readonly string[];
+  configurationFileNames?: readonly string[];
+  configurationFileExtensions?: readonly string[];
+  capabilities?: readonly AnalysisCapability[];
+  configurationHash?: string;
+}): RepositoryLanguageAdapter {
+  const hasBuiltInSurfaceRules = builtInExtractorDialects[input.languageId.toLowerCase()] !== undefined;
+  const capabilities = input.capabilities ?? [
+    'file-inventory',
+    'symbol-index',
+    ...(hasBuiltInSurfaceRules ? ['api-surface' as const] : []),
+    'test-association',
+    ...(input.configurationFileNames || input.configurationFileExtensions
+      ? ['project-model' as const]
+      : []),
+  ];
+  const configurationHash = input.configurationHash ?? sha256(canonicalJson({
+    extractorDialect: builtInExtractorDialects[input.languageId.toLowerCase()] ?? 'generic-line-slice',
+    fileExtensions: normalizedRoutes(input.fileExtensions),
+    configurationFileNames: normalizedRoutes(input.configurationFileNames ?? []),
+    configurationFileExtensions: normalizedRoutes(input.configurationFileExtensions ?? []),
+  }));
+  return {
+    id: input.id ?? defaultLanguageAdapterId(input.languageId),
+    version: input.version ?? '1.0.0-generic',
+    languageId: input.languageId,
+    capabilities: sortedUnique(capabilities),
+    configurationHash,
+    fileExtensions: input.fileExtensions,
+    ...(input.configurationFileNames
+      ? { configurationFileNames: input.configurationFileNames }
+      : {}),
+    ...(input.configurationFileExtensions
+      ? { configurationFileExtensions: input.configurationFileExtensions }
+      : {}),
+    analysisLevel: 'generic',
+    analyze(file, reportDiagnostic) {
+      const preliminary = genericSymbolMatches(file.content, input.languageId).map((match) => {
+        const qualifiedName = genericQualifiedName(file, match.name);
+        const kind: StaticSymbolKind = match.kind;
+        return {
+          id: symbolId(file, kind, qualifiedName, match.line),
+          kind,
+          language: input.languageId,
+          name: match.name,
+          qualifiedName,
+          path: file.path,
+          project: file.project,
+          range: genericDeclarationRange(file, match),
+          signature: match.signature,
+          ...genericSymbolFacts(input.languageId, match),
+          testOnly: file.role === 'test',
+        } satisfies StaticSymbol;
+      });
+      const symbols = preliminary.map((symbol) => {
+        if (symbol.kind !== 'function' || !symbol.range) return symbol;
+        const owner = preliminary
+          .filter((candidate) =>
+            candidate.kind === 'class' && candidate.range &&
+            (candidate.range.startLine < symbol.range!.startLine ||
+              (candidate.range.startLine === symbol.range!.startLine &&
+                (candidate.range.startColumn ?? 1) < (symbol.range!.startColumn ?? 1))) &&
+            (candidate.range.endLine ?? candidate.range.startLine) >=
+              (symbol.range!.endLine ?? symbol.range!.startLine),
+          )
+          .sort((left, right) =>
+            ((left.range?.endLine ?? 0) - (left.range?.startLine ?? 0)) -
+            ((right.range?.endLine ?? 0) - (right.range?.startLine ?? 0)),
+          )[0];
+        return owner ? { ...symbol, containerSymbolId: owner.id } : symbol;
+      });
+      reportDiagnostic({
+        severity: 'info',
+        code: 'GENERIC_LANGUAGE_STATIC_SLICE',
+        message: `${input.languageId} file was analysed with generic declaration slicing; dependency and compiler-semantic evidence is not available for this adapter.`,
+        path: file.path,
+      });
+      return { file, imports: [], references: [], symbols };
+    },
+  };
+}
+
+/** Built-ins are replaceable as a whole by passing a registry to analyzeRepository. */
+export function createDefaultRepositoryLanguageRegistry(): RepositoryLanguageRegistry {
+  return new RepositoryLanguageRegistry([
+    createDeepRepositoryLanguageAdapter({
+      languageId: 'java',
+      dialect: 'Java',
+      fileExtensions: ['.java'],
+      configurationFileNames: [
+        'pom.xml',
+        'build.gradle',
+        'build.gradle.kts',
+        'settings.gradle',
+        'settings.gradle.kts',
+      ],
+    }),
+    createDeepRepositoryLanguageAdapter({
+      languageId: 'csharp',
+      dialect: 'C#',
+      fileExtensions: ['.cs'],
+      configurationFileExtensions: ['.csproj', '.sln'],
+    }),
+    createGenericRepositoryLanguageAdapter({
+      languageId: 'typescript',
+      fileExtensions: ['.ts'],
+      configurationFileNames: ['package.json'],
+    }),
+    createGenericRepositoryLanguageAdapter({
+      languageId: 'python',
+      fileExtensions: ['.py'],
+      configurationFileNames: ['pyproject.toml'],
+    }),
+    createGenericRepositoryLanguageAdapter({
+      languageId: 'rust',
+      fileExtensions: ['.rs'],
+      configurationFileNames: ['cargo.toml'],
+    }),
+    createGenericRepositoryLanguageAdapter({
+      languageId: 'go',
+      fileExtensions: ['.go'],
+      configurationFileNames: ['go.mod'],
+    }),
+  ]);
+}
+
+function projectLanguageId(file: RepositoryFile): LanguageId | undefined {
+  return file.projectLanguageId;
 }
 
 function projectRoot(file: RepositoryFile): string {
@@ -984,16 +1862,18 @@ function withinProject(filePath: string, projectDirectory: string): boolean {
 }
 
 function assignProjects(files: RepositoryFile[]): StaticSymbol[] {
-  const projectFiles = files.filter((file) => file.role === 'configuration' && projectLanguage(file));
+  const projectFiles = files.filter(
+    (file) => file.role === 'configuration' && projectLanguageId(file),
+  );
   const projectSymbols: StaticSymbol[] = [];
   for (const config of projectFiles) {
-    const language = projectLanguage(config);
-    if (!language) continue;
+    const languageId = projectLanguageId(config);
+    if (!languageId) continue;
     const name = config.path.split('/').at(-1) ?? config.path;
     projectSymbols.push({
       id: symbolId(config, 'project', config.path, 0),
       kind: 'project',
-      language,
+      language: languageId,
       name,
       qualifiedName: config.path,
       path: config.path,
@@ -1003,9 +1883,11 @@ function assignProjects(files: RepositoryFile[]): StaticSymbol[] {
   }
 
   for (const file of files) {
-    if (!file.language) continue;
+    if (!file.languageId) continue;
     const candidates = projectFiles.filter(
-      (project) => projectLanguage(project) === file.language && withinProject(file.path, projectRoot(project)),
+      (project) =>
+        projectLanguageId(project) === file.languageId &&
+        withinProject(file.path, projectRoot(project)),
     );
     candidates.sort((left, right) => {
       const lengthDifference = projectRoot(right).length - projectRoot(left).length;
@@ -1050,13 +1932,15 @@ function normalizedTypeReference(reference: string): string {
 }
 
 function ownerTypeCandidates(
-  source: ParsedFile,
+  source: RepositoryLanguageAnalysis,
   typeReference: string,
   symbolIndex: StaticSymbol[],
 ): StaticSymbol[] {
   const normalized = normalizedTypeReference(typeReference);
   if (!normalized) return [];
-  const typeIndex = typeSymbols(symbolIndex).filter((symbol) => symbol.language === source.file.language);
+  const typeIndex = typeSymbols(symbolIndex).filter(
+    (symbol) => symbol.language === source.file.languageId,
+  );
   const simple = simpleName(normalized);
   const candidates: StaticSymbol[] = [];
   const byQualified = (qualified: string): StaticSymbol[] =>
@@ -1067,7 +1951,7 @@ function ownerTypeCandidates(
   }
   for (const imported of source.imports) {
     const importTarget = normalizedTypeReference(imported.targetReference);
-    if (source.file.language === 'Java' && importTarget.endsWith('.*')) {
+    if (importTarget.endsWith('.*')) {
       candidates.push(...byQualified(`${importTarget.slice(0, -2)}.${simple}`));
     } else {
       candidates.push(...byQualified(`${importTarget}.${simple}`));
@@ -1080,7 +1964,7 @@ function ownerTypeCandidates(
   return uniqueSymbols(candidates);
 }
 
-function declaredReceiverTypes(source: ParsedFile, receiver: string): string[] {
+function declaredReceiverTypes(source: RepositoryLanguageAnalysis, receiver: string): string[] {
   if (!/^[A-Za-z_$][\w$]*$/.test(receiver)) return [];
   const escaped = receiver.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   // `var` and dynamically typed declarations are intentionally excluded:
@@ -1097,8 +1981,8 @@ function declaredReceiverTypes(source: ParsedFile, receiver: string): string[] {
 }
 
 function callableOwnerTypes(
-  source: ParsedFile,
-  reference: TypeReference | ImportReference,
+  source: RepositoryLanguageAnalysis,
+  reference: RepositoryLanguageReference | ImportReference,
   normalized: string,
   symbolIndex: StaticSymbol[],
 ): StaticSymbol[] {
@@ -1126,8 +2010,8 @@ function callableOwnerTypes(
 }
 
 function resolveReference(
-  source: ParsedFile,
-  reference: TypeReference | ImportReference,
+  source: RepositoryLanguageAnalysis,
+  reference: RepositoryLanguageReference | ImportReference,
   symbolIndex: StaticSymbol[],
   allowNamespaceTarget: boolean,
 ): Resolution {
@@ -1136,7 +2020,7 @@ function resolveReference(
   const callableReference = referenceKind === 'invocation' || referenceKind === 'member-access';
   const memberReference = referenceKind === 'member-access';
   const sameLanguage = symbolIndex.filter((symbol) =>
-    symbol.language === source.file.language && (
+    symbol.language === source.file.languageId && (
       ['class', 'interface', 'record', 'struct', 'enum'].includes(symbol.kind) ||
       (allowNamespaceTarget && (symbol.kind === 'package' || symbol.kind === 'namespace')) ||
       (callableReference && (
@@ -1180,23 +2064,17 @@ function resolveReference(
   }
 
   if (normalized.includes('.')) candidates.push(...byQualified(normalized));
-  if (source.file.language === 'Java' && !callableReference) {
-    const packageName = namespaceOrPackage;
-    if (!normalized.includes('.') && packageName) candidates.push(...byQualified(`${packageName}.${simple}`));
+  if (!callableReference) {
+    if (!normalized.includes('.') && namespaceOrPackage) {
+      candidates.push(...byQualified(`${namespaceOrPackage}.${simple}`));
+    }
     for (const imported of source.imports) {
       const importTarget = imported.targetReference;
       if (importTarget.endsWith('.*')) {
         candidates.push(...byQualified(`${importTarget.slice(0, -2)}.${simple}`));
-      } else if (simpleName(importTarget) === simple) {
-        candidates.push(...byQualified(importTarget));
+      } else {
+        candidates.push(...byQualified(`${importTarget}.${simple}`));
       }
-    }
-  } else if (!callableReference) {
-    const namespace = namespaceOrPackage;
-    if (!normalized.includes('.') && namespace) candidates.push(...byQualified(`${namespace}.${simple}`));
-    for (const imported of source.imports) {
-      const importTarget = imported.targetReference;
-      candidates.push(...byQualified(`${importTarget}.${simple}`));
       if (simpleName(importTarget) === simple) candidates.push(...byQualified(importTarget));
     }
   }
@@ -1218,8 +2096,8 @@ function resolveReference(
 }
 
 function edgeDraft(
-  parsed: ParsedFile,
-  reference: TypeReference | ImportReference,
+  parsed: RepositoryLanguageAnalysis,
+  reference: RepositoryLanguageReference | ImportReference,
   kind: DependencyKind,
   symbolIndex: StaticSymbol[],
 ): EdgeDraft {
@@ -1362,18 +2240,18 @@ function semanticBindingKey(binding: SemanticDependencyBinding): string {
 function semanticCandidates(
   drafts: EdgeDraft[],
   filesByPath: ReadonlyMap<string, RepositoryFile>,
-  language: 'Java' | 'C#',
+  languageId: LanguageId,
 ): SemanticDependencyBinding[] {
   const candidates = new Map<string, SemanticDependencyBinding>();
   for (const draft of drafts) {
     const source = filesByPath.get(draft.sourcePath);
     const target = draft.targetPath ? filesByPath.get(draft.targetPath) : undefined;
-    const sourceLanguage = source?.language ?? (source ? projectLanguage(source) : undefined);
-    const targetLanguage = target?.language ?? (target ? projectLanguage(target) : undefined);
+    const sourceLanguageId = source?.languageId ?? (source ? projectLanguageId(source) : undefined);
+    const targetLanguageId = target?.languageId ?? (target ? projectLanguageId(target) : undefined);
     const range = draft.evidenceRanges[0];
     if (
-      sourceLanguage !== language ||
-      targetLanguage !== language ||
+      sourceLanguageId !== languageId ||
+      targetLanguageId !== languageId ||
       !draft.internal ||
       draft.resolution !== 'resolved' ||
       draft.evidence !== 'syntactic' ||
@@ -1534,18 +2412,22 @@ async function enrichWithCompiler(
   files: RepositoryFile[],
   drafts: EdgeDraft[],
   diagnostics: StaticAnalysisDiagnostic[],
+  languageRegistry: RepositoryLanguageRegistry,
 ): Promise<SemanticEnrichmentOutcome[]> {
   const enabled = request.semanticEnrichment === true || request.compilerProbe !== undefined;
   if (!enabled) return [];
   const filesByPath = new Map(files.map((file) => [file.path, file]));
   const probe = request.compilerProbe ?? { probe: systemCompilerProbe };
   const outcomes: SemanticEnrichmentOutcome[] = [];
-  for (const language of ['Java', 'C#'] as const) {
+  for (const adapter of languageRegistry.adapters()) {
+    const language = adapter.compilerProbeLanguage;
+    if (!language) continue;
     const languageFiles = files.filter((file) =>
-      file.language === language || (!file.language && projectLanguage(file) === language),
+      file.languageId === adapter.languageId ||
+      (!file.languageId && projectLanguageId(file) === adapter.languageId),
     );
     if (languageFiles.length === 0) continue;
-    const candidates = semanticCandidates(drafts, filesByPath, language);
+    const candidates = semanticCandidates(drafts, filesByPath, adapter.languageId);
     let result: CompilerProbeResult;
     try {
       const probeResult: unknown = await probe.probe({
@@ -1607,14 +2489,19 @@ async function enrichWithCompiler(
   return outcomes;
 }
 
-function conventionalTestReferences(parsed: ParsedFile, typeIndex: StaticSymbol[]): TypeReference[] {
+function conventionalTestReferences(
+  parsed: RepositoryLanguageAnalysis,
+  typeIndex: StaticSymbol[],
+): RepositoryLanguageReference[] {
   if (parsed.file.role !== 'test') return [];
   const base = (parsed.file.path.split('/').at(-1) ?? '')
-    .replace(/\.(?:java|cs)$/i, '')
+    .replace(/\.[^.]+$/i, '')
     .replace(/(?:\.spec|\.tests?|tests?)$/i, '');
   if (!base || base === parsed.file.path) return [];
   const starts = lineStarts(parsed.file.content);
-  const target = typeIndex.filter((symbol) => symbol.language === parsed.file.language && symbol.name === base);
+  const target = typeIndex.filter(
+    (symbol) => symbol.language === parsed.file.languageId && symbol.name === base,
+  );
   if (target.length !== 1) return [];
   return [{
     kind: 'test-reference',
@@ -1679,7 +2566,9 @@ function staticFiles(files: RepositoryFile[]): StaticAnalysisFile[] {
       path: file.path,
       sha256: file.sha256,
       role: file.role,
-      ...(file.language ? { language: file.language } : {}),
+      ...(file.languageId ?? file.projectLanguageId
+        ? { language: file.languageId ?? file.projectLanguageId }
+        : {}),
       ...(file.project ? { project: file.project } : {}),
     }))
     .sort((left, right) => compareText(left.path, right.path));
@@ -1704,7 +2593,7 @@ function canonicalEntries<T>(
 function repositoryAnalysisEvidence(
   analysis: Pick<
     RepositoryStaticAnalysis,
-    'schemaVersion' | 'analyzerVersion' | 'repository' | 'files' | 'symbols' | 'dependencies' | 'diagnostics'
+    'schemaVersion' | 'analyzerVersion' | 'repository' | 'analysisAdapters' | 'files' | 'symbols' | 'dependencies' | 'diagnostics'
   >,
 ): Record<string, unknown> {
   return {
@@ -1714,9 +2603,18 @@ function repositoryAnalysisEvidence(
     // clones of the same revision. It must not change the content address of
     // the static evidence snapshot.
     repository: {
+      ...(analysis.repository.id ? { id: analysis.repository.id } : {}),
       ...(analysis.repository.remote ? { remote: analysis.repository.remote } : {}),
       ...(analysis.repository.revision ? { revision: analysis.repository.revision } : {}),
     },
+    ...(analysis.analysisAdapters
+      ? {
+          analysisAdapters: canonicalEntries(
+            analysis.analysisAdapters,
+            (adapter) => ({ ...adapter, capabilities: sortedUnique(adapter.capabilities) }),
+          ),
+        }
+      : {}),
     files: canonicalEntries(analysis.files, (file) => ({ ...file })),
     symbols: canonicalEntries(analysis.symbols, (symbol) => ({ ...symbol })),
     dependencies: canonicalEntries(
@@ -1735,7 +2633,7 @@ function repositoryAnalysisEvidence(
 export function repositoryAnalysisContentHash(
   analysis: Pick<
     RepositoryStaticAnalysis,
-    'schemaVersion' | 'analyzerVersion' | 'repository' | 'files' | 'symbols' | 'dependencies' | 'diagnostics'
+    'schemaVersion' | 'analyzerVersion' | 'repository' | 'analysisAdapters' | 'files' | 'symbols' | 'dependencies' | 'diagnostics'
   >,
 ): string {
   return sha256(canonicalJson(repositoryAnalysisEvidence(analysis)));
@@ -1749,6 +2647,7 @@ function snapshotIdForEvidence(
     schemaVersion: analysis.schemaVersion,
     analyzerVersion: analysis.analyzerVersion,
     repository: {
+      ...(analysis.repository.id ? { id: analysis.repository.id } : {}),
       ...(analysis.repository.remote ? { remote: analysis.repository.remote } : {}),
       ...(analysis.repository.revision ? { revision: analysis.repository.revision } : {}),
     },
@@ -1760,7 +2659,7 @@ function snapshotIdForEvidence(
 export function repositoryAnalysisSnapshotId(
   analysis: Pick<
     RepositoryStaticAnalysis,
-    'schemaVersion' | 'analyzerVersion' | 'repository' | 'files' | 'symbols' | 'dependencies' | 'diagnostics'
+    'schemaVersion' | 'analyzerVersion' | 'repository' | 'analysisAdapters' | 'files' | 'symbols' | 'dependencies' | 'diagnostics'
   >,
 ): string {
   return snapshotIdForEvidence(analysis, repositoryAnalysisContentHash(analysis));
@@ -1775,6 +2674,46 @@ async function gitRevision(root: string): Promise<string | undefined> {
     return /^[0-9a-f]{40}$/i.test(revision) ? revision : undefined;
   } catch {
     return undefined;
+  }
+}
+
+async function gitRemote(root: string): Promise<string | undefined> {
+  try {
+    const { stdout } = await execFileAsync(
+      'git',
+      ['-C', root, 'config', '--get', 'remote.origin.url'],
+      { windowsHide: true },
+    );
+    const remote = stdout.trim();
+    return remote ? sanitizeGitRemote(remote) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function sanitizeGitRemote(value: string): string {
+  const trimmed = value.trim();
+  if (/^[A-Za-z]:[\\/]/.test(trimmed)) {
+    return trimmed.replaceAll('\\', '/').replace(/\.git\/?$/i, '').replace(/\/$/, '');
+  }
+  try {
+    const remote = new URL(trimmed);
+    remote.username = '';
+    remote.password = '';
+    remote.search = '';
+    remote.hash = '';
+    remote.hostname = remote.hostname.toLowerCase();
+    remote.pathname = remote.pathname.replace(/\.git\/?$/i, '').replace(/\/$/, '');
+    return remote.toString().replace(/\/$/, '');
+  } catch {
+    const scpLike = /^(?:[^@/\s]+@)?([^:/\s]+):(.+)$/.exec(trimmed);
+    if (scpLike?.[1] && scpLike[2]) {
+      return `${scpLike[1].toLowerCase()}:${scpLike[2]
+        .replaceAll('\\', '/')
+        .replace(/\.git\/?$/i, '')
+        .replace(/\/$/, '')}`;
+    }
+    return trimmed.replaceAll('\\', '/').replace(/\.git\/?$/i, '').replace(/\/$/, '');
   }
 }
 
@@ -1898,6 +2837,23 @@ function isRepositoryStaticAnalysisShape(value: unknown): value is RepositorySta
     typeof analysis.analyzerVersion === 'string' &&
     typeof analysis.createdAt === 'string' &&
     isRecord(analysis.repository) &&
+    (analysis.repository.id === undefined || typeof analysis.repository.id === 'string') &&
+    (analysis.repository.root === undefined || typeof analysis.repository.root === 'string') &&
+    (analysis.repository.remote === undefined || typeof analysis.repository.remote === 'string') &&
+    (analysis.repository.revision === undefined || typeof analysis.repository.revision === 'string') &&
+    (analysis.analysisAdapters === undefined || (
+      Array.isArray(analysis.analysisAdapters) &&
+      analysis.analysisAdapters.every((adapter) =>
+        isRecord(adapter) &&
+        typeof adapter.id === 'string' &&
+        typeof adapter.version === 'string' &&
+        typeof adapter.languageId === 'string' &&
+        Array.isArray(adapter.capabilities) &&
+        adapter.capabilities.every((capability) => typeof capability === 'string') &&
+        (adapter.configurationHash === undefined || typeof adapter.configurationHash === 'string') &&
+        (adapter.analysisLevel === 'deep' || adapter.analysisLevel === 'generic'),
+      )
+    )) &&
     Array.isArray(analysis.files) &&
     analysis.files.every((file) =>
       isRecord(file) &&
@@ -1913,7 +2869,21 @@ function isRepositoryStaticAnalysisShape(value: unknown): value is RepositorySta
       typeof symbol.qualifiedName === 'string' &&
       typeof symbol.kind === 'string' &&
       typeof symbol.language === 'string' &&
-      typeof symbol.path === 'string',
+      typeof symbol.path === 'string' &&
+      (symbol.visibility === undefined || typeof symbol.visibility === 'string') &&
+      (symbol.exported === undefined || typeof symbol.exported === 'boolean') &&
+      (symbol.containerSymbolId === undefined || typeof symbol.containerSymbolId === 'string') &&
+      (symbol.returnShape === undefined || typeof symbol.returnShape === 'string') &&
+      (symbol.parameters === undefined || (
+        Array.isArray(symbol.parameters) &&
+        symbol.parameters.every((parameter) =>
+          isRecord(parameter) &&
+          typeof parameter.name === 'string' &&
+          (parameter.type === undefined || typeof parameter.type === 'string') &&
+          (parameter.required === undefined || typeof parameter.required === 'boolean') &&
+          (parameter.variadic === undefined || typeof parameter.variadic === 'boolean'),
+        )
+      )),
     ) &&
     Array.isArray(analysis.dependencies) &&
     analysis.dependencies.every((edge) =>
@@ -1947,6 +2917,9 @@ export function verifyRepositoryStaticAnalysis(value: unknown): RepositoryStatic
     throw new Error('Repository static analysis has an invalid shape.');
   }
   const analysis = value;
+  if (analysis.repository.id !== undefined && !safeRepositoryId.test(analysis.repository.id)) {
+    throw new Error('Repository static analysis has an invalid logical repository ID.');
+  }
   const expectedContentHash = repositoryAnalysisContentHash(analysis);
   if (analysis.contentHash !== expectedContentHash) {
     throw new Error('Repository static analysis content hash does not match its canonical evidence.');
@@ -2027,18 +3000,25 @@ function addResolutionDiagnostics(
 }
 
 /**
- * Analyse Java and C# sources from a real repository without affecting the
- * fixture-oriented `extractCorpus` retrieval path.  The result is an immutable
- * snapshot: all paths are root-relative and every edge carries the snapshot ID.
+ * Analyse registered source languages from a real repository without affecting
+ * the fixture-oriented `extractCorpus` retrieval path. The result is immutable:
+ * all paths are root-relative and every edge carries the snapshot ID.
  */
 export async function analyzeRepository(
   request: AnalyzeRepositoryRequest,
 ): Promise<RepositoryStaticAnalysis> {
+  if (request.repositoryId !== undefined && !safeRepositoryId.test(request.repositoryId.trim())) {
+    throw new Error('Repository ID must be a safe, non-empty logical identifier.');
+  }
   const root = path.resolve(request.root);
   const rootStat = await lstat(root);
   if (!rootStat.isDirectory()) throw new Error(`Repository root must be a directory: ${root}`);
 
   const diagnostics: StaticAnalysisDiagnostic[] = [];
+  const languageRegistry = request.languageRegistry ?? createDefaultRepositoryLanguageRegistry();
+  const reportDiagnostic: RepositoryAnalysisDiagnosticReporter = (input) => {
+    diagnostic(diagnostics, input);
+  };
   const trackedChanges = await trackedGitWorktreeChanges(root);
   if (trackedChanges && trackedChanges.length > 0) {
     if (request.allowDirtyWorktreeForPlanning !== true) {
@@ -2053,33 +3033,48 @@ export async function analyzeRepository(
       message: `Static analysis is using ${trackedChanges.length} tracked Git worktree change${trackedChanges.length === 1 ? '' : 's'} under an explicit planning-only opt-out.`,
     });
   }
-  const files = await discoverFiles(root, request.includeTests !== false, diagnostics);
+  const files = await discoverFiles(
+    root,
+    request.includeTests !== false,
+    diagnostics,
+    languageRegistry,
+  );
   const projectSymbols = assignProjects(files);
   const fileRecords = staticFiles(files);
-  const revision = await gitRevision(root);
+  const [revision, remote] = await Promise.all([gitRevision(root), gitRemote(root)]);
   const baseAnalyzerVersion = request.analyzerVersion ?? repositoryAnalysisVersion;
+  const adapterFingerprint = languageRegistry.fingerprint();
+  const analysisAdapters: RepositoryStaticAnalysisAdapterDescriptor[] = languageRegistry
+    .descriptors()
+    .map((adapter) => ({
+      id: adapter.id,
+      version: adapter.version,
+      languageId: adapter.languageId,
+      capabilities: adapter.capabilities,
+      configurationHash: adapter.configurationHash,
+      analysisLevel: adapter.analysisLevel,
+    }));
 
-  const parsed = files
-    .filter((file) => file.language === 'Java' || file.language === 'C#')
-    .map((file) => parseTypes(file, diagnostics));
-  const allSymbols = [...projectSymbols, ...parsed.flatMap((entry) => entry.types.map((type) => type.symbol))];
-  const methodAndReferenceResults = parsed.map((entry) => parseMethodsAndSignatureReferences(entry));
-  allSymbols.push(...methodAndReferenceResults.flatMap((entry) => entry.symbols));
+  const languageAnalyses = files
+    .filter((file): file is RepositoryFile & { languageId: LanguageId } => file.languageId !== undefined)
+    .map((file) => {
+      const adapter = languageRegistry.adapterForLanguageId(file.languageId);
+      if (!adapter) {
+        throw new Error(`No repository language adapter is registered for ${file.languageId}.`);
+      }
+      return adapter.analyze(file, reportDiagnostic);
+    });
+  const allSymbols = [
+    ...projectSymbols,
+    ...languageAnalyses.flatMap((entry) => entry.symbols),
+  ];
   const symbols = allSymbols.sort((left, right) => compareText(left.id, right.id));
   const typeIndex = typeSymbols(symbols);
   const drafts: EdgeDraft[] = projectReferenceDrafts(root, files, diagnostics);
 
-  for (let index = 0; index < parsed.length; index += 1) {
-    const entry = parsed[index];
-    const result = methodAndReferenceResults[index];
-    if (!entry || !result) continue;
+  for (const entry of languageAnalyses) {
     for (const imported of entry.imports) drafts.push(edgeDraft(entry, imported, 'import', symbols));
-    for (const type of entry.types) {
-      for (const reference of type.typeReferences) {
-        drafts.push(edgeDraft(entry, reference, reference.kind, symbols));
-      }
-    }
-    for (const reference of result.references) {
+    for (const reference of entry.references) {
       drafts.push(edgeDraft(entry, reference, reference.kind, symbols));
     }
     for (const reference of conventionalTestReferences(entry, typeIndex)) {
@@ -2088,7 +3083,14 @@ export async function analyzeRepository(
   }
 
   const semanticEnabled = request.semanticEnrichment === true || request.compilerProbe !== undefined;
-  const semanticOutcomes = await enrichWithCompiler(request, root, files, drafts, diagnostics);
+  const semanticOutcomes = await enrichWithCompiler(
+    request,
+    root,
+    files,
+    drafts,
+    diagnostics,
+    languageRegistry,
+  );
   for (const outcome of semanticOutcomes) {
     if (!outcome.compiler) continue;
     diagnostic(diagnostics, {
@@ -2097,23 +3099,30 @@ export async function analyzeRepository(
       message: `${outcome.language} semantic analysis used ${outcome.compiler}.`,
     });
   }
+  const analyzerIdentity = `${baseAnalyzerVersion}+adapters-${adapterFingerprint.slice(0, 16)}`;
   const analyzerVersion = semanticEnabled
-    ? `${baseAnalyzerVersion}+compiler-probe`
-    : baseAnalyzerVersion;
+    ? `${analyzerIdentity}+compiler-probe`
+    : analyzerIdentity;
   // Edge IDs include the snapshot ID, so establish diagnostics against a
   // temporary edge set and hash the edge evidence without those derived IDs.
   const dependenciesForEvidence = finalizeEdges(drafts, 'snapshot-pending');
   addResolutionDiagnostics(diagnostics, dependenciesForEvidence);
-  if (files.some((file) => file.language === 'Java' || file.language === 'C#')) {
+  const compilerLanguages = languageRegistry.adapters()
+    .filter((adapter) =>
+      adapter.compilerProbeLanguage && files.some((file) => file.languageId === adapter.languageId),
+    )
+    .map((adapter) => adapter.languageId);
+  if (compilerLanguages.length > 0) {
     const hasSemanticEdges = dependenciesForEvidence.some((edge) => edge.evidence === 'semantic');
+    const languageLabel = compilerLanguages.join(' and ');
     diagnostic(diagnostics, {
       severity: 'info',
       code: hasSemanticEdges ? 'COMPILER_SEMANTIC_ENRICHMENT_APPLIED' : 'SYNTACTIC_ANALYSIS_ONLY',
       message: hasSemanticEdges
-        ? 'Java and C# dependencies include compiler-verified bindings; all remaining edges retain their original syntactic or unresolved evidence.'
+        ? `${languageLabel} dependencies include compiler-verified bindings; all remaining edges retain their original syntactic or unresolved evidence.`
         : semanticEnabled
-          ? 'Java and C# dependencies were collected with deterministic syntactic analysis; compiler probing did not provide verified bindings.'
-          : 'Java and C# dependencies were collected with deterministic syntactic analysis; no semantic compiler binding was available.',
+          ? `${languageLabel} dependencies were collected with deterministic syntactic analysis; compiler probing did not provide verified bindings.`
+          : `${languageLabel} dependencies were collected with deterministic syntactic analysis; no semantic compiler binding was available.`,
     });
   }
 
@@ -2122,8 +3131,11 @@ export async function analyzeRepository(
     analyzerVersion,
     repository: {
       root,
+      ...(request.repositoryId?.trim() ? { id: request.repositoryId.trim() } : {}),
+      ...(remote ? { remote } : {}),
       ...(revision ? { revision } : {}),
     },
+    analysisAdapters,
     files: fileRecords,
     symbols,
     dependencies: dependenciesForEvidence,

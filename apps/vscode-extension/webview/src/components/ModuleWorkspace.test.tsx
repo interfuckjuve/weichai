@@ -15,6 +15,13 @@ const targetWorkspace: ModuleWorkspacePresentation = {
   name: 'Target',
   rootLabel: 'target',
   snapshotId: 'snapshot',
+  lifecycle: {
+    stage: 'reviewed',
+    label: '已审目标目录',
+    message: 'ready',
+    ready: true,
+    publicationActive: false,
+  },
   stats: {
     modules: 0,
     files: 0,
@@ -22,7 +29,9 @@ const targetWorkspace: ModuleWorkspacePresentation = {
     methods: 0,
     implemented: 0,
     unimplemented: 0,
+    partial: 0,
     unknown: 0,
+    notApplicable: 0,
     dependencies: 0,
   },
   summary: { exists: false, path: '.forexplore/module-summary.json' },
@@ -217,6 +226,7 @@ describe('ModuleWorkspace history configuration prompt', () => {
       target: statusWorkspace,
       history: [],
     };
+
     const container = document.createElement('div');
     const root = createRoot(container);
 
@@ -224,9 +234,9 @@ describe('ModuleWorkspace history configuration prompt', () => {
       root.render(workspaceElement(explorer, 'target', null, vi.fn()));
     });
 
-    const pendingButton = [...container.querySelectorAll<HTMLButtonElement>('.status-filter button')]
-      .find((button) => button.textContent === '待确认');
-    act(() => pendingButton?.click());
+    const unknownButton = [...container.querySelectorAll<HTMLButtonElement>('.status-filter button')]
+      .find((button) => button.textContent === '未知');
+    act(() => unknownButton?.click());
 
     const tree = container.querySelector('.module-tree');
     expect(tree?.textContent).toContain('pom.xml');
@@ -236,6 +246,60 @@ describe('ModuleWorkspace history configuration prompt', () => {
 
     act(() => root.unmount());
     reactTestEnvironment.IS_REACT_ACT_ENVIRONMENT = false;
+  });
+
+  it('delegates the exact Host lifecycle action for the selected repository', () => {
+    const explorer: ModuleExplorerPresentation = {
+      generatedAt: '2026-09-01T00:00:00.000Z',
+      target: targetWorkspace,
+      history: [{
+        ...historyWorkspace,
+        lifecycle: {
+          stage: 'ready',
+          label: '已发布',
+          message: 'active catalog',
+          ready: true,
+          publicationActive: true,
+          nextAction: 'withdraw-history-publication',
+          nextActionLabel: '撤回当前发布',
+        },
+      }],
+    };
+    const onWorkspaceAction = vi.fn();
+    const container = document.createElement('div');
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <ModuleWorkspace
+          explorer={explorer}
+          mode="history"
+          historyId="history:one"
+          currentTargetId={null}
+          selectedNodeId={null}
+          refreshing={false}
+          onModeChange={vi.fn()}
+          onHistoryChange={vi.fn()}
+          onNodeSelect={vi.fn()}
+          onRefresh={vi.fn()}
+          onOpenSettings={vi.fn()}
+          onWorkspaceAction={onWorkspaceAction}
+          settingsOpen={false}
+        >
+          <div>Workflow</div>
+        </ModuleWorkspace>,
+      );
+    });
+    const withdrawButton = [...container.querySelectorAll('button')]
+      .find((button) => button.textContent?.includes('撤回当前发布'));
+
+    act(() => withdrawButton?.click());
+
+    expect(onWorkspaceAction).toHaveBeenCalledWith(
+      'history:one',
+      'withdraw-history-publication',
+    );
+    act(() => root.unmount());
   });
 });
 
@@ -264,9 +328,9 @@ function workspaceElement(
       onModeChange={vi.fn()}
       onHistoryChange={vi.fn()}
       onNodeSelect={onNodeSelect}
-      onTargetSelect={vi.fn()}
       onRefresh={vi.fn()}
       onOpenSettings={vi.fn()}
+      onWorkspaceAction={vi.fn()}
       settingsOpen={false}
     >
       <div>Workflow</div>

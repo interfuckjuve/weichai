@@ -21,11 +21,21 @@ export type {
   CompilerProbeRequest,
   CompilerProbeResult,
   CompilerProbeStatus,
+  ImportReference,
+  RepositoryAnalysisDiagnosticReporter,
+  RepositoryAnalysisSourceFile,
+  RepositoryLanguageAdapter,
+  RepositoryLanguageAdapterDescriptor,
+  RepositoryLanguageAnalysis,
+  RepositoryLanguageReference,
   SemanticDependencyBinding,
 } from './repository-analysis.js';
 export {
   analyzeRepository,
+  createDefaultRepositoryLanguageRegistry,
+  createGenericRepositoryLanguageAdapter,
   readRepositoryAnalysisArtifact,
+  RepositoryLanguageRegistry,
   repositoryAnalysisContentHash,
   repositoryAnalysisArtifactDirectory,
   repositoryAnalysisArtifactPath,
@@ -34,6 +44,36 @@ export {
   verifyRepositoryStaticAnalysis,
   writeRepositoryAnalysisArtifact,
 } from './repository-analysis.js';
+export type { RepositoryStaticAnalysisBridgeArtifacts } from './repository-ingestion-bridge.js';
+export {
+  bridgeRepositoryStaticAnalysis,
+  repositoryIngestionBridgeHash,
+  repositoryIngestionBridgeVersion,
+  repositoryStaticAnalysisToUnifiedIr,
+} from './repository-ingestion-bridge.js';
+export type {
+  MaterializeReviewedImplementationIndexV2Input,
+  ReviewedImplementationIndexArtifactV2,
+  ReviewedRepositorySourceFileV2,
+} from './implementation-index-v2.js';
+export { materializeReviewedImplementationIndexV2 } from './implementation-index-v2.js';
+export type {
+  AssessRepositoryImplementationsRequest,
+  ImplementationBodyIsolation,
+  ImplementationMaskingProfile,
+  RepositoryImplementationDetectionInput,
+  RepositoryImplementationDetectionResult,
+  RepositoryImplementationDetector,
+  RepositoryImplementationDetectorCapability,
+  RepositoryImplementationDetectorDescriptor,
+  RepositoryImplementationDetectorQuality,
+} from './implementation-assessment.js';
+export {
+  assessRepositoryImplementations,
+  createDefaultRepositoryImplementationDetectorRegistry,
+  implementationAssessmentDetectorVersion,
+  RepositoryImplementationDetectorRegistry,
+} from './implementation-assessment.js';
 
 async function sourceFiles(root: string): Promise<string[]> {
   const files: string[] = [];

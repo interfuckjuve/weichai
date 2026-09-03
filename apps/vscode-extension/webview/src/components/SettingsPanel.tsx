@@ -6,6 +6,8 @@ import type { RepositoryStatus } from '../../../src/ui-types';
 interface SettingsPanelProps extends PanelSettingsPresentation {
   repositoryStatuses: RepositoryStatus[];
   saving: boolean;
+  pickedRepositoryPath?: { path: string; token: number } | null;
+  onPickRepositoryPath(): void;
   onCheckRepositories(): void;
   onSave(settings: PanelSettingsPresentation): void;
   onCancel(): void;
@@ -16,6 +18,8 @@ export function SettingsPanel({
   repositoryPaths,
   repositoryStatuses,
   saving,
+  pickedRepositoryPath,
+  onPickRepositoryPath,
   onCheckRepositories,
   onSave,
   onCancel,
@@ -27,6 +31,16 @@ export function SettingsPanel({
     setDraftTopK(topK);
     setDraftPaths(repositoryPaths);
   }, [topK, repositoryPaths]);
+
+  useEffect(() => {
+    if (!pickedRepositoryPath) return;
+    const picked = pickedRepositoryPath.path.trim();
+    if (!picked) return;
+    setDraftPaths((current) => {
+      if (current.length >= 20 || current.some((item) => item.trim() === picked)) return current;
+      return [...current, picked];
+    });
+  }, [pickedRepositoryPath]);
 
   const normalizedPaths = useMemo(
     () => [...new Set(draftPaths.map((path) => path.trim()).filter(Boolean))],
@@ -76,7 +90,7 @@ export function SettingsPanel({
           <button
             type="button"
             className="text-button"
-            onClick={() => setDraftPaths((current) => current.length < 20 ? [...current, ''] : current)}
+            onClick={onPickRepositoryPath}
             disabled={draftPaths.length >= 20 || saving}
           >
             <FolderPlus size={13} /> 添加路径
@@ -86,7 +100,7 @@ export function SettingsPanel({
         {draftPaths.length === 0 ? (
           <div className="settings-empty">
             <span>尚未添加历史仓路径</span>
-            <button type="button" className="secondary-action" onClick={() => setDraftPaths([''])}>
+            <button type="button" className="secondary-action" onClick={onPickRepositoryPath}>
               <FolderPlus size={13} /> 添加第一个路径
             </button>
           </div>

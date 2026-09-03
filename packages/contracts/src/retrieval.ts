@@ -1,5 +1,6 @@
 import type { Language, ModuleTarget } from './module';
 
+/** @deprecated V1 compatibility only. Production retrieval uses SearchRequestV2. */
 export interface SearchRequest {
   target: ModuleTarget;
   /** Optional natural-language context; an empty string searches by target metadata. */
@@ -31,6 +32,7 @@ export interface CandidateScore {
   rerank?: number;
 }
 
+/** @deprecated V1 compatibility only. Production retrieval uses SearchCandidateV2. */
 export interface SearchCandidate {
   id: string;
   title: string;

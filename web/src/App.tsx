@@ -16,8 +16,10 @@ import {
 } from 'lucide-react';
 import type {
   AdaptationStrategy,
+  MigrationRouteDescriptor,
   ModuleNode,
 } from '@forexplore/contracts';
+import { normalizeLanguageId } from '@forexplore/contracts';
 import {
   initialWorkflowState,
   selectedCandidate,
@@ -39,6 +41,27 @@ const strategyOptions: Array<{
   { id: 'wrap', label: '适配器封装', detail: '添加目标接口与数据转换层' },
   { id: 'reuse', label: '同语言复用', detail: '最小修改直接嵌入' },
 ];
+
+function availableRoute(
+  routes: readonly MigrationRouteDescriptor[],
+  sourceLanguage: string | undefined,
+  targetLanguage: string | undefined,
+  strategy: AdaptationStrategy,
+): MigrationRouteDescriptor | undefined {
+  if (!sourceLanguage || !targetLanguage) return undefined;
+  const sourceLanguageId = normalizeLanguageId(sourceLanguage);
+  const targetLanguageId = normalizeLanguageId(targetLanguage);
+  return routes.find((route) =>
+    route.sourceLanguageId === sourceLanguageId &&
+    route.targetLanguageId === targetLanguageId &&
+    route.strategy === strategy &&
+    route.availability.status !== 'unavailable' &&
+    ['translation', 'patch-generation'].every((stage) =>
+      route.stages.some((capability) =>
+        capability.stage === stage && capability.availability.status !== 'unavailable'),
+    ),
+  );
+}
 
 function RequirementPanel({
   state,
@@ -160,15 +183,24 @@ function SelectionFooter({
   dispatch,
   onAdapt,
   adaptationProvider,
+  migrationRoutes,
 }: {
   state: typeof initialWorkflowState;
   dispatch: React.Dispatch<Parameters<typeof workflowReducer>[1]>;
   onAdapt: () => void;
   adaptationProvider: string;
+  migrationRoutes: readonly MigrationRouteDescriptor[];
 }) {
   const candidate = selectedCandidate(state);
   if (!candidate) return null;
   const realAdaptation = adaptationProvider !== 'Mock';
+  const route = availableRoute(
+    migrationRoutes,
+    candidate.language,
+    state.target?.language,
+    state.strategy,
+  );
+  const routeUnavailable = realAdaptation && route === undefined;
 
   return (
     <div className="selection-workbench">
@@ -211,9 +243,11 @@ function SelectionFooter({
       <button
         type="button"
         className="button-primary"
+        disabled={routeUnavailable}
         onClick={onAdapt}
       >
-        <Sparkles size={15} /> 使用此方案并生成适配
+        <Sparkles size={15} />
+        {routeUnavailable ? '当前语言路线未注册' : '使用此方案并生成适配'}
       </button>
     </div>
   );
@@ -223,12 +257,20 @@ function Inspector({
   state,
   searchProvider,
   adaptationProvider,
+  migrationRoutes,
 }: {
   state: typeof initialWorkflowState;
   searchProvider: string;
   adaptationProvider: string;
+  migrationRoutes: readonly MigrationRouteDescriptor[];
 }) {
   const candidate = selectedCandidate(state);
+  const route = availableRoute(
+    migrationRoutes,
+    candidate?.language,
+    state.target?.language,
+    state.strategy,
+  );
   return (
     <aside className="inspector-pane">
       <div className="pane-heading">
@@ -260,7 +302,7 @@ function Inspector({
             </span>
           </div>
         ) : (
-          <p className="empty-copy">从左侧模块树选择 class 或 function。</p>
+          <p className="empty-copy">从左侧兼容树选择一个可迁移目标实体。</p>
         )}
       </section>
 
@@ -279,9 +321,13 @@ function Inspector({
             <GitCompareArrows size={14} />
             <span>
               <strong>CodeAdaptationPort</strong>
-              <small>{adaptationProvider} · Java → C#</small>
+              <small>
+                {adaptationProvider} · {route
+                  ? `${route.sourceLanguageId} → ${route.targetLanguageId} · ${route.strategy}`
+                  : '等待显式 route capability'}
+              </small>
             </span>
-            <em>ready</em>
+            <em>{adaptationProvider === 'Mock' || route ? 'ready' : 'unverified'}</em>
           </div>
           <div>
             <CodeXml size={14} />
@@ -324,6 +370,7 @@ export interface AppProps {
   moduleTree: ModuleNode;
   searchProvider?: string;
   adaptationProvider?: string;
+  migrationRoutes?: readonly MigrationRouteDescriptor[];
 }
 
 export default function App({
@@ -331,6 +378,7 @@ export default function App({
   moduleTree,
   searchProvider = 'Mock',
   adaptationProvider = 'Mock',
+  migrationRoutes = [],
 }: AppProps) {
   const [state, dispatch] = useReducer(workflowReducer, initialWorkflowState);
   const candidate = useMemo(() => selectedCandidate(state), [state]);
@@ -343,7 +391,6 @@ export default function App({
         target: state.target,
         requirement: state.requirement.trim(),
         topK: state.topK,
-        candidateLanguages: adaptationProvider === 'Mock' ? undefined : ['Java'],
       });
       dispatch({ type: 'SEARCH_SUCCESS', candidates });
     } catch (error) {
@@ -356,6 +403,16 @@ export default function App({
 
   async function handleAdapt() {
     if (!state.target || !candidate) return;
+    if (
+      adaptationProvider !== 'Mock' &&
+      !availableRoute(migrationRoutes, candidate.language, state.target.language, state.strategy)
+    ) {
+      dispatch({
+        type: 'ADAPT_FAILURE',
+        message: '当前 source × target × strategy 路线没有可用的显式能力声明。',
+      });
+      return;
+    }
     dispatch({ type: 'ADAPT_START' });
     try {
       const result = await ports.adaptation.adapt({
@@ -402,6 +459,7 @@ export default function App({
           <kbd>Ctrl K</kbd>
         </div>
         <div className="titlebar-meta">
+          <span className="mock-state">LEGACY FIXTURE UI</span>
           <span className="mock-state">PROTOTYPE</span>
           <button type="button" aria-label="运行当前流程">
             <Play size={14} />
@@ -440,7 +498,7 @@ export default function App({
           onSelect={(target) => dispatch({ type: 'SELECT_TARGET', target })}
         />
         <div className="explorer-note">
-          仅 class / function 可作为工作流目标；文件节点用于导航和上下文组织。
+          此独立页面仅保留兼容 fixture。生产入口使用 VS Code Host 审阅后的通用实体目录。
         </div>
       </aside>
 
@@ -454,10 +512,10 @@ export default function App({
               <span className="empty-state-index">01</span>
               <div>
                 <div className="eyebrow">从软件结构开始</div>
-                <h1>选择一个需要补齐能力的 class 或 function</h1>
+                <h1>选择一个需要补齐能力的目标实体</h1>
                 <p>
-                  目标符号会作为后续检索、接口映射、翻译和回填的稳定锚点。当前 C# 树由
-                  ModuleSymbolPort 提供，并保留真实路径和签名；后续可替换为 IDE Symbol Provider。
+                  本页的静态树只用于旧契约回归，不代表默认目标语言。正式运行由 Host 提供
+                  reviewed catalog、IR entity lineage 和显式 route capability。
                 </p>
               </div>
             </div>
@@ -487,6 +545,7 @@ export default function App({
                 dispatch={dispatch}
                 onAdapt={handleAdapt}
                 adaptationProvider={adaptationProvider}
+                migrationRoutes={migrationRoutes}
               />
             </div>
           ) : null}
@@ -505,7 +564,7 @@ export default function App({
               </p>
               <div className="processing-log">
                 <span>{adaptationProvider} 正在翻译源实现</span>
-                <span>临时 C# skeleton 编译与自动修复</span>
+                <span>按 route 执行目标工具链与有限修复</span>
                 <span>生成工作区补丁预览</span>
               </div>
             </div>
@@ -527,6 +586,7 @@ export default function App({
         state={state}
         searchProvider={searchProvider}
         adaptationProvider={adaptationProvider}
+        migrationRoutes={migrationRoutes}
       />
 
       <footer className="statusbar">

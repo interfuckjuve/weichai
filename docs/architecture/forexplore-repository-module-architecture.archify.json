@@ -1,0 +1,180 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "ForeXplore 存量代码仓模块处理架构",
+    "locale": "zh-CN",
+    "output": "docs/architecture/forexplore-repository-module-architecture.html",
+    "quality_profile": "showcase",
+    "viewBox": [1260, 520],
+    "views": [
+      {
+        "id": "ingestion-path",
+        "label": "入库与双人审主链",
+        "focus": ["source_repo", "code_indexer", "vscode_host", "gate_boundary", "adaptation_agents", "gate_summary", "publisher"],
+        "note": "从存量仓静态快照进入模块边界提案、两道独立人工门禁，再进入发布协调。"
+      },
+      {
+        "id": "dual-indexes",
+        "label": "符号与模块双投影",
+        "focus": ["retrieval_service", "symbol_index", "module_index", "downstream_matcher"],
+        "note": "code_symbols 与 module docs/generations/heads 物理分表、端点独立，下游再决定融合。"
+      },
+      {
+        "id": "publication-control",
+        "label": "发布控制与撤回",
+        "focus": ["vscode_host", "publisher", "sqlite_registry", "retrieval_service", "module_index"],
+        "note": "SQLite 与 SeekDB 采用双 CAS + saga；发布补偿和用户显式撤销是两条不同路径。"
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "source_repo",
+      "type": "external",
+      "label": "存量代码仓快照",
+      "sublabel": "repository snapshot",
+      "tag": "input",
+      "pos": [20, 70],
+      "size": [165, 78]
+    },
+    {
+      "id": "code_indexer",
+      "type": "backend",
+      "label": "Code Indexer",
+      "sublabel": "language adapters → Unified IR",
+      "tag": "static / read-only",
+      "pos": [210, 70],
+      "size": [180, 78]
+    },
+    {
+      "id": "vscode_host",
+      "type": "backend",
+      "label": "VS Code Ingestion Host",
+      "sublabel": "commands + manifest CAS + withdrawal",
+      "tag": "trusted host",
+      "pos": [415, 70],
+      "size": [190, 78]
+    },
+    {
+      "id": "gate_boundary",
+      "type": "security",
+      "label": "Gate 1 · 模块边界人审",
+      "sublabel": "boundary accept / revise / reject",
+      "tag": "awaiting-module-review",
+      "pos": [630, 68],
+      "size": [185, 82]
+    },
+    {
+      "id": "adaptation_agents",
+      "type": "backend",
+      "label": "Adaptation Service Agents",
+      "sublabel": "Discovery + Summary proposals",
+      "tag": "proposal only",
+      "pos": [840, 68],
+      "size": [195, 82]
+    },
+    {
+      "id": "gate_summary",
+      "type": "security",
+      "label": "Gate 2 · 模块摘要人审",
+      "sublabel": "per-module accept / revise / reject",
+      "tag": "awaiting-summary-review",
+      "pos": [1060, 68],
+      "size": [190, 82]
+    },
+    {
+      "id": "publisher",
+      "type": "backend",
+      "label": "Publication Coordinator",
+      "sublabel": "immutable assets + dual CAS saga",
+      "tag": "saga, not 2PC",
+      "pos": [1057.5, 270],
+      "size": [195, 86]
+    },
+    {
+      "id": "sqlite_registry",
+      "type": "database",
+      "label": "SQLite Registry",
+      "sublabel": "active head registry",
+      "tag": "local control plane",
+      "pos": [1065, 390],
+      "size": [180, 88]
+    },
+    {
+      "id": "retrieval_service",
+      "type": "backend",
+      "label": "Retrieval Service",
+      "sublabel": "separate symbol / module APIs",
+      "tag": "HTTP boundary",
+      "pos": [845, 270],
+      "size": [185, 86]
+    },
+    {
+      "id": "symbol_index",
+      "type": "database",
+      "label": "SeekDB 符号索引",
+      "sublabel": "code_symbols｜text + vector",
+      "tag": "/v1/search",
+      "pos": [640, 390],
+      "size": [180, 88]
+    },
+    {
+      "id": "module_index",
+      "type": "database",
+      "label": "SeekDB 模块索引",
+      "sublabel": "docs + generations + active heads",
+      "tag": "reviewed + ACL + active head",
+      "pos": [640, 263],
+      "size": [180, 100]
+    },
+    {
+      "id": "downstream_matcher",
+      "type": "external",
+      "label": "下游匹配 / 检索层",
+      "sublabel": "fusion belongs to next layer",
+      "tag": "out of this module",
+      "pos": [425, 270],
+      "size": [180, 86]
+    }
+  ],
+  "connections": [
+    { "from": "source_repo", "to": "code_indexer", "variant": "emphasis" },
+    { "from": "code_indexer", "to": "vscode_host", "variant": "emphasis" },
+    { "from": "vscode_host", "to": "gate_boundary", "variant": "emphasis" },
+    { "from": "gate_boundary", "to": "adaptation_agents", "variant": "security" },
+    { "from": "adaptation_agents", "to": "gate_summary", "variant": "emphasis" },
+    { "from": "gate_summary", "to": "publisher", "variant": "security" },
+    { "from": "publisher", "to": "sqlite_registry", "fromSide": "bottom", "toSide": "top", "route": "orthogonal-v" },
+    { "from": "publisher", "to": "retrieval_service", "variant": "emphasis" },
+    { "from": "retrieval_service", "to": "symbol_index", "variant": "dashed" },
+    { "from": "retrieval_service", "to": "module_index", "variant": "emphasis" },
+    { "from": "symbol_index", "to": "downstream_matcher", "variant": "dashed" },
+    { "from": "module_index", "to": "downstream_matcher", "variant": "emphasis" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "双投影与双人审",
+      "items": [
+        "符号索引保留在 code_symbols，走 /v1/search",
+        "模块索引使用独立 docs / generations / heads，配置禁止复用符号表",
+        "两个投影的匹配、加权与融合明确留给下游",
+        "Gate 1 只审批模块边界，accept 后 Agent 才能生成模块摘要",
+        "Gate 2 逐模块审批叙述，全部 accept 才进入 publishing-knowledge",
+        "代码未强制两位不同身份；reviewed 也不等于业务行为已验证"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "发布补偿 ≠ 显式撤销",
+      "items": [
+        "本地不可变制品与 SQLite CAS 先激活，再推进 SeekDB active head CAS",
+        "发布失败自动按 remote withdraw → local withdraw 补偿，状态可重放恢复",
+        "仅 ready 可由用户携 actor / reason 发起，顺序为 remote-first",
+        "随后撤销 SQLite 当前头并恢复前代；无前代则 active head 为空",
+        "这是双 CAS + saga，不是分布式 ACID；历史 publication 与 receipt 不删除"
+      ]
+    }
+  ]
+}

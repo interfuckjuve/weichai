@@ -1,23 +1,191 @@
 import type {
-  AdaptationResult,
+  AdaptationResultV2,
   ApplyResult,
-  ModuleTarget,
-  SearchCandidate,
+  EntityImplementationAssessment,
+  ImplementationState,
+  LanguageId,
+  MigrationRouteDescriptor,
+  MigrationRuntimeCapabilitySnapshot,
+  MigrationRunManifestV2,
+  MigrationRouteSnapshotRef,
+  RepositoryModuleCatalogRef,
+  MigrationTargetRef,
+  SearchCandidateV2,
+  SourceImplementationBundleV2,
+  TargetImplementationRollup,
+  TargetWorkspaceModuleSnapshot,
+  TargetWorkspaceSnapshotFreshness,
 } from '@forexplore/contracts';
 import type {
+  HistoryModuleSelectionIdentity,
   ModuleExplorerPresentation,
+  ModuleWorkspaceAction,
   RepositoryStatus,
   ServiceStatus,
 } from '../ui-types';
 
+/**
+ * A presentation-only projection of the reviewed target-workspace module
+ * snapshot. Canonical ownership and implementation evidence remain in
+ * `TargetWorkspaceModuleSnapshot`; the Webview receives stable IDs and never
+ * supplies a path back to the trusted host.
+ */
+export type TargetWorkspaceNodeKind =
+  | 'workspace'
+  | 'module'
+  | 'file'
+  | 'type'
+  | 'container'
+  | 'member'
+  | 'callable';
+
+export interface TargetWorkspaceMigrationRouteOption {
+  /** Exact source x target x strategy capability selected by the trusted host. */
+  route: MigrationRouteDescriptor;
+  /** Degraded-but-runnable capability evidence returned by route resolution. */
+  warnings: string[];
+}
+
+export interface TargetWorkspaceMigrationEligibility {
+  status: 'eligible' | 'blocked';
+  /** Canonical, open-ended target language. Absence always blocks execution. */
+  targetLanguageId?: LanguageId;
+  /** Supported exact routes. An empty set is fail-closed, never "any source". */
+  routeOptions: TargetWorkspaceMigrationRouteOption[];
+  reasonCodes: string[];
+  summary?: string;
+}
+
+export interface TargetWorkspaceTreeNode {
+  /** Unique within this tree projection. Aliases of a shared entity use different node IDs. */
+  nodeId: string;
+  /** Canonical IR entity/file/module identity used by the trusted host. */
+  entityId: string;
+  /** Reviewed functional module identity, when this node is projected under one. */
+  moduleId?: string;
+  /** Points at the primary projection node when a shared entity is shown more than once. */
+  aliasOfNodeId?: string;
+  kind: TargetWorkspaceNodeKind;
+  /** Adapter-native symbol kind (for example function, method, trait, impl). */
+  nativeKind?: string;
+  /** Human-facing native/entity label; old snapshots fall back to `kind`. */
+  kindLabel?: string;
+  name: string;
+  qualifiedName?: string;
+  /** Repository-relative display path only. It is never accepted in a Webview intent. */
+  path?: string;
+  languageId?: LanguageId;
+  signature?: string;
+  range?: {
+    startLine: number;
+    startColumn?: number;
+    endLine?: number;
+    endColumn?: number;
+  };
+  assessment?: EntityImplementationAssessment;
+  rollup?: TargetImplementationRollup;
+  /** Host-derived implementation + route capability decision. */
+  migrationEligibility: TargetWorkspaceMigrationEligibility;
+  children: TargetWorkspaceTreeNode[];
+}
+
+export interface TargetWorkspaceDiagnostic {
+  id: string;
+  severity: 'info' | 'warning' | 'error';
+  message: string;
+  entityId?: string;
+}
+
+export interface TargetWorkspaceSnapshot {
+  schemaVersion: '1.0';
+  workspaceId: string;
+  workspaceName: string;
+  /** Stable UI identity for this exact materialized target snapshot. */
+  snapshotId: string;
+  /** Must equal the canonical module snapshot content hash. */
+  contentHash: string;
+  moduleSnapshot: TargetWorkspaceModuleSnapshot;
+  /** Combined Host-owned runtime truth used to derive route eligibility. */
+  runtimeCapabilitySnapshot?: MigrationRuntimeCapabilitySnapshot;
+  languageIds: LanguageId[];
+  freshness: TargetWorkspaceSnapshotFreshness;
+  staleReason?: string;
+  root: TargetWorkspaceTreeNode;
+  diagnostics: TargetWorkspaceDiagnostic[];
+}
+
+export interface TargetWorkspaceInvalidation {
+  snapshotId: string;
+  contentHash: string;
+  reason: string;
+  detectedAt: string;
+}
+
+export interface TargetWorkspaceSelectionIdentity {
+  snapshotId: string;
+  contentHash: string;
+  nodeId: string;
+  entityId: string;
+}
+
+/**
+ * Host-owned binding retained from 01A/01B selection through the active run.
+ * It prevents the migration workflow from collapsing reviewed catalog/module
+ * identity into only a path and signature.
+ */
+export interface TargetWorkspaceMigrationSelection {
+  workspaceId: string;
+  targetWorkspaceSnapshotId: string;
+  targetWorkspaceSnapshotHash: string;
+  selection: TargetWorkspaceSelectionIdentity;
+  target: MigrationTargetRef;
+  module?: {
+    catalogId: string;
+    catalogHash: string;
+    moduleId: string;
+    moduleName: string;
+  };
+  /** Reviewed source/target catalog mapping approved before this run. */
+  moduleMapping: ModuleMappingRunBinding;
+  routeOptions: TargetWorkspaceMigrationRouteOption[];
+}
+
+export interface ModuleMappingRunBinding {
+  mappingRunId: string;
+  sourceCatalog: RepositoryModuleCatalogRef;
+  targetCatalog: RepositoryModuleCatalogRef;
+  mappingProposalId: string;
+  mappingProposalHash: string;
+  mappingReviewId: string;
+  mappingReviewHash: string;
+  executionOverlayId: string;
+  executionOverlayHash: string;
+  runtimeCapabilitySnapshot: MigrationRuntimeCapabilitySnapshot;
+  route: MigrationRouteSnapshotRef;
+  groupIds: string[];
+  mappingIds: string[];
+  sourceModuleIds: string[];
+  targetModuleIds: string[];
+  sourceEntityIds: string[];
+  targetEntityIds: string[];
+}
+
+/** Re-exported for UI filter declarations without duplicating canonical values. */
+export type TargetWorkspaceImplementationState = ImplementationState;
+
 /** Snapshot sent by the trusted extension host when the panel is created. */
 export interface PanelInitPayload {
-  target: ModuleTarget;
+  /** Current V2 target. It is present only after a reviewed 01B selection. */
+  target?: MigrationTargetRef;
+  /** Present only when a reviewed target and explicit route capabilities are bound. */
+  migrationSelection?: TargetWorkspaceMigrationSelection;
+  /** Optional first 01B snapshot; later refreshes use TARGET_WORKSPACE_SNAPSHOT. */
+  targetWorkspace?: TargetWorkspaceSnapshot;
   workspaceRoot: string;
   settings: PanelSettingsPresentation;
+  moduleExplorer: ModuleExplorerPresentation;
   repositoryStatuses: RepositoryStatus[];
   serviceStatus: ServiceStatus;
-  moduleExplorer: ModuleExplorerPresentation;
   searchProvider: 'SeekDB';
   adaptationProvider: 'DeepSeek';
 }
@@ -30,14 +198,36 @@ export interface PanelSettingsPresentation {
 /** Messages the extension host posts into the Webview. */
 export type HostToWebviewMessage =
   | { type: 'INIT'; payload: PanelInitPayload }
-  | { type: 'SEARCH_RESULT'; candidates: SearchCandidate[] }
-  | { type: 'ADAPT_RESULT'; result: AdaptationResult }
-  | { type: 'APPLY_RESULT'; result: ApplyResult }
+  | { type: 'TARGET_WORKSPACE_SNAPSHOT'; snapshot: TargetWorkspaceSnapshot }
+  | {
+      type: 'TARGET_WORKSPACE_REFRESHING';
+      previousSnapshotId?: string;
+      previousContentHash?: string;
+    }
+  | { type: 'TARGET_WORKSPACE_INVALIDATED'; invalidation: TargetWorkspaceInvalidation }
+  | {
+      type: 'TARGET_ENTITY_SELECTED';
+      selection: TargetWorkspaceSelectionIdentity;
+      target: MigrationTargetRef;
+      migrationSelection: TargetWorkspaceMigrationSelection;
+      /** Only an explicit start intent may leave the 01B browser. */
+      activateWorkflow: boolean;
+    }
+  | { type: 'SEARCH_RESULT'; candidates: SearchCandidateV2[] }
+  | {
+      type: 'CANDIDATE_SELECTED';
+      candidateId: string;
+      sourceBundle: SourceImplementationBundleV2;
+    }
+  | { type: 'ADAPT_RESULT'; result: AdaptationResultV2 }
+  | { type: 'APPLY_RESULT'; result: ApplyResult; manifest: MigrationRunManifestV2 }
   | { type: 'REPOSITORY_STATUS'; statuses: RepositoryStatus[] }
   | { type: 'SERVICE_STATUS'; status: ServiceStatus }
   | { type: 'MODULE_EXPLORER'; explorer: ModuleExplorerPresentation }
-  | { type: 'TARGET_SELECTED'; target: ModuleTarget }
   | { type: 'SETTINGS_UPDATED'; settings: PanelSettingsPresentation }
+  | { type: 'REPOSITORY_PATH_PICKED'; path: string }
+  | { type: 'HISTORY_REPOSITORY_SELECTED'; repositoryRegistrationId: string }
+  | { type: 'HISTORY_MODULE_SELECTED'; selection: HistoryModuleSelectionIdentity }
   | { type: 'ERROR'; message: string };
 
 /**
@@ -46,6 +236,13 @@ export type HostToWebviewMessage =
  */
 export type WebviewToHostMessage =
   | { type: 'READY' }
+  | {
+      type: 'REFRESH_TARGET_WORKSPACE';
+      expectedSnapshotId?: string;
+      expectedContentHash?: string;
+    }
+  | ({ type: 'SELECT_TARGET_ENTITY' } & TargetWorkspaceSelectionIdentity)
+  | ({ type: 'START_TARGET_TRANSLATION' } & TargetWorkspaceSelectionIdentity)
   | {
       type: 'START_SEARCH';
       requirement: string;
@@ -56,23 +253,45 @@ export type WebviewToHostMessage =
   | { type: 'APPLY_CURRENT_RUN' }
   | { type: 'CHECK_REPOSITORIES' }
   | { type: 'REFRESH_MODULE_EXPLORER' }
+  | { type: 'PICK_REPOSITORY_PATH' }
   | { type: 'SAVE_SETTINGS'; settings: PanelSettingsPresentation }
-  | { type: 'SELECT_WORKSPACE_TARGET'; targetId: string }
+  | { type: 'SELECT_HISTORY_REPOSITORY'; repositoryRegistrationId: string }
+  | ({ type: 'SELECT_HISTORY_MODULE' } & HistoryModuleSelectionIdentity)
+  | { type: 'RUN_MODULE_WORKSPACE_ACTION'; workspaceId: string; action: ModuleWorkspaceAction }
   | { type: 'COPY_TARGET_PATH' }
   | { type: 'REVEAL_TARGET_IN_EXPLORER' }
   | { type: 'OPEN_TARGET' };
 
 const hostMessageTypes = new Set<string>([
   'INIT',
+  'TARGET_WORKSPACE_SNAPSHOT',
+  'TARGET_WORKSPACE_REFRESHING',
+  'TARGET_WORKSPACE_INVALIDATED',
+  'TARGET_ENTITY_SELECTED',
   'SEARCH_RESULT',
+  'CANDIDATE_SELECTED',
   'ADAPT_RESULT',
   'APPLY_RESULT',
   'REPOSITORY_STATUS',
   'SERVICE_STATUS',
   'MODULE_EXPLORER',
-  'TARGET_SELECTED',
   'SETTINGS_UPDATED',
+  'REPOSITORY_PATH_PICKED',
+  'HISTORY_REPOSITORY_SELECTED',
+  'HISTORY_MODULE_SELECTED',
   'ERROR',
+]);
+
+const moduleWorkspaceActions = new Set<ModuleWorkspaceAction>([
+  'initialize-target',
+  'review-target-boundaries',
+  'retry-target-inventory',
+  'rebase-target',
+  'import-history',
+  'review-history-boundaries',
+  'generate-history-summaries',
+  'review-history-knowledge',
+  'withdraw-history-publication',
 ]);
 
 /** Strictly validates every Webview payload before it enters the host. */
@@ -84,14 +303,57 @@ export function isWebviewToHostMessage(value: unknown): value is WebviewToHostMe
     case 'APPLY_CURRENT_RUN':
     case 'CHECK_REPOSITORIES':
     case 'REFRESH_MODULE_EXPLORER':
+    case 'PICK_REPOSITORY_PATH':
     case 'COPY_TARGET_PATH':
     case 'REVEAL_TARGET_IN_EXPLORER':
     case 'OPEN_TARGET':
       return hasOnlyKeys(message, ['type']);
     case 'SAVE_SETTINGS':
+      return hasOnlyKeys(message, ['type', 'settings']) && isPanelSettings(message.settings);
+    case 'SELECT_HISTORY_REPOSITORY':
       return (
-        hasOnlyKeys(message, ['type', 'settings']) &&
-        isPanelSettings(message.settings)
+        hasOnlyKeys(message, ['type', 'repositoryRegistrationId']) &&
+        isBoundedOpaqueId(message.repositoryRegistrationId, 256)
+      );
+    case 'SELECT_HISTORY_MODULE':
+      return (
+        hasOnlyKeys(message, [
+          'type',
+          'repositoryRegistrationId',
+          'repositoryId',
+          'catalogId',
+          'catalogHash',
+          'moduleId',
+        ]) &&
+        isBoundedOpaqueId(message.repositoryRegistrationId, 256) &&
+        isBoundedOpaqueId(message.repositoryId, 512) &&
+        isBoundedOpaqueId(message.catalogId, 512) &&
+        isContentHash(message.catalogHash) &&
+        isBoundedOpaqueId(message.moduleId, 512)
+      );
+    case 'RUN_MODULE_WORKSPACE_ACTION':
+      return (
+        hasOnlyKeys(message, ['type', 'workspaceId', 'action']) &&
+        isBoundedOpaqueId(message.workspaceId, 512) &&
+        typeof message.action === 'string' &&
+        moduleWorkspaceActions.has(message.action as ModuleWorkspaceAction)
+      );
+    case 'REFRESH_TARGET_WORKSPACE': {
+      if (hasOnlyKeys(message, ['type'])) return true;
+      return (
+        hasOnlyKeys(message, ['type', 'expectedSnapshotId', 'expectedContentHash']) &&
+        isBoundedOpaqueId(message.expectedSnapshotId, 256) &&
+        isContentHash(message.expectedContentHash)
+      );
+    }
+    case 'SELECT_TARGET_ENTITY':
+    case 'START_TARGET_TRANSLATION':
+      return (
+        hasOnlyKeys(message, ['type', 'snapshotId', 'contentHash', 'nodeId', 'entityId']) &&
+        isBoundedOpaqueId(message.snapshotId, 256) &&
+        isContentHash(message.contentHash) &&
+        isBoundedOpaqueId(message.nodeId, 512) &&
+        isBoundedOpaqueId(message.entityId, 512)
       );
     case 'START_SEARCH':
       return (
@@ -110,13 +372,6 @@ export function isWebviewToHostMessage(value: unknown): value is WebviewToHostMe
         message.candidateId.length > 0 &&
         message.candidateId.length <= 256
       );
-    case 'SELECT_WORKSPACE_TARGET':
-      return (
-        hasOnlyKeys(message, ['type', 'targetId']) &&
-        typeof message.targetId === 'string' &&
-        message.targetId.length > 0 &&
-        message.targetId.length <= 512
-      );
     case 'START_ADAPT':
       return (
         hasOnlyKeys(message, ['type', 'decisionNotes']) &&
@@ -129,19 +384,17 @@ export function isWebviewToHostMessage(value: unknown): value is WebviewToHostMe
 }
 
 function isPanelSettings(value: unknown): value is PanelSettingsPresentation {
-  if (typeof value !== 'object' || value === null) return false;
-  const settings = value as Record<string, unknown>;
+  if (!isRecord(value)) return false;
   return (
-    hasOnlyKeys(settings, ['repositoryPaths', 'topK']) &&
-    Array.isArray(settings.repositoryPaths) &&
-    settings.repositoryPaths.length <= 20 &&
-    settings.repositoryPaths.every(
-      (path) => typeof path === 'string' && path.trim().length > 0 && path.length <= 1_000,
-    ) &&
-    typeof settings.topK === 'number' &&
-    Number.isInteger(settings.topK) &&
-    settings.topK >= 1 &&
-    settings.topK <= 10
+    hasOnlyKeys(value, ['repositoryPaths', 'topK']) &&
+    Array.isArray(value.repositoryPaths) &&
+    value.repositoryPaths.length <= 20 &&
+    value.repositoryPaths.every((item) =>
+      typeof item === 'string' && item.trim().length > 0 && item.length <= 1_000) &&
+    typeof value.topK === 'number' &&
+    Number.isInteger(value.topK) &&
+    value.topK >= 1 &&
+    value.topK <= 10
   );
 }
 
@@ -150,8 +403,40 @@ function hasOnlyKeys(value: Record<string, unknown>, keys: string[]): boolean {
   return received.length === keys.length && received.every((key) => keys.includes(key));
 }
 
+function isBoundedOpaqueId(value: unknown, maximumLength: number): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= maximumLength;
+}
+
+function isContentHash(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-f\d]{64}$/iu.test(value);
+}
+
 export function isHostToWebviewMessage(value: unknown): value is HostToWebviewMessage {
   if (typeof value !== 'object' || value === null) return false;
-  const message = value as { type?: unknown };
-  return typeof message.type === 'string' && hostMessageTypes.has(message.type);
+  const message = value as { type?: unknown; payload?: unknown; candidates?: unknown; result?: unknown };
+  if (typeof message.type !== 'string' || !hostMessageTypes.has(message.type)) return false;
+  if (message.type === 'INIT' && isRecord(message.payload)) {
+    const target = message.payload.target;
+    if (target !== undefined && (!isRecord(target) || target.schemaVersion !== '2.0')) return false;
+  }
+  if (message.type === 'TARGET_ENTITY_SELECTED') {
+    const target = (message as Record<string, unknown>).target;
+    return isRecord(target) && target.schemaVersion === '2.0';
+  }
+  if (message.type === 'SEARCH_RESULT') {
+    return Array.isArray(message.candidates) && message.candidates.every((candidate) =>
+      isRecord(candidate) && candidate.schemaVersion === '2.0');
+  }
+  if (message.type === 'ADAPT_RESULT') {
+    return isRecord(message.result) && message.result.schemaVersion === '2.0';
+  }
+  if (message.type === 'CANDIDATE_SELECTED') {
+    const sourceBundle = (message as Record<string, unknown>).sourceBundle;
+    return isRecord(sourceBundle) && sourceBundle.schemaVersion === '2.0';
+  }
+  return true;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

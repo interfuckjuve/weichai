@@ -1,5 +1,19 @@
-import type { AdaptationRequest, AdaptationResult, ApplyResult, FilePatch } from '@forexplore/contracts';
-import type { CodeAdaptationPort, CodeBackfillPort, WorkflowPorts } from '@forexplore/workflow-core';
+import type {
+  AdaptationRequest,
+  AdaptationRequestV2,
+  AdaptationResult,
+  AdaptationResultV2,
+  ApplyResult,
+  FilePatch,
+} from '@forexplore/contracts';
+import {
+  validateAdaptationRequestV2,
+  validateAdaptationResultV2,
+  type CodeAdaptationPort,
+  type CodeBackfillPort,
+  type MigrationExecutionV2ValidationContext,
+  type WorkflowPorts,
+} from '@forexplore/workflow-core';
 
 export interface AdaptationHttpOptions {
   baseUrl: string;
@@ -34,16 +48,47 @@ function isApplyResult(value: unknown): value is ApplyResult {
   );
 }
 
-async function responseError(response: Response): Promise<string> {
+interface AdaptationServiceErrorBody {
+  error?: unknown;
+  code?: unknown;
+  reasonCodes?: unknown;
+}
+
+async function responseError(response: Response): Promise<AdaptationServiceErrorBody> {
   try {
-    const body = (await response.json()) as { error?: unknown };
-    if (typeof body.error === 'string' && body.error.trim()) return body.error;
+    const body = (await response.json()) as AdaptationServiceErrorBody;
+    if (typeof body.error === 'string' && body.error.trim()) return body;
   } catch {
     // The status text below is more useful than a JSON parse failure.
   }
-  return response.statusText || `HTTP ${response.status}`;
+  return { error: response.statusText || `HTTP ${response.status}` };
 }
 
+export class AdaptationHttpError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code?: string,
+    readonly reasonCodes: readonly string[] = [],
+  ) {
+    super(message);
+    this.name = 'AdaptationHttpError';
+  }
+}
+
+async function adaptationHttpError(response: Response, prefix: string): Promise<AdaptationHttpError> {
+  const body = await responseError(response);
+  return new AdaptationHttpError(
+    `${prefix}: ${String(body.error)}`,
+    response.status,
+    typeof body.code === 'string' ? body.code : undefined,
+    Array.isArray(body.reasonCodes)
+      ? body.reasonCodes.filter((reason): reason is string => typeof reason === 'string')
+      : [],
+  );
+}
+
+/** @deprecated Compatibility client for the legacy V1 adaptation contract. */
 export class AdaptationHttpAdapter implements CodeAdaptationPort {
   private readonly adaptUrl: string;
   private readonly request: typeof globalThis.fetch;
@@ -65,7 +110,7 @@ export class AdaptationHttpAdapter implements CodeAdaptationPort {
     });
 
     if (!response.ok) {
-      throw new Error(`Adaptation failed: ${await responseError(response)}`);
+      throw await adaptationHttpError(response, 'Adaptation failed');
     }
 
     const body: unknown = await response.json();
@@ -73,6 +118,55 @@ export class AdaptationHttpAdapter implements CodeAdaptationPort {
       throw new Error('Adaptation service returned an invalid response.');
     }
     return body;
+  }
+}
+
+export interface CodeAdaptationPortV2 {
+  adapt(
+    request: AdaptationRequestV2,
+    context: MigrationExecutionV2ValidationContext,
+    signal?: AbortSignal,
+  ): Promise<AdaptationResultV2>;
+}
+
+/** Formal V2 client. It validates both sides and has no V1 fallback path. */
+export class AdaptationHttpAdapterV2 implements CodeAdaptationPortV2 {
+  private readonly adaptUrl: string;
+  private readonly request: typeof globalThis.fetch;
+
+  constructor(options: AdaptationHttpOptions) {
+    if (!options.baseUrl.trim()) {
+      throw new Error('Adaptation API base URL must not be empty.');
+    }
+    this.adaptUrl = endpoint(options.baseUrl, '/v2/adapt');
+    this.request = options.fetch ?? globalThis.fetch.bind(globalThis);
+  }
+
+  async adapt(
+    request: AdaptationRequestV2,
+    context: MigrationExecutionV2ValidationContext,
+    signal?: AbortSignal,
+  ): Promise<AdaptationResultV2> {
+    validateAdaptationRequestV2(request, context);
+    const response = await this.request(this.adaptUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(request),
+      signal,
+    });
+    if (!response.ok) {
+      throw await adaptationHttpError(response, 'V2 adaptation failed');
+    }
+    const body = await response.json() as AdaptationResultV2;
+    try {
+      return validateAdaptationResultV2(body, request, context);
+    } catch (error) {
+      throw new Error(
+        `Adaptation service returned an invalid V2 response: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
   }
 }
 
@@ -97,7 +191,7 @@ export class BackfillHttpAdapter implements CodeBackfillPort {
     });
 
     if (!response.ok) {
-      throw new Error(`Backfill failed: ${await responseError(response)}`);
+      throw await adaptationHttpError(response, 'Backfill failed');
     }
 
     const body: unknown = await response.json();

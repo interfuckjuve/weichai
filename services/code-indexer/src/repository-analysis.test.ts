@@ -6,7 +6,9 @@ import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   analyzeRepository,
+  createGenericRepositoryLanguageAdapter,
   readRepositoryAnalysisArtifact,
+  RepositoryLanguageRegistry,
   writeRepositoryAnalysisArtifact,
 } from './repository-analysis.js';
 import type { CompilerProbe } from './repository-analysis.js';
@@ -50,6 +52,320 @@ afterEach(async () => {
 });
 
 describe('analyzeRepository', () => {
+  it('records Java and C# visibility, callable shapes, and declaring containers', async () => {
+    const root = await createRepository();
+    await writeSource(root, 'java/Outer.java', [
+      'package sample;',
+      'public class Outer {',
+      '  protected class Inner {',
+      '    private String secret;',
+      '    public int compute(String value, int count) { return count; }',
+      '  }',
+      '  void packageMethod() {}',
+      '}',
+    ].join('\n'));
+    await writeSource(root, 'dotnet/Worker.cs', [
+      'namespace Demo;',
+      'public interface IWorker {',
+      '  int Missing(string input);',
+      '}',
+      'public abstract class BaseWorker {',
+      '  public abstract void Pending();',
+      '}',
+      'internal class Worker {',
+      '  public Worker() {}',
+      '  public string Name { get; set; }',
+      '  protected int Run(string input, int count) { return count; }',
+      '  public int Expression() => 1;',
+      '  private class Nested {}',
+      '}',
+    ].join('\n'));
+
+    const analysis = await analyzeRepository({ root });
+    const symbol = (language: string, name: string, kind?: string) => analysis.symbols.find(
+      (entry) => entry.language === language && entry.name === name && (!kind || entry.kind === kind),
+    );
+    const outer = symbol('java', 'Outer', 'class');
+    const inner = symbol('java', 'Inner', 'class');
+    const secret = symbol('java', 'secret', 'field');
+    const compute = symbol('java', 'compute', 'method');
+    const packageMethod = symbol('java', 'packageMethod', 'method');
+    const worker = symbol('csharp', 'Worker', 'class');
+    const nested = symbol('csharp', 'Nested', 'class');
+    const run = symbol('csharp', 'Run', 'method');
+    const constructor = symbol('csharp', 'Worker', 'constructor');
+    const expression = symbol('csharp', 'Expression', 'method');
+    const missing = symbol('csharp', 'Missing', 'method');
+    const pending = symbol('csharp', 'Pending', 'method');
+    const property = symbol('csharp', 'Name', 'property');
+
+    expect(outer).toEqual(expect.objectContaining({ visibility: 'public' }));
+    expect(inner).toEqual(expect.objectContaining({
+      qualifiedName: 'sample.Outer.Inner',
+      visibility: 'protected',
+      containerSymbolId: outer?.id,
+    }));
+    expect(secret).toEqual(expect.objectContaining({
+      visibility: 'private',
+      containerSymbolId: inner?.id,
+      returnShape: 'String',
+    }));
+    expect(compute).toEqual(expect.objectContaining({
+      visibility: 'public',
+      containerSymbolId: inner?.id,
+      parameters: [
+        { name: 'value', type: 'String', required: true },
+        { name: 'count', type: 'int', required: true },
+      ],
+      returnShape: 'int',
+    }));
+    expect(packageMethod).toEqual(expect.objectContaining({ visibility: 'package' }));
+    expect(worker).toEqual(expect.objectContaining({ visibility: 'internal' }));
+    expect(nested).toEqual(expect.objectContaining({
+      qualifiedName: 'Demo.Worker.Nested',
+      visibility: 'private',
+      containerSymbolId: worker?.id,
+    }));
+    expect(run).toEqual(expect.objectContaining({
+      visibility: 'protected',
+      containerSymbolId: worker?.id,
+      returnShape: 'int',
+    }));
+    expect(constructor).toEqual(expect.objectContaining({
+      visibility: 'public',
+      containerSymbolId: worker?.id,
+    }));
+    expect(expression).toEqual(expect.objectContaining({
+      visibility: 'public',
+      containerSymbolId: worker?.id,
+      returnShape: 'int',
+    }));
+    expect(missing).toEqual(expect.objectContaining({
+      visibility: 'public',
+      signature: 'int Missing(string input)',
+    }));
+    expect(pending).toEqual(expect.objectContaining({
+      visibility: 'public',
+      signature: 'public abstract void Pending()',
+    }));
+    expect(property).toEqual(expect.objectContaining({
+      visibility: 'public',
+      containerSymbolId: worker?.id,
+      returnShape: 'string',
+    }));
+  });
+
+  it('uses explicit built-in export rules and leaves an unknown custom language unknown', async () => {
+    const root = await createRepository();
+    await writeSource(root, 'src/api.ts', [
+      'export class PublicType {}',
+      'function localFunction(): void {}',
+    ].join('\n'));
+    await writeSource(root, 'src/lib.rs', [
+      'pub struct PublicRecord {}',
+      'fn local_rust() {}',
+    ].join('\n'));
+    await writeSource(root, 'src/api.go', [
+      'package api',
+      'func Exported() {}',
+      'func localGo() {}',
+    ].join('\n'));
+    await writeSource(root, 'src/api.py', [
+      'def visible():',
+      '    pass',
+      'def _private():',
+      '    pass',
+    ].join('\n'));
+    await writeSource(root, 'src/api.acme', 'class CustomType {}\n');
+    const registry = new RepositoryLanguageRegistry([
+      createGenericRepositoryLanguageAdapter({ languageId: 'typescript', fileExtensions: ['.ts'] }),
+      createGenericRepositoryLanguageAdapter({ languageId: 'rust', fileExtensions: ['.rs'] }),
+      createGenericRepositoryLanguageAdapter({ languageId: 'go', fileExtensions: ['.go'] }),
+      createGenericRepositoryLanguageAdapter({ languageId: 'python', fileExtensions: ['.py'] }),
+      createGenericRepositoryLanguageAdapter({ languageId: 'acme', fileExtensions: ['.acme'] }),
+    ]);
+
+    const analysis = await analyzeRepository({ root, languageRegistry: registry });
+    const byName = (name: string) => analysis.symbols.find((symbol) => symbol.name === name);
+
+    expect(byName('PublicType')?.exported).toBe(true);
+    expect(byName('localFunction')?.exported).toBe(false);
+    expect(byName('PublicRecord')?.exported).toBe(true);
+    expect(byName('local_rust')?.exported).toBe(false);
+    expect(byName('Exported')?.exported).toBe(true);
+    expect(byName('localGo')?.exported).toBe(false);
+    expect(byName('visible')?.exported).toBe(true);
+    expect(byName('_private')?.exported).toBe(false);
+    expect(byName('CustomType')).toEqual(expect.objectContaining({ visibility: 'unknown' }));
+    expect(byName('CustomType')?.exported).toBeUndefined();
+    expect(analysis.analysisAdapters?.find((adapter) => adapter.languageId === 'acme')?.capabilities)
+      .not.toContain('api-surface');
+  });
+
+  it('normalizes and fingerprints the registered adapter set in analyzer identity', async () => {
+    const firstRegistry = new RepositoryLanguageRegistry([
+      createGenericRepositoryLanguageAdapter({
+        id: 'acme.adapter:a',
+        version: '2.0.0',
+        languageId: 'acme-a',
+        fileExtensions: ['.A'],
+      }),
+      createGenericRepositoryLanguageAdapter({
+        id: 'acme.adapter:b',
+        version: '3.0.0',
+        languageId: 'acme-b',
+        fileExtensions: ['.b'],
+      }),
+    ]);
+    const secondRegistry = new RepositoryLanguageRegistry([
+      createGenericRepositoryLanguageAdapter({
+        id: 'acme.adapter:b',
+        version: '3.0.0',
+        languageId: 'acme-b',
+        fileExtensions: ['.b'],
+      }),
+      createGenericRepositoryLanguageAdapter({
+        id: 'acme.adapter:a',
+        version: '2.0.0',
+        languageId: 'acme-a',
+        fileExtensions: ['.a'],
+      }),
+    ]);
+    expect(firstRegistry.descriptors()).toEqual(secondRegistry.descriptors());
+    expect(firstRegistry.fingerprint()).toBe(secondRegistry.fingerprint());
+
+    const root = await createRepository();
+    await writeSource(root, 'src/value.a', 'class Value {}\n');
+    const first = await analyzeRepository({ root, languageRegistry: firstRegistry });
+    const second = await analyzeRepository({ root, languageRegistry: secondRegistry });
+    expect(first.analyzerVersion).toContain(`adapters-${firstRegistry.fingerprint().slice(0, 16)}`);
+    expect(second.analyzerVersion).toBe(first.analyzerVersion);
+    expect(second.snapshotId).toBe(first.snapshotId);
+  });
+
+  it('creates safe collision-resistant default adapter IDs for every open LanguageId', () => {
+    const inputs = [
+      { languageId: 'C#', fileExtensions: ['.legacy-cs'] },
+      { languageId: 'vendor language/next', fileExtensions: ['.vendor-next'] },
+      { languageId: '语言', fileExtensions: ['.unicode-language'] },
+    ] as const;
+    const first = inputs.map((input) => createGenericRepositoryLanguageAdapter(input).id);
+    const second = inputs.map((input) => createGenericRepositoryLanguageAdapter(input).id);
+
+    expect(second).toEqual(first);
+    expect(new Set(first).size).toBe(first.length);
+    expect(first.every((id) => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(id))).toBe(true);
+    expect(() => new RepositoryLanguageRegistry([
+      createGenericRepositoryLanguageAdapter({
+        id: 'unsafe/adapter',
+        languageId: 'unsafe-explicit',
+        fileExtensions: ['.unsafe-explicit'],
+      }),
+    ])).toThrow(/safe stable id/i);
+  });
+
+  it('keeps every contract language visible and reports generic-analysis boundaries', async () => {
+    const root = await createRepository();
+    await writeSource(root, 'typescript/checkout.ts', [
+      'export class Checkout {}',
+      'export function submit() {}',
+    ].join('\n'));
+    await writeSource(root, 'python/worker.py', [
+      'class Worker:',
+      '    pass',
+      '',
+      'def run():',
+      '    pass',
+    ].join('\n'));
+    await writeSource(root, 'rust/ledger.rs', [
+      'pub struct Ledger {}',
+      'pub fn total() {}',
+    ].join('\n'));
+    await writeSource(root, 'go/server.go', [
+      'package server',
+      'type Server struct {}',
+      'func Run() {}',
+    ].join('\n'));
+
+    const analysis = await analyzeRepository({ root });
+
+    expect(analysis.files).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: 'typescript/checkout.ts', language: 'typescript' }),
+      expect.objectContaining({ path: 'python/worker.py', language: 'python' }),
+      expect.objectContaining({ path: 'rust/ledger.rs', language: 'rust' }),
+      expect.objectContaining({ path: 'go/server.go', language: 'go' }),
+    ]));
+    expect(analysis.symbols).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'Checkout', language: 'typescript', kind: 'class' }),
+      expect.objectContaining({ name: 'Worker', language: 'python', kind: 'class' }),
+      expect.objectContaining({ name: 'Ledger', language: 'rust', kind: 'class' }),
+      expect.objectContaining({ name: 'Server', language: 'go', kind: 'class' }),
+    ]));
+    expect(analysis.diagnostics.filter(
+      (entry) => entry.code === 'GENERIC_LANGUAGE_STATIC_SLICE',
+    ).map((entry) => entry.path).sort()).toEqual([
+      'go/server.go',
+      'python/worker.py',
+      'rust/ledger.rs',
+      'typescript/checkout.ts',
+    ]);
+  });
+
+  it('accepts a runtime registry with a custom source extension', async () => {
+    const root = await createRepository();
+    await writeSource(root, 'ui/View.tsx', 'export class View {}');
+    const languageRegistry = new RepositoryLanguageRegistry([
+      createGenericRepositoryLanguageAdapter({
+        languageId: 'typescript-react',
+        fileExtensions: ['.tsx'],
+      }),
+    ]);
+    expect(languageRegistry.adapterForLanguageId('typescript-react')?.languageId).toBe(
+      'typescript-react',
+    );
+
+    const analysis = await analyzeRepository({ root, languageRegistry });
+
+    expect(analysis.files).toEqual([
+      expect.objectContaining({ path: 'ui/View.tsx', language: 'typescript-react' }),
+    ]);
+    expect(analysis.symbols).toEqual([
+      expect.objectContaining({ name: 'View', language: 'typescript-react', kind: 'class' }),
+    ]);
+    expect(analysis.diagnostics).toEqual([
+      expect.objectContaining({
+        code: 'GENERIC_LANGUAGE_STATIC_SLICE',
+        path: 'ui/View.tsx',
+      }),
+    ]);
+  });
+
+  it('preserves unregistered languages and non-source files in the baseline inventory', async () => {
+    const root = await createRepository();
+    await writeSource(root, 'src/Service.kt', 'class Service\n');
+    await writeSource(root, 'README.md', '# Fixture\n');
+    await writeSource(root, 'assets/logo.svg', '<svg/>\n');
+
+    const analysis = await analyzeRepository({
+      root,
+      languageRegistry: new RepositoryLanguageRegistry(),
+    });
+
+    expect(analysis.files).toEqual([
+      expect.objectContaining({ path: 'README.md', role: 'documentation' }),
+      expect.objectContaining({ path: 'assets/logo.svg', role: 'asset' }),
+      expect.objectContaining({ path: 'src/Service.kt', role: 'other' }),
+    ]);
+    expect(analysis.files.every((file) => file.language === undefined)).toBe(true);
+    expect(analysis.symbols).toEqual([]);
+    expect(analysis.diagnostics).toEqual([
+      expect.objectContaining({
+        code: 'UNCLASSIFIED_REPOSITORY_FILES',
+        message: expect.stringContaining('3 repository file(s)'),
+      }),
+    ]);
+  });
+
   it('rejects a tracked-dirty Git worktree unless a planning-only caller opts in', async () => {
     const root = await createRepository();
     await writeSource(root, 'src/Service.java', [
@@ -67,6 +383,23 @@ describe('analyzeRepository', () => {
     expect(planningAnalysis.diagnostics).toEqual(expect.arrayContaining([
       expect.objectContaining({ code: 'DIRTY_GIT_WORKTREE_PLANNING_ONLY' }),
     ]));
+  });
+
+  it('records a stable Git remote identity without persisting embedded credentials', async () => {
+    const root = await createRepository();
+    await writeSource(root, 'src/Service.ts', 'export class Service {}\n');
+    await execFileAsync('git', ['init', '--quiet', root]);
+    await execFileAsync('git', [
+      '-C', root,
+      'config',
+      'remote.origin.url',
+      'https://token-user:secret-token@Example.COM/org/repository.git?access_token=leak',
+    ]);
+
+    const analysis = await analyzeRepository({ root });
+
+    expect(analysis.repository.remote).toBe('https://example.com/org/repository');
+    expect(JSON.stringify(analysis.repository)).not.toMatch(/token-user|secret-token|access_token/);
   });
 
   it('collects deterministic Java and C# syntactic dependency evidence without changing retrieval indexing', async () => {

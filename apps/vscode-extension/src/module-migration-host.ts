@@ -4,10 +4,20 @@ import * as vscode from 'vscode';
 import {
   type ExecutionWave,
   type MigrationRunManifest,
+  type ModuleDiscoveryProposal,
   type ModuleMigrationPlan,
   type ModuleSummary,
   type PlanDecision,
+  type RepositoryIngestionArtifactRef,
+  type RepositoryIngestionManifest,
+  type RepositoryKnowledgePublicationScope,
+  type RepositoryModuleCatalog,
+  type RepositoryModuleEvidenceBundle,
+  type RepositoryModuleKnowledgeReview,
+  type RepositoryModuleKnowledgeReviewDecision,
+  type RepositoryModuleWikiProposal,
   type RepositoryStaticAnalysis,
+  type UnifiedRepositoryIR,
 } from '@forexplore/contracts';
 import {
   arePlanApprovalsCurrent,
@@ -16,6 +26,8 @@ import {
   invalidatePlanForSnapshot,
   materializeModuleSummary,
   recordModulePlanDecision,
+  selectCurrentRepositoryKnowledgePublicationArtifactRefs,
+  selectCurrentRepositoryModuleSummaryArtifactRefs,
   validateModuleMigrationPlan,
 } from '@forexplore/workflow-core';
 import type { PreparedModuleWave } from '@forexplore/adaptation-service/module-wave-execution';
@@ -23,7 +35,33 @@ import {
   analyzeRepository,
   readRepositoryAnalysisArtifact,
   writeRepositoryAnalysisArtifact,
+  type RepositoryLanguageRegistry,
+  type AnalyzeRepositoryRequest,
 } from '@forexplore/code-indexer';
+import { requestRepositoryModuleDiscovery } from './module-discovery-client';
+import {
+  HttpModuleKnowledgeIndexPublisher,
+  type ModuleKnowledgeIndexPublisher,
+} from './module-knowledge-index-client';
+import {
+  initializeRepositoryAfterStaticAnalysis,
+  repositoryIngestionInitializationPreview,
+  type InitializeRepositoryAfterStaticAnalysisInput,
+  type RepositoryIngestionInitializationResult,
+} from './repository-ingestion-coordinator';
+import {
+  readRepositoryIngestionArtifactContent,
+  readRepositoryIngestionManifest,
+} from './repository-ingestion-store';
+import { RepositoryKnowledgePublicationStore } from './repository-knowledge-publication-store';
+import {
+  reviewAndPublishRepositoryModuleKnowledge,
+  type RepositoryModuleKnowledgeReviewSubmission,
+} from './repository-module-knowledge-publication';
+import { withdrawRepositoryModuleKnowledgePublication } from './repository-module-knowledge-withdrawal';
+import { reviewRepositoryModulePublication } from './repository-module-publication';
+import { generateRepositoryModuleSummaries } from './repository-module-summary';
+import { requestRepositoryModuleSummary } from './module-summary-client';
 import {
   buildTrustedModuleMigrationPlan,
   requestModuleMigrationProposal,
@@ -48,6 +86,7 @@ import {
   type ModuleMigrationWaveRecoveryResult,
 } from './module-migration-recovery';
 import {
+  loadModuleKnowledgeIndexWriterToken,
   loadModuleWaveValidationCommands,
   loadSettings,
 } from './settings';
@@ -57,15 +96,25 @@ import {
 } from './module-wave-run-manifest';
 import { CommandModuleWaveValidator, type ModuleWaveValidator } from './module-wave-validation';
 import type { ServiceManager } from './service-manager';
+import type { ReviewedModuleCatalogHead } from './module-mapping-host';
 
 export const moduleMigrationPreviewScheme = 'forexplore-module-migration';
-const reviewStorageVersion = 3;
+const reviewStorageVersion = 4;
 const reviewStoragePrefix = 'forexplore.moduleMigration.review';
 
 export type ModuleMigrationHostStage =
   | 'idle'
   | 'indexing'
   | 'indexed'
+  | 'initializing-modules'
+  | 'awaiting-module-review'
+  | 'summarizing-modules'
+  | 'awaiting-summary-review'
+  | 'publishing-knowledge'
+  | 'modules-ready'
+  | 'module-ingestion-closed'
+  | 'analysis-partial'
+  | 'initialization-failed'
   | 'planning'
   | 'plan-review'
   | 'approved'
@@ -81,8 +130,18 @@ export interface ModuleMigrationHostState {
   stage: ModuleMigrationHostStage;
   workspaceUri?: string;
   snapshotId?: string;
+  ingestionId?: string;
+  ingestionStatus?: RepositoryIngestionManifest['status'];
   planId?: string;
   waveId?: string;
+}
+
+/** Read-only 01A projection input. It never grants an action authority to the Webview. */
+export interface RepositoryModuleHostInspection {
+  analysisSnapshotId: string;
+  manifest?: RepositoryIngestionManifest;
+  ir?: UnifiedRepositoryIR;
+  catalog?: RepositoryModuleCatalog;
 }
 
 interface ModuleMigrationReviewSession {
@@ -95,6 +154,7 @@ interface ModuleMigrationReviewSession {
   prepared?: PreparedModuleWave;
   storedPrepared?: StoredPreparedModuleWave;
   recoveryEvents: ModuleMigrationRecoveryEvent[];
+  repositoryIngestion?: StoredRepositoryIngestionInitialization;
 }
 
 interface StoredModuleMigrationReview {
@@ -105,6 +165,13 @@ interface StoredModuleMigrationReview {
   manifest?: MigrationRunManifest;
   prepared?: StoredPreparedModuleWave;
   recoveryEvents?: ModuleMigrationRecoveryEvent[];
+  repositoryIngestion?: StoredRepositoryIngestionInitialization;
+}
+
+interface StoredRepositoryIngestionInitialization {
+  ingestionId: string;
+  status: RepositoryIngestionManifest['status'];
+  manifestPath: string;
 }
 
 interface ModuleMigrationRecoveryEvent {
@@ -156,28 +223,116 @@ export interface ModuleMigrationHostOptions {
   pickWaveBundle?: (workspaceFolder: vscode.WorkspaceFolder) => Promise<ModuleWavePatchBundle | undefined>;
   /** Reads only a managed run artifact after Git proves publication. */
   runManifestReader?: ModuleWaveRunManifestReader;
+  /** Test/host seam for the automatic post-index dynamic initialization. */
+  repositoryInitializer?: (
+    input: InitializeRepositoryAfterStaticAnalysisInput,
+  ) => Promise<RepositoryIngestionInitializationResult>;
+  /** Runtime extension point for repository-analysis languages; migration support is separate. */
+  repositoryLanguageRegistry?: RepositoryLanguageRegistry;
+  /** Host-owned analyzer reused by indexing and every freshness gate. */
+  repositoryAnalyzer?: (
+    request: AnalyzeRepositoryRequest,
+  ) => Promise<RepositoryStaticAnalysis>;
+  /** Test/host seam for the repository-local SQLite publication control plane. */
+  repositoryKnowledgePublicationStore?: RepositoryKnowledgePublicationStore;
+  /** Test/host seam for the separately deployed module-knowledge index writer. */
+  moduleKnowledgeIndexPublisher?: ModuleKnowledgeIndexPublisher;
 }
 
 /**
- * Trusted VS Code host flow for static module planning. It owns immutable
- * analysis artifacts, deterministic validation, and local plan review state;
- * the architecture HTTP endpoint can only return an untrusted proposal.
+ * Trusted VS Code host flow for repository ingestion and module planning. It
+ * owns immutable analysis artifacts, deterministic validation, and local plan
+ * review state; discovery and architecture HTTP endpoints can only return
+ * untrusted proposals.
  * Source changes, run manifests, and module summaries belong to the wave
  * transaction coordinator and are never written by this planning host.
  */
 export class ModuleMigrationHost {
   private readonly sessions = new Map<string, ModuleMigrationReviewSession>();
   private currentState: ModuleMigrationHostState = { stage: 'idle' };
+  readonly #analyzeRepository: (
+    request: AnalyzeRepositoryRequest,
+  ) => Promise<RepositoryStaticAnalysis>;
 
-  constructor(private readonly options: ModuleMigrationHostOptions) {}
+  constructor(private readonly options: ModuleMigrationHostOptions) {
+    this.#analyzeRepository = options.repositoryAnalyzer ?? ((request) => analyzeRepository({
+      ...request,
+      ...(options.repositoryLanguageRegistry === undefined
+        ? {}
+        : { languageRegistry: options.repositoryLanguageRegistry }),
+    }));
+  }
 
   get state(): ModuleMigrationHostState {
     return { ...this.currentState };
   }
 
-  async indexRepository(): Promise<void> {
+  /** Read the current accepted catalog head; draft/legacy FunctionalModule plans are excluded. */
+  async getReviewedCatalogHead(
+    workspaceFolder: vscode.WorkspaceFolder,
+  ): Promise<ReviewedModuleCatalogHead> {
+    const session = await this.loadSession(workspaceFolder);
+    await this.assertSnapshotCurrent(session);
+    const ingestion = requireRepositoryIngestion(session);
+    const manifest = await requireRepositoryIngestionManifest(
+      workspaceFolder.uri.fsPath,
+      ingestion.ingestionId,
+    );
+    const ir = await readManifestJson<UnifiedRepositoryIR>(
+      workspaceFolder.uri.fsPath,
+      manifest,
+      requiredIngestionArtifact(manifest.artifacts.unifiedRepositoryIr, '统一仓库 IR'),
+    );
+    const catalog = await readManifestJson<RepositoryModuleCatalog>(
+      workspaceFolder.uri.fsPath,
+      manifest,
+      requiredIngestionArtifact(manifest.artifacts.activeModuleCatalog, '已审活动模块目录'),
+    );
+    if (catalog.status !== 'active' || !catalog.reviewId || !catalog.reviewHash) {
+      throw new Error('源仓库没有当前已审 RepositoryModuleCatalog。');
+    }
+    return {
+      workspaceId: workspaceFolder.uri.toString(),
+      ir,
+      catalog,
+      analysisSnapshotId: session.analysis.snapshotId,
+      analysisContentHash: session.analysis.contentHash,
+      analysisAdapters: [...(session.analysis.analysisAdapters ?? [])],
+    };
+  }
+
+  async inspectRepository(
+    workspaceFolder: vscode.WorkspaceFolder,
+  ): Promise<RepositoryModuleHostInspection> {
+    const session = await this.loadSession(workspaceFolder);
+    const ingestion = session.repositoryIngestion;
+    if (!ingestion) return { analysisSnapshotId: session.analysis.snapshotId };
+    const manifest = await requireRepositoryIngestionManifest(
+      workspaceFolder.uri.fsPath,
+      ingestion.ingestionId,
+    );
+    const irRef = manifest.artifacts.unifiedRepositoryIr;
+    const catalogRef = manifest.artifacts.activeModuleCatalog ?? manifest.artifacts.moduleCatalog;
+    const [ir, catalog] = await Promise.all([
+      irRef
+        ? readManifestJson<UnifiedRepositoryIR>(workspaceFolder.uri.fsPath, manifest, irRef)
+        : Promise.resolve(undefined),
+      catalogRef
+        ? readManifestJson<RepositoryModuleCatalog>(workspaceFolder.uri.fsPath, manifest, catalogRef)
+        : Promise.resolve(undefined),
+    ]);
+    return {
+      analysisSnapshotId: session.analysis.snapshotId,
+      manifest,
+      ...(ir ? { ir } : {}),
+      ...(catalog ? { catalog } : {}),
+    };
+  }
+
+  async indexRepository(workspaceFolderInput?: vscode.WorkspaceFolder): Promise<void> {
+    let session: ModuleMigrationReviewSession | undefined;
     try {
-      const workspaceFolder = await selectWorkspaceFolder();
+      const workspaceFolder = workspaceFolderInput ?? await selectWorkspaceFolder();
       if (!workspaceFolder) return;
       this.setState({ stage: 'indexing', workspaceFolder });
       const analysis: RepositoryStaticAnalysis = await vscode.window.withProgress<RepositoryStaticAnalysis>(
@@ -185,14 +340,14 @@ export class ModuleMigrationHost {
           location: vscode.ProgressLocation.Notification,
           title: 'ForeXplore: 正在收集模块迁移静态证据',
         },
-        () => analyzeRepository({
+        () => this.#analyzeRepository({
           root: workspaceFolder.uri.fsPath,
           semanticEnrichment: true,
           allowDirtyWorktreeForPlanning: true,
         }),
       );
       const artifactPath = await writeRepositoryAnalysisArtifact(workspaceFolder.uri.fsPath, analysis);
-      const session: ModuleMigrationReviewSession = {
+      session = {
         workspaceFolder,
         analysis,
         artifactPath,
@@ -201,16 +356,440 @@ export class ModuleMigrationHost {
       this.sessions.set(workspaceFolder.uri.toString(), session);
       await this.persistSession(session);
       this.setState({ stage: 'indexed', session });
-      await this.options.previews.show('Static analysis snapshot', staticAnalysisPreview(session));
-      void vscode.window.showInformationMessage(
-        `已创建静态分析快照 ${analysis.snapshotId}；模块规划服务只会接收该快照标识。`,
-      );
     } catch (error) {
       this.reportError(error, '模块静态分析失败');
+      return;
+    }
+
+    try {
+      this.setState({ stage: 'initializing-modules', session });
+      const result = await vscode.window.withProgress<RepositoryIngestionInitializationResult>(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: 'ForeXplore: 正在初始化仓库模块知识',
+        },
+        () => this.initializeRepository(session!),
+      );
+      session.repositoryIngestion = {
+        ingestionId: result.ingestionId,
+        status: result.status,
+        manifestPath: result.manifestPath,
+      };
+      await this.persistSession(session);
+      this.setState({
+        stage: result.status === 'awaiting-module-review'
+          ? 'awaiting-module-review'
+          : result.status === 'ready'
+            ? 'modules-ready'
+            : result.status === 'summarizing-modules'
+              ? 'summarizing-modules'
+              : result.status === 'awaiting-summary-review'
+                ? 'awaiting-summary-review'
+                : result.status === 'publishing-knowledge'
+                  ? 'publishing-knowledge'
+            : result.status === 'partial'
+              ? 'analysis-partial'
+              : result.status === 'failed'
+                ? 'initialization-failed'
+                : 'initialization-failed',
+        session,
+      });
+      await this.options.previews.show('Repository module initialization', {
+        staticSnapshot: staticAnalysisPreview(session),
+        dynamicInitialization: repositoryIngestionInitializationPreview(result),
+      });
+      if (result.status === 'awaiting-module-review') {
+        void vscode.window.showInformationMessage(
+          `已创建静态分析快照 ${session.analysis.snapshotId}，并完成动态模块初始化 ${result.ingestionId}。当前停在“等待模块人工审阅”；模块目录尚未批准，检索投影也尚未写入 SeekDB。`,
+        );
+      } else if (result.status === 'ready') {
+        void vscode.window.showInformationMessage(
+          `仓库模块处理已完成；已复用人工审阅后的 RepositoryModuleBundle。`,
+        );
+      } else if (
+        result.status === 'summarizing-modules' ||
+        result.status === 'awaiting-summary-review' ||
+        result.status === 'publishing-knowledge'
+      ) {
+        void vscode.window.showInformationMessage(
+          `模块边界已接受，知识处理当前处于 ${result.status}；尚未激活为可检索知识。`,
+        );
+      } else if (result.status === 'partial') {
+        this.options.output.appendLine(
+          `[forexplore] 仓库分析证据不足，未调用模块 Agent: ${result.manifestPath}`,
+        );
+        void vscode.window.showWarningMessage(
+          `静态分析快照 ${session.analysis.snapshotId} 已保留，但缺少模块划分所需的符号/API 证据。未调用模块 Agent；请注册对应语言分析适配器后重新入库。`,
+        );
+      } else {
+        this.options.output.appendLine(
+          `[forexplore] 动态模块初始化失败（静态快照已保留）: ${result.failureMessage ?? result.manifestPath}`,
+        );
+        void vscode.window.showErrorMessage(
+          `静态分析快照 ${session.analysis.snapshotId} 已保留，但动态模块初始化失败：${result.failureMessage ?? '请查看初始化清单。'} 清单：${result.manifestPath}`,
+        );
+      }
+    } catch (error) {
+      this.setState({ stage: 'initialization-failed', session });
+      await this.options.previews.show('Static analysis snapshot (module initialization failed)', {
+        staticSnapshot: staticAnalysisPreview(session),
+        dynamicInitialization: {
+          status: 'failed',
+          committed: false,
+          message: error instanceof Error ? error.message : String(error),
+        },
+      });
+      this.reportError(error, '动态模块初始化失败（静态分析快照已保留）');
     }
   }
 
-  async reviewPlan(): Promise<void> {
+  /** First human gate: accept only the proposed module ownership/boundaries. */
+  async reviewRepositoryModuleBoundaries(
+    workspaceFolderInput?: vscode.WorkspaceFolder,
+  ): Promise<void> {
+    try {
+      const workspaceFolder = workspaceFolderInput ?? await selectWorkspaceFolder();
+      if (!workspaceFolder) return;
+      const session = await this.loadSession(workspaceFolder);
+      const ingestion = requireRepositoryIngestion(session);
+      const manifest = await requireRepositoryIngestionManifest(
+        workspaceFolder.uri.fsPath,
+        ingestion.ingestionId,
+      );
+      if (manifest.status !== 'awaiting-module-review') {
+        throw new Error(`当前入库不在模块边界审阅阶段：${manifest.status}。`);
+      }
+      const proposal = await readManifestJson<ModuleDiscoveryProposal>(
+        workspaceFolder.uri.fsPath,
+        manifest,
+        requiredIngestionArtifact(manifest.artifacts.moduleDiscoveryProposal, '模块发现提案'),
+      );
+      const catalog = await readManifestJson<RepositoryModuleCatalog>(
+        workspaceFolder.uri.fsPath,
+        manifest,
+        requiredIngestionArtifact(manifest.artifacts.moduleCatalog, '草稿模块目录'),
+      );
+      await this.options.previews.show('Repository module boundary review', {
+        warning: '本次决定只审批模块边界，不审批 Agent 叙述，也不会直接进入正式检索。',
+        proposal,
+        catalog,
+      });
+      const choice = await vscode.window.showWarningMessage(
+        '请在只读文档中核对模块归属、重叠、未分配文件、依赖和风险。该决定不会把摘要叙述标为已审阅。',
+        { modal: true },
+        '接受模块边界',
+        '要求重新划分',
+        '拒绝本次入库',
+      );
+      if (!choice) return;
+      const reviewerId = await requestReviewActor('模块边界审批人');
+      if (!reviewerId) return;
+      const comment = await vscode.window.showInputBox({
+        title: '模块边界审阅备注（可选）',
+        prompt: '记录接受依据、修订要求或拒绝原因。',
+      });
+      if (comment === undefined) return;
+      const decision = choice === '接受模块边界'
+        ? 'accept' as const
+        : choice === '要求重新划分'
+          ? 'revise' as const
+          : 'reject' as const;
+      const result = await reviewRepositoryModulePublication({
+        repositoryRoot: workspaceFolder.uri.fsPath,
+        ingestionId: manifest.id,
+        decision,
+        reviewerId,
+        ...(comment.trim() ? { comment: comment.trim() } : {}),
+      });
+      updateStoredRepositoryIngestion(session, result.manifest, result.manifestPath);
+      await this.persistSession(session);
+      if (result.outcome !== 'summarizing-modules') {
+        this.setState({ stage: 'module-ingestion-closed', session });
+        void vscode.window.showInformationMessage(
+          result.outcome === 'revision-required'
+            ? '本轮模块提案已关闭，必须生成新的提案后才能继续。未发布任何模块知识。'
+            : '本轮仓库入库已拒绝。未发布任何模块知识。',
+        );
+        return;
+      }
+
+      this.setState({ stage: 'summarizing-modules', session });
+      try {
+        await this.runRepositoryModuleSummaryGeneration(session);
+      } catch (error) {
+        this.reportError(error, '模块边界已接受，但 Summary Agent 未完成；可运行“生成模块知识摘要提案”重试');
+      }
+    } catch (error) {
+      this.reportError(error, '模块边界审阅失败');
+    }
+  }
+
+  /** Retryable Agent stage; it always stops at the independent summary gate. */
+  async generateRepositoryModuleSummaries(
+    workspaceFolderInput?: vscode.WorkspaceFolder,
+  ): Promise<void> {
+    try {
+      const workspaceFolder = workspaceFolderInput ?? await selectWorkspaceFolder();
+      if (!workspaceFolder) return;
+      const session = await this.loadSession(workspaceFolder);
+      await this.runRepositoryModuleSummaryGeneration(session);
+    } catch (error) {
+      this.reportError(error, '模块摘要生成失败');
+    }
+  }
+
+  /** Second human gate followed by immutable staging and dual-head activation. */
+  async reviewRepositoryModuleKnowledge(
+    workspaceFolderInput?: vscode.WorkspaceFolder,
+  ): Promise<void> {
+    try {
+      const workspaceFolder = workspaceFolderInput ?? await selectWorkspaceFolder();
+      if (!workspaceFolder) return;
+      const session = await this.loadSession(workspaceFolder);
+      const ingestion = requireRepositoryIngestion(session);
+      const manifest = await requireRepositoryIngestionManifest(
+        workspaceFolder.uri.fsPath,
+        ingestion.ingestionId,
+      );
+      updateStoredRepositoryIngestion(session, manifest, ingestion.manifestPath);
+      if (
+        manifest.status !== 'awaiting-summary-review' &&
+        manifest.status !== 'publishing-knowledge' &&
+        manifest.status !== 'ready'
+      ) {
+        throw new Error(`当前入库不在模块知识审阅/发布阶段：${manifest.status}。`);
+      }
+      const summaryRefs = selectCurrentRepositoryModuleSummaryArtifactRefs(manifest);
+      const [evidenceBundles, wikiProposals, currentReviews] = await Promise.all([
+        Promise.all(summaryRefs.evidenceBundles.map((artifact) =>
+          readManifestJson<RepositoryModuleEvidenceBundle>(workspaceFolder.uri.fsPath, manifest, artifact),
+        )),
+        Promise.all(summaryRefs.wikiProposals.map((artifact) =>
+          readManifestJson<RepositoryModuleWikiProposal>(workspaceFolder.uri.fsPath, manifest, artifact),
+        )),
+        Promise.all(summaryRefs.knowledgeReviews.map((artifact) =>
+          readManifestJson<RepositoryModuleKnowledgeReview>(workspaceFolder.uri.fsPath, manifest, artifact),
+        )),
+      ]);
+      await this.options.previews.show('Repository module knowledge review', {
+        warning: '这是独立于模块边界审批的第二道人审。只有全部当前摘要被明确接受，才会进入本地不可变发布和独立模块索引。',
+        evidenceBundles,
+        wikiProposals,
+        carriedAcceptedReviews: currentReviews.filter((review) => review.decision === 'accept'),
+      });
+
+      const reviews = manifest.status !== 'awaiting-summary-review'
+        ? []
+        : await collectPendingModuleKnowledgeReviews(wikiProposals, currentReviews);
+      if (reviews === undefined) return;
+
+      const settings = loadSettings();
+      const publicationContext = manifest.status !== 'awaiting-summary-review'
+        ? requirePersistedPublicationContext(manifest)
+        : await requestPublicationContext(manifest.repositoryId, settings.repositoryKnowledgeChannel);
+      if (publicationContext === undefined) return;
+      const indexPublisher = this.options.moduleKnowledgeIndexPublisher ??
+        createFailClosedModuleKnowledgeIndexPublisher(settings.retrievalApiUrl);
+      this.setState({ stage: manifest.status === 'ready' ? 'modules-ready' : 'publishing-knowledge', session });
+      const result = await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: 'ForeXplore: 正在提交模块知识审阅并发布独立索引',
+        },
+        () => reviewAndPublishRepositoryModuleKnowledge(
+          {
+            repositoryRoot: workspaceFolder.uri.fsPath,
+            ingestionId: manifest.id,
+            scope: publicationContext.scope,
+            repositoryScopes: publicationContext.repositoryScopes,
+            reviews,
+          },
+          {
+            publicationStore: this.options.repositoryKnowledgePublicationStore ??
+              new RepositoryKnowledgePublicationStore(),
+            indexPublisher,
+          },
+        ),
+      );
+      updateStoredRepositoryIngestion(session, result.manifest, result.manifestPath);
+      await this.persistSession(session);
+      if (result.outcome === 'revision-required') {
+        this.setState({ stage: 'summarizing-modules', session });
+        void vscode.window.showInformationMessage(
+          '已保留接受项并记录修订意见；只会为要求修订的模块重新运行 Summary Agent。',
+        );
+        await this.runRepositoryModuleSummaryGeneration(session);
+        return;
+      }
+      if (result.outcome === 'rejected') {
+        this.setState({ stage: 'module-ingestion-closed', session });
+        void vscode.window.showInformationMessage('本轮模块知识已拒绝并关闭，未发布到正式检索。');
+        return;
+      }
+      this.setState({ stage: 'modules-ready', session });
+      void vscode.window.showInformationMessage(
+        result.outcome === 'reused'
+          ? '已确认现有本地与模块索引发布状态；未创建重复发布。'
+          : `模块知识已在 ${publicationContext.scope.channel} 通道完成双头激活，可进入正式模块检索。`,
+      );
+    } catch (error) {
+      this.reportError(error, '模块知识审阅或发布失败');
+    }
+  }
+
+  /** Explicit logical revocation; history is retained and the predecessor is restored when available. */
+  async withdrawRepositoryModuleKnowledge(
+    workspaceFolderInput?: vscode.WorkspaceFolder,
+  ): Promise<void> {
+    try {
+      const workspaceFolder = workspaceFolderInput ?? await selectWorkspaceFolder();
+      if (!workspaceFolder) return;
+      const session = await this.loadSession(workspaceFolder);
+      const ingestion = requireRepositoryIngestion(session);
+      const manifest = await requireRepositoryIngestionManifest(
+        workspaceFolder.uri.fsPath,
+        ingestion.ingestionId,
+      );
+      if (manifest.status !== 'ready') {
+        throw new Error(`只有 ready 的当前模块知识可以撤销：${manifest.status}。`);
+      }
+      const refs = selectCurrentRepositoryKnowledgePublicationArtifactRefs(manifest);
+      await this.options.previews.show('Repository module knowledge withdrawal', {
+        warning: '撤销是逻辑操作：正式模块检索会移除当前发布代，并在可用时恢复前一代；历史制品和审计记录不会删除。',
+        scope: requirePersistedPublicationContext(manifest).scope,
+        activePublicationArtifacts: refs,
+      });
+      const confirmation = await vscode.window.showWarningMessage(
+        '确认撤销当前 active 模块知识发布？此操作不会删除历史，但会改变正式检索的 active head。',
+        { modal: true },
+        '确认撤销',
+      );
+      if (confirmation !== '确认撤销') return;
+      const actorId = await requestReviewActor('模块知识撤销人');
+      if (!actorId) return;
+      const reason = await vscode.window.showInputBox({
+        title: '模块知识撤销原因',
+        prompt: '必填；该原因会写入不可变 ingestion 审计账本。',
+        validateInput: (value) => value.trim() ? undefined : '撤销原因不能为空。',
+      });
+      if (reason === undefined || !reason.trim()) return;
+      const context = requirePersistedPublicationContext(manifest);
+      const settings = loadSettings();
+      const result = await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: 'ForeXplore: 正在撤销模块知识发布',
+        },
+        () => withdrawRepositoryModuleKnowledgePublication(
+          {
+            repositoryRoot: workspaceFolder.uri.fsPath,
+            ingestionId: manifest.id,
+            scope: context.scope,
+            reason: reason.trim(),
+            actorId,
+          },
+          {
+            publicationStore: this.options.repositoryKnowledgePublicationStore ??
+              new RepositoryKnowledgePublicationStore(),
+            indexPublisher: this.options.moduleKnowledgeIndexPublisher ??
+              createFailClosedModuleKnowledgeIndexPublisher(settings.retrievalApiUrl),
+          },
+        ),
+      );
+      updateStoredRepositoryIngestion(session, result.manifest, result.manifestPath);
+      await this.persistSession(session);
+      this.setState({ stage: 'module-ingestion-closed', session });
+      void vscode.window.showInformationMessage(
+        result.restoredHead === undefined
+          ? '当前模块知识发布已撤销；该作用域现在没有 active 模块发布。'
+          : `当前模块知识发布已撤销，并恢复 generation ${result.restoredHead.generation}。`,
+      );
+    } catch (error) {
+      this.reportError(error, '模块知识撤销失败');
+    }
+  }
+
+  private async runRepositoryModuleSummaryGeneration(
+    session: ModuleMigrationReviewSession,
+  ): Promise<void> {
+    const ingestion = requireRepositoryIngestion(session);
+    const currentManifest = await requireRepositoryIngestionManifest(
+      session.workspaceFolder.uri.fsPath,
+      ingestion.ingestionId,
+    );
+    updateStoredRepositoryIngestion(session, currentManifest, ingestion.manifestPath);
+    if (
+      currentManifest.status !== 'summarizing-modules' &&
+      currentManifest.status !== 'awaiting-summary-review'
+    ) {
+      throw new Error(`当前入库不在模块摘要生成阶段：${currentManifest.status}。`);
+    }
+    const serviceStatus = await this.options.services.refresh();
+    if (serviceStatus.adaptation !== 'connected') {
+      throw new Error(serviceStatus.message ?? '模块摘要服务尚未就绪。');
+    }
+    const settings = loadSettings();
+    this.setState({ stage: 'summarizing-modules', session });
+    const result = await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: 'ForeXplore: Summary Agent 正在生成证据绑定的模块 Wiki 提案',
+      },
+      () => generateRepositoryModuleSummaries(
+        {
+          repositoryRoot: session.workspaceFolder.uri.fsPath,
+          ingestionId: ingestion.ingestionId,
+        },
+        {
+          summarizeModule: (request) => requestRepositoryModuleSummary(
+            settings.adaptationApiUrl,
+            request,
+          ),
+        },
+      ),
+    );
+    updateStoredRepositoryIngestion(session, result.manifest, result.manifestPath);
+    await this.persistSession(session);
+    this.setState({ stage: 'awaiting-summary-review', session });
+    await this.options.previews.show('Repository module summary review', {
+      warning: '以下叙述由 Agent 生成，尚未通过第二道人审；当前仍不可进入正式检索。',
+      evidenceBundles: result.evidenceBundles,
+      wikiProposals: result.wikiProposals,
+    });
+    void vscode.window.showInformationMessage(
+      `已生成 ${result.wikiProposals.length} 个证据绑定的模块摘要提案；当前停在第二道人审，尚未发布。`,
+    );
+  }
+
+  private async initializeRepository(
+    session: ModuleMigrationReviewSession,
+  ): Promise<RepositoryIngestionInitializationResult> {
+    if (this.options.repositoryInitializer) {
+      return this.options.repositoryInitializer({
+        repositoryRoot: session.workspaceFolder.uri.fsPath,
+        analysis: session.analysis,
+      });
+    }
+    const settings = loadSettings();
+    return initializeRepositoryAfterStaticAnalysis(
+      {
+        repositoryRoot: session.workspaceFolder.uri.fsPath,
+        analysis: session.analysis,
+      },
+      {
+        discoverModules: async (request) => {
+          const status = await this.options.services.refresh();
+          if (status.adaptation !== 'connected') {
+            throw new Error(status.message ?? '模块发现服务尚未就绪。');
+          }
+          return requestRepositoryModuleDiscovery(settings.adaptationApiUrl, request);
+        },
+      },
+    );
+  }
+
+  /** Explicit compatibility path; never used by the canonical mapping workflow. */
+  async reviewLegacyPlan(): Promise<void> {
     try {
       const workspaceFolder = await selectWorkspaceFolder();
       if (!workspaceFolder) return;
@@ -242,7 +821,7 @@ export class ModuleMigrationHost {
       const proposal = await vscode.window.withProgress(
         {
           location: vscode.ProgressLocation.Notification,
-          title: 'ForeXplore: Agenticodex 正在提出模块边界',
+          title: 'ForeXplore Legacy: Agenticodex 正在提出 FunctionalModule 调度提案',
         },
         () => requestModuleMigrationProposal(settings.adaptationApiUrl, {
           snapshotId: session.analysis.snapshotId,
@@ -617,6 +1196,9 @@ export class ModuleMigrationHost {
       analysis,
       artifactPath: path.join(workspaceFolder.uri.fsPath, '.forexplore', 'analysis', `${stored.snapshotId}.json`),
       recoveryEvents: stored.recoveryEvents === undefined ? [] : copyRecoveryEvents(stored.recoveryEvents),
+      ...(stored.repositoryIngestion === undefined
+        ? {}
+        : { repositoryIngestion: { ...stored.repositoryIngestion } }),
     };
     if (stored.plan !== undefined) {
       const plan = stored.plan;
@@ -658,7 +1240,7 @@ export class ModuleMigrationHost {
   }
 
   private async assertSnapshotCurrent(session: ModuleMigrationReviewSession): Promise<void> {
-    const current = await analyzeRepository({
+    const current = await this.#analyzeRepository({
       root: session.workspaceFolder.uri.fsPath,
       semanticEnrichment: true,
       allowDirtyWorktreeForPlanning: true,
@@ -690,6 +1272,9 @@ export class ModuleMigrationHost {
       ...(session.recoveryEvents.length === 0
         ? {}
         : { recoveryEvents: copyRecoveryEvents(session.recoveryEvents) }),
+      ...(session.repositoryIngestion === undefined
+        ? {}
+        : { repositoryIngestion: { ...session.repositoryIngestion } }),
     };
     await this.options.context.workspaceState.update(storageKey(session.workspaceFolder), stored);
   }
@@ -706,6 +1291,12 @@ export class ModuleMigrationHost {
       stage: input.stage,
       ...(workspaceFolder === undefined ? {} : { workspaceUri: workspaceFolder.uri.toString() }),
       ...(session === undefined ? {} : { snapshotId: session.analysis.snapshotId }),
+      ...(session?.repositoryIngestion === undefined
+        ? {}
+        : {
+          ingestionId: session.repositoryIngestion.ingestionId,
+          ingestionStatus: session.repositoryIngestion.status,
+        }),
       ...(session?.plan === undefined ? {} : { planId: session.plan.id }),
       ...(input.waveId === undefined ? {} : { waveId: input.waveId }),
     };
@@ -721,6 +1312,61 @@ export class ModuleMigrationHost {
 function requirePlan(session: ModuleMigrationReviewSession): ModuleMigrationPlan {
   if (!session.plan) throw new Error('尚未生成模块计划。');
   return session.plan;
+}
+
+function requireRepositoryIngestion(
+  session: ModuleMigrationReviewSession,
+): StoredRepositoryIngestionInitialization {
+  if (!session.repositoryIngestion) {
+    throw new Error('当前工作区没有可审阅的仓库入库记录；请先运行“索引模块迁移仓库”。');
+  }
+  return session.repositoryIngestion;
+}
+
+async function requireRepositoryIngestionManifest(
+  repositoryRoot: string,
+  ingestionId: string,
+): Promise<RepositoryIngestionManifest> {
+  const manifest = await readRepositoryIngestionManifest(repositoryRoot, ingestionId);
+  if (!manifest) throw new Error(`仓库入库清单不存在：${ingestionId}。`);
+  return manifest;
+}
+
+function requiredIngestionArtifact(
+  artifact: RepositoryIngestionArtifactRef | undefined,
+  label: string,
+): RepositoryIngestionArtifactRef {
+  if (!artifact) throw new Error(`仓库入库缺少${label}。`);
+  return artifact;
+}
+
+async function readManifestJson<T>(
+  repositoryRoot: string,
+  manifest: RepositoryIngestionManifest,
+  artifact: RepositoryIngestionArtifactRef,
+): Promise<T> {
+  const content = await readRepositoryIngestionArtifactContent(
+    repositoryRoot,
+    manifest.id,
+    artifact,
+  );
+  try {
+    return JSON.parse(content) as T;
+  } catch {
+    throw new Error(`仓库入库制品不是有效 JSON：${artifact.id}。`);
+  }
+}
+
+function updateStoredRepositoryIngestion(
+  session: ModuleMigrationReviewSession,
+  manifest: RepositoryIngestionManifest,
+  manifestPath: string,
+): void {
+  session.repositoryIngestion = {
+    ingestionId: manifest.id,
+    status: manifest.status,
+    manifestPath,
+  };
 }
 
 function createPlanApprovalDecision(
@@ -782,6 +1428,136 @@ async function requestReviewActor(title: string): Promise<string | undefined> {
   return actor?.trim() || undefined;
 }
 
+async function collectPendingModuleKnowledgeReviews(
+  proposals: readonly RepositoryModuleWikiProposal[],
+  currentReviews: readonly RepositoryModuleKnowledgeReview[],
+): Promise<RepositoryModuleKnowledgeReviewSubmission[] | undefined> {
+  const acceptedByModule = new Map(currentReviews
+    .filter((review) => review.decision === 'accept')
+    .map((review) => [review.moduleId, review]));
+  const pending = proposals.filter((proposal) => {
+    const review = acceptedByModule.get(proposal.moduleId);
+    return review === undefined ||
+      review.wikiProposalId !== proposal.id ||
+      review.wikiProposalHash !== proposal.contentHash;
+  });
+  if (pending.length === 0) return [];
+  const reviewerId = await requestReviewActor('模块知识审批人');
+  if (!reviewerId) return undefined;
+  const submissions: RepositoryModuleKnowledgeReviewSubmission[] = [];
+  for (const proposal of pending) {
+    const choice = await vscode.window.showWarningMessage(
+      `审阅模块 ${proposal.moduleId}。接受只表示该摘要与所列证据一致，不证明迁移行为正确。`,
+      { modal: true },
+      '接受当前摘要',
+      '要求修订摘要',
+      '拒绝本次入库',
+    );
+    if (!choice) return undefined;
+    const decision: RepositoryModuleKnowledgeReviewDecision = choice === '接受当前摘要'
+      ? 'accept'
+      : choice === '要求修订摘要'
+        ? 'revise'
+        : 'reject';
+    const comment = await vscode.window.showInputBox({
+      title: `模块知识审阅备注：${proposal.moduleId}`,
+      prompt: decision === 'accept'
+        ? '可选：记录接受依据。'
+        : '必填：给出可审计的修订要求或拒绝原因。',
+      validateInput: (value) => decision === 'accept' || value.trim()
+        ? undefined
+        : '修订或拒绝必须填写原因。',
+    });
+    if (comment === undefined) return undefined;
+    submissions.push({
+      moduleId: proposal.moduleId,
+      decision,
+      reviewerId,
+      ...(comment.trim() ? { comment: comment.trim() } : {}),
+    });
+  }
+  return submissions;
+}
+
+async function requestPublicationContext(
+  repositoryId: string,
+  defaultChannel: string,
+): Promise<{
+  scope: RepositoryKnowledgePublicationScope;
+  repositoryScopes: string[];
+} | undefined> {
+  const channel = await vscode.window.showInputBox({
+    title: '模块知识发布通道',
+    prompt: '激活头以 (repositoryId, channel) 为作用域；同一作用域每次只激活一个发布代。',
+    value: defaultChannel,
+    validateInput: (value) => value.trim() ? undefined : '发布通道不能为空。',
+  });
+  if (channel === undefined) return undefined;
+  const scope = { repositoryId, channel: channel.trim() };
+  const confirmation = await vscode.window.showWarningMessage(
+    `全部当前模块摘要通过后，将发布到 ${repositoryId} / ${scope.channel}；ACL 仅包含当前仓库。确认继续？`,
+    { modal: true },
+    '确认审阅并发布',
+  );
+  if (confirmation !== '确认审阅并发布') return undefined;
+  return { scope, repositoryScopes: [repositoryId] };
+}
+
+function requirePersistedPublicationContext(manifest: RepositoryIngestionManifest): {
+  scope: RepositoryKnowledgePublicationScope;
+  repositoryScopes: string[];
+} {
+  for (const event of [...manifest.events].reverse()) {
+    if (
+      event.type !== 'knowledge-publication-staged' &&
+      !(event.type === 'module-knowledge-review-recorded' && event.toStatus === 'publishing-knowledge')
+    ) continue;
+    if (!isRecord(event.details) || !isRecord(event.details.update)) continue;
+    const update = event.details.update;
+    const context = isRecord(update.publicationContext) ? update.publicationContext : update;
+    if (
+      !isRecord(context.scope) ||
+      typeof context.scope.repositoryId !== 'string' ||
+      typeof context.scope.channel !== 'string' ||
+      !Array.isArray(context.repositoryScopes) ||
+      !context.repositoryScopes.every((value) => typeof value === 'string' && value.trim())
+    ) continue;
+    const repositoryScopes = [...new Set(context.repositoryScopes.map((value) => String(value).trim()))].sort();
+    if (!repositoryScopes.includes(context.scope.repositoryId)) continue;
+    return {
+      scope: {
+        repositoryId: context.scope.repositoryId,
+        channel: context.scope.channel,
+      },
+      repositoryScopes,
+    };
+  }
+  throw new Error('发布恢复缺少已持久化的仓库、通道或 ACL 上下文。');
+}
+
+function createFailClosedModuleKnowledgeIndexPublisher(
+  retrievalApiUrl: string,
+): ModuleKnowledgeIndexPublisher {
+  try {
+    return new HttpModuleKnowledgeIndexPublisher(
+      retrievalApiUrl,
+      loadModuleKnowledgeIndexWriterToken(),
+    );
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    const unavailable = async (): Promise<never> => {
+      throw new Error(`模块知识索引写入不可用：${detail}`);
+    };
+    return {
+      stage: unavailable,
+      validate: unavailable,
+      readHead: unavailable,
+      activate: unavailable,
+      withdraw: unavailable,
+    };
+  }
+}
+
 function splitConstraints(value: string): string[] {
   return [...new Set(value.split(';').map((item) => item.trim()).filter(Boolean))];
 }
@@ -796,15 +1572,32 @@ function isStoredReview(
 ): value is StoredModuleMigrationReview {
   if (!isRecord(value)) return false;
   return (
-    (value.version === 2 || value.version === reviewStorageVersion) &&
+    ([2, 3, reviewStorageVersion] as unknown[]).includes(value.version) &&
     value.workspaceUri === workspaceFolder.uri.toString() &&
     typeof value.snapshotId === 'string' &&
     value.snapshotId.length > 0 &&
     (value.plan === undefined || isRecord(value.plan)) &&
     (value.manifest === undefined || isRecord(value.manifest)) &&
     (value.prepared === undefined || isRecord(value.prepared)) &&
-    (value.recoveryEvents === undefined || Array.isArray(value.recoveryEvents))
+    (value.recoveryEvents === undefined || Array.isArray(value.recoveryEvents)) &&
+    (value.repositoryIngestion === undefined || isStoredRepositoryIngestion(value.repositoryIngestion))
   );
+}
+
+function isStoredRepositoryIngestion(value: unknown): value is StoredRepositoryIngestionInitialization {
+  return isRecord(value) &&
+    typeof value.ingestionId === 'string' &&
+    (
+      value.status === 'awaiting-module-review' ||
+      value.status === 'summarizing-modules' ||
+      value.status === 'awaiting-summary-review' ||
+      value.status === 'publishing-knowledge' ||
+      value.status === 'ready' ||
+      value.status === 'partial' ||
+      value.status === 'failed' ||
+      value.status === 'superseded'
+    ) &&
+    typeof value.manifestPath === 'string';
 }
 
 function isStoredManifest(value: unknown): value is MigrationRunManifest {

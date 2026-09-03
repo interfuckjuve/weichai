@@ -1,4 +1,7 @@
 export * from './module-target';
+export * from './module-mapping';
+export * from './migration-route-registry';
+export * from './migration-execution-v2';
 export * from './ports';
 export * from './workflow';
 export * from './patching';
@@ -9,3 +12,7 @@ export * from './module-scheduler';
 export * from './module-summary';
 export * from './module-wave-lifecycle';
 export * from './module-migration-workflow';
+export * from './repository-knowledge';
+export * from './repository-knowledge-lifecycle';
+export * from './repository-ingestion';
+export * from './target-workspace';

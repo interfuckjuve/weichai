@@ -13,6 +13,30 @@ export type {
   AdaptationValidator,
 } from "./adaptation-adapter";
 
+export {
+  AdaptationAdapterV2,
+  DeepSeekMigrationAnalyzerV2,
+  DeepSeekMigrationPlannerV2,
+  DeepSeekMigrationTranslatorV2,
+  MigrationRouteExecutionError,
+} from "./adaptation-adapter-v2";
+export type {
+  AdaptationAdapterV2Options,
+  CodeAdaptationPortV2,
+  DeepSeekMigrationAgentsV2Options,
+  MigrationAnalysisV2,
+  MigrationAnalyzerV2,
+  MigrationBehaviorVerifierV2,
+  MigrationCompilerV2,
+  MigrationEvidenceInputV2,
+  MigrationPlanV2,
+  MigrationPlannerV2,
+  MigrationRouteExecutionErrorCode,
+  MigrationTranslationV2,
+  MigrationTranslatorV2,
+  MigrationValidationEvidenceV2,
+} from "./adaptation-adapter-v2";
+
 export { BackfillAdapter } from "./backfill-adapter";
 export type {
   BackfillAdapterOptions,
@@ -91,8 +115,29 @@ export type {
   ArchitectModelClient,
 } from "./architect-agent";
 
-export { collectTargetContext, serializeTargetContext } from "./context-collector";
-export type { ContextCollectorOptions } from "./context-collector";
+export {
+  canonicalTargetLanguageId,
+  collectTargetContext,
+  collectTargetContextSnapshot,
+  createDefaultTargetEngineeringAdapterRegistry,
+  locateTargetPatch,
+  serializeTargetContext,
+  TargetEngineeringAdapterRegistry,
+  TargetEngineeringUnsupportedError,
+} from "./context-collector";
+export type {
+  ContextCollectorOptions,
+  TargetContextSnapshot,
+  TargetEngineeringAdapter,
+  TargetEngineeringCapabilityDescriptor,
+  TargetEngineeringContextRequest,
+  TargetEngineeringPatchContextV2,
+  TargetEngineeringResult,
+  TargetEngineeringStage,
+  TargetEngineeringUnsupportedReason,
+  TargetPatchLocation,
+  TargetPatchLocatorInput,
+} from "./context-collector";
 
 export {
   compileStandalone,
@@ -102,8 +147,21 @@ export {
   compileTargetStandalone,
   compileTargetIntegrated,
   compilerCommand,
+  createDefaultCompilerRouteRegistry,
+  listCompilerRouteCapabilities,
+  resolveCompilerRouteCapability,
+  resolveCompilerRouteCapabilityByLanguageId,
+  compileTargetStandaloneByLanguageId,
+  compileTargetIntegratedByLanguageId,
 } from "./compiler";
-export type { CompileResult } from "./compiler";
+export type {
+  CompileResult,
+  CompilerRouteRegistration,
+  CompilerRouteCapability,
+  CompilerUnsupportedReason,
+  CompilerValidationLevel,
+} from "./compiler";
+export { CompilerRouteRegistry } from "./compiler";
 
 export { deepSeekModelConfig, loadDeepSeekModelConfig } from "./model-config";
 export type { DeepSeekModelConfig } from "./model-config";
@@ -117,10 +175,69 @@ export type { AdaptationServiceConfig } from "./config";
 export { createHttpServer } from "./http-server";
 export type {
   HttpServerOptions,
+  MigrationExecutionV2ArtifactLookup,
+  MigrationExecutionV2ArtifactStore,
+  MigrationExecutionV2ServerArtifacts,
+  ModuleDiscoveryHttpConstraint,
+  ModuleDiscoveryHttpRequest,
   ModulePlanHttpRequest,
   StaticAnalysisSnapshotStore,
 } from "./http-server";
 export type { RepositoryArchitecturePort } from "@forexplore/workflow-core";
+
+export {
+  adaptationServiceOwnedRouteStages,
+  adaptationServiceOwnedRouteUnavailability,
+  createAdaptationRuntimeCapabilitySnapshot,
+  defaultExactTranslationRouteRegistrations,
+  hostOwnedRouteStages,
+  routeByExactPair,
+} from "./runtime-capability-snapshot";
+export type {
+  AdaptationRuntimeCapabilitySnapshotOptions,
+  BehaviorVerifierExecution,
+  ExactTranslationRouteRegistration,
+  RepositoryAnalysisExecution,
+  WorkspaceMutationExecution,
+} from "./runtime-capability-snapshot";
+
+export {
+  ModuleDiscoveryAgent,
+  buildModuleDiscoveryMessages,
+  materializeModuleDiscoveryProposal,
+  parseModuleDiscoveryDraft,
+  repositoryStaticAnalysisToUnifiedIr,
+  validateModuleDiscoveryDraft,
+  validateModuleDiscoveryProposal,
+  validateModuleDiscoveryRequest,
+} from "./module-discovery-agent";
+
+export {
+  ModuleSummaryAgent,
+  buildModuleSummaryMessages,
+  moduleSummaryAgentVersion,
+  moduleSummaryPromptTemplateId,
+  moduleSummaryPromptTemplateVersion,
+  parseModuleSummaryDraft,
+  validateModuleSummaryRequest,
+} from "./module-summary-agent";
+export type {
+  ModuleSummaryAgentOptions,
+  ModuleSummaryDraft,
+  ModuleSummaryMessage,
+  ModuleSummaryModelClient,
+  ModuleSummaryPort,
+  ModuleSummaryRequest,
+} from "./module-summary-agent";
+export type {
+  ModuleDiscoveryAgentOptions,
+  ModuleDiscoveryDraft,
+  ModuleDiscoveryMessage,
+  ModuleDiscoveryModelClient,
+  ModuleDiscoveryPort,
+  ModuleDiscoveryRequest,
+  RepositoryStaticAnalysisIrBridge,
+} from "./module-discovery-agent";
 
 export { FileStaticAnalysisSnapshotStore } from "./analysis-snapshot-store";
 export type { FileStaticAnalysisSnapshotStoreOptions } from "./analysis-snapshot-store";

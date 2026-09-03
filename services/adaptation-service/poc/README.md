@@ -8,6 +8,10 @@ handoff.
 
 ## Replacement
 
-Use the supported service or MCP workflow instead. It always creates a fresh
-Analyzer session, persists only `AnalysisReport`, starts a separate Translator
-session from that artifact, then validates and previews a protected patch.
+Use the formal HTTP V2 workflow only when its exact route and every required
+stage are available and the trusted Host supplies authoritative artifacts.
+`POST /v1/adapt` and the adaptation MCP workflow are deprecated legacy
+compatibility paths, not replacements for V2. The retained legacy path creates
+a fresh Analyzer session, persists only `AnalysisReport`, starts a separate
+Translator session from that artifact, then validates and previews a protected
+patch.

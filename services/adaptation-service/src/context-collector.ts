@@ -7,11 +7,14 @@ import {
 import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 import type {
   CallerContext,
+  MigrationTargetEntityRef,
   ModuleTarget,
   RelatedTypeContext,
   TargetDependencyContext,
   TargetModuleContext,
+  TargetContextFactV2,
 } from "@forexplore/contracts";
+import { normalizeLanguageId } from "@forexplore/contracts";
 
 const DEFAULT_MAX_CHARS = 24_000;
 const DEFAULT_MAX_CALLERS = 3;
@@ -65,6 +68,301 @@ export interface ContextCollectorOptions {
   maxCallers?: number;
   maxRelatedTypes?: number;
   signal?: AbortSignal;
+  adapterRegistry?: TargetEngineeringAdapterRegistry;
+}
+
+export type TargetEngineeringStage = "context" | "patch-locator";
+
+export interface TargetEngineeringUnsupportedReason {
+  code:
+    | "TARGET_ENGINEERING_ADAPTER_UNAVAILABLE"
+    | "TARGET_CONTEXT_CAPABILITY_UNAVAILABLE"
+    | "TARGET_PATCH_LOCATOR_CAPABILITY_UNAVAILABLE";
+  stage: TargetEngineeringStage;
+  languageId: string;
+  detail: string;
+  retryable: false;
+}
+
+export class TargetEngineeringUnsupportedError extends Error {
+  readonly reason: TargetEngineeringUnsupportedReason;
+
+  constructor(reason: TargetEngineeringUnsupportedReason) {
+    super(`[${reason.code}] ${reason.detail}`);
+    this.name = "TargetEngineeringUnsupportedError";
+    this.reason = reason;
+  }
+}
+
+export interface TargetEngineeringCapabilityDescriptor {
+  id: string;
+  version: string;
+  languageId: string;
+  context: {
+    status: "supported" | "unsupported";
+    targetKinds: readonly ("class" | "function")[];
+    ownerKinds: readonly ("type" | "module")[];
+    relatedFileExtensions: readonly string[];
+  };
+  patchLocator: {
+    status: "supported" | "unsupported";
+    targetKinds: readonly ("class" | "function")[];
+  };
+  quality: {
+    level: "language-aware-lexical-heuristic" | "unavailable";
+    provesBehavioralCorrectness: false;
+    failClosed: true;
+    limitations: readonly string[];
+  };
+}
+
+export interface TargetContextSnapshot {
+  schemaVersion: "1.0";
+  languageId: string;
+  ownerKind: "type" | "module";
+  adapter: { id: string; version: string; languageId: string };
+  context: TargetModuleContext;
+}
+
+export interface TargetPatchLocatorInput {
+  source: string;
+  targetLine: number;
+  targetKind: "class" | "function";
+  targetName?: string;
+}
+
+export interface TargetPatchLocation {
+  startLine: number;
+  endLine: number;
+  declarationIndentation: string;
+}
+
+export interface TargetEngineeringPatchContextV2 {
+  source: string;
+  target: MigrationTargetEntityRef;
+  declaration: TargetContextFactV2;
+}
+
+export type TargetEngineeringResult<T> =
+  | { status: "supported"; value: T }
+  | { status: "unsupported"; reason: TargetEngineeringUnsupportedReason };
+
+export interface TargetEngineeringContextRequest {
+  projectRoot: string;
+  target: ModuleTarget;
+  maxChars: number;
+  maxCallers: number;
+  maxRelatedTypes: number;
+  signal?: AbortSignal;
+}
+
+export interface TargetEngineeringAdapter {
+  descriptor: TargetEngineeringCapabilityDescriptor;
+  collectContext(
+    request: TargetEngineeringContextRequest,
+  ): TargetEngineeringResult<TargetContextSnapshot>;
+  locatePatch(
+    input: TargetPatchLocatorInput,
+  ): TargetEngineeringResult<TargetPatchLocation>;
+  locatePatchFromContext(
+    input: TargetEngineeringPatchContextV2,
+  ): TargetEngineeringResult<TargetPatchLocation>;
+}
+
+export class TargetEngineeringAdapterRegistry {
+  private readonly byLanguageId = new Map<string, TargetEngineeringAdapter>();
+
+  constructor(adapters: readonly TargetEngineeringAdapter[] = []) {
+    for (const adapter of adapters) this.register(adapter);
+  }
+
+  register(adapter: TargetEngineeringAdapter): void {
+    const languageId = canonicalTargetLanguageId(adapter.descriptor.languageId);
+    assertEngineeringDescriptor(adapter.descriptor, languageId);
+    if (this.byLanguageId.has(languageId)) {
+      throw new Error(`Target engineering adapter is already registered for ${languageId}.`);
+    }
+    this.byLanguageId.set(languageId, adapter);
+  }
+
+  adapterFor(language: string): TargetEngineeringAdapter | undefined {
+    return this.byLanguageId.get(canonicalTargetLanguageId(language));
+  }
+
+  capabilities(): TargetEngineeringCapabilityDescriptor[] {
+    return [...this.byLanguageId.values()]
+      .map(({ descriptor }) => cloneEngineeringDescriptor(descriptor))
+      .sort((left, right) => left.languageId.localeCompare(right.languageId));
+  }
+}
+
+interface BraceEngineeringConfiguration {
+  languageId: "java" | "csharp" | "typescript";
+  extensions: readonly string[];
+  ownerKinds: readonly ("type" | "module")[];
+  masking: "java" | "csharp" | "typescript";
+}
+
+export function createDefaultTargetEngineeringAdapterRegistry(): TargetEngineeringAdapterRegistry {
+  return new TargetEngineeringAdapterRegistry([
+    createBraceEngineeringAdapter({
+      languageId: "java",
+      extensions: [".java"],
+      ownerKinds: ["type"],
+      masking: "java",
+    }),
+    createBraceEngineeringAdapter({
+      languageId: "csharp",
+      extensions: [".cs"],
+      ownerKinds: ["type"],
+      masking: "csharp",
+    }),
+    createBraceEngineeringAdapter({
+      languageId: "typescript",
+      extensions: [".ts", ".tsx", ".mts", ".cts"],
+      ownerKinds: ["type", "module"],
+      masking: "typescript",
+    }),
+    createPythonEngineeringAdapter(),
+    createCapabilityGapAdapter("go"),
+    createCapabilityGapAdapter("rust"),
+  ]);
+}
+
+function createBraceEngineeringAdapter(
+  configuration: BraceEngineeringConfiguration,
+): TargetEngineeringAdapter {
+  const descriptor: TargetEngineeringCapabilityDescriptor = {
+    id: `forexplore.target-engineering.${configuration.languageId}.lexical`,
+    version: "1.0.0",
+    languageId: configuration.languageId,
+    context: {
+      status: "supported",
+      targetKinds: ["class", "function"],
+      ownerKinds: configuration.ownerKinds,
+      relatedFileExtensions: configuration.extensions,
+    },
+    patchLocator: {
+      status: "supported",
+      targetKinds: ["class", "function"],
+    },
+    quality: {
+      level: "language-aware-lexical-heuristic",
+      provesBehavioralCorrectness: false,
+      failClosed: true,
+      limitations: [
+        "Context and patch boundaries are lexical evidence, not compiler AST evidence.",
+        "Ambiguous or unbalanced declarations are rejected instead of widening the patch range.",
+      ],
+    },
+  };
+  const syntax = createBraceContextSyntax(configuration);
+  return {
+    descriptor,
+    collectContext(request) {
+      return {
+        status: "supported",
+        value: collectContextWithSyntax(request, descriptor, syntax),
+      };
+    },
+    locatePatch(input) {
+      return locateBracePatch(input, configuration);
+    },
+    locatePatchFromContext(input) {
+      return locateBracePatch(patchLocatorInputFromContext(input, configuration), configuration);
+    },
+  };
+}
+
+function createPythonEngineeringAdapter(): TargetEngineeringAdapter {
+  const descriptor: TargetEngineeringCapabilityDescriptor = {
+    id: "forexplore.target-engineering.python.lexical",
+    version: "1.0.0",
+    languageId: "python",
+    context: {
+      status: "supported",
+      targetKinds: ["class", "function"],
+      ownerKinds: ["type", "module"],
+      relatedFileExtensions: [".py"],
+    },
+    patchLocator: {
+      status: "supported",
+      targetKinds: ["class", "function"],
+    },
+    quality: {
+      level: "language-aware-lexical-heuristic",
+      provesBehavioralCorrectness: false,
+      failClosed: true,
+      limitations: [
+        "Indentation, comments, and triple-quoted literals are handled lexically; decorators are not executed.",
+        "Ambiguous suites are rejected instead of extending a patch into a sibling declaration.",
+      ],
+    },
+  };
+  return {
+    descriptor,
+    collectContext(request) {
+      return {
+        status: "supported",
+        value: collectContextWithSyntax(request, descriptor, pythonContextSyntax()),
+      };
+    },
+    locatePatch: locatePythonPatch,
+    locatePatchFromContext(input) {
+      return locatePythonPatch(pythonPatchLocatorInputFromContext(input));
+    },
+  };
+}
+
+function createCapabilityGapAdapter(languageId: "go" | "rust"): TargetEngineeringAdapter {
+  const descriptor: TargetEngineeringCapabilityDescriptor = {
+    id: `forexplore.target-engineering.${languageId}.capability-gap`,
+    version: "1.0.0",
+    languageId,
+    context: {
+      status: "unsupported",
+      targetKinds: [],
+      ownerKinds: [],
+      relatedFileExtensions: [],
+    },
+    patchLocator: { status: "unsupported", targetKinds: [] },
+    quality: {
+      level: "unavailable",
+      provesBehavioralCorrectness: false,
+      failClosed: true,
+      limitations: [
+        `${languageId} target context and patch location require a dedicated engineering adapter.`,
+        "Compiler availability does not imply safe context collection, patching, or behavioral verification.",
+      ],
+    },
+  };
+  return {
+    descriptor,
+    collectContext() {
+      return unsupportedEngineering(
+        "TARGET_CONTEXT_CAPABILITY_UNAVAILABLE",
+        "context",
+        languageId,
+        `The ${languageId} target engineering adapter is an explicit capability gap.`,
+      );
+    },
+    locatePatch() {
+      return unsupportedEngineering(
+        "TARGET_PATCH_LOCATOR_CAPABILITY_UNAVAILABLE",
+        "patch-locator",
+        languageId,
+        `The ${languageId} target engineering adapter is an explicit capability gap.`,
+      );
+    },
+    locatePatchFromContext() {
+      return unsupportedEngineering(
+        "TARGET_PATCH_LOCATOR_CAPABILITY_UNAVAILABLE",
+        "patch-locator",
+        languageId,
+        `The ${languageId} target engineering adapter is an explicit capability gap.`,
+      );
+    },
+  };
 }
 
 interface CodeRange {
@@ -79,21 +377,142 @@ interface SourceFile {
   content: string;
 }
 
+interface TargetContextSyntax {
+  findTargetRange(source: string, target: ModuleTarget): CodeRange;
+  findContainingType(source: string, offset: number): CodeRange | null;
+  extractImports(source: string): string[];
+  findNamespace(source: string): string | undefined;
+  extractTypeName(declaration: string): string | undefined;
+  extractFields(typeSource: string, ownerKind: "type" | "module"): string[];
+  extractConstructor(typeSource: string, typeName: string, ownerKind: "type" | "module"): string | undefined;
+  extractRelatedMembers(
+    typeSource: string,
+    targetName: string,
+    typeName: string,
+    ownerKind: "type" | "module",
+  ): string[];
+  extractConstraints(source: string, scopeStart: number, scopeEnd: number): string[];
+  collectDependencyNames(
+    target: ModuleTarget,
+    fields: string[],
+    constructor: string | undefined,
+    typeName: string,
+  ): string[];
+  buildDependencies(
+    target: ModuleTarget,
+    fields: string[],
+    constructor: string | undefined,
+    names: string[],
+    definitions: RelatedTypeContext[],
+    method: string,
+  ): TargetDependencyContext[];
+  resolveRelatedTypes(
+    files: SourceFile[],
+    targetPath: string,
+    names: string[],
+    maxTypes: number,
+    signal: AbortSignal | undefined,
+  ): RelatedTypeContext[];
+  findCallers(
+    files: SourceFile[],
+    targetPath: string,
+    targetName: string,
+    maxCallers: number,
+    signal: AbortSignal | undefined,
+  ): CallerContext[];
+}
+
 export function collectTargetContext(
   options: ContextCollectorOptions,
 ): TargetModuleContext {
-  const {
-    projectRoot,
-    target,
-    maxChars = DEFAULT_MAX_CHARS,
-    maxCallers = DEFAULT_MAX_CALLERS,
-    maxRelatedTypes = DEFAULT_MAX_RELATED_TYPES,
-    signal,
-  } = options;
+  const result = collectTargetContextSnapshot(options);
+  if (result.status === "unsupported") throw new TargetEngineeringUnsupportedError(result.reason);
+  return result.value.context;
+}
 
+export function collectTargetContextSnapshot(
+  options: ContextCollectorOptions,
+): TargetEngineeringResult<TargetContextSnapshot> {
+  const registry = options.adapterRegistry ?? createDefaultTargetEngineeringAdapterRegistry();
+  const languageId = canonicalTargetLanguageId(options.target.language);
+  const adapter = registry.adapterFor(languageId);
+  if (!adapter) {
+    return unsupportedEngineering(
+      "TARGET_ENGINEERING_ADAPTER_UNAVAILABLE",
+      "context",
+      languageId,
+      `No target engineering adapter is registered for ${options.target.language}.`,
+    );
+  }
+  if (
+    adapter.descriptor.context.status !== "supported" ||
+    !adapter.descriptor.context.targetKinds.includes(options.target.kind)
+  ) {
+    return unsupportedEngineering(
+      "TARGET_CONTEXT_CAPABILITY_UNAVAILABLE",
+      "context",
+      languageId,
+      `Adapter ${adapter.descriptor.id} does not provide ${options.target.kind} target context collection for ${options.target.language}.`,
+    );
+  }
+  const maxChars = options.maxChars ?? DEFAULT_MAX_CHARS;
+  const maxCallers = options.maxCallers ?? DEFAULT_MAX_CALLERS;
+  const maxRelatedTypes = options.maxRelatedTypes ?? DEFAULT_MAX_RELATED_TYPES;
   assertPositiveInteger(maxChars, "maxChars");
   assertNonNegativeInteger(maxCallers, "maxCallers");
   assertNonNegativeInteger(maxRelatedTypes, "maxRelatedTypes");
+  return adapter.collectContext({
+    projectRoot: options.projectRoot,
+    target: options.target,
+    maxChars,
+    maxCallers,
+    maxRelatedTypes,
+    ...(options.signal ? { signal: options.signal } : {}),
+  });
+}
+
+export function locateTargetPatch(
+  language: string,
+  input: TargetPatchLocatorInput,
+  registry: TargetEngineeringAdapterRegistry = createDefaultTargetEngineeringAdapterRegistry(),
+): TargetEngineeringResult<TargetPatchLocation> {
+  const languageId = canonicalTargetLanguageId(language);
+  const adapter = registry.adapterFor(languageId);
+  if (!adapter) {
+    return unsupportedEngineering(
+      "TARGET_ENGINEERING_ADAPTER_UNAVAILABLE",
+      "patch-locator",
+      languageId,
+      `No target engineering adapter is registered for ${language}.`,
+    );
+  }
+  if (
+    adapter.descriptor.patchLocator.status !== "supported" ||
+    !adapter.descriptor.patchLocator.targetKinds.includes(input.targetKind)
+  ) {
+    return unsupportedEngineering(
+      "TARGET_PATCH_LOCATOR_CAPABILITY_UNAVAILABLE",
+      "patch-locator",
+      languageId,
+      `Adapter ${adapter.descriptor.id} does not provide safe ${input.targetKind} patch location for ${language}.`,
+    );
+  }
+  return adapter.locatePatch(input);
+}
+
+function collectContextWithSyntax(
+  request: TargetEngineeringContextRequest,
+  adapter: TargetEngineeringCapabilityDescriptor,
+  syntax: TargetContextSyntax,
+): TargetContextSnapshot {
+  const {
+    projectRoot,
+    target,
+    maxChars,
+    maxCallers,
+    maxRelatedTypes,
+    signal,
+  } = request;
   throwIfAborted(signal);
 
   const root = resolve(projectRoot);
@@ -103,42 +522,40 @@ export function collectTargetContext(
   }
 
   const content = normalizeNewlines(readFileSync(targetPath, "utf8"));
-  const methodRange = findTargetRange(content, target);
-  const containingType = findContainingType(
-    content,
-    methodRange.declarationStart,
-    target.language,
-  );
+  const methodRange = syntax.findTargetRange(content, target);
+  const containingType = syntax.findContainingType(content, methodRange.declarationStart);
   const typeRange = containingType ?? methodRange;
-  const sourceLines = content.split("\n");
-  const namespace = findNamespace(content);
-  const usings = sourceLines
-    .filter((line) => /^\s*(?:using|import)\s+(?:static\s+)?[^;]+;\s*$/.test(line) || /^\s*from\s+\S+\s+import\s+/.test(line))
-    .map((line) => line.trim());
+  const ownerKind = containingType ? "type" : "module";
+  const namespace = syntax.findNamespace(content);
+  const usings = syntax.extractImports(content);
 
   const method = content.slice(methodRange.declarationStart, methodRange.end + 1).trim();
   const containingTypeSource = content
     .slice(typeRange.declarationStart, typeRange.end + 1)
     .trim();
-  const typeName = extractTypeName(typeRange.declaration) ?? target.name;
-  const fields = extractFields(containingTypeSource);
-  const constructor = extractConstructor(containingTypeSource, typeName);
-  const relatedMembers = extractRelatedMembers(containingTypeSource, target.name, typeName);
-  const constraints = extractConstraints(
+  const typeName = syntax.extractTypeName(typeRange.declaration) ?? target.name;
+  const fields = syntax.extractFields(containingTypeSource, ownerKind);
+  const constructor = syntax.extractConstructor(containingTypeSource, typeName, ownerKind);
+  const relatedMembers = syntax.extractRelatedMembers(containingTypeSource, target.name, typeName, ownerKind);
+  const constraints = syntax.extractConstraints(
     content,
     typeRange.declarationStart,
     typeRange.end,
   );
 
   throwIfAborted(signal);
-  const files = listSourceFiles(root, DEFAULT_MAX_FILES_TO_SCAN);
-  const dependencyNames = collectDependencyNames(
+  const files = listSourceFiles(
+    root,
+    DEFAULT_MAX_FILES_TO_SCAN,
+    adapter.context.relatedFileExtensions,
+  );
+  const dependencyNames = syntax.collectDependencyNames(
     target,
     fields,
     constructor,
     typeName,
   );
-  const definitions = resolveRelatedTypes(
+  const definitions = syntax.resolveRelatedTypes(
     files,
     targetPath,
     dependencyNames,
@@ -148,7 +565,7 @@ export function collectTargetContext(
     ...definition,
     path: toProjectRelativePath(root, definition.path),
   }));
-  const dependencies = buildDependencies(
+  const dependencies = syntax.buildDependencies(
     target,
     fields,
     constructor,
@@ -158,7 +575,7 @@ export function collectTargetContext(
   );
   const callers =
     target.kind === "function"
-      ? findCallers(files, targetPath, target.name, maxCallers, signal).map((caller) => ({
+      ? syntax.findCallers(files, targetPath, target.name, maxCallers, signal).map((caller) => ({
           ...caller,
           path: toProjectRelativePath(root, caller.path),
         }))
@@ -191,27 +608,100 @@ export function collectTargetContext(
   };
 
   applyBudget(context, maxChars);
-  return context;
+  return {
+    schemaVersion: "1.0",
+    languageId: adapter.languageId,
+    ownerKind,
+    adapter: {
+      id: adapter.id,
+      version: adapter.version,
+      languageId: adapter.languageId,
+    },
+    context,
+  };
 }
 
 export function serializeTargetContext(context: TargetModuleContext): string {
   return JSON.stringify(context, null, 2);
 }
 
-function findTargetRange(source: string, target: ModuleTarget): CodeRange {
-  if (target.language === "Python") return findPythonTargetRange(source, target);
+function createBraceContextSyntax(
+  configuration: BraceEngineeringConfiguration,
+): TargetContextSyntax {
+  return {
+    findTargetRange: (source, target) => findBraceTargetRange(source, target, configuration),
+    findContainingType: (source, offset) => findBraceContainingType(source, offset, configuration),
+    extractImports: (source) => extractBraceImports(source, configuration),
+    findNamespace: (source) => configuration.languageId === "typescript" ? undefined : findNamespace(source),
+    extractTypeName,
+    extractFields: (source, ownerKind) => ownerKind === "type" ? extractFields(source) : [],
+    extractConstructor: (source, typeName, ownerKind) => ownerKind === "type"
+      ? configuration.languageId === "typescript"
+        ? extractTypescriptConstructor(source)
+        : extractConstructor(source, typeName, configuration.masking)
+      : undefined,
+    extractRelatedMembers: (source, targetName, typeName, ownerKind) => ownerKind === "type"
+      ? extractRelatedMembers(source, targetName, typeName)
+      : [],
+    extractConstraints,
+    collectDependencyNames,
+    buildDependencies,
+    resolveRelatedTypes: (files, targetPath, names, maxTypes, signal) =>
+      resolveRelatedTypes(files, targetPath, names, maxTypes, signal, configuration),
+    findCallers,
+  };
+}
+
+function pythonContextSyntax(): TargetContextSyntax {
+  return {
+    findTargetRange: findPythonTargetRange,
+    findContainingType: findPythonContainingType,
+    extractImports: extractPythonImports,
+    findNamespace: () => undefined,
+    extractTypeName: (declaration) => /^\s*class\s+([A-Za-z_]\w*)/.exec(declaration)?.[1],
+    extractFields: (source, ownerKind) => ownerKind === "type" ? extractPythonFields(source) : [],
+    extractConstructor: (source, _typeName, ownerKind) => ownerKind === "type"
+      ? extractPythonFunction(source, "__init__")
+      : undefined,
+    extractRelatedMembers: (source, targetName, _typeName, ownerKind) => ownerKind === "type"
+      ? extractPythonRelatedMembers(source, targetName)
+      : [],
+    extractConstraints: extractPythonConstraints,
+    collectDependencyNames,
+    buildDependencies: buildPythonDependencies,
+    resolveRelatedTypes: resolvePythonRelatedTypes,
+    findCallers,
+  };
+}
+
+function findBraceTargetRange(
+  source: string,
+  target: ModuleTarget,
+  configuration: BraceEngineeringConfiguration,
+): CodeRange {
   const escapedName = escapeRegExp(target.name);
-  const pattern =
-    target.kind === "function"
-      ? new RegExp(`\\b${escapedName}\\s*\\(`, "g")
-      : new RegExp(`\\b(?:class|record|struct|interface)\\s+${escapedName}\\b`, "g");
+  const typeKeywords = configuration.languageId === "typescript"
+    ? "class|interface|type|enum"
+    : "class|record|struct|interface|enum";
+  const pattern = target.kind === "function"
+    ? configuration.languageId === "typescript"
+      ? new RegExp(
+          `(?:\\b(?:const|let|var)\\s+${escapedName}\\s*=\\s*(?:async\\s*)?\\(|\\b${escapedName}\\s*\\()`,
+          "g",
+        )
+      : new RegExp(`\\b${escapedName}\\s*\\(`, "g")
+    : new RegExp(`\\b(?:${typeKeywords})\\s+${escapedName}\\b`, "g");
   const candidates: CodeRange[] = [];
 
   for (const match of source.matchAll(pattern)) {
     const declarationStart = source.lastIndexOf("\n", match.index ?? 0) + 1;
-    const openingBrace = source.indexOf("{", match.index ?? 0);
+    const openingBrace = declarationOpeningBrace(
+      source,
+      match.index ?? 0,
+      configuration.masking,
+    );
     if (openingBrace < 0) continue;
-    const end = matchingBrace(source, openingBrace);
+    const end = matchingBrace(source, openingBrace, configuration.masking);
     candidates.push({
       declarationStart,
       openingBrace,
@@ -262,15 +752,20 @@ function findPythonTargetRange(source: string, target: ModuleTarget): CodeRange 
   return candidates[0];
 }
 
-function findContainingType(source: string, offset: number, language: ModuleTarget["language"]): CodeRange | null {
-  if (language === "Python") return findPythonContainingType(source, offset);
-  const typePattern = /\b(class|record|struct|interface|enum)\s+([A-Za-z_]\w*)\b/g;
+function findBraceContainingType(
+  source: string,
+  offset: number,
+  configuration: BraceEngineeringConfiguration,
+): CodeRange | null {
+  const typePattern = configuration.languageId === "typescript"
+    ? /\b(class|interface|enum)\s+([A-Za-z_]\w*)\b/g
+    : /\b(class|record|struct|interface|enum)\s+([A-Za-z_]\w*)\b/g;
   const candidates: CodeRange[] = [];
   for (const match of source.matchAll(typePattern)) {
     const declarationStart = source.lastIndexOf("\n", match.index ?? 0) + 1;
-    const openingBrace = source.indexOf("{", match.index ?? 0);
+    const openingBrace = declarationOpeningBrace(source, match.index ?? 0, configuration.masking);
     if (openingBrace < 0 || openingBrace > offset) continue;
-    const end = matchingBrace(source, openingBrace);
+    const end = matchingBrace(source, openingBrace, configuration.masking);
     if (offset <= end) {
       candidates.push({
         declarationStart,
@@ -301,14 +796,16 @@ function findPythonContainingType(source: string, offset: number): CodeRange | n
 }
 
 function pythonBlockEnd(source: string, start: number): number {
+  const masked = maskPythonSyntax(source);
   const startLineEnd = source.indexOf("\n", start);
   const baseIndent = source.slice(start, startLineEnd < 0 ? source.length : startLineEnd).match(/^\s*/)?.[0].length ?? 0;
   let end = source.length;
   for (let index = startLineEnd < 0 ? source.length : startLineEnd + 1; index < source.length;) {
     const next = source.indexOf("\n", index);
     const lineEnd = next < 0 ? source.length : next;
-    const line = source.slice(index, lineEnd);
-    if (line.trim() && !line.trimStart().startsWith("#") && (line.match(/^\s*/)?.[0].length ?? 0) <= baseIndent) {
+    const maskedLine = masked.slice(index, lineEnd);
+    const originalLine = source.slice(index, lineEnd);
+    if (maskedLine.trim() && (originalLine.match(/^\s*/)?.[0].length ?? 0) <= baseIndent) {
       end = index - 1;
       break;
     }
@@ -317,40 +814,463 @@ function pythonBlockEnd(source: string, start: number): number {
   return end;
 }
 
-function matchingBrace(source: string, openingBrace: number): number {
-  let depth = 0;
-  let quote: "'" | '"' | null = null;
-  let escaped = false;
-
-  for (let index = openingBrace; index < source.length; index += 1) {
-    const character = source[index];
-    const next = source[index + 1];
-    if (quote) {
-      if (escaped) escaped = false;
-      else if (character === "\\") escaped = true;
-      else if (character === quote) quote = null;
+function maskPythonSyntax(source: string): string {
+  const output = source.split("");
+  const mask = (start: number, end: number): void => {
+    for (let index = start; index < end; index += 1) {
+      if (output[index] !== "\n" && output[index] !== "\r") output[index] = " ";
+    }
+  };
+  for (let index = 0; index < source.length;) {
+    const current = source[index] ?? "";
+    if (current === "#") {
+      const end = source.indexOf("\n", index + 1);
+      const stop = end === -1 ? source.length : end;
+      mask(index, stop);
+      index = stop;
       continue;
     }
-    if (character === "'" || character === '"') {
-      quote = character;
+    if (source.startsWith('"""', index) || source.startsWith("'''", index)) {
+      const delimiter = source.slice(index, index + 3);
+      const end = source.indexOf(delimiter, index + 3);
+      const stop = end === -1 ? source.length : end + 3;
+      mask(index, stop);
+      index = stop;
       continue;
     }
-    if (character === "/" && next === "/") {
-      index = source.indexOf("\n", index + 2);
-      if (index < 0) break;
+    if (current === '"' || current === "'") {
+      const quote = current;
+      let cursor = index + 1;
+      while (cursor < source.length) {
+        if (source[cursor] === "\\") cursor += 2;
+        else if (source[cursor] === quote) { cursor += 1; break; }
+        else cursor += 1;
+      }
+      mask(index, cursor);
+      index = cursor;
       continue;
     }
-    if (character === "/" && next === "*") {
-      index = source.indexOf("*/", index + 2);
-      if (index < 0) break;
-      index += 1;
-      continue;
-    }
-    if (character === "{") depth += 1;
-    else if (character === "}" && --depth === 0) return index;
+    index += 1;
   }
+  return output.join("");
+}
 
+function patchLocatorInputFromContext(
+  input: TargetEngineeringPatchContextV2,
+  configuration: BraceEngineeringConfiguration,
+): TargetPatchLocatorInput {
+  const declaration = input.declaration.content?.trimStart() ?? "";
+  const declarationIsType = configuration.languageId === "typescript"
+    ? /^(?:export\s+)?(?:default\s+)?(?:abstract\s+)?(?:class|interface|type|enum)\b/.test(declaration)
+    : /^(?:(?:public|private|protected|internal|abstract|sealed|final|static|partial)\s+)*(?:class|record|struct|interface|enum)\b/.test(declaration);
+  return {
+    source: input.source,
+    targetLine: contextDeclarationStartLine(input),
+    targetKind: declarationIsType || nativeEntityKindIsType(input.target.kind)
+      ? "class"
+      : "function",
+    targetName: input.target.name,
+  };
+}
+
+function pythonPatchLocatorInputFromContext(
+  input: TargetEngineeringPatchContextV2,
+): TargetPatchLocatorInput {
+  const declaration = input.declaration.content?.trimStart() ?? "";
+  return {
+    source: input.source,
+    targetLine: contextDeclarationStartLine(input),
+    targetKind: /^class\b/.test(declaration) || nativeEntityKindIsType(input.target.kind)
+      ? "class"
+      : "function",
+    targetName: input.target.name,
+  };
+}
+
+function contextDeclarationStartLine(input: TargetEngineeringPatchContextV2): number {
+  const value = input.declaration.attributes.startLine;
+  if (typeof value === "number" && Number.isInteger(value) && value > 0) return value;
+  const declaration = input.declaration.content;
+  if (declaration) {
+    const offset = input.source.indexOf(declaration);
+    if (offset >= 0) return input.source.slice(0, offset).split("\n").length;
+  }
+  throw new Error(
+    `Target declaration fact ${input.declaration.id} must provide a positive startLine or exact declaration content.`,
+  );
+}
+
+function nativeEntityKindIsType(kind: string): boolean {
+  return /^(?:class|record|struct|interface|enum|type|trait|protocol)$/i.test(kind.trim());
+}
+
+function locateBracePatch(
+  input: TargetPatchLocatorInput,
+  configuration: BraceEngineeringConfiguration,
+): TargetEngineeringResult<TargetPatchLocation> {
+  const source = normalizeNewlines(input.source);
+  const lines = source.split("\n");
+  const startLine = locateDeclarationLine(lines, input, (line) =>
+    braceDeclarationMatches(line, input.targetKind, input.targetName, configuration));
+  const lineOffsets = sourceLineOffsets(source);
+  const declarationOffset = lineOffsets[startLine] ?? 0;
+  const openingBrace = declarationOpeningBrace(source, declarationOffset, configuration.masking);
+  let endLine: number;
+  if (openingBrace < 0) {
+    const semicolon = expressionDeclarationSemicolon(source, declarationOffset, configuration.masking);
+    if (semicolon === undefined || input.targetKind === "class") {
+      throw new Error("Cannot build a safe patch because the target declaration has no isolatable body.");
+    }
+    endLine = lineIndexAtOffset(lineOffsets, semicolon);
+  } else {
+    const closingBrace = matchingBrace(source, openingBrace, configuration.masking);
+    endLine = lineIndexAtOffset(lineOffsets, closingBrace);
+    assertBracePatchBoundary(
+      source,
+      lines,
+      startLine,
+      endLine,
+      openingBrace,
+      configuration,
+      input.targetKind,
+    );
+  }
+  return {
+    status: "supported",
+    value: {
+      startLine,
+      endLine,
+      declarationIndentation: lines[startLine]?.match(/^\s*/)?.[0] ?? "",
+    },
+  };
+}
+
+function locatePythonPatch(
+  input: TargetPatchLocatorInput,
+): TargetEngineeringResult<TargetPatchLocation> {
+  const source = normalizeNewlines(input.source);
+  const lines = source.split("\n");
+  const startLine = locateDeclarationLine(lines, input, (line) =>
+    pythonDeclarationMatches(line, input.targetKind, input.targetName));
+  const offsets = sourceLineOffsets(source);
+  const endOffset = pythonBlockEnd(source, offsets[startLine] ?? 0);
+  const endLine = lineIndexAtOffset(offsets, Math.max(offsets[startLine] ?? 0, endOffset));
+  if (endLine < startLine) {
+    throw new Error("Cannot build a safe patch because the Python target suite is incomplete.");
+  }
+  return {
+    status: "supported",
+    value: {
+      startLine,
+      endLine,
+      declarationIndentation: lines[startLine]?.match(/^\s*/)?.[0] ?? "",
+    },
+  };
+}
+
+function locateDeclarationLine(
+  lines: string[],
+  input: TargetPatchLocatorInput,
+  matches: (line: string) => boolean,
+): number {
+  const requested = Math.max(0, input.targetLine - 1);
+  if (requested >= lines.length) {
+    throw new Error("The target line is outside the target file before a safe patch can be built.");
+  }
+  if (matches(lines[requested] ?? "")) return requested;
+  const limit = Math.min(lines.length, requested + 33);
+  for (let index = requested + 1; index < limit; index += 1) {
+    if (matches(lines[index] ?? "")) return index;
+    if (!declarationPrefixTrivia(lines[index] ?? "")) break;
+  }
+  throw new Error(
+    input.targetKind === "class"
+      ? "The target line must point at a class declaration before a safe patch can be built."
+      : "The target line must point at a method declaration or top-level function before a safe patch can be built.",
+  );
+}
+
+function braceDeclarationMatches(
+  line: string,
+  kind: "class" | "function",
+  targetName: string | undefined,
+  configuration: BraceEngineeringConfiguration,
+): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) return false;
+  const name = targetName ? escapeRegExp(targetName) : "[A-Za-z_$][\\w$]*";
+  if (kind === "class") {
+    const keywords = configuration.languageId === "typescript"
+      ? "class|interface|type|enum"
+      : "class|record|struct|interface|enum";
+    return new RegExp(`^(?:(?:public|private|protected|internal|abstract|sealed|final|static|export|default|partial)\\s+)*(?:${keywords})\\s+${name}\\b`).test(trimmed);
+  }
+  if (/^(?:if|for|foreach|while|switch|catch|using|return|new|throw)\b/.test(trimmed)) return false;
+  if (configuration.languageId === "typescript") {
+    if (new RegExp(`^(?:export\\s+)?(?:default\\s+)?(?:async\\s+)?function\\s+${name}\\s*(?:<[^>]+>)?\\s*\\(`).test(trimmed)) return true;
+    if (new RegExp(`^(?:export\\s+)?(?:const|let|var)\\s+${name}\\s*=`).test(trimmed)) return true;
+  }
+  return new RegExp(`\\b${name}\\s*(?:<[^>]+>)?\\s*\\(`).test(trimmed);
+}
+
+function pythonDeclarationMatches(
+  line: string,
+  kind: "class" | "function",
+  targetName: string | undefined,
+): boolean {
+  const name = targetName ? escapeRegExp(targetName) : "[A-Za-z_]\\w*";
+  return kind === "class"
+    ? new RegExp(`^\\s*class\\s+${name}\\b`).test(line)
+    : new RegExp(`^\\s*(?:async\\s+)?def\\s+${name}\\s*\\(`).test(line);
+}
+
+function declarationPrefixTrivia(line: string): boolean {
+  const trimmed = line.trim();
+  return trimmed === "" ||
+    trimmed === "*/" ||
+    trimmed.startsWith("//") ||
+    trimmed.startsWith("/*") ||
+    trimmed.startsWith("*") ||
+    trimmed.startsWith("#") ||
+    trimmed.startsWith("@") ||
+    trimmed.startsWith("[");
+}
+
+function expressionDeclarationSemicolon(
+  source: string,
+  start: number,
+  profile: BraceEngineeringConfiguration["masking"],
+): number | undefined {
+  const masked = maskBraceSyntax(source, profile);
+  let parentheses = 0;
+  let brackets = 0;
+  for (let index = start; index < masked.length; index += 1) {
+    const character = masked[index] ?? "";
+    if (character === "(") parentheses += 1;
+    else if (character === ")") parentheses = Math.max(0, parentheses - 1);
+    else if (character === "[") brackets += 1;
+    else if (character === "]") brackets = Math.max(0, brackets - 1);
+    else if (character === ";" && parentheses === 0 && brackets === 0) return index;
+  }
+  return undefined;
+}
+
+function assertBracePatchBoundary(
+  source: string,
+  lines: string[],
+  startLine: number,
+  endLine: number,
+  openingBrace: number,
+  configuration: BraceEngineeringConfiguration,
+  targetKind: "class" | "function",
+): void {
+  const masked = maskBraceSyntax(source, configuration.masking);
+  const offsets = sourceLineOffsets(source);
+  const declarationIndentation = lines[startLine]?.match(/^\s*/)?.[0].length ?? 0;
+  let depth = 0;
+  let cursor = openingBrace;
+  for (let lineIndex = startLine; lineIndex <= endLine; lineIndex += 1) {
+    const lineStart = Math.max(openingBrace, offsets[lineIndex] ?? openingBrace);
+    const lineEnd = offsets[lineIndex + 1] ?? masked.length;
+    for (; cursor < lineStart; cursor += 1) {
+      if (masked[cursor] === "{") depth += 1;
+      else if (masked[cursor] === "}") depth -= 1;
+    }
+    if (lineIndex > startLine && depth === 1) {
+      const line = lines[lineIndex] ?? "";
+      const indentation = line.match(/^\s*/)?.[0].length ?? 0;
+      if (
+        indentation <= declarationIndentation &&
+        likelySiblingDeclaration(line, targetKind, configuration)
+      ) {
+        throw new Error(
+          "Cannot build a safe patch because a sibling declaration appears before the target declaration closes.",
+        );
+      }
+    }
+    for (; cursor < lineEnd; cursor += 1) {
+      if (masked[cursor] === "{") depth += 1;
+      else if (masked[cursor] === "}") depth -= 1;
+    }
+  }
+  const closingIndentation = lines[endLine]?.match(/^\s*/)?.[0].length ?? 0;
+  if (closingIndentation < declarationIndentation) {
+    throw new Error(
+      "Cannot build a safe patch because the closing brace is outside the target declaration indentation.",
+    );
+  }
+}
+
+function likelySiblingDeclaration(
+  line: string,
+  targetKind: "class" | "function",
+  configuration: BraceEngineeringConfiguration,
+): boolean {
+  if (braceDeclarationMatches(line, targetKind, undefined, configuration)) return true;
+  if (targetKind === "class") return false;
+  const trimmed = line.trim();
+  if (!trimmed || /^(?:else|do|try|finally|if|for|while|switch|catch|return|throw|new)\b/.test(trimmed)) return false;
+  return /^(?:(?:public|private|protected|internal|static|readonly|final|const|volatile|abstract|virtual|override|sealed|async|partial|export)\s+)*(?:[A-Za-z_$][\w$<>,.?\[\]]*\s+)+[A-Za-z_$][\w$]*(?:\s*[=;{])/.test(trimmed);
+}
+
+function sourceLineOffsets(source: string): number[] {
+  const offsets = [0];
+  for (let index = 0; index < source.length; index += 1) {
+    if (source[index] === "\n") offsets.push(index + 1);
+  }
+  return offsets;
+}
+
+function lineIndexAtOffset(offsets: number[], target: number): number {
+  let low = 0;
+  let high = offsets.length - 1;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    if ((offsets[middle] ?? 0) <= target) low = middle + 1;
+    else high = middle - 1;
+  }
+  return Math.max(0, high);
+}
+
+function declarationOpeningBrace(
+  source: string,
+  declarationStart: number,
+  profile: BraceEngineeringConfiguration["masking"],
+): number {
+  const masked = maskBraceSyntax(source, profile);
+  let parentheses = 0;
+  let brackets = 0;
+  for (let index = declarationStart; index < masked.length; index += 1) {
+    const character = masked[index] ?? "";
+    if (character === "(") parentheses += 1;
+    else if (character === ")") parentheses = Math.max(0, parentheses - 1);
+    else if (character === "[") brackets += 1;
+    else if (character === "]") brackets = Math.max(0, brackets - 1);
+    if (parentheses !== 0 || brackets !== 0) continue;
+    if (character === ";") return -1;
+    if (character !== "{") continue;
+    const closing = matchingBraceInMasked(masked, index);
+    if (closing === undefined) return -1;
+    const next = nextNonWhitespace(masked, closing + 1);
+    if (next !== undefined && masked[next] === "{") {
+      index = closing;
+      continue;
+    }
+    return index;
+  }
+  return -1;
+}
+
+function matchingBrace(
+  source: string,
+  openingBrace: number,
+  profile: BraceEngineeringConfiguration["masking"] = "typescript",
+): number {
+  const masked = maskBraceSyntax(source, profile);
+  const closing = matchingBraceInMasked(masked, openingBrace);
+  if (closing !== undefined) return closing;
   throw new Error("Target context contains an unmatched brace.");
+}
+
+function matchingBraceInMasked(masked: string, openingBrace: number): number | undefined {
+  let depth = 0;
+  for (let index = openingBrace; index < masked.length; index += 1) {
+    const character = masked[index];
+    if (character === "{") depth += 1;
+    else if (character === "}") {
+      depth -= 1;
+      if (depth === 0) return index;
+      if (depth < 0) return undefined;
+    }
+  }
+  return undefined;
+}
+
+function maskBraceSyntax(
+  source: string,
+  profile: BraceEngineeringConfiguration["masking"],
+): string {
+  const output = source.split("");
+  const mask = (start: number, end: number): void => {
+    for (let index = start; index < end; index += 1) {
+      if (output[index] !== "\n" && output[index] !== "\r") output[index] = " ";
+    }
+  };
+  for (let index = 0; index < source.length;) {
+    const current = source[index] ?? "";
+    const next = source[index + 1] ?? "";
+    if (current === "/" && next === "/") {
+      const end = source.indexOf("\n", index + 2);
+      const stop = end === -1 ? source.length : end;
+      mask(index, stop);
+      index = stop;
+      continue;
+    }
+    if (current === "/" && next === "*") {
+      const end = source.indexOf("*/", index + 2);
+      const stop = end === -1 ? source.length : end + 2;
+      mask(index, stop);
+      index = stop;
+      continue;
+    }
+    const csharpVerbatimPrefixLength = profile === "csharp"
+      ? source.startsWith('$@"', index) || source.startsWith('@$"', index)
+        ? 3
+        : source.startsWith('@"', index)
+          ? 2
+          : 0
+      : 0;
+    if (csharpVerbatimPrefixLength > 0) {
+      let cursor = index + csharpVerbatimPrefixLength;
+      while (cursor < source.length) {
+        if (source[cursor] === '"' && source[cursor + 1] === '"') cursor += 2;
+        else if (source[cursor] === '"') { cursor += 1; break; }
+        else cursor += 1;
+      }
+      mask(index, cursor);
+      index = cursor;
+      continue;
+    }
+    if (profile === "typescript" && current === "`") {
+      let cursor = index + 1;
+      while (cursor < source.length) {
+        if (source[cursor] === "\\") cursor += 2;
+        else if (source[cursor] === "`") { cursor += 1; break; }
+        else cursor += 1;
+      }
+      mask(index, cursor);
+      index = cursor;
+      continue;
+    }
+    if (source.startsWith('"""', index)) {
+      const end = source.indexOf('"""', index + 3);
+      const stop = end === -1 ? source.length : end + 3;
+      mask(index, stop);
+      index = stop;
+      continue;
+    }
+    if (current === '"' || current === "'") {
+      const quote = current;
+      let cursor = index + 1;
+      while (cursor < source.length) {
+        if (source[cursor] === "\\") cursor += 2;
+        else if (source[cursor] === quote) { cursor += 1; break; }
+        else cursor += 1;
+      }
+      mask(index, cursor);
+      index = cursor;
+      continue;
+    }
+    index += 1;
+  }
+  return output.join("");
+}
+
+function nextNonWhitespace(value: string, start: number): number | undefined {
+  for (let index = start; index < value.length; index += 1) {
+    if (!/\s/.test(value[index] ?? "")) return index;
+  }
+  return undefined;
 }
 
 function extractFields(typeSource: string): string[] {
@@ -369,13 +1289,17 @@ function extractFields(typeSource: string): string[] {
   return fields;
 }
 
-function extractConstructor(typeSource: string, typeName: string): string | undefined {
+function extractConstructor(
+  typeSource: string,
+  typeName: string,
+  profile: BraceEngineeringConfiguration["masking"] = "typescript",
+): string | undefined {
   const pattern = new RegExp(`(?:public|private|protected|internal|static|\\s)+${escapeRegExp(typeName)}\\s*\\([^)]*\\)`);
   const match = pattern.exec(typeSource);
   if (!match) return undefined;
   const openingBrace = typeSource.indexOf("{", match.index + match[0].length);
   if (openingBrace < 0) return match[0].trim();
-  const end = matchingBrace(typeSource, openingBrace);
+  const end = matchingBrace(typeSource, openingBrace, profile);
   return typeSource.slice(match.index, end + 1).trim();
 }
 
@@ -399,6 +1323,67 @@ function extractRelatedMembers(typeSource: string, targetName: string, typeName:
   return [...new Set(members)];
 }
 
+function extractBraceImports(
+  source: string,
+  configuration: BraceEngineeringConfiguration,
+): string[] {
+  if (configuration.languageId === "typescript") {
+    return source
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => /^import\s+(?:type\s+)?/.test(line));
+  }
+  const prefix = configuration.languageId === "csharp" ? "using" : "import";
+  return source
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => new RegExp(`^${prefix}\\s+(?:static\\s+)?[^;]+;`).test(line));
+}
+
+function extractTypescriptConstructor(typeSource: string): string | undefined {
+  const match = /\bconstructor\s*\([^)]*\)/.exec(typeSource);
+  if (!match) return undefined;
+  const openingBrace = declarationOpeningBrace(typeSource, match.index, "typescript");
+  if (openingBrace < 0) return match[0];
+  return typeSource.slice(match.index, matchingBrace(typeSource, openingBrace, "typescript") + 1).trim();
+}
+
+function extractPythonImports(source: string): string[] {
+  return source
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => /^(?:from\s+\S+\s+import\s+|import\s+)/.test(line));
+}
+
+function extractPythonFields(typeSource: string): string[] {
+  const fields: string[] = [];
+  const lines = typeSource.split("\n");
+  const classIndent = lines[0]?.match(/^\s*/)?.[0].length ?? 0;
+  for (const line of lines.slice(1)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#") || /^def\s+|^async\s+def\s+/.test(trimmed)) continue;
+    const indentation = line.match(/^\s*/)?.[0].length ?? 0;
+    if (indentation <= classIndent) continue;
+    if (/^(?:self\.)?[A-Za-z_]\w*\s*(?::[^=]+)?=/.test(trimmed)) fields.push(trimmed);
+  }
+  return [...new Set(fields)];
+}
+
+function extractPythonFunction(source: string, name: string): string | undefined {
+  const match = new RegExp(`^[\\t ]*(?:async\\s+)?def\\s+${escapeRegExp(name)}\\s*\\(`, "m").exec(source);
+  if (!match || match.index === undefined) return undefined;
+  return source.slice(match.index, pythonBlockEnd(source, match.index) + 1).trim();
+}
+
+function extractPythonRelatedMembers(source: string, targetName: string): string[] {
+  const members: string[] = [];
+  for (const match of source.matchAll(/^[\t ]*(?:async\s+)?def\s+([A-Za-z_]\w*)\s*\([^\n]*$/gm)) {
+    if (!match[1] || match[1] === targetName || match[1] === "__init__") continue;
+    members.push(match[0].trim().replace(/:\s*$/, ""));
+  }
+  return [...new Set(members)];
+}
+
 function extractConstraints(
   source: string,
   typeStart: number,
@@ -418,6 +1403,19 @@ function extractConstraints(
     )
     .map(({ line }) => line.replace(/^\/\/\s*/, "").replace(/^\/\/\/\s*/, "").trim())
     .filter(Boolean);
+}
+
+function extractPythonConstraints(
+  source: string,
+  scopeStart: number,
+  scopeEnd: number,
+): string[] {
+  return source
+    .slice(scopeStart, scopeEnd + 1)
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => /^#.*\bREQ\s*:/i.test(line))
+    .map((line) => line.replace(/^#\s*/, "").trim());
 }
 
 function findNamespace(source: string): string | undefined {
@@ -493,7 +1491,76 @@ function buildDependencies(
   return dependencies;
 }
 
+function buildPythonDependencies(
+  target: ModuleTarget,
+  fields: string[],
+  constructor: string | undefined,
+  names: string[],
+  definitions: RelatedTypeContext[],
+  method: string,
+): TargetDependencyContext[] {
+  return names.map((name) => {
+    const definition = definitions.find((item) => item.name === name);
+    const field = fields.find((item) => new RegExp(`\\b${escapeRegExp(name)}\\b`).test(item));
+    return {
+      name,
+      kind: target.signature.includes(name)
+        ? "signature"
+        : constructor?.includes(name)
+          ? "constructor"
+          : field
+            ? "field"
+            : method.includes(name)
+              ? "invocation"
+              : "type",
+      declaration: field ?? constructor ?? target.signature,
+      path: definition?.path,
+      memberSignatures: definition?.source
+        ? extractPythonRelatedMembers(definition.source, "").slice(0, 12)
+        : undefined,
+    };
+  });
+}
+
 function resolveRelatedTypes(
+  files: SourceFile[],
+  targetPath: string,
+  names: string[],
+  maxTypes: number,
+  signal: AbortSignal | undefined,
+  configuration: BraceEngineeringConfiguration,
+): RelatedTypeContext[] {
+  const result: RelatedTypeContext[] = [];
+  for (const name of names) {
+    throwIfAborted(signal);
+    if (result.length >= maxTypes) break;
+    for (const file of files) {
+      if (file.path === targetPath) continue;
+      const typeKeywords = configuration.languageId === "typescript"
+        ? "class|interface|enum|type"
+        : "class|record|struct|interface|enum";
+      const declarationPattern = new RegExp(`\\b(${typeKeywords})\\s+${escapeRegExp(name)}\\b`);
+      const match = declarationPattern.exec(file.content);
+      if (!match) continue;
+      const declarationStart = file.content.lastIndexOf("\n", match.index) + 1;
+      const openingBrace = declarationOpeningBrace(file.content, match.index, configuration.masking);
+      const end = openingBrace >= 0
+        ? matchingBrace(file.content, openingBrace, configuration.masking)
+        : match.index + match[0].length;
+      result.push({
+        name,
+        kind: normalizeTypeKind(match[1]),
+        path: file.path,
+        declaration: file.content.slice(declarationStart, openingBrace >= 0 ? openingBrace : end).trim(),
+        source: truncateText(file.content.slice(declarationStart, end + 1).trim(), 4_000),
+      });
+      break;
+    }
+  }
+  return result;
+}
+
+function resolvePythonRelatedTypes(
   files: SourceFile[],
   targetPath: string,
   names: string[],
@@ -506,18 +1573,19 @@ function resolveRelatedTypes(
     if (result.length >= maxTypes) break;
     for (const file of files) {
       if (file.path === targetPath) continue;
-      const declarationPattern = new RegExp(`\\b(class|record|struct|interface|enum)\\s+${escapeRegExp(name)}\\b`);
-      const match = declarationPattern.exec(file.content);
-      if (!match) continue;
-      const declarationStart = file.content.lastIndexOf("\n", match.index) + 1;
-      const openingBrace = file.content.indexOf("{", match.index);
-      const end = openingBrace >= 0 ? matchingBrace(file.content, openingBrace) : match.index + match[0].length;
+      const match = new RegExp(`^[\\t ]*class\\s+${escapeRegExp(name)}\\b`, "m").exec(file.content);
+      if (!match || match.index === undefined) continue;
+      const end = pythonBlockEnd(file.content, match.index);
+      const declarationEnd = file.content.indexOf("\n", match.index);
       result.push({
         name,
-        kind: normalizeTypeKind(match[1]),
+        kind: "class",
         path: file.path,
-        declaration: file.content.slice(declarationStart, openingBrace >= 0 ? openingBrace : end).trim(),
-        source: truncateText(file.content.slice(declarationStart, end + 1).trim(), 4_000),
+        declaration: file.content.slice(
+          match.index,
+          declarationEnd < 0 ? file.content.length : declarationEnd,
+        ).trim(),
+        source: truncateText(file.content.slice(match.index, end + 1).trim(), 4_000),
       });
       break;
     }
@@ -551,8 +1619,13 @@ function findCallers(
   return callers;
 }
 
-function listSourceFiles(root: string, maxFiles: number): SourceFile[] {
+function listSourceFiles(
+  root: string,
+  maxFiles: number,
+  extensions: readonly string[],
+): SourceFile[] {
   const files: SourceFile[] = [];
+  const normalizedExtensions = new Set(extensions.map((extension) => extension.toLowerCase()));
   const visit = (directory: string): void => {
     if (files.length >= maxFiles) return;
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
@@ -560,7 +1633,10 @@ function listSourceFiles(root: string, maxFiles: number): SourceFile[] {
       if (entry.name === ".git" || entry.name === "bin" || entry.name === "obj" || entry.name === "node_modules") continue;
       const path = resolve(directory, entry.name);
       if (entry.isDirectory()) visit(path);
-      else if (entry.isFile() && path.endsWith(".cs")) {
+      else if (
+        entry.isFile() &&
+        [...normalizedExtensions].some((extension) => path.toLowerCase().endsWith(extension))
+      ) {
         files.push({ path, content: normalizeNewlines(readFileSync(path, "utf8")) });
       }
     }
@@ -699,7 +1775,7 @@ function toProjectRelativePath(root: string, path: string): string {
 }
 
 function extractTypeName(declaration: string): string | undefined {
-  return /\b(?:class|record|struct|interface|enum)\s+([A-Za-z_]\w*)/.exec(declaration)?.[1];
+  return /\b(?:class|record|struct|interface|enum|type)\s+([A-Za-z_]\w*)/.exec(declaration)?.[1];
 }
 
 function normalizeTypeKind(kind: string): RelatedTypeContext["kind"] {
@@ -728,6 +1804,86 @@ function truncateText(value: string, maxLength: number): string {
 
 function normalizeNewlines(value: string): string {
   return value.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
+export function canonicalTargetLanguageId(value: string): string {
+  return normalizeLanguageId(value);
+}
+
+function unsupportedEngineering<T>(
+  code: TargetEngineeringUnsupportedReason["code"],
+  stage: TargetEngineeringStage,
+  languageId: string,
+  detail: string,
+): TargetEngineeringResult<T> {
+  return {
+    status: "unsupported",
+    reason: {
+      code,
+      stage,
+      languageId: canonicalTargetLanguageId(languageId),
+      detail,
+      retryable: false,
+    },
+  };
+}
+
+function assertEngineeringDescriptor(
+  descriptor: TargetEngineeringCapabilityDescriptor,
+  canonicalLanguageId: string,
+): void {
+  if (!descriptor.id.trim()) throw new Error("Target engineering adapter id must not be empty.");
+  if (!descriptor.version.trim()) throw new Error("Target engineering adapter version must not be empty.");
+  if (descriptor.languageId !== canonicalLanguageId) {
+    throw new Error(
+      `Target engineering adapter languageId must be canonical: expected ${canonicalLanguageId}, received ${descriptor.languageId}.`,
+    );
+  }
+  if (!descriptor.quality.failClosed) {
+    throw new Error(`Target engineering adapter ${descriptor.id} must fail closed.`);
+  }
+  if (descriptor.quality.provesBehavioralCorrectness !== false) {
+    throw new Error(`Target engineering adapter ${descriptor.id} cannot claim behavioral correctness.`);
+  }
+  if (descriptor.quality.limitations.length === 0) {
+    throw new Error(`Target engineering adapter ${descriptor.id} must document its limitations.`);
+  }
+  if (
+    descriptor.context.status === "supported" &&
+    (descriptor.context.targetKinds.length === 0 ||
+      descriptor.context.ownerKinds.length === 0 ||
+      descriptor.context.relatedFileExtensions.length === 0)
+  ) {
+    throw new Error(`Target engineering adapter ${descriptor.id} has an incomplete context capability.`);
+  }
+  if (
+    descriptor.patchLocator.status === "supported" &&
+    descriptor.patchLocator.targetKinds.length === 0
+  ) {
+    throw new Error(`Target engineering adapter ${descriptor.id} has an incomplete patch locator capability.`);
+  }
+}
+
+function cloneEngineeringDescriptor(
+  descriptor: TargetEngineeringCapabilityDescriptor,
+): TargetEngineeringCapabilityDescriptor {
+  return {
+    ...descriptor,
+    context: {
+      ...descriptor.context,
+      targetKinds: [...descriptor.context.targetKinds],
+      ownerKinds: [...descriptor.context.ownerKinds],
+      relatedFileExtensions: [...descriptor.context.relatedFileExtensions],
+    },
+    patchLocator: {
+      ...descriptor.patchLocator,
+      targetKinds: [...descriptor.patchLocator.targetKinds],
+    },
+    quality: {
+      ...descriptor.quality,
+      limitations: [...descriptor.quality.limitations],
+    },
+  };
 }
 
 function escapeRegExp(value: string): string {

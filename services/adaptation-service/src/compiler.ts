@@ -15,58 +15,286 @@ import {
 } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
-import type { Language } from "@forexplore/contracts";
+import type { Language, LanguageId } from "@forexplore/contracts";
+import { normalizeLanguageId } from "@forexplore/contracts";
 
 export interface CompileResult {
   success: boolean;
   errors: string[];
   output: string;
+  unsupportedReason?: CompilerUnsupportedReason;
+}
+
+export type CompilerValidationLevel = "syntax" | "typecheck" | "compile" | "project-build-or-test";
+
+export interface CompilerUnsupportedReason {
+  code: "COMPILER_ROUTE_UNAVAILABLE";
+  stage: "standalone" | "integrated";
+  language: string;
+  detail: string;
+  retryable: false;
+}
+
+export interface CompilerRouteCapability {
+  /** Canonical, open-ended routing key. This is not the closed V1 Language union. */
+  languageId: LanguageId;
+  /** Human-readable label only; never used as the routing key. */
+  displayName: string;
+  providerId: string;
+  version: string;
+  standalone: { command: string; level: CompilerValidationLevel };
+  integrated: { command: string; level: CompilerValidationLevel };
+  quality: {
+    provesBehavioralCorrectness: false;
+    limitations: readonly string[];
+  };
+}
+
+export interface CompilerRouteRegistration {
+  capability: CompilerRouteCapability;
+  standalone: (code: string, targetName: string) => CompileResult;
+  integrated: (code: string, projectPath: string, targetFilePath: string) => CompileResult;
+}
+
+export class CompilerRouteRegistry {
+  readonly #byLanguageId = new Map<LanguageId, CompilerRouteRegistration>();
+
+  constructor(routes: readonly CompilerRouteRegistration[] = []) {
+    for (const route of routes) this.register(route);
+  }
+
+  register(route: CompilerRouteRegistration): void {
+    const languageId = normalizeLanguageId(route.capability.languageId);
+    assertCompilerRoute(route, languageId);
+    if (this.#byLanguageId.has(languageId)) {
+      throw new Error(`Compiler route is already registered for ${languageId}.`);
+    }
+    this.#byLanguageId.set(languageId, {
+      ...route,
+      capability: cloneCompilerCapability({ ...route.capability, languageId }),
+    });
+  }
+
+  listCapabilities(): CompilerRouteCapability[] {
+    return [...this.#byLanguageId.values()]
+      .map(({ capability }) => cloneCompilerCapability(capability));
+  }
+
+  resolve(languageId: LanguageId): CompilerRouteCapability | undefined {
+    const capability = this.#byLanguageId.get(normalizeLanguageId(languageId))?.capability;
+    return capability ? cloneCompilerCapability(capability) : undefined;
+  }
+
+  compileStandalone(languageId: LanguageId, code: string, targetName: string): CompileResult {
+    const normalized = normalizeLanguageId(languageId);
+    const route = this.#byLanguageId.get(normalized);
+    return route
+      ? route.standalone(code, targetName)
+      : unsupportedCompilerRoute(normalized, "standalone");
+  }
+
+  compileIntegrated(
+    languageId: LanguageId,
+    code: string,
+    projectPath: string,
+    targetFilePath: string,
+  ): CompileResult {
+    const normalized = normalizeLanguageId(languageId);
+    const route = this.#byLanguageId.get(normalized);
+    return route
+      ? route.integrated(code, projectPath, targetFilePath)
+      : unsupportedCompilerRoute(normalized, "integrated");
+  }
+}
+
+const DEFAULT_COMPILER_ROUTES: readonly CompilerRouteRegistration[] = [
+  compilerRoute("java", "Java", "javac", "compile", "javac / Maven", "project-build-or-test", compileJavaStandalone, compileJavaIntegrated, [
+    "Integrated validation uses Maven when available and otherwise compiles discovered Java files with javac; Gradle is not executed.",
+  ]),
+  compilerRoute("csharp", "C#", "dotnet build --nologo -v q", "compile", "dotnet build --nologo -v q", "project-build-or-test", compileStandalone, compileIntegrated, [
+    "Standalone validation uses a generated net8.0 wrapper project.",
+  ]),
+  compilerRoute("typescript", "TypeScript", "tsc --noEmit", "typecheck", "tsc --noEmit", "typecheck", compileTypeScriptStandalone, compileTypeScriptIntegrated, [
+    "Standalone validation uses fixed ES2022/NodeNext options; integrated validation uses only the detected root tsconfig or target file.",
+  ]),
+  compilerRoute("python", "Python", "python -m py_compile", "syntax", "python -m py_compile", "syntax", compilePythonStandalone, compilePythonIntegrated, [
+    "Python validation is syntax compilation only; it does not prove imports, types, or tests.",
+  ]),
+  compilerRoute("rust", "Rust", "rustc", "compile", "cargo check / rustc", "project-build-or-test", compileRustStandalone, compileRustIntegrated, [
+    "Integrated validation falls back to single-file rustc when no Cargo manifest/tool is available.",
+  ]),
+  compilerRoute("go", "Go", "go test", "compile", "go test", "project-build-or-test", compileGoStandalone, compileGoIntegrated, [
+    "Integrated validation runs the module test graph only when go.mod is present; otherwise it validates the target file.",
+  ]),
+];
+
+export function createDefaultCompilerRouteRegistry(): CompilerRouteRegistry {
+  return new CompilerRouteRegistry(DEFAULT_COMPILER_ROUTES);
+}
+
+const defaultCompilerRouteRegistry = createDefaultCompilerRouteRegistry();
+
+export function listCompilerRouteCapabilities(
+  registry: CompilerRouteRegistry = defaultCompilerRouteRegistry,
+): CompilerRouteCapability[] {
+  return registry.listCapabilities();
+}
+
+/** @deprecated V1 closed-Language compatibility wrapper. Use the LanguageId resolver. */
+export function resolveCompilerRouteCapability(
+  language: Language,
+): CompilerRouteCapability | undefined {
+  return resolveCompilerRouteCapabilityByLanguageId(language);
+}
+
+export function resolveCompilerRouteCapabilityByLanguageId(
+  languageId: LanguageId,
+  registry: CompilerRouteRegistry = defaultCompilerRouteRegistry,
+): CompilerRouteCapability | undefined {
+  return registry.resolve(languageId);
+}
+
+export function compileTargetStandaloneByLanguageId(
+  languageId: LanguageId,
+  code: string,
+  targetName: string,
+  registry: CompilerRouteRegistry = defaultCompilerRouteRegistry,
+): CompileResult {
+  return registry.compileStandalone(languageId, code, targetName);
+}
+
+export function compileTargetIntegratedByLanguageId(
+  languageId: LanguageId,
+  code: string,
+  projectPath: string,
+  targetFilePath: string,
+  registry: CompilerRouteRegistry = defaultCompilerRouteRegistry,
+): CompileResult {
+  return registry.compileIntegrated(languageId, code, projectPath, targetFilePath);
 }
 
 /**
  * Language-neutral validation entry points used by the adaptation workflow.
  * Individual compilers remain implementation details behind this registry.
  */
+/** @deprecated V1 closed-Language compatibility wrapper. */
 export function compileTargetStandalone(
   language: Language,
   code: string,
   targetName: string,
 ): CompileResult {
-  switch (language) {
-    case "Java": return compileJavaStandalone(code, targetName);
-    case "C#": return compileStandalone(code, targetName);
-    case "TypeScript": return compileTypeScriptStandalone(code, targetName);
-    case "Python": return compilePythonStandalone(code, targetName);
-    case "Rust": return compileRustStandalone(code, targetName);
-    case "Go": return compileGoStandalone(code, targetName);
-  }
+  const capability = defaultCompilerRouteRegistry.resolve(language);
+  return capability
+    ? defaultCompilerRouteRegistry.compileStandalone(capability.languageId, code, targetName)
+    : unsupportedCompilerRoute(String(language), "standalone");
 }
 
+/** @deprecated V1 closed-Language compatibility wrapper. */
 export function compileTargetIntegrated(
   language: Language,
   code: string,
   projectPath: string,
   targetFilePath: string,
 ): CompileResult {
-  switch (language) {
-    case "Java": return compileJavaIntegrated(code, projectPath, targetFilePath);
-    case "C#": return compileIntegrated(code, projectPath, targetFilePath);
-    case "TypeScript": return compileTypeScriptIntegrated(code, projectPath, targetFilePath);
-    case "Python": return compilePythonIntegrated(code, projectPath, targetFilePath);
-    case "Rust": return compileRustIntegrated(code, projectPath, targetFilePath);
-    case "Go": return compileGoIntegrated(code, projectPath, targetFilePath);
+  const capability = defaultCompilerRouteRegistry.resolve(language);
+  return capability
+    ? defaultCompilerRouteRegistry.compileIntegrated(
+        capability.languageId,
+        code,
+        projectPath,
+        targetFilePath,
+      )
+    : unsupportedCompilerRoute(String(language), "integrated");
+}
+
+/** @deprecated V1 closed-Language compatibility helper. */
+export function compilerCommand(language: Language): string {
+  const capability = defaultCompilerRouteRegistry.resolve(language);
+  if (!capability) throw new Error(`Compiler route is unavailable for ${String(language)}.`);
+  return capability.standalone.command;
+}
+
+function compilerRoute(
+  languageId: LanguageId,
+  displayName: string,
+  standaloneCommand: string,
+  standaloneLevel: CompilerValidationLevel,
+  integratedCommand: string,
+  integratedLevel: CompilerValidationLevel,
+  standalone: CompilerRouteRegistration["standalone"],
+  integrated: CompilerRouteRegistration["integrated"],
+  limitations: readonly string[],
+): CompilerRouteRegistration {
+  return {
+    capability: {
+      languageId,
+      displayName,
+      providerId: `forexplore.compiler.${languageId}`,
+      version: "1.0.0",
+      standalone: { command: standaloneCommand, level: standaloneLevel },
+      integrated: { command: integratedCommand, level: integratedLevel },
+      quality: {
+        provesBehavioralCorrectness: false,
+        limitations: [
+          "Validation strength is the declared level, not a language-independent correctness score.",
+          "Project tests and behavioral verification remain separate required evidence.",
+          ...limitations,
+        ],
+      },
+    },
+    standalone,
+    integrated,
+  };
+}
+
+function assertCompilerRoute(route: CompilerRouteRegistration, languageId: LanguageId): void {
+  const capability = route.capability;
+  if (
+    !languageId ||
+    !capability.displayName.trim() ||
+    !capability.providerId.trim() ||
+    !capability.version.trim() ||
+    !capability.standalone.command.trim() ||
+    !capability.integrated.command.trim() ||
+    capability.quality.provesBehavioralCorrectness !== false ||
+    !Array.isArray(capability.quality.limitations) ||
+    capability.quality.limitations.length === 0 ||
+    typeof route.standalone !== "function" ||
+    typeof route.integrated !== "function"
+  ) {
+    throw new Error(`Compiler route for ${languageId} has an invalid capability descriptor.`);
   }
 }
 
-export function compilerCommand(language: Language): string {
-  switch (language) {
-    case "Java": return "javac";
-    case "C#": return "dotnet build --nologo -v q";
-    case "TypeScript": return "tsc --noEmit";
-    case "Python": return "python -m py_compile";
-    case "Rust": return "rustc";
-    case "Go": return "go test";
-  }
+function cloneCompilerCapability(capability: CompilerRouteCapability): CompilerRouteCapability {
+  return {
+    ...capability,
+    standalone: { ...capability.standalone },
+    integrated: { ...capability.integrated },
+    quality: {
+      ...capability.quality,
+      limitations: [...capability.quality.limitations],
+    },
+  };
+}
+
+function unsupportedCompilerRoute(
+  language: string,
+  stage: CompilerUnsupportedReason["stage"],
+): CompileResult {
+  const unsupportedReason: CompilerUnsupportedReason = {
+    code: "COMPILER_ROUTE_UNAVAILABLE",
+    stage,
+    language,
+    detail: `No compiler provider is registered for ${language} (${stage}).`,
+    retryable: false,
+  };
+  return {
+    success: false,
+    errors: [`[${unsupportedReason.code}] ${unsupportedReason.detail}`],
+    output: "",
+    unsupportedReason,
+  };
 }
 
 export interface ResolvedProjectTarget {

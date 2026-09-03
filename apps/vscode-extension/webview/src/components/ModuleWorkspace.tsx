@@ -21,25 +21,27 @@ import type {
   ModuleExplorerNode,
   ModuleExplorerPresentation,
   ModuleImplementationStatus,
+  ModuleWorkspaceAction,
   ModuleWorkspacePresentation,
 } from '../../../src/ui-types';
 
-type StatusFilter = 'all' | 'implemented' | 'unimplemented' | 'unknown';
+type StatusFilter = ModuleImplementationStatus | 'all';
 
 interface ModuleWorkspaceProps {
   explorer: ModuleExplorerPresentation;
   mode: ModuleExplorerMode;
   historyId: string | null;
-  currentTargetId: string;
+  currentTargetId: string | null;
   selectedNodeId: string | null;
   refreshing: boolean;
   onModeChange(mode: ModuleExplorerMode): void;
   onHistoryChange(id: string): void;
   onNodeSelect(node: ModuleExplorerNode): void;
-  onTargetSelect(targetId: string): void;
   onRefresh(): void;
   onOpenSettings(): void;
+  onWorkspaceAction(workspaceId: string, action: ModuleWorkspaceAction): void;
   settingsOpen: boolean;
+  notice?: React.ReactNode;
   children: React.ReactNode;
 }
 
@@ -53,10 +55,11 @@ export function ModuleWorkspace({
   onModeChange,
   onHistoryChange,
   onNodeSelect,
-  onTargetSelect,
   onRefresh,
   onOpenSettings,
+  onWorkspaceAction,
   settingsOpen,
+  notice,
   children,
 }: ModuleWorkspaceProps) {
   const [query, setQuery] = useState('');
@@ -117,8 +120,8 @@ export function ModuleWorkspace({
           <button
             type="button"
             className="icon-button"
-            title="重新分析模块树"
-            aria-label="重新分析模块树"
+            title="刷新 Host 模块状态"
+            aria-label="刷新 Host 模块状态"
             onClick={onRefresh}
             disabled={refreshing}
           >
@@ -140,8 +143,10 @@ export function ModuleWorkspace({
           {([
             ['all', '全部'],
             ['implemented', '已完成'],
-            ['unimplemented', '未完成'],
-            ['unknown', '待确认'],
+            ['unimplemented', '未实现'],
+            ['partial', '部分实现'],
+            ['unknown', '未知'],
+            ['not-applicable', '不适用'],
           ] as const).map(([value, label]) => (
             <button
               key={value}
@@ -176,7 +181,6 @@ export function ModuleWorkspace({
                 currentTargetId={currentTargetId}
                 selectedNodeId={selectedNode?.id ?? null}
                 onNodeSelect={onNodeSelect}
-                onTargetSelect={mode === 'target' ? onTargetSelect : undefined}
               />
             ))
           )}
@@ -184,13 +188,23 @@ export function ModuleWorkspace({
 
         <div className="tree-legend">
           <span><i className="status-mark is-implemented" />已完成</span>
-          <span><i className="status-mark is-unimplemented" />未完成</span>
-          <span><i className="status-mark is-unknown" />待确认</span>
+          <span><i className="status-mark is-unimplemented" />未实现</span>
+          <span><i className="status-mark is-partial" />部分实现</span>
+          <span><i className="status-mark is-unknown" />未知</span>
+          <span><i className="status-mark is-not-applicable" />不适用</span>
         </div>
       </aside>
 
       <section className="module-main">
         <div className="module-main-scroll">
+          {notice}
+          {!settingsOpen ? (
+            <WorkspaceLifecycle
+              workspace={workspace}
+              busy={refreshing}
+              onAction={onWorkspaceAction}
+            />
+          ) : null}
           {!settingsOpen && explorer.history.length === 0 ? (
             <section className="history-configuration-prompt" role="status">
               <div className="history-configuration-icon"><History size={17} /></div>
@@ -217,17 +231,47 @@ export function ModuleWorkspace({
   );
 }
 
+function WorkspaceLifecycle({
+  workspace,
+  busy,
+  onAction,
+}: {
+  workspace: ModuleWorkspacePresentation;
+  busy: boolean;
+  onAction(workspaceId: string, action: ModuleWorkspaceAction): void;
+}) {
+  const lifecycle = workspace.lifecycle;
+  return (
+    <section className={`workspace-lifecycle${lifecycle.ready ? ' is-ready' : ''}`} role="status">
+      <div>
+        <strong>{lifecycle.label}</strong>
+        <span>{lifecycle.message}</span>
+      </div>
+      {lifecycle.nextAction && lifecycle.nextActionLabel ? (
+        <button
+          type="button"
+          className={lifecycle.nextAction.includes('withdraw') ? 'danger-action' : 'secondary-action'}
+          disabled={busy}
+          onClick={() => onAction(workspace.id, lifecycle.nextAction!)}
+        >
+          {busy ? <RefreshCw size={13} className="is-spinning" /> : null}
+          {lifecycle.nextActionLabel}
+        </button>
+      ) : null}
+    </section>
+  );
+}
+
 interface TreeNodeProps {
   node: ModuleExplorerNode;
   depth: number;
-  currentTargetId: string;
+  currentTargetId: string | null;
   selectedNodeId: string | null;
   onNodeSelect(node: ModuleExplorerNode): void;
-  onTargetSelect?: (targetId: string) => void;
 }
 
 function TreeNode(props: TreeNodeProps) {
-  const { node, depth, currentTargetId, selectedNodeId, onNodeSelect, onTargetSelect } = props;
+  const { node, depth, currentTargetId, selectedNodeId, onNodeSelect } = props;
   const [expanded, setExpanded] = useState(depth < 2);
   const hasChildren = node.children.length > 0;
   const isCurrent = node.targetId === currentTargetId;
@@ -235,9 +279,6 @@ function TreeNode(props: TreeNodeProps) {
 
   function select(): void {
     onNodeSelect(node);
-    if (node.targetId && node.targetId !== currentTargetId && onTargetSelect) {
-      onTargetSelect(node.targetId);
-    }
   }
 
   return (
@@ -245,11 +286,12 @@ function TreeNode(props: TreeNodeProps) {
       <div
         className={`tree-row${isSelected ? ' is-selected' : ''}${isCurrent ? ' is-current-target' : ''}`}
         style={{ paddingLeft: `${6 + depth * 15}px` }}
+        data-node-id={node.id}
       >
         <button
           type="button"
           className="tree-toggle"
-          aria-label={expanded ? '折叠' : '展开'}
+          aria-label={`${expanded ? '折叠' : '展开'} ${node.name}`}
           onClick={() => setExpanded((value) => !value)}
           disabled={!hasChildren}
         >
@@ -295,16 +337,22 @@ function HistoryOverview({
   const [expanded, setExpanded] = useState(false);
   const modules = workspace.tree.filter((node) => node.kind === 'module');
   const pipeline = [
-    { icon: <Database size={15} />, title: '静态索引', detail: `${workspace.stats.files} 文件 / ${workspace.stats.types + workspace.stats.methods} 符号`, complete: Boolean(workspace.snapshotId) },
-    { icon: <GitBranch size={15} />, title: '依赖分析', detail: `${workspace.stats.dependencies} 条依赖证据`, complete: Boolean(workspace.snapshotId) },
-    { icon: <Sparkles size={15} />, title: 'Agent 模块划分', detail: `${workspace.stats.modules} 个模块`, complete: workspace.stats.modules > 0 },
+    { icon: <Database size={15} />, title: '静态分析', detail: `${workspace.stats.files} 文件 / ${workspace.stats.types + workspace.stats.methods} 实体`, complete: Boolean(workspace.snapshotId) },
+    { icon: <GitBranch size={15} />, title: '模块边界', detail: `${workspace.stats.modules} 个模块 / ${workspace.stats.dependencies} 条依赖`, complete: Boolean(workspace.catalog) },
+    { icon: <Sparkles size={15} />, title: '边界人审', detail: workspace.catalog?.status ?? '尚未建立目录', complete: workspace.catalog?.status === 'active' },
     {
       icon: <FileJson2 size={15} />,
-      title: 'summary.json',
+      title: '模块知识摘要',
       detail: workspace.summary.error
         ? '摘要无效'
         : workspace.summary.exists ? `${workspace.summary.moduleCount ?? 0} 个模块摘要` : '尚未生成',
       complete: workspace.summary.exists && !workspace.summary.error,
+    },
+    {
+      icon: <CheckCircle2 size={15} />,
+      title: '知识审阅与发布',
+      detail: workspace.lifecycle.publicationActive ? '当前发布有效' : '尚未形成可检索发布',
+      complete: workspace.lifecycle.publicationActive,
     },
   ];
   return (
@@ -315,11 +363,11 @@ function HistoryOverview({
           <div>
             <span className="history-library-code">01A · 历史模块库</span>
             <h1>{workspace.name}</h1>
-            <p>浏览可复用模块，并选择本次需求需要参考的代码范围</p>
+            <p>浏览已发布模块并核对证据；实际迁移范围由已审跨目录映射决定</p>
           </div>
         </div>
-        <div className={`history-library-state${workspace.snapshotId ? ' is-ready' : ''}`}>
-          <span><i />{workspace.snapshotId ? '模块库已就绪' : '等待分析'}</span>
+        <div className={`history-library-state${workspace.lifecycle.ready ? ' is-ready' : ''}`}>
+          <span><i />{workspace.lifecycle.label}</span>
           <small title={workspace.rootLabel}>{workspace.rootLabel}</small>
         </div>
       </section>
@@ -387,7 +435,7 @@ function HistoryOverview({
           {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
           {expanded ? '收起分析信息' : '查看分析信息'}
         </button>
-        {!expanded ? <span>4 项技术状态</span> : null}
+        {!expanded ? <span>{pipeline.length} 项技术状态</span> : null}
       </div>
       {expanded ? (
         <>
@@ -407,7 +455,7 @@ function HistoryOverview({
               {workspace.summary.error ? (
                 <div className="summary-empty is-error">
                   <AlertTriangle size={24} />
-                  <strong>module-summary.json 无法读取</strong>
+                  <strong>模块知识摘要无法读取</strong>
                   <span>{workspace.summary.error}</span>
                 </div>
               ) : workspace.summary.exists ? (
@@ -421,8 +469,8 @@ function HistoryOverview({
               ) : (
                 <div className="summary-empty">
                   <FileJson2 size={24} />
-                  <strong>未发现 module-summary.json</strong>
-                  <span>完成 Agent 模块计划和受信任审批后，由 Host 事务生成。</span>
+                  <strong>尚无已审模块知识摘要</strong>
+                  <span>模块边界与知识摘要分别审批；发布前不会进入正式检索。</span>
                 </div>
               )}
             </section>
@@ -458,7 +506,7 @@ function HistorySelectionPreview({ node }: { node?: ModuleExplorerNode }) {
     return (
       <section className="history-selection-preview is-empty">
         <Box size={16} />
-        <span>从模块卡片或左侧模块树中选择一项，查看它的检索范围。</span>
+        <span>从模块卡片或左侧模块树中选择一项进行浏览；该动作不会改写已审映射或检索范围。</span>
       </section>
     );
   }
@@ -473,7 +521,7 @@ function HistorySelectionPreview({ node }: { node?: ModuleExplorerNode }) {
         <span className="history-selection-icon"><NodeIcon node={node} /></span>
         <div>
           <strong>{node.name}</strong>
-          <p>{node.description ?? node.signature ?? '该项将作为历史代码检索与复用的参考范围。'}</p>
+          <p>{node.description ?? node.signature ?? '该项仅用于浏览当前历史模块证据。'}</p>
           <div className="history-selection-meta">
             {node.path ? <code title={node.path}>{node.path}</code> : null}
             {node.language ? <span>{node.language}</span> : null}
@@ -537,7 +585,25 @@ function emptyHistoryWorkspace(): ModuleWorkspacePresentation {
     name: '未配置历史仓',
     rootLabel: '请在 ForeXplore 设置中配置 repositoryPaths',
     error: '未配置可分析的历史代码仓路径。',
-    stats: { modules: 0, files: 0, types: 0, methods: 0, implemented: 0, unimplemented: 0, unknown: 0, dependencies: 0 },
+    lifecycle: {
+      stage: 'not-configured',
+      label: '尚未配置历史仓',
+      message: '添加路径只建立本地注册，不会自动发布或撤回模块知识。',
+      ready: false,
+      publicationActive: false,
+    },
+    stats: {
+      modules: 0,
+      files: 0,
+      types: 0,
+      methods: 0,
+      implemented: 0,
+      unimplemented: 0,
+      partial: 0,
+      unknown: 0,
+      notApplicable: 0,
+      dependencies: 0,
+    },
     summary: { exists: false, path: '.forexplore/module-summary.json' },
     tree: [],
   };
@@ -587,6 +653,8 @@ function kindLabel(kind: ModuleExplorerNode['kind']): string {
 
 function statusLabel(status?: ModuleImplementationStatus): string {
   if (status === 'implemented') return '已完成';
-  if (status === 'unimplemented') return '未完成';
-  return '待确认';
+  if (status === 'unimplemented') return '未实现';
+  if (status === 'partial') return '部分实现';
+  if (status === 'not-applicable') return '不适用';
+  return '未知';
 }

@@ -5,6 +5,7 @@ import type { ValidationRecord } from './validation';
 
 export type AdaptationStrategy = 'translate' | 'bridge' | 'wrap' | 'reuse';
 
+/** @deprecated V1 compatibility only. Production execution uses AdaptationRequestV2. */
 export interface AdaptationRequest {
   target: ModuleTarget;
   candidate: SearchCandidate;
@@ -20,6 +21,7 @@ export interface InterfaceMapping {
   note: string;
 }
 
+/** @deprecated V1 compatibility only. Production execution uses AdaptationResultV2. */
 export interface AdaptationResult {
   strategy: AdaptationStrategy;
   targetLanguage: Language;

@@ -1,0 +1,208 @@
+{
+  "schema_version": 1,
+  "diagram_type": "lifecycle",
+  "meta": {
+    "title": "ForeXplore 存量代码仓模块处理生命周期",
+    "locale": "zh-CN",
+    "output": "docs/architecture/forexplore-repository-module-lifecycle.html",
+    "quality_profile": "showcase",
+    "viewBox": [1020, 636],
+    "views": [
+      {
+        "id": "review-gates",
+        "label": "两道人审",
+        "focus": ["initialize", "gate_boundary", "summary_agent", "gate_summary"],
+        "note": "第一门审模块边界；第二门审模块叙述，只有第二门 revise 会原地重跑选中模块。"
+      },
+      {
+        "id": "publish-rail",
+        "label": "双 CAS 发布主链",
+        "focus": ["publishing", "stage_validate", "sqlite_activate", "seekdb_activate", "ready"],
+        "note": "先物化并完成本地/远端 stage，再本地 SQLite CAS，随后 SeekDB active head CAS，最后 manifest ready。"
+      },
+      {
+        "id": "compensation-path",
+        "label": "发布补偿",
+        "focus": ["sqlite_activate", "seekdb_activate", "publication_compensation", "stage_validate"],
+        "note": "激活阶段失败走 remote withdraw → local withdraw，并保持 publishing-knowledge 以便重放。"
+      },
+      {
+        "id": "explicit-withdrawal",
+        "label": "显式撤销",
+        "focus": ["ready", "explicit_withdrawal", "superseded"],
+        "note": "用户仅能撤销 ready：远端先撤、再恢复本地前代或空头，历史制品保留。"
+      }
+    ]
+  },
+  "lanes": [
+    { "id": "main", "label": "仓库处理主阶段" },
+    { "id": "events", "label": "发布事件、补偿与撤销" },
+    { "id": "terminal", "label": "终态" }
+  ],
+  "states": [
+    {
+      "id": "initialize",
+      "type": "start",
+      "label": "静态初始化",
+      "sublabel": "queued → … → discovering",
+      "tag": "static init",
+      "step": "01",
+      "lane": "main",
+      "col": 0,
+      "width": 120,
+      "height": 64
+    },
+    {
+      "id": "gate_boundary",
+      "type": "waiting",
+      "label": "Gate 1 · 边界",
+      "sublabel": "module review",
+      "tag": "boundary",
+      "step": "02",
+      "lane": "main",
+      "col": 1,
+      "width": 120,
+      "height": 64
+    },
+    {
+      "id": "summary_agent",
+      "type": "active",
+      "label": "Summary Agent",
+      "sublabel": "module proposals",
+      "tag": "proposal",
+      "step": "03",
+      "lane": "main",
+      "col": 2,
+      "width": 120,
+      "height": 64
+    },
+    {
+      "id": "gate_summary",
+      "type": "waiting",
+      "label": "Gate 2 · 摘要",
+      "sublabel": "summary review",
+      "tag": "narrative",
+      "step": "04",
+      "lane": "main",
+      "col": 3,
+      "width": 120,
+      "height": 64
+    },
+    {
+      "id": "publishing",
+      "type": "active",
+      "label": "Publishing",
+      "sublabel": "dual CAS saga",
+      "tag": "publishing",
+      "step": "05",
+      "lane": "main",
+      "col": 4,
+      "width": 120,
+      "height": 64
+    },
+    {
+      "id": "stage_validate",
+      "type": "active",
+      "label": "Stage + Validate",
+      "sublabel": "local → remote",
+      "tag": "staged",
+      "step": "06",
+      "lane": "events",
+      "col": 2,
+      "width": 120,
+      "height": 64,
+      "yOffset": -56
+    },
+    {
+      "id": "sqlite_activate",
+      "type": "active",
+      "label": "SQLite CAS",
+      "sublabel": "local head",
+      "tag": "local first",
+      "step": "07",
+      "lane": "events",
+      "col": 1,
+      "width": 120,
+      "height": 64,
+      "yOffset": -56
+    },
+    {
+      "id": "seekdb_activate",
+      "type": "decision",
+      "label": "SeekDB Head CAS",
+      "sublabel": "active head",
+      "tag": "remote second",
+      "step": "08",
+      "lane": "events",
+      "col": 0,
+      "width": 120,
+      "height": 64,
+      "yOffset": -56
+    },
+    {
+      "id": "publication_compensation",
+      "type": "failure",
+      "label": "发布补偿",
+      "sublabel": "remote → local",
+      "tag": "saga",
+      "lane": "events",
+      "col": 1,
+      "width": 120,
+      "height": 64,
+      "yOffset": 56
+    },
+    {
+      "id": "explicit_withdrawal",
+      "type": "decision",
+      "label": "显式撤销",
+      "sublabel": "ready · remote-first",
+      "tag": "human",
+      "lane": "events",
+      "col": 2,
+      "width": 120,
+      "height": 64,
+      "yOffset": 56
+    },
+    {
+      "id": "ready",
+      "type": "success",
+      "label": "Ready",
+      "sublabel": "search-visible",
+      "tag": "active",
+      "step": "09",
+      "lane": "terminal",
+      "col": 0,
+      "width": 120,
+      "height": 64
+    },
+    {
+      "id": "superseded",
+      "type": "neutral",
+      "label": "Superseded",
+      "sublabel": "predecessor / empty",
+      "tag": "terminal",
+      "lane": "terminal",
+      "col": 2,
+      "width": 120,
+      "height": 64
+    }
+  ],
+  "transitions": [
+    { "from": "initialize", "to": "gate_boundary", "variant": "emphasis" },
+    { "from": "gate_boundary", "to": "summary_agent", "variant": "security" },
+    { "from": "gate_boundary", "to": "superseded", "label": "revise / reject", "variant": "security", "route": "bottom-channel", "fromSide": "bottom", "toSide": "bottom", "channelY": 535 },
+    { "from": "summary_agent", "to": "gate_summary", "variant": "emphasis" },
+    { "from": "gate_summary", "to": "summary_agent", "label": "revise", "variant": "dashed", "route": "top-channel", "fromSide": "top", "toSide": "top", "channelY": 100 },
+    { "from": "gate_summary", "to": "superseded", "label": "reject", "variant": "security", "fromSide": "top", "toSide": "right", "via": [[556, 80], [860, 80], [860, 482]] },
+    { "from": "gate_summary", "to": "publishing", "variant": "security" },
+    { "from": "publishing", "to": "stage_validate", "variant": "emphasis", "route": "straight", "fromSide": "bottom", "toSide": "top" },
+    { "from": "stage_validate", "to": "sqlite_activate", "variant": "emphasis" },
+    { "from": "sqlite_activate", "to": "seekdb_activate", "variant": "emphasis" },
+    { "from": "seekdb_activate", "to": "ready", "variant": "emphasis", "route": "straight", "fromSide": "bottom", "toSide": "top" },
+    { "from": "sqlite_activate", "to": "publication_compensation", "variant": "security", "route": "straight", "fromSide": "bottom", "toSide": "top" },
+    { "from": "seekdb_activate", "to": "publication_compensation", "variant": "security", "route": "bottom-channel", "fromSide": "bottom", "toSide": "top", "channelY": 310 },
+    { "from": "publication_compensation", "to": "stage_validate", "label": "replay", "variant": "dashed", "route": "top-channel", "fromSide": "top", "toSide": "bottom", "channelY": 310 },
+    { "from": "ready", "to": "explicit_withdrawal", "label": "human", "variant": "security", "route": "top-channel", "fromSide": "top", "toSide": "bottom", "channelY": 424 },
+    { "from": "explicit_withdrawal", "to": "superseded", "variant": "security", "route": "straight", "fromSide": "bottom", "toSide": "top" }
+  ]
+}
