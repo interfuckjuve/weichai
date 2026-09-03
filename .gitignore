@@ -64,3 +64,9 @@ output/
 
 # Git worktrees
 .worktrees/
+
+# Local Superpowers planning artifacts
+docs/superpowers/
+
+# Smoke differential pipeline output
+test-results/
