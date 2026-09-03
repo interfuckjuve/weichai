@@ -70,6 +70,57 @@ const historyWorkspace: ModuleWorkspacePresentation = {
   tree: [paymentModule],
 };
 
+const statusWorkspace: ModuleWorkspacePresentation = {
+  ...targetWorkspace,
+  name: 'Status Target',
+  tree: [{
+    id: 'module:test',
+    name: '测试模块',
+    kind: 'module',
+    children: [
+      {
+        id: 'file:pom',
+        name: 'pom.xml',
+        kind: 'file',
+        path: 'pom.xml',
+        children: [],
+      },
+      {
+        id: 'file:done',
+        name: 'Done.java',
+        kind: 'file',
+        path: 'src/Done.java',
+        children: [{
+          id: 'method:done',
+          name: 'done',
+          kind: 'method',
+          implementationStatus: 'implemented',
+          targetId: 'target:done',
+          children: [],
+        }],
+      },
+      {
+        id: 'file:todo',
+        name: 'Todo.java',
+        kind: 'file',
+        path: 'src/Todo.java',
+        children: [{
+          id: 'method:todo',
+          name: 'todo',
+          kind: 'method',
+          implementationStatus: 'unimplemented',
+          targetId: 'target:todo',
+          children: [],
+        }],
+      },
+    ],
+  }],
+};
+
+const reactTestEnvironment = globalThis as typeof globalThis & {
+  IS_REACT_ACT_ENVIRONMENT?: boolean;
+};
+
 describe('ModuleWorkspace history configuration prompt', () => {
   it('prompts for repository paths when no history repository is configured', () => {
     const markup = renderWorkspace({
@@ -157,6 +208,34 @@ describe('ModuleWorkspace history configuration prompt', () => {
     act(() => moduleCard?.click());
     expect(onNodeSelect).toHaveBeenCalledWith(paymentModule);
     act(() => root.unmount());
+  });
+
+  it('keeps status-less configuration files available under pending confirmation', () => {
+    reactTestEnvironment.IS_REACT_ACT_ENVIRONMENT = true;
+    const explorer: ModuleExplorerPresentation = {
+      generatedAt: '2026-09-03T00:00:00.000Z',
+      target: statusWorkspace,
+      history: [],
+    };
+    const container = document.createElement('div');
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(workspaceElement(explorer, 'target', null, vi.fn()));
+    });
+
+    const pendingButton = [...container.querySelectorAll<HTMLButtonElement>('.status-filter button')]
+      .find((button) => button.textContent === '待确认');
+    act(() => pendingButton?.click());
+
+    const tree = container.querySelector('.module-tree');
+    expect(tree?.textContent).toContain('pom.xml');
+    expect(tree?.textContent).not.toContain('Done.java');
+    expect(tree?.textContent).not.toContain('Todo.java');
+    expect(tree?.querySelector('.status-mark.is-unknown')).not.toBeNull();
+
+    act(() => root.unmount());
+    reactTestEnvironment.IS_REACT_ACT_ENVIRONMENT = false;
   });
 });
 

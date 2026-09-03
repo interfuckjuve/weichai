@@ -24,7 +24,7 @@ import type {
   ModuleWorkspacePresentation,
 } from '../../../src/ui-types';
 
-type StatusFilter = 'all' | 'implemented' | 'unimplemented';
+type StatusFilter = 'all' | 'implemented' | 'unimplemented' | 'unknown';
 
 interface ModuleWorkspaceProps {
   explorer: ModuleExplorerPresentation;
@@ -141,6 +141,7 @@ export function ModuleWorkspace({
             ['all', '全部'],
             ['implemented', '已完成'],
             ['unimplemented', '未完成'],
+            ['unknown', '待确认'],
           ] as const).map(([value, label]) => (
             <button
               key={value}
@@ -257,7 +258,7 @@ function TreeNode(props: TreeNodeProps) {
         <button type="button" className="tree-select" onClick={select} title={node.signature ?? node.path}>
           <NodeIcon node={node} />
           <span className="tree-label">{node.name}</span>
-          {node.targetId ? <StatusMark status={node.implementationStatus} /> : null}
+          {node.targetId || !hasChildren ? <StatusMark status={node.implementationStatus} /> : null}
         </button>
       </div>
       {hasChildren && expanded ? (
@@ -552,7 +553,8 @@ function filterTree(
     const queryMatch = !query || [node.name, node.path, node.signature]
       .filter(Boolean)
       .some((value) => value?.toLocaleLowerCase().includes(query));
-    const statusMatch = status === 'all' || node.implementationStatus === status;
+    const effectiveStatus = node.implementationStatus ?? (node.children.length === 0 ? 'unknown' : undefined);
+    const statusMatch = status === 'all' || effectiveStatus === status;
     if ((queryMatch && statusMatch) || children.length > 0) return [{ ...node, children }];
     return [];
   });
