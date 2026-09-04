@@ -27,6 +27,7 @@ import type {
 type StatusFilter = 'all' | 'implemented' | 'unimplemented' | 'unknown';
 
 interface ModuleWorkspaceProps {
+  onRetry?(scope: import('@forexplore/contracts').ProjectAnalysisScope, force: boolean): void;
   explorer: ModuleExplorerPresentation;
   mode: ModuleExplorerMode;
   historyId: string | null;
@@ -44,6 +45,7 @@ interface ModuleWorkspaceProps {
 }
 
 export function ModuleWorkspace({
+  onRetry,
   explorer,
   mode,
   historyId,
@@ -191,6 +193,36 @@ export function ModuleWorkspace({
 
       <section className="module-main">
         <div className="module-main-scroll">
+          {!settingsOpen && workspace.projectId ? (
+            <section className="card project-analysis" aria-label="项目解析结果">
+              <h2>{workspace.name}</h2>
+              <p role="status">模块解析：{analysisState(workspace.analysis?.state)} · 检索同步：{workspace.analysis?.projection ?? 'pending'}</p>
+              {workspace.analysis?.error ? <p role="alert">{workspace.analysis.error}</p> : null}
+              <p className="project-summary">{workspace.analysis?.proposal?.summary ?? '尚无有效模块摘要。可查看结构索引，或重试模块解析。'}</p>
+              {workspace.analysis?.state === 'stale' ? <p>正在浏览历史版本，以下结果不代表当前代码。</p> : null}
+              {workspace.analysis?.coverage ? <p>文件覆盖：{workspace.analysis.coverage.assigned} / {workspace.analysis.coverage.total}
+                {workspace.analysis.coverage.unassigned.map((item) => <span className="unassigned-file" key={item.path}>{item.path}：{item.reason}</span>)}
+              </p> : null}
+              {workspace.analysis?.proposal?.risks?.map((risk, i) => <p key={i}>{risk}</p>)}
+              {workspace.repositoryId && workspace.revision && workspace.analysis?.state !== 'stale' ? (
+                <div className="project-actions">
+                  <button type="button" onClick={() => onRetry?.({ repositoryId: workspace.repositoryId!, analysisRevision: workspace.revision!, projectId: workspace.projectId! }, false)}>重试解析 / 同步</button>
+                  <button type="button" onClick={() => onRetry?.({ repositoryId: workspace.repositoryId!, analysisRevision: workspace.revision!, projectId: workspace.projectId! }, true)}>重新解析模块</button>
+                </div>
+              ) : null}
+              <details><summary>依赖关系（{workspace.dependencies?.length ?? 0}）</summary>
+                <ul>{workspace.dependencies?.map((edge) => <li key={edge.dependencyEdgeId}>
+                  {edge.sourceRelativePath} → {edge.targetRelativePath ?? edge.targetReference ?? '未知目标'} · {edge.kind} · {edge.resolution}
+                </li>)}</ul>
+              </details>
+              <details><summary>解析诊断（{workspace.diagnostics?.length ?? 0}）</summary>
+                <ul>{workspace.diagnostics?.map((diagnostic) => <li key={diagnostic.diagnosticId}>
+                  {diagnostic.relativePath} · {diagnostic.severity} · {diagnostic.message}
+                </li>)}</ul>
+              </details>
+              <details><summary>版本信息</summary><code>{workspace.repositoryId} / {workspace.projectId} / {workspace.revision}</code></details>
+            </section>
+          ) : null}
           {!settingsOpen && explorer.history.length === 0 ? (
             <section className="history-configuration-prompt" role="status">
               <div className="history-configuration-icon"><History size={17} /></div>
@@ -357,9 +389,10 @@ function HistoryOverview({
                   </span>
                   <strong>{module.name}</strong>
                   <span className="history-module-description">
-                    {module.description ?? `包含 ${summary.files} 个代码文件，可作为需求实现的检索范围。`}
+                    {module.purpose ?? module.description ?? `包含 ${summary.files} 个代码文件，可作为需求实现的检索范围。`}
                   </span>
                   <span className="history-module-card-footer">
+                    {module.domain ? <span>{module.domain}</span> : null}
                     <span>{summary.files} 文件</span>
                     <span>{summary.types} 类型</span>
                     <span>{summary.methods} 方法</span>
@@ -463,6 +496,7 @@ function HistorySelectionPreview({ node }: { node?: ModuleExplorerNode }) {
     );
   }
   const summary = summarizeModule(node);
+  const coreApis = node.coreApis?.slice(0, 6) ?? [];
   return (
     <section className="history-selection-preview" aria-label="当前选择">
       <div className="history-selection-heading">
@@ -473,14 +507,20 @@ function HistorySelectionPreview({ node }: { node?: ModuleExplorerNode }) {
         <span className="history-selection-icon"><NodeIcon node={node} /></span>
         <div>
           <strong>{node.name}</strong>
-          <p>{node.description ?? node.signature ?? '该项将作为历史代码检索与复用的参考范围。'}</p>
+          <p>{node.purpose ?? node.description ?? node.signature ?? '该项将作为历史代码检索与复用的参考范围。'}</p>
           <div className="history-selection-meta">
             {node.path ? <code title={node.path}>{node.path}</code> : null}
+            {node.domain ? <span>{node.domain}</span> : null}
             {node.language ? <span>{node.language}</span> : null}
             {summary.files > 0 ? <span>{summary.files} 文件</span> : null}
             {summary.types > 0 ? <span>{summary.types} 类型</span> : null}
             {summary.methods > 0 ? <span>{summary.methods} 方法</span> : null}
           </div>
+          {coreApis.length > 0 ? (
+            <div className="history-selection-apis" aria-label="核心 API">
+              {coreApis.map((api) => <code key={api}>{api}</code>)}
+            </div>
+          ) : null}
         </div>
       </div>
     </section>
@@ -589,4 +629,8 @@ function statusLabel(status?: ModuleImplementationStatus): string {
   if (status === 'implemented') return '已完成';
   if (status === 'unimplemented') return '未完成';
   return '待确认';
+}
+
+function analysisState(state?: import('@forexplore/contracts').ProjectAnalysisRecord['state']): string {
+  return ({ missing: '未解析', queued: '排队中', analyzing: '解析中', validating: '校验中', ready: '就绪', failed: '失败，可重试', stale: '历史结果' })[state ?? 'missing'];
 }

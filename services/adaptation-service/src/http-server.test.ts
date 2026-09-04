@@ -16,6 +16,10 @@ import {
   createHttpServer,
   type StaticAnalysisSnapshotStore,
 } from './http-server';
+import type {
+  RevisionScopedArchitecturePort,
+  ToolCallingArchitectPlanResult,
+} from './tool-calling-architect-runtime';
 
 const servers: ReturnType<typeof createHttpServer>[] = [];
 
@@ -35,6 +39,7 @@ async function listen(
   options: {
     architecturePort?: RepositoryArchitecturePort;
     staticAnalysisSnapshots?: StaticAnalysisSnapshotStore;
+    semanticArchitecturePort?: RevisionScopedArchitecturePort;
   } = {},
 ): Promise<string> {
   const server = createHttpServer({
@@ -161,6 +166,36 @@ const modulePlan: ModuleMigrationProposal = {
   risks: [],
 };
 
+const semanticModulePlan: ToolCallingArchitectPlanResult = {
+  proposal: {
+    schemaVersion: '1.0',
+    repositoryId: 'history-quote',
+    analysisRevision: 'revision-20260904',
+    analysisHash: 'c'.repeat(64),
+    objective: 'Plan quote migration modules.',
+    modules: [{
+      id: 'quote',
+      name: 'Quote',
+      kind: 'feature',
+      description: 'Quote feature.',
+      sourceFiles: ['src/Quote.java'],
+      symbolKeys: ['java:example.Quote'],
+      dependsOn: [],
+      writeSet: ['src/Quote.java'],
+      resourceLocks: [],
+      evidenceIds: ['symbol:symbol-quote'],
+    }],
+    dependencies: [],
+  },
+  evidence: {
+    repositoryId: 'history-quote',
+    analysisRevision: 'revision-20260904',
+    analysisHash: 'c'.repeat(64),
+    planHash: `sha256:${'d'.repeat(64)}`,
+    evidenceIds: ['symbol:symbol-quote'],
+  },
+};
+
 describe('adaptation HTTP API', () => {
   it('serves health check', async () => {
     const adapter: CodeAdaptationPort = { adapt: vi.fn() };
@@ -268,6 +303,66 @@ describe('adaptation HTTP API', () => {
 
     expect(response.status).toBe(404);
     expect(await response.json()).toEqual({ error: 'Module planning is not configured.' });
+  });
+
+  it('routes revision-scoped semantic planning without accepting snapshots, hashes, or source', async () => {
+    const adapter: CodeAdaptationPort = { adapt: vi.fn() };
+    const semanticArchitecturePort: RevisionScopedArchitecturePort = {
+      proposeModulePlanWithEvidence: vi.fn(async () => semanticModulePlan),
+    };
+    const url = await listen(adapter, { semanticArchitecturePort });
+
+    const response = await fetch(`${url}/v1/semantic-module-plan`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        repositoryId: 'history-quote',
+        analysisRevision: 'revision-20260904',
+        objective: semanticModulePlan.proposal.objective,
+        immutableConstraints: ['Keep public contracts stable.'],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(semanticArchitecturePort.proposeModulePlanWithEvidence).toHaveBeenCalledWith(
+      {
+        schemaVersion: '1.0',
+        repositoryId: 'history-quote',
+        analysisRevision: 'revision-20260904',
+        objective: semanticModulePlan.proposal.objective,
+        immutableConstraints: ['Keep public contracts stable.'],
+      },
+      expect.any(AbortSignal),
+    );
+    expect(await response.json()).toEqual(semanticModulePlan);
+
+    for (const body of [
+      { repositoryId: 'history-quote', analysisRevision: 'revision-20260904', objective: 'Plan', analysisHash: 'c'.repeat(64) },
+      { repositoryId: 'history-quote', analysisRevision: 'revision-20260904', objective: 'Plan', snapshotId: 'legacy' },
+      { repositoryId: 'history-quote', analysisRevision: 'revision-20260904', objective: 'Plan', source: 'class Secret {}' },
+      { repositoryId: 'history-quote', analysisRevision: 'revision-20260904', objective: 'Plan', path: 'C:/secret' },
+    ]) {
+      const invalid = await fetch(`${url}/v1/semantic-module-plan`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      expect(invalid.status).toBe(400);
+    }
+  });
+
+  it('does not expose revision-scoped semantic planning without a semantic architecture port', async () => {
+    const adapter: CodeAdaptationPort = { adapt: vi.fn() };
+    const url = await listen(adapter);
+
+    const response = await fetch(`${url}/v1/semantic-module-plan`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ repositoryId: 'history-quote', analysisRevision: 'revision-20260904', objective: 'Plan' }),
+    });
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: 'Revision-scoped semantic module planning is not configured.' });
   });
 
   it('returns 404 when the requested server-owned snapshot does not exist', async () => {

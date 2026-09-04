@@ -34,6 +34,56 @@ export {
   verifyRepositoryStaticAnalysis,
   writeRepositoryAnalysisArtifact,
 } from './repository-analysis.js';
+export {
+  compilerConfirmedSemanticEdges,
+  verifyCompilerProbeAnalysis,
+} from './deep-analysis-adapters.js';
+export {
+  createDefaultLanguageRegistry,
+  LanguageRegistry,
+  type TreeSitterCapabilityLevel,
+  type TreeSitterGrammar,
+  type TreeSitterLanguageId,
+  type TreeSitterLanguageRegistration,
+} from './language-registry.js';
+export {
+  discoverProjects,
+  projectForPath,
+  type ProjectDiscoveryFile,
+  type ProjectDiscoveryRequest,
+  type ProjectDiscoveryResult,
+  type ProjectReferenceSyntax,
+} from './project-discovery.js';
+export {
+  indexTreeSitterFile,
+  sourceRangeForOffsets,
+  type StructuralSourceRange,
+  type StructuralSymbolKind,
+  type TreeSitterDeclaration,
+  type TreeSitterDiagnostic,
+  type TreeSitterExport,
+  type TreeSitterFileIndex,
+  type TreeSitterImport,
+  type TreeSitterIndexRequest,
+} from './tree-sitter-indexer.js';
+export {
+  resolveSyntacticDependencies,
+  syntacticDependencyCandidatePaths,
+  type SyntacticDependencyResolverRequest,
+} from './syntactic-dependency-resolver.js';
+export {
+  buildStructuralIndex,
+  type BuildStructuralIndexRequest,
+  type StructuralIndexBuild,
+  type StructuralIndexBuildStats,
+  type StructuralSourceFile,
+} from './structural-index.js';
+export {
+  filesystemRepositoryStructuralScanner,
+  scanRepositoryStructuralIndex,
+  type RepositoryStructuralScanner,
+  type RepositoryStructuralScanRequest,
+} from './repository-scan.js';
 
 async function sourceFiles(root: string): Promise<string[]> {
   const files: string[] = [];

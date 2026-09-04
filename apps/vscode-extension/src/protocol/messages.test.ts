@@ -27,6 +27,13 @@ describe('Webview message boundary', () => {
         targetId: 'workspace://src/PaymentService.cs#L42',
       }),
     ).toBe(true);
+    expect(
+      isWebviewToHostMessage({
+        type: 'SELECT_CODE_INTELLIGENCE_REVISION',
+        repositoryId: 'repo-2dd9d4a2',
+        analysisRevision: 'revision-33b87b6a',
+      }),
+    ).toBe(true);
   });
 
   it('rejects a Webview-supplied target, patch, file path, or old protocol action', () => {
@@ -49,6 +56,21 @@ describe('Webview message boundary', () => {
         path: '../../outside.cs',
       }),
     ).toBe(false);
+    expect(
+      isWebviewToHostMessage({
+        type: 'SELECT_CODE_INTELLIGENCE_REVISION',
+        repositoryId: 'repo-2dd9d4a2',
+        analysisRevision: 'revision-33b87b6a',
+        localPath: 'C:\\private\\repository',
+      }),
+    ).toBe(false);
+    expect(
+      isWebviewToHostMessage({
+        type: 'SELECT_CODE_INTELLIGENCE_REVISION',
+        repositoryId: 'C:\\private\\repository',
+        analysisRevision: 'revision-33b87b6a',
+      }),
+    ).toBe(false);
   });
 
   it('rejects unbounded or malformed intent payloads', () => {
@@ -68,6 +90,20 @@ describe('Webview message boundary', () => {
     ).toBe(false);
     expect(isWebviewToHostMessage({ type: 'SELECT_CANDIDATE', candidateId: '' })).toBe(false);
     expect(isWebviewToHostMessage({ type: 'SELECT_WORKSPACE_TARGET', targetId: '' })).toBe(false);
+    expect(
+      isWebviewToHostMessage({
+        type: 'SELECT_CODE_INTELLIGENCE_REVISION',
+        repositoryId: 'repo-2dd9d4a2',
+        analysisRevision: '',
+      }),
+    ).toBe(false);
+    expect(
+      isWebviewToHostMessage({
+        type: 'SELECT_CODE_INTELLIGENCE_REVISION',
+        repositoryId: 'repo-2dd9d4a2',
+        analysisRevision: '../revision',
+      }),
+    ).toBe(false);
     expect(isWebviewToHostMessage({ type: 'OPEN_REPOSITORY_SETTINGS' })).toBe(false);
     expect(
       isWebviewToHostMessage({

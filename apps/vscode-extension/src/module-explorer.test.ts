@@ -139,6 +139,12 @@ describe('module explorer host transform', () => {
       '订单模块',
     ]);
     expect(result.presentation.tree[0]?.description).toBe('支付业务边界');
+    expect(result.presentation.tree[0]).toMatchObject({
+      purpose: '负责支付发起、确认与退款复用入口',
+      coreApis: ['PaymentService.Pay'],
+      language: 'C#',
+      domain: '支付',
+    });
     expect(result.presentation.summary).toMatchObject({
       exists: true,
       planId: 'plan-ui',
@@ -181,6 +187,88 @@ describe('module explorer host transform', () => {
       error: expect.stringContaining('JSON'),
     });
   });
+
+  it('keeps same-named history repository paths distinct before and after analysis', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'forexplore-explorer-'));
+    temporaryDirectories.push(root);
+    const targetRoot = path.join(root, 'target');
+    const firstHistory = path.join(root, 'first', 'legacy');
+    const secondHistory = path.join(root, 'second', 'legacy');
+    await mkdir(path.join(targetRoot, 'src'), { recursive: true });
+    await mkdir(firstHistory, { recursive: true });
+    await mkdir(secondHistory, { recursive: true });
+    await writeFile(path.join(targetRoot, 'src', 'Target.cs'), 'class Target { void Run() {} }\n');
+
+    const request = {
+      workspaceRoot: targetRoot,
+      workspaceName: 'Target',
+      currentTarget: {
+        id: 'workspace://src/Target.cs#L1',
+        name: 'Run',
+        kind: 'function' as const,
+        path: 'src/Target.cs',
+        language: 'C#' as const,
+        signature: 'void Run()',
+        line: 1,
+      },
+      historyRoots: [firstHistory, secondHistory, firstHistory],
+    };
+    const pending = await buildModuleExplorer(request, { includeHistory: false });
+    const refreshed = await buildModuleExplorer(request);
+
+    expect(pending.presentation.history).toHaveLength(2);
+    expect(new Set(pending.presentation.history.map((repository) => repository.id)).size).toBe(2);
+    expect(refreshed.presentation.history.map((repository) => repository.id)).toEqual(
+      pending.presentation.history.map((repository) => repository.id),
+    );
+  });
+
+  it('keeps the file tree usable when optional module summary metadata is malformed', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'forexplore-explorer-'));
+    temporaryDirectories.push(root);
+    await mkdir(path.join(root, 'src'), { recursive: true });
+    await mkdir(path.join(root, '.forexplore'), { recursive: true });
+    await writeFile(path.join(root, 'src', 'Target.java'), 'class Target { void run() {} }');
+    await writeFile(path.join(root, '.forexplore', 'module-summary.json'), JSON.stringify({
+      schemaVersion: '1.0',
+      generated: {
+        snapshotId: 'snapshot',
+        planId: 'plan',
+        status: 'approved',
+        modules: [{
+          id: 'target',
+          name: '目标模块',
+          description: '目标模块边界',
+          coreApis: 'Target.run',
+          sourceFiles: ['src/Target.java'],
+        }],
+        executionWaves: [],
+      },
+      human: { approvalsCurrent: true },
+    }));
+
+    const result = await buildModuleExplorer({
+      workspaceRoot: root,
+      workspaceName: 'Target',
+      currentTarget: {
+        id: 'editor-target',
+        name: 'run',
+        kind: 'function',
+        path: 'src/Target.java',
+        language: 'Java',
+        signature: 'void run()',
+        line: 1,
+      },
+      historyRoots: [],
+    });
+
+    expect(result.presentation.target.error).toBeUndefined();
+    expect(result.presentation.target.tree).not.toHaveLength(0);
+    expect(result.presentation.target.summary).toMatchObject({
+      exists: false,
+      error: expect.stringContaining('结构无效'),
+    });
+  });
 });
 
 function moduleSummary(): ModuleSummary {
@@ -208,6 +296,10 @@ function moduleSummary(): ModuleSummary {
           id: 'payments',
           name: '支付模块',
           description: '支付业务边界',
+          purpose: '负责支付发起、确认与退款复用入口',
+          coreApis: ['PaymentService.Pay'],
+          language: 'C#',
+          domain: '支付',
           sourceFiles: ['src/Payments/PaymentService.cs'],
         },
         {

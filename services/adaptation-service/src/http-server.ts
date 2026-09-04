@@ -15,6 +15,10 @@ import type {
   CodeAdaptationPort,
   RepositoryArchitecturePort,
 } from "@forexplore/workflow-core";
+import type {
+  RevisionScopedArchitecturePort,
+  ToolCallingArchitectRequest,
+} from "./tool-calling-architect-runtime";
 
 export interface StaticAnalysisSnapshotStore {
   /** Returns only a server-persisted snapshot; HTTP never supplies source or paths. */
@@ -27,6 +31,8 @@ export interface HttpServerOptions {
   architecturePort?: RepositoryArchitecturePort;
   /** Server-owned static-analysis snapshots addressed by their immutable ID. */
   staticAnalysisSnapshots?: StaticAnalysisSnapshotStore;
+  /** Revision-native planning path backed only by SemanticQueryPort tools. */
+  semanticArchitecturePort?: RevisionScopedArchitecturePort;
   /** Browser CORS is opt-in; the VS Code extension host uses local HTTP directly. */
   corsOrigin?: string;
 }
@@ -140,8 +146,16 @@ function isAdaptationRequest(value: unknown): value is AdaptationRequest {
   );
 }
 
-interface ModulePlanHttpRequest {
+export interface ModulePlanHttpRequest {
   snapshotId: string;
+  objective: string;
+  immutableConstraints?: string[];
+}
+
+export interface SemanticModulePlanHttpRequest {
+  repositoryId: string;
+  analysisRevision: string;
+  projectId?: string;
   objective: string;
   immutableConstraints?: string[];
 }
@@ -163,6 +177,42 @@ function isModulePlanHttpRequest(value: unknown): value is ModulePlanHttpRequest
   if (
     typeof body.snapshotId !== "string" ||
     !body.snapshotId.trim() ||
+    typeof body.objective !== "string" ||
+    !body.objective.trim() ||
+    body.objective.length > maxPlanningObjectiveChars
+  ) {
+    return false;
+  }
+  if (body.immutableConstraints === undefined) return true;
+  return (
+    isStringArray(body.immutableConstraints) &&
+    body.immutableConstraints.length <= maxPlanningConstraints &&
+    body.immutableConstraints.every(
+      (constraint) => constraint.trim() && constraint.length <= maxPlanningConstraintChars,
+    )
+  );
+}
+
+/**
+ * This route deliberately receives only a stable index scope and planning
+ * intent.  It cannot upload a legacy snapshot, analysis hash, source text, or
+ * local path; the ToolCallingArchitectRuntime reads those facts from the
+ * revision-scoped SemanticQueryPort itself.
+ */
+function isSemanticModulePlanHttpRequest(value: unknown): value is SemanticModulePlanHttpRequest {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const body = value as Record<string, unknown>;
+  const allowedKeys = new Set(["repositoryId", "analysisRevision", "projectId", "objective", "immutableConstraints"]);
+  if (Object.keys(body).some((key) => !allowedKeys.has(key))) return false;
+  if (
+    typeof body.repositoryId !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/.test(body.repositoryId) ||
+    typeof body.analysisRevision !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/.test(body.analysisRevision) ||
+    (body.projectId !== undefined && (
+      typeof body.projectId !== "string" ||
+      !/^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/.test(body.projectId)
+    )) ||
     typeof body.objective !== "string" ||
     !body.objective.trim() ||
     body.objective.length > maxPlanningObjectiveChars
@@ -270,6 +320,43 @@ export function createHttpServer(options: HttpServerOptions): Server {
         return;
       }
 
+      if (request.method === "POST" && request.url === "/v1/semantic-module-plan") {
+        if (!options.semanticArchitecturePort) {
+          json(
+            response,
+            404,
+            { error: "Revision-scoped semantic module planning is not configured." },
+            options.corsOrigin,
+          );
+          return;
+        }
+        requireJson(request);
+        const body = await readBody(request);
+        if (!isSemanticModulePlanHttpRequest(body)) {
+          json(
+            response,
+            400,
+            { error: "Invalid semantic module planning payload. Submit only repositoryId, analysisRevision, projectId, objective, and immutableConstraints." },
+            options.corsOrigin,
+          );
+          return;
+        }
+        const semanticRequest: ToolCallingArchitectRequest = {
+          schemaVersion: moduleMigrationSchemaVersion,
+          repositoryId: body.repositoryId,
+          analysisRevision: body.analysisRevision,
+          ...(body.projectId === undefined ? {} : { projectId: body.projectId }),
+          objective: body.objective,
+          ...(body.immutableConstraints === undefined ? {} : { immutableConstraints: body.immutableConstraints }),
+        };
+        const result = await options.semanticArchitecturePort.proposeModulePlanWithEvidence(
+          semanticRequest,
+          requestSignal(request),
+        );
+        json(response, 200, result, options.corsOrigin);
+        return;
+      }
+
       if (request.method === "POST" && request.url === "/v1/backfill") {
         // A bare HTTP client is not an approval authority. Until this service
         // has a server-owned run manifest and authorization layer, write-back
@@ -292,5 +379,3 @@ export function createHttpServer(options: HttpServerOptions): Server {
     }
   });
 }
-
-export type { ModulePlanHttpRequest };

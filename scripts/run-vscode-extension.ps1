@@ -52,7 +52,7 @@ function Start-DevWindow {
     [string]$Command
   )
 
-  Start-Process -FilePath 'powershell.exe' -WorkingDirectory $repoRoot -ArgumentList @(
+  Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -WorkingDirectory $repoRoot -ArgumentList @(
     '-NoExit',
     '-ExecutionPolicy',
     'Bypass',
@@ -62,6 +62,11 @@ function Start-DevWindow {
 }
 
 Start-DevWindow -Command 'npm run dev:retrieval'
+# The adaptation planner is revision-scoped in the rebuilt flow. It receives
+# only this loopback SemanticQueryPort and never gets repository paths.
+$env:ADAPTATION_SEMANTIC_INDEX_ENABLED = 'true'
+$env:SEMANTIC_QUERY_PORT_URL = 'http://127.0.0.1:8790'
+if (-not $env:CODE_INTELLIGENCE_SEEKDB_DATABASE) { $env:CODE_INTELLIGENCE_SEEKDB_DATABASE = 'forexplore_code_intelligence' }
 Start-DevWindow -Command 'npm run dev:adaptation'
 
 & code ('--extensionDevelopmentPath={0}' -f $extensionRoot)

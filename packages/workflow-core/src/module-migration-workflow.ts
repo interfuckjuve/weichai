@@ -72,6 +72,9 @@ function normalizeModules(
   return proposal.modules
     .map((module) => ({
       ...module,
+      purpose: module.purpose === undefined ? undefined : module.purpose.trim(),
+      coreApis: module.coreApis === undefined ? undefined : sortedUnique(module.coreApis),
+      domain: module.domain === undefined ? undefined : module.domain.trim(),
       sourceFiles: sortedUnique(module.sourceFiles),
       testFiles: sortedUnique(module.testFiles ?? []),
       generatedFiles: sortedUnique(module.generatedFiles ?? []),

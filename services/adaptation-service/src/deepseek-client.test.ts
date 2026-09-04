@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { chatCompletionContent, completeWithDeepSeek } from "./deepseek-client";
+import { chatCompletionContent, completeWithDeepSeek, completeWithDeepSeekTools } from "./deepseek-client";
 
 describe("DeepSeek chat-completions client", () => {
   it("uses the chat-completions endpoint and keeps caller-supplied messages intact", async () => {
@@ -51,5 +51,40 @@ describe("DeepSeek chat-completions client", () => {
         { apiKey: "test-key", request: request as unknown as typeof globalThis.fetch },
       ),
     ).rejects.toThrow("DeepSeek API error 401: invalid key");
+  });
+
+  it("serializes declared functions and returns provider tool calls without executing them", async () => {
+    const request = vi.fn(async (_url: URL | RequestInfo, _init?: RequestInit) => new Response(JSON.stringify({
+      choices: [{ message: {
+        content: null,
+        tool_calls: [{ id: "call-search", type: "function", function: {
+          name: "search_symbols",
+          arguments: '{"query":"QuoteService"}',
+        } }],
+      } }],
+    }), { status: 200 }));
+
+    await expect(completeWithDeepSeekTools(
+      [{ role: "user", content: "Find the quote service." }],
+      [{
+        name: "search_symbols",
+        description: "Search a revision.",
+        inputSchema: { type: "object", properties: { query: { type: "string" } } },
+      }],
+      {
+        apiKey: "test-key",
+        modelConfig: { apiBase: "https://api.deepseek.test/v1", model: "deepseek-test" },
+        request: request as unknown as typeof globalThis.fetch,
+        temperature: 0,
+      },
+    )).resolves.toEqual({
+      toolCalls: [{ id: "call-search", name: "search_symbols", arguments: '{"query":"QuoteService"}' }],
+    });
+
+    const init = request.mock.calls[0]?.[1];
+    expect(JSON.parse(String(init?.body))).toMatchObject({
+      tool_choice: "auto",
+      tools: [{ type: "function", function: { name: "search_symbols" } }],
+    });
   });
 });

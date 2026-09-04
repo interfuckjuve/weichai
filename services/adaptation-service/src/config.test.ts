@@ -34,6 +34,34 @@ describe("adaptation service config", () => {
     expect(config.analysisRoot).toBe("/tmp/workspace/.forexplore/analysis");
   });
 
+  it("enables the revision-scoped semantic planner only with an explicit host query-port configuration", () => {
+    expect(loadConfig({ DEEPSEEK_API_KEY: "sk-test" }).semanticQueryPort).toBeUndefined();
+    const config = loadConfig({
+      DEEPSEEK_API_KEY: "sk-test",
+      ADAPTATION_SEMANTIC_INDEX_ENABLED: "true",
+      SEMANTIC_QUERY_PORT_URL: "http://semantic-host.local:8790/api",
+      SEMANTIC_QUERY_PORT_TOKEN: " host-issued-token ",
+    });
+
+    expect(config.semanticQueryPort).toEqual({
+      endpoint: "http://semantic-host.local:8790/api",
+      bearerToken: "host-issued-token",
+    });
+  });
+
+  it("requires a host HTTP endpoint instead of a local semantic storage configuration", () => {
+    expect(() => loadConfig({
+      DEEPSEEK_API_KEY: "sk-test",
+      ADAPTATION_SEMANTIC_INDEX_ENABLED: "true",
+    })).toThrow("SEMANTIC_QUERY_PORT_URL is required");
+
+    expect(() => loadConfig({
+      DEEPSEEK_API_KEY: "sk-test",
+      ADAPTATION_SEMANTIC_INDEX_ENABLED: "true",
+      SEMANTIC_QUERY_PORT_URL: "seekdb://localhost:2881",
+    })).toThrow("SEMANTIC_QUERY_PORT_URL must be an http(s) URL.");
+  });
+
   it("accepts the merged branch's skeleton variable as a compatibility alias", () => {
     const config = loadConfig({
       DEEPSEEK_API_KEY: "sk-test",

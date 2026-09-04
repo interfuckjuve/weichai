@@ -34,6 +34,10 @@ const paymentModule: ModuleExplorerNode = {
   name: '支付模块',
   kind: 'module',
   description: '处理支付发起、确认与退款',
+  purpose: '负责支付发起、确认与退款复用入口',
+  coreApis: ['PaymentService.Pay', 'PaymentService.Refund'],
+  language: 'C#',
+  domain: '支付',
   children: [{
     id: 'file:payment-service',
     name: 'PaymentService.cs',
@@ -166,7 +170,8 @@ describe('ModuleWorkspace history configuration prompt', () => {
     expect(markup).toContain('历史模块库');
     expect(markup).toContain('模块目录');
     expect(markup).toContain('支付模块');
-    expect(markup).toContain('处理支付发起、确认与退款');
+    expect(markup).toContain('负责支付发起、确认与退款复用入口');
+    expect(markup).toContain('支付');
     expect(markup).toContain('1 文件');
     expect(markup).toContain('1 类型');
     expect(markup).toContain('1 方法');
@@ -189,6 +194,20 @@ describe('ModuleWorkspace history configuration prompt', () => {
     expect(markup).toContain('src/Payments/PaymentService.cs');
   });
 
+  it('previews committed module summary metadata for a selected module', () => {
+    const explorer: ModuleExplorerPresentation = {
+      generatedAt: '2026-09-01T00:00:00.000Z',
+      target: targetWorkspace,
+      history: [historyWorkspace],
+    };
+    const markup = renderWorkspace(explorer, 'history', 'module:payments');
+
+    expect(markup).toContain('负责支付发起、确认与退款复用入口');
+    expect(markup).toContain('PaymentService.Pay');
+    expect(markup).toContain('PaymentService.Refund');
+    expect(markup).toContain('C#');
+  });
+
   it('selects a module from the module catalog', () => {
     const explorer: ModuleExplorerPresentation = {
       generatedAt: '2026-09-01T00:00:00.000Z',
@@ -203,7 +222,7 @@ describe('ModuleWorkspace history configuration prompt', () => {
       root.render(workspaceElement(explorer, 'history', null, onNodeSelect));
     });
     const moduleCard = [...container.querySelectorAll('button')]
-      .find((button) => button.textContent?.includes('处理支付发起、确认与退款'));
+      .find((button) => button.textContent?.includes('负责支付发起、确认与退款复用入口'));
     expect(moduleCard).toBeDefined();
     act(() => moduleCard?.click());
     expect(onNodeSelect).toHaveBeenCalledWith(paymentModule);

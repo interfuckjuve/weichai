@@ -5,6 +5,7 @@ import type {
   ModuleFileAssignment,
   ModuleMigrationPlan,
   ModuleMigrationProposal,
+  ModuleSummaryLanguage,
   RepositoryStaticAnalysis,
 } from '@forexplore/contracts';
 import { isValidModuleId, moduleMigrationSchemaVersion } from '@forexplore/contracts';
@@ -51,6 +52,17 @@ export interface DependencyModuleEndpoints {
 function canonicalPath(path: string): string {
   return path.replaceAll('\\', '/').replace(/^\.\//, '');
 }
+
+const moduleSummaryLanguages = new Set<ModuleSummaryLanguage>([
+  'TypeScript',
+  'Python',
+  'Java',
+  'C#',
+  'Rust',
+  'Go',
+  'Mixed',
+  'Unknown',
+]);
 
 export function isHardInternalDependency(edge: DependencyEdge): boolean {
   return (
@@ -528,6 +540,7 @@ export function validateModuleMigrationProposal(
         moduleIds: [module.id],
       });
     }
+    validateModuleSummaryFields(module, issues);
     for (const path of module.sourceFiles) {
       const snapshotFile = analysis.files.find((file) => canonicalPath(file.path) === canonicalPath(path));
       if (snapshotFile === undefined) {
@@ -676,6 +689,63 @@ export function validateModuleMigrationProposal(
     }),
     cycles,
   };
+}
+
+function validateModuleSummaryFields(
+  module: FunctionalModule,
+  issues: ModulePlanIssue[],
+): void {
+  if (module.purpose !== undefined && (typeof module.purpose !== 'string' || !module.purpose.trim())) {
+    appendIssue(issues, {
+      code: 'module-purpose-invalid',
+      severity: 'error',
+      message: `Module ${module.id} purpose must be non-empty when supplied.`,
+      moduleIds: [module.id],
+    });
+  }
+  if (module.domain !== undefined && (typeof module.domain !== 'string' || !module.domain.trim())) {
+    appendIssue(issues, {
+      code: 'module-domain-invalid',
+      severity: 'error',
+      message: `Module ${module.id} domain must be non-empty when supplied.`,
+      moduleIds: [module.id],
+    });
+  }
+  if (module.language !== undefined && !moduleSummaryLanguages.has(module.language)) {
+    appendIssue(issues, {
+      code: 'module-language-invalid',
+      severity: 'error',
+      message: `Module ${module.id} language must be a supported module summary language.`,
+      moduleIds: [module.id],
+    });
+  }
+  validateModuleStringList(module, 'coreApis', issues);
+}
+
+function validateModuleStringList(
+  module: FunctionalModule,
+  property: 'coreApis',
+  issues: ModulePlanIssue[],
+): void {
+  const values = module[property];
+  if (values === undefined) return;
+  if (!Array.isArray(values) || values.some((value) => typeof value !== 'string' || !value.trim())) {
+    appendIssue(issues, {
+      code: `module-${property}-invalid`,
+      severity: 'error',
+      message: `Module ${module.id} ${property} must contain only non-empty strings.`,
+      moduleIds: [module.id],
+    });
+    return;
+  }
+  if (new Set(values).size !== values.length) {
+    appendIssue(issues, {
+      code: `module-${property}-duplicate`,
+      severity: 'error',
+      message: `Module ${module.id} ${property} must not contain duplicates.`,
+      moduleIds: [module.id],
+    });
+  }
 }
 
 function incrementCount(counts: Map<string, number>, value: string): void {

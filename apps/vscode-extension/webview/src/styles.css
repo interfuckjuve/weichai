@@ -2112,6 +2112,104 @@ button:disabled {
   font-size: 11px;
 }
 
+.code-intelligence-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.code-intelligence-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 9px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface-2);
+}
+
+.code-intelligence-row > div:first-child {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 2px;
+}
+
+.code-intelligence-row > div:first-child strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+}
+
+.code-intelligence-row > div:first-child span,
+.code-intelligence-facts {
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.code-intelligence-facts {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  max-width: 62%;
+  text-align: right;
+}
+
+.code-intelligence-active-revision {
+  color: var(--fg);
+  font-family: var(--mono);
+}
+
+.code-intelligence-revision-picker {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  max-width: 100%;
+  color: var(--muted);
+}
+
+.code-intelligence-revision-picker select {
+  min-width: 0;
+  max-width: 180px;
+  padding: 2px 4px;
+  border: 1px solid var(--input-border);
+  border-radius: 3px;
+  background: var(--input-bg);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 8px;
+}
+
+.code-intelligence-history-notice,
+.code-intelligence-stale-warning {
+  max-width: 100%;
+  color: var(--warning);
+  font-size: 8px;
+  line-height: 1.35;
+}
+
+.summary-status {
+  padding: 1px 5px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--muted) 14%, transparent);
+}
+
+.summary-status.is-current {
+  background: color-mix(in srgb, var(--ok) 18%, transparent);
+  color: var(--ok);
+}
+
+.summary-status.is-stale {
+  background: color-mix(in srgb, var(--warning) 18%, transparent);
+  color: var(--warning);
+}
+
 .repository-path-fields {
   display: flex;
   flex-direction: column;
@@ -2562,6 +2660,22 @@ button:disabled {
   font-size: 8px;
 }
 
+.history-selection-apis {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 7px;
+}
+
+.history-selection-apis code {
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface-2));
+  color: var(--fg);
+  font-size: 8px;
+}
+
 .history-analysis-fold {
   display: flex;
   align-items: center;
@@ -2819,3 +2933,15 @@ button:disabled {
     flex-wrap: wrap;
   }
 }
+/* Project analysis shares the existing panel palette and remains usable in narrow webviews. */
+.project-selector { display: flex; flex-wrap: wrap; gap: 12px; padding: 12px 20px; border-bottom: 1px solid var(--vscode-panel-border); }
+.project-selector label { display: grid; gap: 6px; min-width: 200px; flex: 1; }
+.project-selector select { width: 100%; padding: 8px; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-panel-border); }
+.project-analysis { margin: 16px; padding: 18px; overflow-wrap: anywhere; }
+.project-analysis h2 { margin-top: 0; font-size: 18px; }
+.project-summary { white-space: pre-wrap; line-height: 1.7; }
+.project-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.project-actions button { padding: 6px 10px; cursor: pointer; }
+.project-analysis details { margin-top: 12px; }
+.project-analysis ul { max-height: 260px; overflow: auto; }
+.unassigned-file { display: block; margin-top: 4px; }
