@@ -1,0 +1,218 @@
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import type { RepositoryIngestionJsonValue } from "@forexplore/contracts";
+import type { EffortLevel, SpawnClaude } from "../claude-client.js";
+import type { SmokeCaseVerdict, VerifierLanguage } from "../smoke-types.js";
+import { createVerificationResult, type VerificationArtifact, type VerificationInput, type VerificationIssue, type VerificationResult, type VerificationStrategy, type VerificationStrategyContext, type VerificationStrategyDescriptor, type VerificationStrategyProvider } from "../verification-types.js";
+import { createWorkspaceBaseline, writeWorkspaceBaseline } from "../workspace-baseline.js";
+import { runSmoke, type SmokeResult, type SmokeRunOptions } from "./smoke-runner.js";
+import type { SmokeTaskInput } from "./prompts/smoke-task.js";
+
+export const DIFFERENTIAL_SMOKE_STRATEGY: VerificationStrategyDescriptor = {
+  id: "differential-smoke",
+  version: "1.0.0",
+  displayName: "Differential Smoke",
+};
+
+export type RunSmokeImpl = typeof runSmoke;
+
+export interface DifferentialSmokeStrategyOptions {
+  runSmoke?: RunSmokeImpl;
+  runSmokeImpl?: RunSmokeImpl;
+  apiKey?: string;
+  model?: string;
+  timeoutMs?: number;
+  maxTurns?: number;
+  effort?: EffortLevel;
+  spawnClaude?: SpawnClaude;
+}
+
+const verifierLanguage: ReadonlyMap<string, VerifierLanguage> = new Map([
+  ["java", "Java"],
+  ["csharp", "C#"],
+  ["python", "Python"],
+  ["typescript", "TypeScript"],
+]);
+
+const runnerRoots = ["source/.forexplore-tests", "target/.forexplore-tests"] as const;
+const mutableFiles = ["agent/report.json", "agent/claude-steps.jsonl", "agent/commands.jsonl"] as const;
+
+export class DifferentialSmokeStrategy implements VerificationStrategy {
+  readonly #options: DifferentialSmokeStrategyOptions;
+
+  constructor(options: DifferentialSmokeStrategyOptions = {}) {
+    this.#options = options;
+  }
+
+  async verify(
+    input: VerificationInput,
+    context: VerificationStrategyContext,
+    signal?: AbortSignal,
+  ): Promise<VerificationResult> {
+    const sourceLanguageId = input.request.route?.sourceLanguageId ?? input.request.candidate.entity.languageId;
+    const targetLanguageId = input.request.route?.targetLanguageId ?? input.request.target.entity.languageId;
+    const sourceLanguage = languageFor(sourceLanguageId);
+    const targetLanguage = languageFor(targetLanguageId);
+    if (sourceLanguage === undefined || targetLanguage === undefined) {
+      return createVerificationResult(input, DIFFERENTIAL_SMOKE_STRATEGY, {
+        status: "unverified",
+        summary: `Unsupported differential smoke language route: ${sourceLanguageId} -> ${targetLanguageId}`,
+        issues: [{
+          id: "unsupported-language-route",
+          kind: "unsupported-language",
+          message: `differential-smoke@1.0.0 does not support ${sourceLanguageId} -> ${targetLanguageId}`,
+          evidenceArtifactIds: [],
+        }],
+        artifacts: [],
+        strategyReport: { unsupportedLanguages: { sourceLanguageId, targetLanguageId } },
+      });
+    }
+
+    prepareCallerOwnedWorkspace(context);
+    const smoke = await (this.#options.runSmokeImpl ?? this.#options.runSmoke ?? runSmoke)(
+      smokeInput(input, context, sourceLanguage, targetLanguage),
+      smokeOptions(context, this.#options),
+      signal,
+    );
+    const artifact = await writeSmokeReportArtifact(context, smoke);
+
+    return createVerificationResult(input, DIFFERENTIAL_SMOKE_STRATEGY, {
+      status: smokeStatus(smoke),
+      summary: smoke.summary,
+      issues: smokeIssues(smoke, artifact.id),
+      artifacts: [artifact],
+      strategyReport: smoke.report as unknown as RepositoryIngestionJsonValue,
+    });
+  }
+}
+
+export function createDifferentialSmokeProvider(
+  options: DifferentialSmokeStrategyOptions = {},
+): VerificationStrategyProvider {
+  return {
+    descriptor: DIFFERENTIAL_SMOKE_STRATEGY,
+    create: () => new DifferentialSmokeStrategy(options),
+  };
+}
+
+function smokeInput(
+  input: VerificationInput,
+  context: VerificationStrategyContext,
+  sourceLanguage: VerifierLanguage,
+  targetLanguage: VerifierLanguage,
+): SmokeTaskInput {
+  const targetEntity = input.request.target.entity;
+  const declaration = input.request.targetContext.declarations.find((fact) =>
+    fact.entityId === targetEntity.entityId || fact.path === targetEntity.path,
+  ) ?? input.request.targetContext.declarations[0];
+  return {
+    requirement: input.request.requirement,
+    analysisReport: JSON.stringify(input.analysisReport),
+    source: {
+      language: sourceLanguage,
+      root: context.workspace.sourceRoot,
+      candidatePath: input.request.candidate.entity.path ?? input.request.sourceBundle.files[0]?.path,
+    },
+    target: {
+      language: targetLanguage,
+      className: stringAttribute(declaration?.attributes, "containerName") ?? targetEntity.qualifiedName ?? targetEntity.name,
+      method: targetEntity.name,
+      isStatic: booleanAttribute(declaration?.attributes, "isStatic") ?? false,
+      root: context.workspace.targetRoot,
+      file: targetEntity.path,
+    },
+  };
+}
+
+function smokeOptions(
+  context: VerificationStrategyContext,
+  options: DifferentialSmokeStrategyOptions,
+): SmokeRunOptions {
+  return {
+    mode: "verify-only",
+    workspaceDir: context.workspace.strategyRoot,
+    executionRoot: context.workspace.root,
+    baselinePath: join(context.workspace.root, "baseline.json"),
+    commandEvidencePath: join(context.workspace.strategyRoot, "commands.jsonl"),
+    runnerRoots,
+    apiKey: options.apiKey,
+    model: options.model,
+    timeoutMs: options.timeoutMs,
+    maxTurns: options.maxTurns,
+    effort: options.effort,
+    spawnClaude: options.spawnClaude,
+  };
+}
+
+function prepareCallerOwnedWorkspace(context: VerificationStrategyContext): void {
+  mkdirSync(context.workspace.strategyRoot, { recursive: true });
+  for (const root of runnerRoots) mkdirSync(join(context.workspace.root, root), { recursive: true });
+  writeWorkspaceBaseline(
+    join(context.workspace.root, "baseline.json"),
+    createWorkspaceBaseline(context.workspace.root, runnerRoots, mutableFiles),
+  );
+}
+
+async function writeSmokeReportArtifact(
+  context: VerificationStrategyContext,
+  smoke: SmokeResult,
+): Promise<VerificationArtifact> {
+  const path = "reports/differential-smoke-report.json";
+  mkdirSync(join(context.workspace.strategyRoot, "reports"), { recursive: true });
+  writeFileSync(join(context.workspace.strategyRoot, path), `${JSON.stringify(smoke.report, null, 2)}\n`, "utf8");
+  return context.writeArtifact({
+    id: "differential-smoke-report",
+    kind: "strategy-report",
+    path,
+    contentHash: "0".repeat(64),
+    mediaType: "application/json",
+  });
+}
+
+function smokeStatus(smoke: SmokeResult): VerificationResult["status"] {
+  if (smoke.status === "pass") return "pass";
+  if (smoke.status === "fail") return "fail";
+  return "unverified";
+}
+
+function smokeIssues(smoke: SmokeResult, artifactId: string): VerificationIssue[] {
+  if (smoke.status === "pass") return [];
+  if (smoke.status === "fail") {
+    const bugCases = smoke.evaluation?.bugCases ?? [];
+    if (bugCases.length === 0) {
+      return [issue("smoke-fail", smoke.evaluation?.reason ?? "behavioral-divergence", smoke.summary, artifactId)];
+    }
+    return bugCases.map((caseVerdict, index) => caseIssue(caseVerdict, artifactId, index));
+  }
+  return [issue("smoke-error", smoke.errorReason ?? "smoke-error", smoke.summary, artifactId)];
+}
+
+function caseIssue(caseVerdict: SmokeCaseVerdict, artifactId: string, index: number): VerificationIssue {
+  return {
+    id: `smoke-case-${index + 1}-${caseVerdict.caseId}`,
+    kind: "behavioral-divergence",
+    message: caseVerdict.reasoning || "Differential smoke found a translation behavior divergence.",
+    caseId: caseVerdict.caseId,
+    sourceObservation: caseVerdict.source as RepositoryIngestionJsonValue,
+    targetObservation: caseVerdict.target as RepositoryIngestionJsonValue,
+    evidenceArtifactIds: [artifactId],
+  };
+}
+
+function issue(id: string, kind: string, message: string, artifactId: string): VerificationIssue {
+  return { id, kind, message, evidenceArtifactIds: [artifactId] };
+}
+
+function languageFor(languageId: string): VerifierLanguage | undefined {
+  return verifierLanguage.get(languageId) as VerifierLanguage | undefined;
+}
+
+function stringAttribute(attributes: Record<string, RepositoryIngestionJsonValue> | undefined, name: string): string | undefined {
+  const value = attributes?.[name];
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+}
+
+function booleanAttribute(attributes: Record<string, RepositoryIngestionJsonValue> | undefined, name: string): boolean | undefined {
+  const value = attributes?.[name];
+  return typeof value === "boolean" ? value : undefined;
+}
