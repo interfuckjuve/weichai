@@ -1,5 +1,10 @@
 import type { RepositoryIngestionJsonValue } from "@forexplore/contracts";
-import type { VerificationResult, VerificationService } from "@forexplore/translation-verifier";
+import {
+  DIFFERENTIAL_SMOKE_STRATEGY,
+  type VerificationResult,
+  type VerificationService,
+  type VerificationStrategyDescriptor,
+} from "@forexplore/translation-verifier";
 import type {
   MigrationBehaviorVerificationInputV2,
   MigrationBehaviorVerifierV2,
@@ -8,6 +13,9 @@ import type {
 export class TranslationVerifierV2Adapter implements MigrationBehaviorVerifierV2 {
   readonly providerId = "forexplore.translation-verifier.differential";
   readonly providerVersion = "1.0.0";
+  readonly strategyDescriptor: VerificationStrategyDescriptor = Object.freeze({
+    ...DIFFERENTIAL_SMOKE_STRATEGY,
+  });
 
   constructor(private readonly service: Pick<VerificationService, "verify">) {}
 

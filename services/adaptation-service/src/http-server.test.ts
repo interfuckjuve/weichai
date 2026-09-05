@@ -19,7 +19,10 @@ import {
   materializeMigrationRuntimeCapabilitySnapshot,
   validateAdaptationResultV2,
 } from '@forexplore/workflow-core';
-import { createVerificationResult } from '@forexplore/translation-verifier';
+import {
+  createVerificationResult,
+  type VerificationStrategyDescriptor,
+} from '@forexplore/translation-verifier';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createHttpServer,
@@ -36,6 +39,12 @@ import {
   createAdaptationV2TestFixture,
 } from './adaptation-v2-test-support';
 import { createAdaptationRuntimeCapabilitySnapshot } from './runtime-capability-snapshot';
+
+const httpBehaviorStrategyDescriptor: VerificationStrategyDescriptor = {
+  id: 'forexplore.translation-verifier.differential',
+  version: '1.0.0',
+  displayName: 'Fixture Differential Verifier',
+};
 
 const servers: ReturnType<typeof createHttpServer>[] = [];
 
@@ -227,6 +236,7 @@ function deterministicAdapterV2(
     verifier: {
       providerId: 'forexplore.translation-verifier.differential',
       providerVersion: '1.0.0',
+      strategyDescriptor: httpBehaviorStrategyDescriptor,
       verify: async (input) => createVerificationResult({
         schemaVersion: '1.0',
         request: input.request,
@@ -238,11 +248,7 @@ function deterministicAdapterV2(
           files: input.files,
           patchHash: input.patchHash,
         },
-      }, {
-        id: 'forexplore.translation-verifier.differential',
-        version: '1.0.0',
-        displayName: 'Fixture Differential Verifier',
-      }, {
+      }, httpBehaviorStrategyDescriptor, {
         status: 'pass',
         summary: 'Controlled local test-fixture verifier passed.',
         issues: [],

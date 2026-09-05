@@ -5,6 +5,7 @@ import type { RepositoryIngestionJsonValue } from "@forexplore/contracts";
 import {
   createVerificationResult,
   type VerificationResult,
+  type VerificationStrategyDescriptor,
 } from "@forexplore/translation-verifier";
 import {
   evaluateValidationPolicyGate,
@@ -68,12 +69,19 @@ function deterministicProviders() {
   return { analyzer, planner, translator };
 }
 
+const behaviorStrategyDescriptor: VerificationStrategyDescriptor = {
+  id: "forexplore.translation-verifier.differential",
+  version: "1.0.0",
+  displayName: "Fixture Differential Verifier",
+};
+
 // Test-only seam: it executes only the fixed repository fixture in local child
 // processes. It is deterministic evidence for this test, not a production
 // isolated-executor attestation (it inherits this test process environment).
 const behaviorVerifier: MigrationBehaviorVerifierV2 = {
   providerId: "forexplore.translation-verifier.differential",
   providerVersion: "1.0.0",
+  strategyDescriptor: behaviorStrategyDescriptor,
   async verify(input) {
     const samples = ["  alpha ", "Beta"];
     const tsxCli = fileURLToPath(
@@ -135,6 +143,7 @@ function validVerificationResult(
     artifacts: [],
     strategyReport: {},
   },
+  descriptor: VerificationStrategyDescriptor = behaviorStrategyDescriptor,
 ): VerificationResult {
   return createVerificationResult({
     schemaVersion: "1.0",
@@ -147,14 +156,10 @@ function validVerificationResult(
       files: input.files,
       patchHash: input.patchHash,
     },
-  }, {
-    id: "forexplore.translation-verifier.differential",
-    version: "1.0.0",
-    displayName: "Fixture Differential Verifier",
-  }, output, () => adaptationV2TestNow);
+  }, descriptor, output, () => adaptationV2TestNow);
 }
 
-type VerificationResultMutation = (result: VerificationResult) => VerificationResult;
+type VerificationResultMutation = (input: MigrationBehaviorVerificationInputV2) => VerificationResult;
 
 describe("AdaptationAdapterV2", () => {
   it("uses the full TypeScript bundle and adapter-owned Python facts to produce a validated patch", async () => {
@@ -231,15 +236,27 @@ describe("AdaptationAdapterV2", () => {
   });
 
   it.each<[string, VerificationResultMutation]>([
-    ["stale subjectHash", (result) => ({ ...result, subjectHash: "f".repeat(64) })],
-    ["wrong round", (result) => ({ ...result, round: result.round + 1 })],
-    ["invalid contentHash", (result) => ({ ...result, contentHash: "f".repeat(64) })],
+    ["stale subjectHash", (input) => ({ ...validVerificationResult(input), subjectHash: "f".repeat(64) })],
+    ["wrong round", (input) => {
+      const result = validVerificationResult(input);
+      return { ...result, round: result.round + 1 };
+    }],
+    ["invalid contentHash", (input) => ({ ...validVerificationResult(input), contentHash: "f".repeat(64) })],
+    ["wrong strategyId", (input) => validVerificationResult(input, undefined, {
+      ...behaviorStrategyDescriptor,
+      id: "unexpected-strategy",
+    })],
+    ["wrong strategyVersion", (input) => validVerificationResult(input, undefined, {
+      ...behaviorStrategyDescriptor,
+      version: "9.9.9",
+    })],
   ])("fails closed when the behavior verifier returns a %s", async (_name, mutate) => {
     const fixture = createAdaptationV2TestFixture();
     const verifier: MigrationBehaviorVerifierV2 = {
       providerId: "forexplore.translation-verifier.differential",
       providerVersion: "1.0.0",
-      verify: vi.fn(async (input) => mutate(validVerificationResult(input))),
+      strategyDescriptor: behaviorStrategyDescriptor,
+      verify: vi.fn(async (input) => mutate(input)),
     };
     const adapter = new AdaptationAdapterV2({
       runtimeCapabilities: fixture.serviceRuntime,

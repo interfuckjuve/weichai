@@ -16,6 +16,7 @@ import {
   assertVerificationResult,
   type VerificationInput,
   type VerificationResult,
+  type VerificationStrategyDescriptor,
 } from "@forexplore/translation-verifier";
 import {
   calculatePatchHashV2,
@@ -136,6 +137,8 @@ export interface MigrationBehaviorVerificationInputV2 {
 }
 
 export interface MigrationBehaviorVerifierV2 extends ProviderIdentity {
+  readonly strategyDescriptor: VerificationStrategyDescriptor;
+
   verify(
     input: MigrationBehaviorVerificationInputV2,
     signal?: AbortSignal,
@@ -380,6 +383,7 @@ export class AdaptationAdapterV2 implements CodeAdaptationPortV2 {
       ? verificationResultEvidence(
           await this.#verifier.verify(behaviorInput, signal),
           behaviorVerificationInput(behaviorInput),
+          this.#verifier.strategyDescriptor,
         )
       : undefined;
     signal?.throwIfAborted();
@@ -681,13 +685,10 @@ function behaviorVerificationInput(input: MigrationBehaviorVerificationInputV2):
 function verificationResultEvidence(
   result: VerificationResult,
   input: VerificationInput,
+  descriptor: VerificationStrategyDescriptor,
 ): MigrationValidationEvidenceV2 {
   try {
-    const verified = assertVerificationResult(result, input, {
-      id: result.strategyId,
-      version: result.strategyVersion,
-      displayName: "Behavior verifier result",
-    });
+    const verified = assertVerificationResult(result, input, descriptor);
     return {
       status: verified.status,
       summary: verified.summary,

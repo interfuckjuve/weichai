@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
+import type { RepositoryIngestionJsonValue } from "@forexplore/contracts";
 import { calculatePatchHashV2 } from "@forexplore/workflow-core";
-import type { VerificationResult, VerificationService } from "@forexplore/translation-verifier";
+import {
+  createVerificationResult,
+  DIFFERENTIAL_SMOKE_STRATEGY,
+  type VerificationService,
+} from "@forexplore/translation-verifier";
 import { TranslationVerifierV2Adapter } from "./translation-verifier-v2-adapter";
 import type {
   MigrationAnalysisV2,
@@ -57,20 +62,25 @@ describe("TranslationVerifierV2Adapter", () => {
     }];
     const patchHash = calculatePatchHashV2(files);
     const signal = AbortSignal.abort("stop");
-    const result = {
-      schemaVersion: "1.0",
-      strategyId: "differential-smoke",
-      strategyVersion: "1.0.0",
-      subjectHash: patchHash,
-      round: 1,
+    const verificationInput = {
+      schemaVersion: "1.0" as const,
+      request,
+      analysisReport: analysis as unknown as RepositoryIngestionJsonValue,
+      migrationPlan: plan as unknown as RepositoryIngestionJsonValue,
+      translation: {
+        round: 1,
+        generatedContent: translation.generatedContent,
+        files,
+        patchHash,
+      },
+    };
+    const result = createVerificationResult(verificationInput, DIFFERENTIAL_SMOKE_STRATEGY, {
       status: "pass",
       summary: "verified",
       issues: [],
       artifacts: [],
       strategyReport: { cases: 1 },
-      createdAt: "2026-09-05T00:00:00.000Z",
-      contentHash: "c".repeat(64),
-    } satisfies VerificationResult;
+    }, () => "2026-09-05T00:00:00.000Z");
     const service = {
       verify: vi.fn(async () => result),
     } satisfies Pick<VerificationService, "verify">;
@@ -88,6 +98,9 @@ describe("TranslationVerifierV2Adapter", () => {
 
     expect(adapter.providerId).toBe("forexplore.translation-verifier.differential");
     expect(adapter.providerVersion).toBe("1.0.0");
+    expect(adapter.strategyDescriptor).toEqual(DIFFERENTIAL_SMOKE_STRATEGY);
+    expect(adapter.strategyDescriptor).not.toBe(DIFFERENTIAL_SMOKE_STRATEGY);
+    expect(Object.isFrozen(adapter.strategyDescriptor)).toBe(true);
     expect(service.verify).toHaveBeenCalledOnce();
     expect(service.verify).toHaveBeenCalledWith(
       expect.objectContaining({
