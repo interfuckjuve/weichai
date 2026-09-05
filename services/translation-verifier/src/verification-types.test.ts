@@ -80,7 +80,25 @@ describe("verification-types", () => {
     )).toThrow(/subject hash/i);
   });
 
-  it("rejects dangling issue artifact references", () => {
+  it("rejects non-array issue lists and artifact lists", () => {
+    expect(() => createVerificationResult(input(), descriptor, {
+      status: "pass",
+      summary: "verified",
+      issues: {} as never,
+      artifacts: [],
+      strategyReport: {},
+    })).toThrow(/issues.*array/i);
+
+    expect(() => createVerificationResult(input(), descriptor, {
+      status: "pass",
+      summary: "verified",
+      issues: [],
+      artifacts: {} as never,
+      strategyReport: {},
+    })).toThrow(/artifacts.*array/i);
+  });
+
+  it("rejects non-array evidence artifact ids", () => {
     expect(() => createVerificationResult(input(), descriptor, {
       status: "fail",
       summary: "different",
@@ -88,10 +106,16 @@ describe("verification-types", () => {
         id: "issue-1",
         kind: "custom",
         message: "different",
-        evidenceArtifactIds: ["missing"],
+        evidenceArtifactIds: {} as never,
       }],
-      artifacts: [],
+      artifacts: [{
+        id: "artifact-1",
+        kind: "report",
+        path: "reports/result.json",
+        contentHash: "a".repeat(64),
+        mediaType: "application/json",
+      }],
       strategyReport: {},
-    })).toThrow(/artifact/i);
+    })).toThrow(/evidence artifact ids.*array/i);
   });
 });

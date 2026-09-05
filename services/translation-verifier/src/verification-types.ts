@@ -105,8 +105,8 @@ export function createVerificationResult(
   const round = requireNonNegativeInteger(input.translation.round, "Verification translation round");
   const subjectHash = requireSha256(input.translation.patchHash, "Verification translation patch hash");
   const status = requireVerificationStatus(output.status, "Verification result status");
-  const issues = output.issues.map((issue) => validateIssue(issue));
-  const artifacts = output.artifacts.map((artifact) => validateArtifact(artifact));
+  const issues = requireVerificationArray(output.issues, "Verification result issues").map((issue) => validateIssue(issue));
+  const artifacts = requireVerificationArray(output.artifacts, "Verification result artifacts").map((artifact) => validateArtifact(artifact));
   assertUniqueIds(issues.map((issue) => issue.id), "Verification issue");
   assertUniqueIds(artifacts.map((artifact) => artifact.id), "Verification artifact");
   if (output.status === "fail" && issues.length === 0) {
@@ -223,6 +223,10 @@ function validateIssue(issue: VerificationIssue): VerificationIssue {
   if (!isRecord(issue)) {
     throw new Error("Verification issue must be an object.");
   }
+  const evidenceArtifactIds = requireVerificationArray(
+    issue.evidenceArtifactIds,
+    "Verification issue evidence artifact IDs",
+  ).map((artifactId) => requireNonEmptyString(artifactId, "Verification issue evidence artifact ID"));
   return {
     id: requireNonEmptyString(issue.id, "Verification issue ID"),
     kind: requireNonEmptyString(issue.kind, "Verification issue kind"),
@@ -230,11 +234,15 @@ function validateIssue(issue: VerificationIssue): VerificationIssue {
     ...(issue.caseId === undefined ? {} : { caseId: requireNonEmptyString(issue.caseId, "Verification issue case ID") }),
     ...(issue.sourceObservation === undefined ? {} : { sourceObservation: structuredClone(issue.sourceObservation) }),
     ...(issue.targetObservation === undefined ? {} : { targetObservation: structuredClone(issue.targetObservation) }),
-    evidenceArtifactIds: issue.evidenceArtifactIds.map((artifactId) => requireNonEmptyString(
-      artifactId,
-      "Verification issue evidence artifact ID",
-    )),
+    evidenceArtifactIds,
   };
+}
+
+function requireVerificationArray(value: unknown, label: string): unknown[] {
+  if (!Array.isArray(value)) {
+    throw new Error(`${label} must be an array.`);
+  }
+  return value;
 }
 
 function validateArtifact(artifact: VerificationArtifact): VerificationArtifact {

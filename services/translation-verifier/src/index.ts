@@ -1,18 +1,5 @@
 export const translationVerifierSchemaVersion = "1.0" as const;
 
-export { assertVerificationInput, assertVerificationResult, createVerificationResult } from "./verification-types.js";
-export type {
-  VerificationArtifact,
-  VerificationInput,
-  VerificationIssue,
-  VerificationResult,
-  VerificationStrategy,
-  VerificationStrategyContext,
-  VerificationStrategyDescriptor,
-  VerificationStrategyOutput,
-  VerificationStrategyProvider,
-} from "./verification-types.js";
-
 // smoke 差分报告类型(SmokeReport schema,src/smoke-types.ts)。
 export type {
   CaseResult,
