@@ -115,6 +115,10 @@ interface MigrationAttemptV2 {
 const MAX_MIGRATION_REPAIR_ROUNDS = 2;
 
 
+interface ProviderIdentity {
+  providerId: string;
+  providerVersion: string;
+}
 export interface MigrationAnalyzerV2 extends ProviderIdentity {
   analyze(input: MigrationEvidenceInputV2, signal?: AbortSignal): Promise<MigrationAnalysisV2>;
 }
