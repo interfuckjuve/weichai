@@ -86,6 +86,39 @@ describe("DifferentialSmokeStrategy", () => {
     expect(result.issues[0]).toMatchObject({ kind: "invalid-report" });
   });
 
+  it("returns canonical insufficient-context for analysis unresolved without calling runSmoke", async () => {
+    const fakeRunSmoke = vi.fn() as RunSmokeImpl;
+    const result = await new DifferentialSmokeStrategy({ runSmokeImpl: fakeRunSmoke }).verify(
+      inputWithContext({ analysisReport: { unresolved: ["dependency mapping"] } }), context(),
+    );
+    expect(fakeRunSmoke).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ status: "unverified", artifacts: [], issues: [{ id: "insufficient-context", kind: "insufficient-context", evidenceArtifactIds: [] }] });
+    expect(result.strategyReport).toEqual({ preflight: { status: "insufficient-context", reasons: [{ code: "unresolved", fields: ["analysisReport"] }] } });
+  });
+
+  it("returns canonical insufficient-context for migration plan unresolved without calling runSmoke", async () => {
+    const fakeRunSmoke = vi.fn() as RunSmokeImpl;
+    const result = await new DifferentialSmokeStrategy({ runSmokeImpl: fakeRunSmoke }).verify(
+      inputWithContext({ migrationPlan: { unresolved: ["build command"] } }), context(),
+    );
+    expect(fakeRunSmoke).not.toHaveBeenCalled();
+    expect(result.issues[0]).toMatchObject({ id: "insufficient-context", kind: "insufficient-context" });
+  });
+
+  it("returns canonical insufficient-context for declared dependencies without build facts without calling runSmoke", async () => {
+    const fakeRunSmoke = vi.fn() as RunSmokeImpl;
+    const result = await new DifferentialSmokeStrategy({ runSmokeImpl: fakeRunSmoke }).verify(
+      inputWithContext({ sourceBundle: { dependencyIds: ["dep-1"] } }), context(),
+    );
+    expect(fakeRunSmoke).not.toHaveBeenCalled();
+    expect(result.issues[0]).toMatchObject({ id: "insufficient-context", kind: "insufficient-context" });
+  });
+
+  it("calls runSmoke for self-contained supported input after unsupported-language precedence", async () => {
+    const fakeRunSmoke = vi.fn(async () => ({ status: "pass" as const, summary: "ok", durationMs: 1, generatedTestsKept: false, report: validSmokeReport(), evaluation: { status: "pass" as const, bugCases: [], summary: "same" } } satisfies SmokeResult));
+    await new DifferentialSmokeStrategy({ runSmokeImpl: fakeRunSmoke }).verify(input(), context());
+    expect(fakeRunSmoke).toHaveBeenCalledOnce();
+  });
   it("returns unverified for unsupported language IDs without calling runSmoke", async () => {
     const fakeRunSmoke = vi.fn() as RunSmokeImpl;
 
@@ -212,6 +245,20 @@ function request(overrides: { sourceLanguageId?: string; targetLanguageId?: stri
     },
     requirement: "Keep behavior identical.",
   } as unknown as AdaptationRequestV2;
+}
+
+function inputWithContext(overrides: Record<string, unknown>): VerificationInput {
+  const value = input() as unknown as Record<string, unknown>;
+  const requestValue = value.request as Record<string, unknown>;
+  const requestOverrides = Object.fromEntries(Object.entries(overrides).filter(([key]) => key === "sourceBundle" || key === "targetContext"));
+  for (const key of ["sourceBundle", "targetContext"] as const) {
+    if (requestOverrides[key]) requestOverrides[key] = { ...(requestValue[key] as Record<string, unknown>), ...(requestOverrides[key] as Record<string, unknown>) };
+  }
+  return {
+    ...value,
+    ...Object.fromEntries(Object.entries(overrides).filter(([key]) => key !== "sourceBundle" && key !== "targetContext")),
+    request: { ...requestValue, ...requestOverrides },
+  } as unknown as VerificationInput;
 }
 
 function context(): VerificationStrategyContext {

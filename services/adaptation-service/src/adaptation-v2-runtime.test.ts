@@ -1,4 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
+
+vi.mock("@forexplore/translation-verifier", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@forexplore/translation-verifier")>();
+  return { ...actual, createDefaultVerificationService: vi.fn(actual.createDefaultVerificationService) };
+});
+
 import { createVerificationResult, type VerificationService } from "@forexplore/translation-verifier";
 import { createAdaptationV2Runtime } from "./adaptation-v2-runtime";
 import {
@@ -47,6 +53,13 @@ const providers = {
 };
 
 describe("createAdaptationV2Runtime", () => {
+  it("passes explicit API key and verification roots and timeout to the default factory", async () => {
+    const { createDefaultVerificationService } = await import("@forexplore/translation-verifier");
+    const factory = vi.mocked(createDefaultVerificationService);
+    factory.mockClear();
+    createAdaptationV2Runtime({ apiKey: "explicit-key", verificationWorkspaceRoot: "/workspace-root", verificationArtifactRoot: "/artifact-root", verificationTimeoutMs: 456 });
+    expect(factory).toHaveBeenCalledWith({ workspaceRoot: "/workspace-root", artifactRoot: "/artifact-root", timeoutMs: 456, apiKey: "explicit-key" });
+  });
   it("executes V2 verification through the server-owned local verifier", async () => {
     const fixture = createAdaptationV2TestFixture();
     const verify = vi.fn<VerificationService["verifyWithReceipt"]>(async (input) => ({ result: createVerificationResult(input, {

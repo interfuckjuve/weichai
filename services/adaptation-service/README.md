@@ -26,7 +26,7 @@ and its validation policy:
 - Required `fail` or `unverified` validation evidence blocks the result gate;
   compilation alone never proves behavioral correctness.
 
-The production HTTP composition runs the `forexplore.translation-verifier.differential@1.0.0` strategy with `local-process` behavior execution. Processes run on the adaptation-service host and are not isolated, so this is not a production-safe sandbox boundary. The server owns the default strategy; clients cannot select one. Configure `ADAPTATION_VERIFICATION_WORKSPACE_ROOT` (default `<os.tmpdir()>/forexplore-verification-workspaces`), `ADAPTATION_VERIFICATION_ARTIFACT_ROOT` (default `<projectRoot>/.forexplore/verification-artifacts`), and `ADAPTATION_VERIFICATION_TIMEOUT_MS` (default `300000`). Repair is limited to at most three rounds. Repository analysis and workspace apply/rollback remain disabled in the HTTP runtime.
+The production HTTP composition runs the `forexplore.translation-verifier.differential@1.0.0` strategy with `local-process` behavior execution. Processes run on the adaptation-service host and are not isolated, so this is not a production-safe sandbox boundary. The server owns the default strategy; clients cannot select one. Configure `ADAPTATION_VERIFICATION_WORKSPACE_ROOT` (default `<os.tmpdir()>/forexplore-verification-workspaces`), `ADAPTATION_VERIFICATION_ARTIFACT_ROOT` (default `<projectRoot>/.forexplore/verification-artifacts`), and `ADAPTATION_VERIFICATION_TIMEOUT_MS` (default `300000`). Repair is limited to at most two rounds. Repository analysis and workspace apply/rollback remain disabled in the HTTP runtime.
 
 Comprehensive multi-language development is the current engineering direction;
 it is not a claim that every language pair is available. Unknown routes,
@@ -78,7 +78,7 @@ collectTargetContext -> AnalyzerAgent.analyze -> AnalysisReport artifact
   -> TranslatorAgent.translate
   -> compile validation
   -> differential verification -> modification plan
-  -> repairTranslation (at most three rounds) -> recompile/reverify
+  -> repairTranslation (at most two rounds) -> recompile/reverify
 ```
 
 `AnalysisReport` comes from `@forexplore/contracts`; the Translator no longer

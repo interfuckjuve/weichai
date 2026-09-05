@@ -24,6 +24,7 @@ import {
   type MigrationTranslatorV2,
   type MigrationTranslationV2,
 } from "./adaptation-adapter-v2";
+import { createAdaptationRuntimeCapabilitySnapshot } from "./runtime-capability-snapshot";
 import {
   adaptationV2GeneratedContent,
   adaptationV2SourceContent,

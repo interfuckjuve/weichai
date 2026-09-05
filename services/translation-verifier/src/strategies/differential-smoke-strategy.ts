@@ -68,6 +68,22 @@ export class DifferentialSmokeStrategy implements VerificationStrategy {
       });
     }
 
+    const insufficientContext = insufficientContextReason(input);
+    if (insufficientContext !== undefined) {
+      return createVerificationResult(input, DIFFERENTIAL_SMOKE_STRATEGY, {
+        status: "unverified",
+        summary: "Differential smoke verification requires additional migration context.",
+        issues: [{
+          id: "insufficient-context",
+          kind: "insufficient-context",
+          message: insufficientContext.message,
+          evidenceArtifactIds: [],
+        }],
+        artifacts: [],
+        strategyReport: { preflight: insufficientContext.details },
+      });
+    }
+
     prepareCallerOwnedWorkspace(context);
     const smoke = await (this.#options.runSmokeImpl ?? this.#options.runSmoke ?? runSmoke)(
       smokeInput(input, context, sourceLanguage, targetLanguage),
@@ -206,6 +222,36 @@ function issue(id: string, kind: string, message: string, artifactId: string): V
 function languageFor(languageId: string): VerifierLanguage | undefined {
   return verifierLanguage.get(languageId) as VerifierLanguage | undefined;
 }
+
+function insufficientContextReason(input: VerificationInput): { message: string; details: RepositoryIngestionJsonValue } | undefined {
+  const unresolvedFields = [
+    ["analysisReport", input.analysisReport],
+    ["migrationPlan", input.migrationPlan],
+  ].flatMap(([field, value]) => isNonEmptyStringArray(recordValue(value, "unresolved")) ? [field] : []);
+  const sourceDependencies = input.request.sourceBundle.dependencyIds ?? [];
+  const targetDependencies = input.request.targetContext.dependencies ?? [];
+  const missingBuildFacts = (sourceDependencies.length > 0 || targetDependencies.length > 0)
+    && (input.request.targetContext.buildFacts?.length ?? 0) === 0;
+  if (unresolvedFields.length === 0 && !missingBuildFacts) return undefined;
+  const reasons: RepositoryIngestionJsonValue[] = [];
+  if (unresolvedFields.length > 0) reasons.push({ code: "unresolved", fields: unresolvedFields });
+  if (missingBuildFacts) reasons.push({ code: "dependencies-without-build-facts", sourceDependencyCount: sourceDependencies.length, targetDependencyCount: targetDependencies.length });
+  return {
+    message: "Required migration context is unresolved or incomplete.",
+    details: { status: "insufficient-context", reasons },
+  };
+}
+
+function recordValue(value: RepositoryIngestionJsonValue, key: string): RepositoryIngestionJsonValue | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, RepositoryIngestionJsonValue>)[key]
+    : undefined;
+}
+
+function isNonEmptyStringArray(value: RepositoryIngestionJsonValue | undefined): value is string[] {
+  return Array.isArray(value) && value.length > 0 && value.every((item) => typeof item === "string");
+}
+
 
 function stringAttribute(attributes: Record<string, RepositoryIngestionJsonValue> | undefined, name: string): string | undefined {
   const value = attributes?.[name];
