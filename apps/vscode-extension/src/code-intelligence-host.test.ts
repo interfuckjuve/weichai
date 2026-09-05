@@ -1,4 +1,5 @@
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -201,6 +202,31 @@ async function temporaryRepository(name: string): Promise<string> {
   await mkdir(path.join(root, 'src'));
   await writeFile(path.join(root, 'src', 'example.ts'), 'export const example = 1;\n');
   return root;
+}
+
+async function availablePort(): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('Unable to allocate a test port.');
+  await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  return address.port;
+}
+
+function semanticQueryTestServer(options: { bearerToken?: string }) {
+  return createServer((request, response) => {
+    const authorization = request.headers.authorization;
+    if (options.bearerToken && authorization !== `Bearer ${options.bearerToken}`) {
+      response.writeHead(401, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ error: { message: 'Unauthorized.' } }));
+      return;
+    }
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ repositories: [] }));
+  });
 }
 
 function javaCompilerProbeAnalysis(sha256 = 'sha-1'): RepositoryStaticAnalysis {
@@ -432,5 +458,47 @@ it('processes a saved configuration that arrives during a scan, including remova
   const result = await updated;
   expect(result.presentation.repositories).toHaveLength(1);
   expect(result.presentation.repositories[0]?.displayName).toBe(path.basename(second));
+  expect(await runtime.registry.list!()).toHaveLength(2);
   expect(count).toBe(2);
+});
+
+it('keeps shared repository data while each host presents only its configured repositories', async () => {
+  const first = await temporaryRepository('shared-first');
+  const second = await temporaryRepository('shared-second');
+  const runtime = createRuntime();
+  const firstHost = new CodeIntelligenceHost({ runtimeFactory: async () => runtime });
+  const secondHost = new CodeIntelligenceHost({ runtimeFactory: async () => runtime });
+
+  const firstResult = await firstHost.synchronize({ repositories: [{ localPath: first, role: 'target' }] });
+  const secondResult = await secondHost.synchronize({ repositories: [{ localPath: second, role: 'target' }] });
+
+  expect(firstResult.presentation.repositories.map((repository) => repository.displayName))
+    .toEqual([path.basename(first)]);
+  expect(secondResult.presentation.repositories.map((repository) => repository.displayName))
+    .toEqual([path.basename(second)]);
+  expect(await runtime.registry.list!()).toHaveLength(2);
+  expect((await firstHost.presentation()).repositories.map((repository) => repository.displayName))
+    .toEqual([path.basename(first)]);
+});
+
+it('reuses a compatible semantic query listener owned by another host', async () => {
+  const runtime = createRuntime();
+  const firstHost = new CodeIntelligenceHost({
+    runtimeFactory: async () => runtime,
+    semanticQueryServerFactory: semanticQueryTestServer,
+  });
+  const secondHost = new CodeIntelligenceHost({
+    runtimeFactory: async () => runtime,
+    semanticQueryServerFactory: semanticQueryTestServer,
+  });
+  const port = await availablePort();
+
+  try {
+    const firstEndpoint = await firstHost.startSemanticQueryServer({ port, bearerToken: 'shared-token' });
+    const secondEndpoint = await secondHost.startSemanticQueryServer({ port, bearerToken: 'shared-token' });
+    expect(secondEndpoint).toBe(firstEndpoint);
+  } finally {
+    firstHost.dispose();
+    secondHost.dispose();
+  }
 });

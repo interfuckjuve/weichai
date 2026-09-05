@@ -113,6 +113,32 @@ function codeIntelligenceService(): CodeIntelligenceServiceModule {
   return loadedCodeIntelligenceService;
 }
 
+function isAddressInUse(error: unknown): boolean {
+  return error instanceof Error && 'code' in error && error.code === 'EADDRINUSE';
+}
+
+async function isSemanticQueryEndpoint(
+  endpoint: string,
+  bearerToken?: string,
+): Promise<boolean> {
+  try {
+    const response = await fetch(`${endpoint}/v1/semantic-query/listRepositories`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...(bearerToken ? { authorization: `Bearer ${bearerToken}` } : {}),
+      },
+      body: '{}',
+      signal: AbortSignal.timeout(2_000),
+    });
+    if (!response.ok) return false;
+    const payload = await response.json() as { repositories?: unknown };
+    return Array.isArray(payload.repositories);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Minimal persistence surface supplied by VS Code's globalState.  IDs are
  * deliberately keyed by a digest of a local path, and no local path ever
@@ -147,6 +173,11 @@ export interface CodeIntelligenceHostOptions {
     runtime: CodeIntelligenceRuntime,
     index: StructuralIndex,
   ) => Promise<void>;
+  /** Test seam; production uses the code-intelligence service transport. */
+  semanticQueryServerFactory?: (options: {
+    queryPort: SemanticQueryPort;
+    bearerToken?: string;
+  }) => Server;
 }
 
 export interface CodeIntelligenceRepositoryInput {
@@ -336,9 +367,12 @@ export class CodeIntelligenceHost {
   readonly #storageKind: 'seekdb' | 'memory';
   readonly #now: () => string;
   readonly #projectModuleArtifacts: (runtime: CodeIntelligenceRuntime, index: StructuralIndex) => Promise<void>;
+  readonly #semanticQueryServerFactory: NonNullable<CodeIntelligenceHostOptions['semanticQueryServerFactory']>;
   #runtimePromise: Promise<CodeIntelligenceRuntime> | undefined;
   #synchronizing: Promise<CodeIntelligenceSynchronizationResult> | undefined;
   #ephemeralRepositoryIds = new Map<string, RepositoryId>();
+  /** Repository visibility belongs to one VS Code window, not the shared persistent registry. */
+  #visibleRepositoryIds = new Set<RepositoryId>();
   /** Per-panel-host display choice only; never persisted as repository state. */
   #selectedRevisions = new Map<RepositoryId, string>();
   #selectedProjects = new Map<RepositoryId, ProjectId>();
@@ -361,6 +395,8 @@ export class CodeIntelligenceHost {
     this.#projectModuleArtifacts = options.projectModuleArtifacts ?? (async (runtime, index) => {
       await new (codeIntelligenceService().SeekDbProjection)(runtime.store).projectModuleArtifacts(index);
     });
+    this.#semanticQueryServerFactory = options.semanticQueryServerFactory
+      ?? ((serverOptions) => codeIntelligenceService().createSemanticQueryHttpServer(serverOptions));
   }
 
   /** Safe read-only data boundary suitable for a ToolCallingArchitectRuntime. */
@@ -377,6 +413,14 @@ export class CodeIntelligenceHost {
     port?: number;
     bearerToken?: string;
   } = {}): Promise<string> {
+    if (this.#semanticServerStart) {
+      const endpoint = await this.#semanticServerStart;
+      if (this.#semanticQueryServer?.listening || await isSemanticQueryEndpoint(endpoint, options.bearerToken)) {
+        return endpoint;
+      }
+      this.#semanticServerStart = undefined;
+      this.#semanticQueryEndpoint = undefined;
+    }
     if (!this.#semanticServerStart) {
       this.#semanticServerStart = this.startSemanticQueryServerInternal(options).catch((error) => {
         this.#semanticServerStart = undefined;
@@ -392,23 +436,33 @@ export class CodeIntelligenceHost {
     if (!Number.isInteger(port) || port <= 0 || port > 65_535) {
       throw new Error('Semantic query server port must be a valid TCP port.');
     }
-    const server = codeIntelligenceService().createSemanticQueryHttpServer({
+    const server = this.#semanticQueryServerFactory({
       queryPort: await this.semanticQueryPort(),
       ...(options.bearerToken ? { bearerToken: options.bearerToken } : {}),
     });
-    await new Promise<void>((resolve, reject) => {
-      const onError = (error: Error) => {
-        server.off('error', onError);
-        reject(error);
-      };
-      server.once('error', onError);
-      server.listen(port, '127.0.0.1', () => {
-        server.off('error', onError);
-        resolve();
+    const endpoint = `http://127.0.0.1:${port}`;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const onError = (error: Error) => {
+          server.off('error', onError);
+          reject(error);
+        };
+        server.once('error', onError);
+        server.listen(port, '127.0.0.1', () => {
+          server.off('error', onError);
+          resolve();
+        });
       });
-    });
+    } catch (error) {
+      if (isAddressInUse(error) && await isSemanticQueryEndpoint(endpoint, options.bearerToken)) {
+        this.#semanticQueryEndpoint = endpoint;
+        this.#output?.appendLine(`[forexplore] reusing semantic query port at ${endpoint}.`);
+        return endpoint;
+      }
+      throw error;
+    }
     this.#semanticQueryServer = server;
-    this.#semanticQueryEndpoint = `http://127.0.0.1:${port}`;
+    this.#semanticQueryEndpoint = endpoint;
     this.#output?.appendLine(`[forexplore] semantic query port listening at ${this.#semanticQueryEndpoint}.`);
     return this.#semanticQueryEndpoint;
   }
@@ -648,21 +702,6 @@ export class CodeIntelligenceHost {
       ...input, localPath: await realpath(path.resolve(input.localPath)).catch(() => path.resolve(input.localPath)),
     })));
     const preferredInputs = preferredRepositoryInputs(normalizedInputs);
-    if (runtime.registry.list && runtime.registry.unregister) {
-      const desiredPaths = new Set(preferredInputs.map((input) => repositoryInputKey(input)));
-      for (const existing of await runtime.registry.list()) {
-        if (!desiredPaths.has(repositoryInputKey({ localPath: existing.localPath, role: existing.role }))) {
-          try {
-            await runtime.registry.unregister(existing.repositoryId);
-            this.#selectedRevisions.delete(existing.repositoryId);
-            this.#selectedProjects.delete(existing.repositoryId);
-          } catch (error) {
-            this.logFailure(`unregister code intelligence repository ${existing.repositoryId}`, error);
-            registrationFailed = true;
-          }
-        }
-      }
-    }
     for (const input of preferredInputs) {
       try {
         const repositoryId = await this.repositoryIdFor(input.localPath);
@@ -679,6 +718,10 @@ export class CodeIntelligenceHost {
         this.logFailure('register code intelligence repository', error);
         registrationFailed = true;
       }
+    }
+    this.#visibleRepositoryIds = new Set(registered.keys());
+    if (this.#selectedTarget && !this.#visibleRepositoryIds.has(this.#selectedTarget)) {
+      this.#selectedTarget = undefined;
     }
 
     const scannedRepositoryIds: RepositoryId[] = [];
@@ -751,7 +794,8 @@ export class CodeIntelligenceHost {
     analysis?: ProjectAnalysisRecord; selectedTarget: boolean;
   }>> {
     const runtime = await this.runtime();
-    const repositories = await runtime.registry.list?.() ?? [];
+    const repositories = (await runtime.registry.list?.() ?? [])
+      .filter((repository) => this.#visibleRepositoryIds.has(repository.repositoryId));
     const target = repositories.find((r) => r.repositoryId === this.#selectedTarget && r.role === 'target')
       ?? repositories.find((r) => r.role === 'target');
     return (await Promise.all(repositories.map(async (repository) => {
@@ -793,7 +837,9 @@ export class CodeIntelligenceHost {
 
   private async presentationFor(runtime: CodeIntelligenceRuntime): Promise<CodeIntelligencePresentation> {
     const listed = await runtime.queryPort.listRepositories();
-    const repositories = await Promise.all(listed.repositories.map(async (repository) => {
+    const repositories = await Promise.all(listed.repositories
+      .filter((repository) => this.#visibleRepositoryIds.has(repository.repositoryId))
+      .map(async (repository) => {
       const activeRevision = repository.analysisRevision;
       const availableRevisions = await this.revisionPresentations(
         runtime,
@@ -869,7 +915,7 @@ export class CodeIntelligenceHost {
             : null,
         ),
       } satisfies CodeIntelligenceRepositoryPresentation;
-    }));
+      }));
     const message = this.#lastFailure
       ? '部分仓库索引失败；请检查扩展输出日志。'
       : this.#storageKind === 'memory'
