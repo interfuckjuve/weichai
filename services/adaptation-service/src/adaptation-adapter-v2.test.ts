@@ -13,6 +13,8 @@ import {
 } from "@forexplore/workflow-core";
 import {
   AdaptationAdapterV2,
+  DeepSeekMigrationTranslatorV2,
+  type MigrationAnalysisV2,
   type MigrationAnalyzerV2,
   type MigrationBehaviorVerificationInputV2,
   type MigrationBehaviorVerifierV2,
@@ -65,6 +67,7 @@ function deterministicProviders() {
       completedSteps: ["Mapped the reviewed behavior."],
       unresolved: [],
     })),
+    repair: vi.fn(),
   };
   return { analyzer, planner, translator };
 }
@@ -162,6 +165,31 @@ function validVerificationResult(
 type VerificationResultMutation = (input: MigrationBehaviorVerificationInputV2) => VerificationResult;
 
 describe("AdaptationAdapterV2", () => {
+  it("sends structured repair feedback without strategy reports", async () => {
+    const fixture = createAdaptationV2TestFixture();
+    const request = vi.fn(async (_url: URL | RequestInfo, _init?: RequestInit) => new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify({
+        schemaVersion: "1.0",
+        generatedContent: adaptationV2GeneratedContent,
+        completedSteps: [],
+        unresolved: [],
+      }) } }],
+    }), { status: 200 }));
+    const translator = new DeepSeekMigrationTranslatorV2({ apiKey: "test-key", request: request as unknown as typeof globalThis.fetch });
+    const analysis: MigrationAnalysisV2 = { schemaVersion: "1.0", behavior: [], targetConstraints: [], mappings: [], risks: [], unresolved: [] };
+    const plan = { schemaVersion: "1.0" as const, steps: [], preservedFacts: [], expectedTargetChanges: [], validationFocus: [], unresolved: [] };
+    await translator.repair(fixture.request as never, analysis, plan, {
+      schemaVersion: "1.0", generatedContent: "previous", completedSteps: [], unresolved: [],
+    }, {
+      round: 1, inputPatchHash: "a".repeat(64), issues: [{ id: "x", kind: "behavioral-divergence", message: "m", evidenceArtifactIds: [] }], validationRecordIds: [],
+    });
+    const body = JSON.parse(String(request.mock.calls[0]?.[1]?.body));
+    const payload = JSON.parse(body.messages[1].content);
+    expect(payload.feedback.issues).toEqual([expect.objectContaining({ kind: "behavioral-divergence" })]);
+    expect(JSON.stringify(payload)).not.toContain("strategyReport");
+    expect(payload).toHaveProperty("previous");
+  });
+
   it("uses the full TypeScript bundle and adapter-owned Python facts to produce a validated patch", async () => {
     const fixture = createAdaptationV2TestFixture();
     const providers = deterministicProviders();

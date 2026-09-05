@@ -15,6 +15,7 @@ import type {
 import {
   assertVerificationResult,
   type VerificationInput,
+  type VerificationIssue,
   type VerificationResult,
   type VerificationStrategyDescriptor,
 } from "@forexplore/translation-verifier";
@@ -91,6 +92,15 @@ export interface MigrationTranslationV2 {
   unresolved: string[];
 }
 
+export interface MigrationRepairFeedbackV2 {
+  round: number;
+  inputPatchHash: string;
+  issues: VerificationIssue[];
+  validationRecordIds: string[];
+  verificationResultHash?: string;
+  verificationArtifactPath?: string;
+}
+
 interface ProviderIdentity {
   providerId: string;
   providerVersion: string;
@@ -114,6 +124,14 @@ export interface MigrationTranslatorV2 extends ProviderIdentity {
     input: MigrationEvidenceInputV2,
     analysis: MigrationAnalysisV2,
     plan: MigrationPlanV2,
+    signal?: AbortSignal,
+  ): Promise<MigrationTranslationV2>;
+  repair(
+    input: MigrationEvidenceInputV2,
+    analysis: MigrationAnalysisV2,
+    plan: MigrationPlanV2,
+    previous: MigrationTranslationV2,
+    feedback: MigrationRepairFeedbackV2,
     signal?: AbortSignal,
   ): Promise<MigrationTranslationV2>;
 }
@@ -498,6 +516,27 @@ export class DeepSeekMigrationTranslatorV2 implements MigrationTranslatorV2 {
       signal,
     );
     return validateTranslation(parseJson(raw, "V2 translator"));
+  }
+
+  async repair(
+    input: MigrationEvidenceInputV2,
+    analysis: MigrationAnalysisV2,
+    plan: MigrationPlanV2,
+    previous: MigrationTranslationV2,
+    feedback: MigrationRepairFeedbackV2,
+    signal?: AbortSignal,
+  ): Promise<MigrationTranslationV2> {
+    const raw = await neutralCompletion(
+      [
+        "Repair the previous translation using only normalized verification issues and validated migration artifacts.",
+        "Do not request or infer strategy-specific reports.",
+        "Return exactly one replacement for the selected target entity.",
+      ].join(" "),
+      { input, analysis, plan, previous, feedback, output: translationShape },
+      this.options,
+      signal,
+    );
+    return validateTranslation(parseJson(raw, "V2 translator repair"));
   }
 }
 
