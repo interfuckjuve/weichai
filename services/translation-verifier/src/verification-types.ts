@@ -131,7 +131,7 @@ export function createVerificationResult(
     summary: requireNonEmptyString(output.summary, "Verification result summary"),
     issues,
     artifacts,
-    strategyReport: structuredClone(output.strategyReport),
+    strategyReport: cloneJsonValue(output.strategyReport, "Verification strategy report"),
     createdAt: requireNonEmptyString(now(), "Verification result createdAt"),
   };
   return {
@@ -152,11 +152,16 @@ export function assertVerificationInput(input: VerificationInput): VerificationI
   }
   requireNonNegativeInteger(input.translation.round, "Verification translation round");
   requireNonEmptyString(input.translation.generatedContent, "Verification translation generated content");
-  if (!Array.isArray(input.translation.files) || input.translation.files.length === 0) {
-    throw new Error("Verification translation must contain at least one patch.");
-  }
+
+  assertJsonCompatible(input.request, "Verification input request");
+  assertJsonCompatible(input.analysisReport, "Verification input analysis report");
+  assertJsonCompatible(input.migrationPlan, "Verification input migration plan");
+
+  validateVerificationRequestArtifacts(input.request);
+  const translationFiles = requireVerificationArray(input.translation.files, "Verification translation files") as FilePatch[];
+  validateVerificationTranslationFiles(translationFiles);
   const expectedPatchHash = requireSha256(
-    calculatePatchHashV2(input.translation.files),
+    calculatePatchHashV2(translationFiles),
     "Verification translation patch hash",
   );
   if (requireSha256(input.translation.patchHash, "Verification translation patch hash") !== expectedPatchHash) {
@@ -232,8 +237,8 @@ function validateIssue(issue: VerificationIssue): VerificationIssue {
     kind: requireNonEmptyString(issue.kind, "Verification issue kind"),
     message: requireNonEmptyString(issue.message, "Verification issue message"),
     ...(issue.caseId === undefined ? {} : { caseId: requireNonEmptyString(issue.caseId, "Verification issue case ID") }),
-    ...(issue.sourceObservation === undefined ? {} : { sourceObservation: structuredClone(issue.sourceObservation) }),
-    ...(issue.targetObservation === undefined ? {} : { targetObservation: structuredClone(issue.targetObservation) }),
+    ...(issue.sourceObservation === undefined ? {} : { sourceObservation: cloneJsonValue(issue.sourceObservation, "Verification issue source observation") }),
+    ...(issue.targetObservation === undefined ? {} : { targetObservation: cloneJsonValue(issue.targetObservation, "Verification issue target observation") }),
     evidenceArtifactIds,
   };
 }
@@ -245,6 +250,39 @@ function requireVerificationArray(value: unknown, label: string): unknown[] {
     throw new Error(`${label} must be an array.`);
   }
   return [...value];
+}
+
+function validateVerificationRequestArtifacts(request: AdaptationRequestV2): void {
+  const requestRecord = requireRecord(request, "Verification input request");
+  const sourceBundle = requireRecord(requestRecord.sourceBundle, "Verification request sourceBundle");
+  const targetContext = requireRecord(requestRecord.targetContext, "Verification request targetContext");
+  validateVerificationStagedArtifacts(
+    requireVerificationArray(sourceBundle.files, "Verification sourceBundle.files"),
+    "Verification sourceBundle.files",
+  );
+  validateVerificationStagedArtifacts(
+    requireVerificationArray(targetContext.sourceFiles, "Verification targetContext.sourceFiles"),
+    "Verification targetContext.sourceFiles",
+  );
+}
+
+function validateVerificationStagedArtifacts(items: readonly unknown[], label: string): void {
+  items.forEach((item, index) => {
+    const artifact = requireRecord(item, `${label}[${index}]`);
+    normalizeRepositoryRelativePath(artifact.path, `${label}[${index}] path`);
+    const content = requireString(artifact.content, `${label}[${index}] content`);
+    const contentHash = requireSha256(requireString(artifact.contentHash, `${label}[${index}] contentHash`), `${label}[${index}] contentHash`);
+    if (contentHash !== sha256Hex(content)) {
+      throw new Error(`${label}[${index}] contentHash does not match sha256(content).`);
+    }
+  });
+}
+
+function validateVerificationTranslationFiles(files: readonly FilePatch[]): void {
+  files.forEach((patch, index) => {
+    const patchRecord = requireRecord(patch, `Verification translation.files[${index}]`);
+    normalizeRepositoryRelativePath(patchRecord.path, `Verification translation.files[${index}] path`);
+  });
 }
 
 function validateArtifact(artifact: VerificationArtifact): VerificationArtifact {
@@ -261,18 +299,117 @@ function validateArtifact(artifact: VerificationArtifact): VerificationArtifact 
 }
 
 function normalizeArtifactPath(value: string): string {
-  const pathValue = requireNonEmptyString(value, "Verification artifact path");
+  return normalizeRepositoryRelativePath(value, "Verification artifact path");
+}
+
+function normalizeRepositoryRelativePath(value: unknown, label: string): string {
+  const pathValue = requireString(value, label);
   if (pathValue.startsWith("/") || pathValue.startsWith("\\") || /^[A-Za-z]:/.test(pathValue) || /^\\\\/.test(pathValue)) {
-    throw new Error("Verification artifact path must be a normalized relative path.");
+    throw new Error(`${label} must be a normalized safe repository-relative POSIX path.`);
   }
   if (pathValue.includes("\\")) {
-    throw new Error("Verification artifact path must use normalized relative separators.");
+    throw new Error(`${label} must be a normalized safe repository-relative POSIX path.`);
   }
   const normalized = pathPosix.normalize(pathValue);
-  if (normalized !== pathValue || normalized === "." || normalized === "" || normalized.startsWith("../") || normalized.includes("/../") || normalized.endsWith("/..")) {
-    throw new Error("Verification artifact path must be a normalized relative path.");
+  if (
+    normalized !== pathValue ||
+    normalized === "." ||
+    normalized === ".." ||
+    normalized.startsWith("../") ||
+    normalized.includes("/../") ||
+    normalized.endsWith("/..")
+  ) {
+    throw new Error(`${label} must be a normalized safe repository-relative POSIX path.`);
   }
   return normalized;
+}
+
+function cloneJsonValue<T>(value: T, label: string): T {
+  assertJsonCompatible(value, label);
+  return structuredClone(value);
+}
+
+function assertJsonCompatible(value: unknown, label: string): void {
+  assertJsonCompatibleValue(value, label, new Set<object>());
+}
+
+function assertJsonCompatibleValue(value: unknown, label: string, active: Set<object>): void {
+  switch (typeof value) {
+    case "string":
+    case "boolean":
+      return;
+    case "number":
+      if (!Number.isFinite(value)) {
+        throw new Error(`${label} must be JSON-compatible; non-finite numbers are not allowed.`);
+      }
+      return;
+    case "undefined":
+      throw new Error(`${label} must be JSON-compatible; undefined is not allowed.`);
+    case "function":
+      throw new Error(`${label} must be JSON-compatible; functions are not allowed.`);
+    case "symbol":
+      throw new Error(`${label} must be JSON-compatible; symbols are not allowed.`);
+    case "bigint":
+      throw new Error(`${label} must be JSON-compatible; bigints are not allowed.`);
+    case "object":
+      break;
+    default:
+      throw new Error(`${label} must be JSON-compatible; unsupported values are not allowed.`);
+  }
+
+  if (value === null) {
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    if (active.has(value)) {
+      throw new Error(`${label} must be JSON-compatible; cyclic references are not allowed.`);
+    }
+    active.add(value);
+    try {
+      if (Object.getOwnPropertySymbols(value).length > 0) {
+        throw new Error(`${label} must be JSON-compatible; symbol keys are not allowed.`);
+      }
+      for (let index = 0; index < value.length; index += 1) {
+        assertJsonCompatibleValue(value[index], `${label}[${index}]`, active);
+      }
+    } finally {
+      active.delete(value);
+    }
+    return;
+  }
+
+  if (!isPlainObject(value)) {
+    throw new Error(`${label} must be JSON-compatible; non-plain objects are not allowed.`);
+  }
+  if (active.has(value)) {
+    throw new Error(`${label} must be JSON-compatible; cyclic references are not allowed.`);
+  }
+  active.add(value);
+  try {
+    if (Object.getOwnPropertySymbols(value).length > 0) {
+      throw new Error(`${label} must be JSON-compatible; symbol keys are not allowed.`);
+    }
+    for (const key of Object.keys(value)) {
+      assertJsonCompatibleValue(value[key], `${label}.${key}`, active);
+    }
+  } finally {
+    active.delete(value);
+  }
+}
+
+function requireRecord(value: unknown, label: string): Record<string, unknown> {
+  if (!isRecord(value)) {
+    throw new Error(`${label} must be an object.`);
+  }
+  return value;
+}
+
+function requireString(value: unknown, label: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(`${label} must be a nonempty string.`);
+  }
+  return value;
 }
 
 function assertVerificationStrategyDescriptor(
@@ -312,6 +449,14 @@ function requireSha256(value: string, label: string): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
 
 function sha256Hex(value: string): string {

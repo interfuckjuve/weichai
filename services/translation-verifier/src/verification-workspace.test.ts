@@ -49,7 +49,7 @@ describe("createVerificationWorkspace", () => {
 
   it("rejects traversal and an expected-original hash mismatch", () => {
     expect(() => createVerificationWorkspace(inputWithSourcePath("../escape.ts"), { workspaceRoot, artifactRoot }))
-      .toThrow(/relative path/i);
+      .toThrow(/repository-relative/i);
     expect(() => createVerificationWorkspace(inputWithWrongPatchHash(), { workspaceRoot, artifactRoot }))
       .toThrow(/original hash/i);
   });

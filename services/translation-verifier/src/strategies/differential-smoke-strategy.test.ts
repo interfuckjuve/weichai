@@ -198,10 +198,10 @@ function request(overrides: { sourceLanguageId?: string; targetLanguageId?: stri
       },
     },
     sourceBundle: {
-      files: [{ path: "src/Source.java", content: "class Source { String convert() { return \"new\"; } }\n", contentHash: sha256("source") }],
+      files: [{ path: "src/Source.java", content: "class Source { String convert() { return \"new\"; } }\n", contentHash: sha256("class Source { String convert() { return \"new\"; } }\n") }],
     },
     targetContext: {
-      sourceFiles: [{ path: "src/Target.cs", content: "class Target { string convert() => \"old\"; }\n", contentHash: sha256("target"), attributes: {} }],
+      sourceFiles: [{ path: "src/Target.cs", content: "class Target { string convert() => \"old\"; }\n", contentHash: sha256("class Target { string convert() => \"old\"; }\n"), attributes: {} }],
       declarations: [{
         role: "declaration",
         path: "src/Target.cs",
