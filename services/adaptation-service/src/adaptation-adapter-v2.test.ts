@@ -18,8 +18,8 @@ import {
   type MigrationAnalyzerV2,
   type MigrationBehaviorVerificationInputV2,
   type MigrationBehaviorVerifierV2,
-  type MigrationPlannerV2,
   type MigrationTranslatorV2,
+  type MigrationTranslationV2,
 } from "./adaptation-adapter-v2";
 import {
   adaptationV2GeneratedContent,
@@ -57,18 +57,23 @@ function deterministicProviders() {
       unresolved: [],
     })),
   };
-  const translator: MigrationTranslatorV2 = {
+  const translator = {
     providerId: "forexplore.translator.deepseek",
     providerVersion: "1.0.0",
-    strategy: "translate",
+    strategy: "translate" as const,
     translate: vi.fn(async () => ({
       schemaVersion: "1.0" as const,
       generatedContent: adaptationV2GeneratedContent,
       completedSteps: ["Mapped the reviewed behavior."],
       unresolved: [],
     })),
-    repair: vi.fn(),
-  };
+    repair: vi.fn<MigrationTranslatorV2["repair"]>(async () => ({
+      schemaVersion: "1.0" as const,
+      generatedContent: adaptationV2GeneratedContent,
+      completedSteps: [],
+      unresolved: [],
+    })),
+  } satisfies MigrationTranslatorV2;
   return { analyzer, planner, translator };
 }
 

@@ -232,6 +232,12 @@ function deterministicAdapterV2(
         completedSteps: ['translated'],
         unresolved: [],
       }),
+      repair: async (_input, _analysis, _plan, previous) => ({
+        schemaVersion: '1.0' as const,
+        generatedContent: previous.generatedContent,
+        completedSteps: previous.completedSteps,
+        unresolved: previous.unresolved,
+      }),
     },
     verifier: {
       providerId: 'forexplore.translation-verifier.differential',
