@@ -69,6 +69,14 @@ export interface ValidationRecord {
   command?: string;
   /** Human-readable, bounded summary of the verifier output. */
   summary: string;
+  /** Optional durable artifact reference. */
+  artifact?: {
+    id: string;
+    kind: string;
+    path: string;
+    contentHash: string;
+    mediaType: string;
+  };
   /** Optional durable artifact containing full output. */
   artifactPath?: string;
   /** Explicit reason when a check failed or was not executed. */

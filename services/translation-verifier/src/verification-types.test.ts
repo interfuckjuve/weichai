@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   assertVerificationInput,
+  assertVerificationReceipt,
   assertVerificationResult,
   createVerificationResult,
   type VerificationInput,
@@ -62,6 +63,23 @@ function input(): VerificationInput {
 }
 
 describe("verification-types", () => {
+  it("rejects a receipt whose result artifact metadata is tampered", () => {
+    const result = createVerificationResult(input(), descriptor, {
+      status: "pass", summary: "verified", issues: [], artifacts: [], strategyReport: { cases: 1 },
+    }, () => "2026-09-05T00:00:00.000Z");
+    const bytes = Buffer.from(JSON.stringify(result), "utf8");
+    const receipt = { result, resultArtifact: {
+      id: "verification-result:attempt-1/verification-result.json",
+      kind: "verification-result" as const,
+      path: "attempt-1/verification-result.json",
+      contentHash: createHash("sha256").update(bytes).digest("hex"),
+      size: bytes.byteLength,
+      mediaType: "application/json" as const,
+    }};
+    expect(() => assertVerificationReceipt(receipt, input(), descriptor)).toThrow();
+    expect(() => assertVerificationReceipt({ ...receipt, resultArtifact: { ...receipt.resultArtifact, size: bytes.byteLength + 1 } }, input(), descriptor)).toThrow();
+  });
+
   it("binds a result to the strategy, round, and exact patch hash", () => {
     const result = createVerificationResult(input(), descriptor, {
       status: "pass",

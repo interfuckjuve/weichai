@@ -15,6 +15,7 @@ import type {
   ValidationStatus,
 } from "@forexplore/contracts";
 import {
+  assertVerificationReceipt,
   assertVerificationResult,
   type VerificationInput,
   type VerificationIssue,
@@ -155,6 +156,7 @@ export interface MigrationValidationEvidenceV2 {
   status: ValidationStatus;
   summary: string;
   command?: string;
+  artifact?: { id: string; kind: string; path: string; contentHash: string; mediaType: string };
   artifactPath?: string;
   failureReason?: string;
 }
@@ -515,6 +517,7 @@ export class AdaptationAdapterV2 implements CodeAdaptationPortV2 {
         subjectHash: patchHash,
         ...(resolved.command === undefined ? {} : { command: resolved.command }),
         summary: resolved.summary,
+        ...(resolved.artifact === undefined ? {} : { artifact: resolved.artifact }),
         ...(resolved.artifactPath === undefined ? {} : { artifactPath: resolved.artifactPath }),
         ...(resolved.failureReason === undefined ? {} : { failureReason: resolved.failureReason }),
       };
@@ -802,13 +805,21 @@ function verificationResultEvidence(
   descriptor: VerificationStrategyDescriptor,
 ): MigrationValidationEvidenceV2 {
   try {
-    const verified = assertVerificationResult(receipt.result, input, descriptor);
+    if (receipt.resultArtifact === undefined) {
+      return {
+        status: "unverified",
+        summary: receipt.result.summary,
+        failureReason: "artifact-persistence-failed",
+      };
+    }
+    const verified = assertVerificationReceipt(receipt, input, descriptor);
     return {
-      status: verified.status,
-      summary: verified.summary,
+      status: verified.result.status,
+      summary: verified.result.summary,
       artifactPath: receipt.resultArtifact.path,
-      ...(verified.status === "fail" || verified.status === "unverified") && verified.issues[0] !== undefined
-        ? { failureReason: verified.issues[0].kind }
+      artifact: artifactRef(receipt.resultArtifact),
+      ...(verified.result.status === "fail" || verified.result.status === "unverified") && verified.result.issues[0] !== undefined
+        ? { failureReason: verified.result.issues[0].kind }
         : {},
     };
   } catch (error) {

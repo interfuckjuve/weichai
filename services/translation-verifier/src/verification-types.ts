@@ -224,6 +224,34 @@ export function assertVerificationResult(
   return result;
 }
 
+export function assertVerificationReceipt(
+  receipt: VerificationReceipt,
+  input: VerificationInput,
+  descriptor: VerificationStrategyDescriptor,
+): VerificationReceipt {
+  if (receipt.resultArtifact === undefined) {
+    if (receipt.result.status !== "unverified" || !receipt.result.issues.some((issue) => issue.id === "artifact-persistence-failed" && issue.kind === "artifact-persistence-failed")) {
+      throw new Error("Verification receipt may omit its result artifact only for artifact-persistence-failed.");
+    }
+    return receipt;
+  }
+  if (!isRecord(receipt) || receipt.resultArtifact === undefined) {
+    throw new Error("Verification receipt must contain a result artifact.");
+  }
+  assertVerificationResult(receipt.result, input, descriptor);
+  const artifact = receipt.resultArtifact;
+  if (!isRecord(artifact) || artifact.kind !== "verification-result" || artifact.mediaType !== "application/json") {
+    throw new Error("Verification receipt result artifact metadata is invalid.");
+  }
+  const path = normalizeArtifactPath(artifact.path);
+  const bytes = Buffer.from(canonicalJson(receipt.result), "utf8");
+  const hash = createHash("sha256").update(bytes).digest("hex");
+  if (artifact.path !== path || artifact.contentHash !== hash || artifact.size !== bytes.byteLength || artifact.id !== `verification-result:${path}`) {
+    throw new Error("Verification receipt result artifact metadata does not match the canonical result bytes.");
+  }
+  return receipt;
+}
+
 function requireVerificationStatus(value: string, label: string): VerificationResult["status"] {
   if (value !== "pass" && value !== "warn" && value !== "fail" && value !== "unverified") {
     throw new Error(`${label} must be one of pass, warn, fail, or unverified.`);

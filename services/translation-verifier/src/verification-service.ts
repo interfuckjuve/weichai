@@ -6,6 +6,7 @@ import { VerificationStrategyFactory } from "./verification-strategy-factory.js"
 import { createVerificationWorkspace } from "./verification-workspace.js";
 import {
   assertVerificationInput,
+  assertVerificationReceipt,
   assertVerificationResult,
   createVerificationResult,
   type VerificationInput,
@@ -90,7 +91,7 @@ export class VerificationService {
       assertArtifactsMatch(result.artifacts, workspace.writtenArtifacts());
       const receiptBytes = Buffer.from(canonicalJson(result), "utf8");
       const resultArtifact = workspace.writeFrameworkResult(receiptBytes);
-      return { result, resultArtifact };
+      return assertVerificationReceipt({ result, resultArtifact }, input, descriptor);
     } catch (error) {
       if (signal?.aborted && error === signal.reason && isAbortError(error)) throw error;
       const result = this.#unverified(input, descriptor, error, workspace?.writtenArtifacts() ?? []);
