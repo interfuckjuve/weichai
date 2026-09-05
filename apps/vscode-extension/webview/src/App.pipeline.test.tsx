@@ -98,11 +98,19 @@ it('opens without a method, saves two history paths, displays durable summaries 
   expect(plan).toHaveBeenCalledTimes(3);
   const history = (await host.presentation()).repositories.find((r) => r.displayName === 'history-b')!;
   await act(async () => {
-    const selector = container.querySelector<HTMLSelectElement>(`select[aria-label="history-b 项目"]`)!;
-    selector.value = history.projects[0]!.projectId;
-    selector.dispatchEvent(new Event('change', { bubbles: true }));
+    container.querySelector<HTMLButtonElement>('.workspace-switch button:nth-child(2)')!.click();
+  });
+  await act(async () => {
+    container.querySelector<HTMLButtonElement>('button[aria-label="选择历史项目"]')!.click();
+  });
+  expect(container.querySelector('.project-selector')).toBeNull();
+  expect(container.querySelector('.module-sidebar [role="menu"]')).not.toBeNull();
+  await act(async () => {
+    container.querySelector<HTMLButtonElement>('[role="group"][aria-label="history-b"] [role="menuitemradio"]')!.click();
     await Promise.all(pending);
   });
+  expect(sent).toContainEqual({ type: 'SELECT_CODE_INTELLIGENCE_PROJECT', repositoryId: history.repositoryId,
+    analysisRevision: history.selectedRevision, projectId: history.projects[0]!.projectId });
   expect(container.textContent).toContain('Stored summary: history-b');
   expect(container.textContent).toContain('Agent module history-b');
   expect(container.textContent).not.toContain('WRONG DISK SUMMARY');

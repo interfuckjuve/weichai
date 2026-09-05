@@ -265,28 +265,20 @@ export default function App() {
         </button>
       </header>
 
-      <section className="project-selector" aria-label="项目选择">
-        {codeIntelligence?.repositories.map((repository) => (
-          <label key={repository.repositoryId}>
-            <span>{repository.role === 'target' ? '目标工程' : '历史项目'} · {repository.displayName}</span>
-            <select aria-label={`${repository.displayName} 项目`} value={repository.selectedProjectId ?? ''}
-              onChange={(event) => {
-                if (!repository.selectedRevision || !event.target.value) return;
-                setExplorerMode(repository.role === 'target' ? 'target' : 'history');
-                setHistoryId(repository.repositoryId);
-                setSelectedNodeId(null);
-                handleSelectCodeIntelligenceProject(repository.repositoryId, repository.selectedRevision, event.target.value);
-              }}>
-              <option value="">选择项目</option>
-              {repository.projects.map((project) => <option key={project.projectId} value={project.projectId}>
-                {project.displayName} · {project.relativePath || '.'} · {project.analysis?.state ?? 'missing'}
-              </option>)}
-            </select>
-            <button type="button" onClick={() => bus.post({ type: 'REFRESH_REPOSITORY', repositoryId: repository.repositoryId })}>刷新此仓库</button>
-          </label>
-        ))}
-      </section>
+      {error ? <div className="error-banner" role="alert">{error}</div> : null}
       <ModuleWorkspace
+        repositories={codeIntelligence?.repositories ?? []}
+        onSelectProject={(repositoryId, revision, projectId) => {
+          setSelectedNodeId(null);
+          if (explorerMode === 'history') setHistoryId(repositoryId);
+          handleSelectCodeIntelligenceProject(repositoryId, revision, projectId);
+        }}
+        onRefreshRepository={(repositoryId) => {
+          setError(null);
+          setRefreshingExplorer(true);
+          bus.post({ type: 'REFRESH_REPOSITORY', repositoryId });
+        }}
+        onAddTarget={(mode) => { setError(null); bus.post({ type: 'ADD_TARGET_WORKSPACE', mode }); }}
         explorer={moduleExplorer}
         mode={explorerMode}
         historyId={historyId}
@@ -302,12 +294,6 @@ export default function App() {
         onOpenSettings={() => setSettingsOpen(true)}
         settingsOpen={settingsOpen}
       >
-        {error ? (
-          <div className="error-banner" role="alert">
-            {error}
-          </div>
-        ) : null}
-
         {settingsOpen ? (
           <SettingsPanel
             topK={payload.settings.topK}

@@ -3,6 +3,11 @@ import { isWebviewToHostMessage } from './messages';
 
 describe('Webview message boundary', () => {
   it('accepts bounded intent messages', () => {
+    expect(isWebviewToHostMessage({ type: 'ADD_TARGET_WORKSPACE', mode: 'browse' })).toBe(true);
+    expect(isWebviewToHostMessage({ type: 'ADD_TARGET_WORKSPACE', mode: 'input' })).toBe(true);
+    expect(isWebviewToHostMessage({ type: 'ADD_TARGET_WORKSPACE', mode: 'workspace' })).toBe(true);
+    expect(isWebviewToHostMessage({ type: 'ADD_TARGET_WORKSPACE', mode: ['workspace'] })).toBe(false);
+    expect(isWebviewToHostMessage({ type: 'ADD_TARGET_WORKSPACE', mode: 'input', path: '/tmp' })).toBe(false);
     expect(
       isWebviewToHostMessage({
         type: 'START_SEARCH',

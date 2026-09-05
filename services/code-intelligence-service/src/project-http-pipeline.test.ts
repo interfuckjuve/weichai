@@ -31,17 +31,17 @@ it('publishes a project summary through the actual planning HTTP route and revis
     let objective = '';
     const architect = new ToolCallingArchitectRuntime({ queryPort, client: { complete: async (messages) => {
       turns++;
-      if (turns === 1) return { toolCalls: [{ id: 'projects', name: 'list_projects', arguments: {} }] };
-      const tool = messages.find((message) => message.role === 'tool');
-      expect(tool).toBeDefined();
-      const response = JSON.parse(tool!.content);
-      expect(response.projects[0].value.files).toHaveLength(2);
+      const user = messages.find((message) => message.role === 'user')!;
+      const response = JSON.parse(user.content.split('[INITIAL_PROJECT_CONTEXT]\n')[1]!.split('\n')[0]!);
+      expect(response.files.items).toHaveLength(2);
+      expect(response.symbols.items.length).toBeGreaterThan(0);
+      expect(response.dependencies.omittedFromPage).toBe(0);
       return { content: JSON.stringify({
         schemaVersion: '1.0', ...run.scope, analysisHash: index.analysisHash, objective,
         summary: 'Provides an addition function.', unassignedFiles: [],
         modules: [{ id: 'math', name: 'Math', kind: 'feature', description: 'Addition utilities',
-          sourceFiles: response.projects[0].value.files.map((file: { relativePath: string }) => file.relativePath),
-          symbolKeys: [], dependsOn: [], writeSet: [], resourceLocks: [], evidenceIds: [response.projects[0].evidenceId] }],
+          sourceFiles: response.files.items.map((file: { relativePath: string }) => file.relativePath),
+          symbolKeys: [], dependsOn: [], writeSet: [], resourceLocks: [], evidenceIds: [response.project.evidenceId] }],
       }) };
     } } });
     const adaptation = createHttpServer({
@@ -58,7 +58,7 @@ it('publishes a project summary through the actual planning HTTP route and revis
     expect(record.error).toBeUndefined();
     expect(record).toMatchObject({ state: 'ready', projection: 'ready', coverage: { total: 2, assigned: 2 } });
     expect(record.proposal?.summary).toBe('Provides an addition function.');
-    expect(turns).toBe(2);
+    expect(turns).toBe(1);
     expect((await runtime.store.listSearchDocuments(run.scope)).some((document) => document.kind === 'summary')).toBe(true);
   } finally {
     await Promise.all(servers.map((server) => new Promise<void>((resolve) => { server.close(() => resolve()); server.closeAllConnections(); })));

@@ -51,6 +51,7 @@ export type HostToWebviewMessage =
  */
 export type WebviewToHostMessage =
   | { type: 'READY' }
+  | { type: 'ADD_TARGET_WORKSPACE'; mode: 'browse' | 'input' | 'workspace' }
   | {
       type: 'START_SEARCH';
       requirement: string;
@@ -95,6 +96,8 @@ export function isWebviewToHostMessage(value: unknown): value is WebviewToHostMe
   if (typeof value !== 'object' || value === null) return false;
   const message = value as Record<string, unknown>;
   switch (message.type) {
+    case 'ADD_TARGET_WORKSPACE':
+      return hasOnlyKeys(message, ['type', 'mode']) && typeof message.mode === 'string' && ['browse', 'input', 'workspace'].includes(message.mode);
     case 'READY':
     case 'APPLY_CURRENT_RUN':
     case 'CHECK_REPOSITORIES':

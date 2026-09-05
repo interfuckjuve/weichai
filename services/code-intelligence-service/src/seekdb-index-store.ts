@@ -28,6 +28,7 @@ import {
   validateSearchDocumentsAgainstIndex,
   validateStructuralIndex,
   validateSourceTexts,
+  validateSummaryReplacement,
   type IndexStore,
 } from './index-store.js';
 import {
@@ -387,17 +388,72 @@ function toSearchDocument(scope: RepositoryRevisionScope, row: SearchDocumentRow
 
 async function withTransaction<T>(pool: Pool, operation: (connection: PoolConnection) => Promise<T>): Promise<T> {
   const connection = await pool.getConnection();
+  let previousTimeout: number | undefined;
+  let timeoutChanged = false;
+  let transactionStarted = false;
+  let reusable = true;
+  const started = performance.now();
   try {
+    const [rows] = await connection.query<RowDataPacket[]>('SELECT @@session.ob_query_timeout AS query_timeout');
+    previousTimeout = Number(rows[0]!.query_timeout);
+    // Bulk index writes also pay for secondary indexes and log flushes at COMMIT.
+    if (previousTimeout > 0 && previousTimeout < 60_000_000) {
+      await connection.query('SET SESSION ob_query_timeout = 60000000');
+      timeoutChanged = true;
+    }
     await connection.beginTransaction();
+    transactionStarted = true;
     const value = await operation(connection);
+    const commitStarted = performance.now();
     await connection.commit();
+    transactionStarted = false;
+    console.info('[forexplore:performance]', JSON.stringify({ stage: 'seekdb-transaction',
+      durationMs: Math.round(performance.now() - started), commitMs: Math.round(performance.now() - commitStarted) }));
     return value;
   } catch (error) {
-    await connection.rollback();
+    if (transactionStarted) {
+      try { await connection.rollback(); }
+      catch { reusable = false; }
+    }
     throw error;
   } finally {
-    connection.release();
+    if (timeoutChanged && reusable) {
+      try { await connection.query('SET SESSION ob_query_timeout = ?', [previousTimeout]); }
+      catch { reusable = false; }
+    }
+    if (reusable) connection.release();
+    else connection.destroy();
   }
+}
+
+type InsertRow = { values: unknown[]; vector?: string };
+
+function* insertRows<T>(rows: readonly T[], convert: (row: T) => InsertRow): Iterable<InsertRow> {
+  for (const row of rows) yield convert(row);
+}
+
+// Limit both row count and escaped SQL size; a single large source stays intact.
+async function insertBatches(connection: PoolConnection, sql: string, rows: Iterable<InsertRow>): Promise<number> {
+  let batch: InsertRow[] = [];
+  let bytes = 0;
+  let statements = 0;
+  const flush = async () => {
+    if (!batch.length) return;
+    const tuples = batch.map((row) => `(${row.values.map(() => '?').join(', ')}${row.vector ? `, ${row.vector}` : ''})`);
+    await connection.query(`${sql} VALUES ${tuples.join(', ')}`, batch.flatMap((row) => row.values));
+    statements += 1;
+    batch = [];
+    bytes = 0;
+  };
+  for (const row of rows) {
+    const size = row.values.reduce<number>((total, value) => total +
+      (typeof value === 'string' ? Buffer.byteLength(value, 'utf8') * 2 + 2 : 32), 0) + (row.vector?.length ?? 0);
+    if (batch.length && (batch.length >= 250 || bytes + size > 512 * 1024)) await flush();
+    batch.push(row);
+    bytes += size;
+  }
+  await flush();
+  return statements;
 }
 
 /**
@@ -502,7 +558,7 @@ export class SeekDbIndexStore implements IndexStore {
         project_id VARCHAR(256) NULL,
         source_text LONGTEXT NULL,
         PRIMARY KEY (repository_id, analysis_revision, file_id),
-        UNIQUE KEY uq_files_path (repository_id, analysis_revision, relative_path)
+        INDEX idx_files_path (repository_id, analysis_revision, relative_path(512))
       ) ORGANIZATION = HEAP
     `);
     await this.pool.query(`
@@ -731,15 +787,20 @@ export class SeekDbIndexStore implements IndexStore {
         throw new Error('Structural index analysisHash must match its analysis revision.');
       }
       await this.#deleteRevisionStructuralRecords(connection, index);
-      for (const project of index.projects) await this.#insertProject(connection, project);
-      for (const file of index.files) await this.#insertFile(connection, file, sourceTexts.get(file.relativePath) ?? null);
-      for (const symbol of index.symbols) await this.#insertSymbol(connection, symbol);
-      for (const edge of index.dependencyEdges) await this.#insertDependency(connection, edge);
-      for (const diagnostic of index.diagnostics) await this.#insertDiagnostic(connection, diagnostic);
+      const started = performance.now();
+      let statements = await this.#insertProjects(connection, index.projects);
+      statements += await this.#insertFiles(connection, index.files, sourceTexts);
+      statements += await this.#insertSymbols(connection, index.symbols);
+      statements += await this.#insertDependencies(connection, index.dependencyEdges);
+      statements += await this.#insertDiagnostics(connection, index.diagnostics);
+      console.info('[forexplore:performance]', JSON.stringify({ stage: 'structural-insert', repositoryId: index.repositoryId,
+        durationMs: Math.round(performance.now() - started), files: index.files.length, symbols: index.symbols.length,
+        dependencies: index.dependencyEdges.length, insertStatements: statements }));
     });
   }
 
-  async getStructuralIndex(scope: RepositoryRevisionScope): Promise<StructuralIndex | null> {
+  async getStructuralIndex({ repositoryId, analysisRevision }: RepositoryRevisionScope): Promise<StructuralIndex | null> {
+    const scope = { repositoryId, analysisRevision };
     const revision = await this.getRevision(scope);
     if (!revision) return null;
     const [projects, files, symbols, dependencyEdges, diagnostics] = await Promise.all([
@@ -862,10 +923,11 @@ export class SeekDbIndexStore implements IndexStore {
     return rows.map((row) => toModuleArtifact(scope, row));
   }
 
-  async replaceSearchDocuments(scope: RepositoryRevisionScope, documents: SearchDocumentRecord[]): Promise<void> {
+  async replaceSearchDocuments(scope: RepositoryRevisionScope, documents: SearchDocumentRecord[], moduleArtifactId?: string): Promise<void> {
     // Validate scope, document shape, and repository-relative paths before
     // opening the delete-and-replace transaction.
     validateSearchDocumentRecords(scope, documents);
+    validateSummaryReplacement(documents, moduleArtifactId);
     const [repository, revision, index, artifacts] = await Promise.all([
       this.getRepository(scope.repositoryId),
       this.getRevision(scope),
@@ -927,19 +989,23 @@ export class SeekDbIndexStore implements IndexStore {
         })),
         toRepository(lockedRepository),
       );
-      await connection.query(`DELETE FROM ${this.#tables.searchDocuments} WHERE repository_id = ? AND analysis_revision = ?`, scopeParams(scope));
-      for (const { document, searchText, embedding } of projected) {
-        await connection.query(`
+      await connection.query(
+        `DELETE FROM ${this.#tables.searchDocuments} WHERE repository_id = ? AND analysis_revision = ?${moduleArtifactId === undefined ? '' : " AND kind = 'summary' AND module_artifact_id = ?"}`,
+        [...scopeParams(scope), ...(moduleArtifactId === undefined ? [] : [moduleArtifactId])],
+      );
+      const started = performance.now();
+      const statements = await insertBatches(connection, `
           INSERT INTO ${this.#tables.searchDocuments} (
             repository_id, analysis_revision, search_document_id, kind, relative_path, symbol_key,
             module_artifact_id, content_hash, title, document_text, search_text, embedding
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${vectorHex(embedding)})
-        `, [
+          )
+        `, insertRows(projected, ({ document, searchText, embedding }) => ({ vector: vectorHex(embedding), values: [
           document.repositoryId, document.analysisRevision, document.searchDocumentId, document.kind,
           document.relativePath, document.symbolKey ?? null, document.moduleArtifactId ?? null,
           document.contentHash, document.title, document.text, searchText,
-        ]);
-      }
+        ] })));
+      console.info('[forexplore:performance]', JSON.stringify({ stage: 'search-insert', repositoryId: scope.repositoryId,
+        moduleArtifactId, durationMs: Math.round(performance.now() - started), documents: documents.length, insertStatements: statements }));
     });
   }
 
@@ -1073,77 +1139,79 @@ export class SeekDbIndexStore implements IndexStore {
     }
   }
 
-  async #insertProject(connection: PoolConnection, project: ProjectRecord): Promise<void> {
-    await connection.query(`
+  async #insertProjects(connection: PoolConnection, projects: ProjectRecord[]): Promise<number> {
+    return insertBatches(connection, `
       INSERT INTO ${this.#tables.projects} (
         repository_id, analysis_revision, project_id, kind, display_name, relative_path,
         manifest_paths, source_roots, test_roots, language_ids
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `, [
+      )
+    `, insertRows(projects, (project) => ({ values: [
       project.repositoryId, project.analysisRevision, project.projectId, project.kind, project.displayName,
       project.relativePath, JSON.stringify(project.manifestPaths), JSON.stringify(project.sourceRoots),
       JSON.stringify(project.testRoots), JSON.stringify(project.languageIds),
-    ]);
+    ] })));
   }
 
-  async #insertFile(connection: PoolConnection, file: IndexedFileRecord, sourceText: string | null): Promise<void> {
-    await connection.query(`
+  async #insertFiles(connection: PoolConnection, files: IndexedFileRecord[], sourceTexts: ReadonlyMap<string, string>): Promise<number> {
+    return insertBatches(connection, `
       INSERT INTO ${this.#tables.files} (
         repository_id, analysis_revision, file_id, relative_path, language_id, role, sha256,
         size_bytes, parse_status, project_id, source_text
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `, [
+      )
+    `, insertRows(files, (file) => ({ values: [
       file.repositoryId, file.analysisRevision, file.fileId, file.relativePath, file.languageId ?? null,
-      file.role, file.sha256, file.sizeBytes, file.parseStatus, file.projectId ?? null, sourceText,
-    ]);
+      file.role, file.sha256, file.sizeBytes, file.parseStatus, file.projectId ?? null, sourceTexts.get(file.relativePath) ?? null,
+    ] })));
   }
 
-  async #insertSymbol(connection: PoolConnection, symbol: SymbolRecord): Promise<void> {
-    await connection.query(`
+  async #insertSymbols(connection: PoolConnection, symbols: SymbolRecord[]): Promise<number> {
+    return insertBatches(connection, `
       INSERT INTO ${this.#tables.symbols} (
         repository_id, analysis_revision, symbol_id, symbol_key, ast_declaration_id, name, qualified_name,
         kind, language_id, relative_path, source_range, signature, container_symbol_key, project_id,
         exported, provider, confidence, evidence_level
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `, [
+      )
+    `, insertRows(symbols, (symbol) => ({ values: [
       symbol.repositoryId, symbol.analysisRevision, symbol.symbolId, symbol.symbolKey, symbol.astDeclarationId,
       symbol.name, symbol.qualifiedName, symbol.kind, symbol.languageId, symbol.relativePath,
       JSON.stringify(symbol.sourceRange), symbol.signature ?? null, symbol.containerSymbolKey ?? null,
       symbol.projectId ?? null, symbol.exported, symbol.provider, symbol.confidence, symbol.evidenceLevel,
-    ]);
+    ] })));
   }
 
-  async #insertDependency(connection: PoolConnection, edge: DependencyEdgeRecord): Promise<void> {
-    await connection.query(`
+  async #insertDependencies(connection: PoolConnection, edges: DependencyEdgeRecord[]): Promise<number> {
+    return insertBatches(connection, `
       INSERT INTO ${this.#tables.dependencyEdges} (
         repository_id, analysis_revision, dependency_edge_id, kind, source_symbol_key, target_symbol_key,
         source_relative_path, target_relative_path, target_reference, internal, resolution, provider,
         confidence, evidence_level, evidence_ranges
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `, [
+      )
+    `, insertRows(edges, (edge) => ({ values: [
       edge.repositoryId, edge.analysisRevision, edge.dependencyEdgeId, edge.kind,
       edge.sourceSymbolKey ?? null, edge.targetSymbolKey ?? null, edge.sourceRelativePath,
       edge.targetRelativePath ?? null, edge.targetReference ?? null, edge.internal, edge.resolution,
       edge.provider, edge.confidence, edge.evidenceLevel, JSON.stringify(edge.evidenceRanges),
-    ]);
+    ] })));
   }
 
-  async #insertDiagnostic(connection: PoolConnection, diagnostic: IndexDiagnosticRecord): Promise<void> {
-    await connection.query(`
+  async #insertDiagnostics(connection: PoolConnection, diagnostics: IndexDiagnosticRecord[]): Promise<number> {
+    return insertBatches(connection, `
       INSERT INTO ${this.#tables.diagnostics} (
         repository_id, analysis_revision, diagnostic_id, severity, message, code, relative_path,
         source_range, provider, confidence, evidence_level
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `, [
+      )
+    `, insertRows(diagnostics, (diagnostic) => ({ values: [
       diagnostic.repositoryId, diagnostic.analysisRevision, diagnostic.diagnosticId, diagnostic.severity,
       diagnostic.message, diagnostic.code ?? null, diagnostic.relativePath,
       diagnostic.sourceRange === null ? null : JSON.stringify(diagnostic.sourceRange), diagnostic.provider,
       diagnostic.confidence, diagnostic.evidenceLevel,
-    ]);
+    ] })));
   }
 }
 
 export const seekDbIndexStoreInternals = {
+  withTransaction,
+  insertBatches,
   assertEmbedding,
   identifier,
   json,

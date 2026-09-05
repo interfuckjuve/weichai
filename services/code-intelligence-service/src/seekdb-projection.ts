@@ -142,20 +142,23 @@ export class SeekDbProjection implements SearchProjection {
       documents.push(fragmentDocument(index, relativePath, source));
     }
     const repository = await this.store.getRepository(index.repositoryId);
-    const artifacts = await this.store.listModuleArtifacts(index);
+    const scope = { repositoryId: index.repositoryId, analysisRevision: index.analysisRevision };
+    const artifacts = await this.store.listModuleArtifacts(scope);
     for (const artifact of artifacts) {
       documents.push(...summaryDocuments(index, artifact, repository?.activeRevision));
     }
-    await this.store.replaceSearchDocuments(index, documents);
+    await this.store.replaceSearchDocuments(scope, documents);
   }
 
-  async projectModuleArtifacts(index: StructuralIndex, signal?: AbortSignal): Promise<void> {
-    const sourceTexts = new Map<string, string>();
-    for (const file of index.files) {
-      const source = await this.store.getSourceText(index, file.relativePath);
-      if (source !== null) sourceTexts.set(file.relativePath, source);
+  async projectModuleArtifacts(index: StructuralIndex, signal?: AbortSignal, moduleArtifactId?: string): Promise<void> {
+    const repository = await this.store.getRepository(index.repositoryId);
+    const scope = { repositoryId: index.repositoryId, analysisRevision: index.analysisRevision };
+    const artifacts = await this.store.listModuleArtifacts(scope);
+    for (const artifact of artifacts) {
+      signal?.throwIfAborted();
+      if (artifact.kind !== 'module-summary' || (moduleArtifactId !== undefined && artifact.moduleArtifactId !== moduleArtifactId)) continue;
+      await this.store.replaceSearchDocuments(scope, summaryDocuments(index, artifact, repository?.activeRevision), artifact.moduleArtifactId);
     }
-    await this.project(index, sourceTexts, signal);
   }
 }
 

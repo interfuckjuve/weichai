@@ -87,4 +87,16 @@ describe("DeepSeek chat-completions client", () => {
       tools: [{ type: "function", function: { name: "search_symbols" } }],
     });
   });
+
+  it('omits tool declarations and automatic tool selection when finalizing', async () => {
+    const request = vi.fn(async (_url: URL | RequestInfo, _init?: RequestInit) => new Response(JSON.stringify({
+      choices: [{ message: { content: '{}' } }],
+    }), { status: 200 }));
+    await completeWithDeepSeekTools([{ role: 'user', content: 'Finalize the proposal.' }], [], {
+      apiKey: 'test-key', request: request as unknown as typeof globalThis.fetch,
+    });
+    const body = JSON.parse(String(request.mock.calls[0]![1]!.body));
+    expect(body).not.toHaveProperty('tools');
+    expect(body).not.toHaveProperty('tool_choice');
+  });
 });

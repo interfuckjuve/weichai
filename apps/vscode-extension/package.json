@@ -17,10 +17,11 @@
     "dist/extension/**",
     "dist/extension/node_modules/**",
     "dist/webview/**",
+    "media/**",
     "README.md"
   ],
   "activationEvents": [
-    "onCommand:forexplore.startTranslation",
+    "onView:forexplore.launcher",
     "onCommand:forexplore.showPanel",
     "onCommand:forexplore.checkRepositories",
     "onCommand:forexplore.reindex",
@@ -34,11 +35,31 @@
     "onCommand:forexplore.recoverModuleMigrationReview"
   ],
   "contributes": {
-    "commands": [
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "forexplore",
+          "title": "ForeXplore",
+          "icon": "media/forexplore.svg"
+        }
+      ]
+    },
+    "views": {
+      "forexplore": [
+        {
+          "id": "forexplore.launcher",
+          "name": "ForeXplore",
+          "type": "tree"
+        }
+      ]
+    },
+    "viewsWelcome": [
       {
-        "command": "forexplore.startTranslation",
-        "title": "ForeXplore: 开始代码翻译"
-      },
+        "view": "forexplore.launcher",
+        "contents": "[打开翻译面板](command:forexplore.showPanel)"
+      }
+    ],
+    "commands": [
       {
         "command": "forexplore.showPanel",
         "title": "ForeXplore: 打开翻译面板"
@@ -84,15 +105,6 @@
         "title": "ForeXplore: 恢复模块迁移审阅状态"
       }
     ],
-    "menus": {
-      "editor/context": [
-        {
-          "command": "forexplore.startTranslation",
-          "when": "editorHasSelection && resourceScheme == file",
-          "group": "forexplore@1"
-        }
-      ]
-    },
     "configuration": {
       "title": "ForeXplore",
       "properties": {
@@ -109,6 +121,12 @@
           },
           "default": [],
           "description": "历史代码仓的本地目录。保存后由扩展建立版本化结构索引、项目模块 Summary 和模块内候选索引。"
+        },
+        "forexplore.targetRepositoryPaths": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "通过目标项目选择器明确选择的目录。只有同时位于当前工作区中的目录会作为目标工程索引。"
         },
         "forexplore.topK": {
           "type": "number",

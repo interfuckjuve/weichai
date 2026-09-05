@@ -161,7 +161,10 @@ export class ProjectAnalysisCoordinator implements ProjectAnalysisPort {
         await persist();
         record.state = 'analyzing';
         await persist();
+        const planStarted = performance.now();
         const result = await this.options.plan({ ...scope, objective: projectAnalysisObjective });
+        console.info('[forexplore:performance]', JSON.stringify({ stage: 'agent-analysis', ...scope,
+          durationMs: Math.round(performance.now() - planStarted) }));
         record.state = 'validating';
         await persist();
         record.coverage = validateProjectResult(index, scope, result);
@@ -174,7 +177,10 @@ export class ProjectAnalysisCoordinator implements ProjectAnalysisPort {
         await persist();
       }
       try {
-        await (this.options.project ?? ((value) => new SeekDbProjection(store).projectModuleArtifacts(value)))(index);
+        const projectionStarted = performance.now();
+        await (this.options.project ?? ((value) => new SeekDbProjection(store).projectModuleArtifacts(value, undefined, identity(scope, 'summary'))))(index);
+        console.info('[forexplore:performance]', JSON.stringify({ stage: 'summary-projection', ...scope,
+          durationMs: Math.round(performance.now() - projectionStarted) }));
         record.projection = 'ready';
         delete record.error;
       } catch (error) {
@@ -196,7 +202,8 @@ export class ProjectAnalysisCoordinator implements ProjectAnalysisPort {
       repositoryId: record.repositoryId, analysisRevision: record.analysisRevision,
       moduleArtifactId: identity(record, kind), kind: kind === 'summary' ? 'module-summary' : 'other',
       status: 'current', analysisHash: index.analysisHash, planHash: record.planHash,
-      contentHash: projectPlanHash(record), createdAt: now, updatedAt: now, payload: structuredClone(record),
+      contentHash: createHash('sha256').update(canonical(record)).digest('hex'),
+      createdAt: now, updatedAt: now, payload: structuredClone(record),
     };
   }
 }

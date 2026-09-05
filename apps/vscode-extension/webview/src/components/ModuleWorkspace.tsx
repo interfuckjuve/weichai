@@ -9,13 +9,16 @@ import {
   FileCode2,
   FileJson2,
   Folder,
+  FolderOpen,
   GitBranch,
   History,
   RefreshCw,
   Search,
   Sparkles,
   Target,
+  RotateCcw,
 } from 'lucide-react';
+import { ProjectPicker, type ProjectPickerProps } from './ProjectPicker';
 import type {
   ModuleExplorerMode,
   ModuleExplorerNode,
@@ -27,6 +30,10 @@ import type {
 type StatusFilter = 'all' | 'implemented' | 'unimplemented' | 'unknown';
 
 interface ModuleWorkspaceProps {
+  repositories?: ProjectPickerProps['repositories'];
+  onSelectProject?: ProjectPickerProps['onSelect'];
+  onRefreshRepository?: ProjectPickerProps['onRefresh'];
+  onAddTarget?: ProjectPickerProps['onAdd'];
   onRetry?(scope: import('@forexplore/contracts').ProjectAnalysisScope, force: boolean): void;
   explorer: ModuleExplorerPresentation;
   mode: ModuleExplorerMode;
@@ -45,6 +52,10 @@ interface ModuleWorkspaceProps {
 }
 
 export function ModuleWorkspace({
+  repositories = [],
+  onSelectProject,
+  onRefreshRepository,
+  onAddTarget,
   onRetry,
   explorer,
   mode,
@@ -63,7 +74,10 @@ export function ModuleWorkspace({
 }: ModuleWorkspaceProps) {
   const [query, setQuery] = useState('');
   const [status, setStatus] = useState<StatusFilter>('all');
+  const [pickerOpen, setPickerOpen] = useState(false);
   const workspace = activeWorkspace(explorer, mode, historyId);
+  const noTarget = mode === 'target' && !workspace.projectId && workspace.id === 'target:unselected';
+  const analyzing = ['queued', 'analyzing', 'validating'].includes(workspace.analysis?.state ?? '');
   const filteredTree = useMemo(
     () => filterTree(workspace.tree, query.trim().toLocaleLowerCase(), status),
     [workspace.tree, query, status],
@@ -80,7 +94,8 @@ export function ModuleWorkspace({
           <button
             type="button"
             className={mode === 'target' ? 'is-active' : ''}
-            onClick={() => onModeChange('target')}
+            role="tab" aria-selected={mode === 'target'}
+            onClick={() => { setPickerOpen(false); onModeChange('target'); }}
           >
             <Target size={13} />
             目标工作区
@@ -89,7 +104,8 @@ export function ModuleWorkspace({
           <button
             type="button"
             className={mode === 'history' ? 'is-active' : ''}
-            onClick={() => onModeChange('history')}
+            role="tab" aria-selected={mode === 'history'}
+            onClick={() => { setPickerOpen(false); onModeChange('history'); }}
           >
             <History size={13} />
             历史仓
@@ -97,7 +113,12 @@ export function ModuleWorkspace({
           </button>
         </div>
 
-        {mode === 'history' && explorer.history.length > 1 ? (
+        {onSelectProject ? <ProjectPicker mode={mode} workspace={workspace} repositories={repositories}
+          open={pickerOpen} onOpenChange={setPickerOpen} refreshing={refreshing}
+          onSelect={(...args) => { setQuery(''); setStatus('all'); onSelectProject(...args); }}
+          onRefresh={(id) => onRefreshRepository?.(id)} onAdd={(value) => onAddTarget?.(value)} onOpenSettings={onOpenSettings} /> : null}
+
+        {!onSelectProject && mode === 'history' && explorer.history.length > 1 ? (
           <label className="history-picker">
             <span>历史仓库</span>
             <select
@@ -111,7 +132,7 @@ export function ModuleWorkspace({
           </label>
         ) : null}
 
-        <div className="explorer-title-row">
+        {!onSelectProject ? <div className="explorer-title-row">
           <div>
             <strong>{workspace.name}</strong>
             <small>{workspace.rootLabel}</small>
@@ -126,11 +147,12 @@ export function ModuleWorkspace({
           >
             <RefreshCw size={13} className={refreshing ? 'is-spinning' : ''} />
           </button>
-        </div>
+        </div> : null}
 
         <label className="module-search">
           <Search size={13} />
           <input
+            disabled={noTarget}
             type="search"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
@@ -168,7 +190,7 @@ export function ModuleWorkspace({
               <span>{workspace.error}</span>
             </div>
           ) : filteredTree.length === 0 ? (
-            <div className="tree-empty">没有匹配的模块项</div>
+            <div className="tree-empty">{noTarget ? '尚未选择目标项目' : '没有匹配的模块项'}</div>
           ) : (
             filteredTree.map((node) => (
               <TreeNode
@@ -193,8 +215,13 @@ export function ModuleWorkspace({
 
       <section className="module-main">
         <div className="module-main-scroll">
+          {!settingsOpen && noTarget ? <section className="target-empty-state" aria-label="选择目标项目">
+            <FolderOpen size={32} strokeWidth={1.25} />
+            <h1>选择目标项目</h1>
+            <button type="button" className="primary-action" onClick={() => setPickerOpen(true)}><FolderOpen size={15} />选择项目<ChevronDown size={13} /></button>
+          </section> : null}
           {!settingsOpen && workspace.projectId ? (
-            <section className="card project-analysis" aria-label="项目解析结果">
+            <section className="project-analysis" aria-label="项目解析结果">
               <h2>{workspace.name}</h2>
               <p role="status">模块解析：{analysisState(workspace.analysis?.state)} · 检索同步：{workspace.analysis?.projection ?? 'pending'}</p>
               {workspace.analysis?.error ? <p role="alert">{workspace.analysis.error}</p> : null}
@@ -206,8 +233,8 @@ export function ModuleWorkspace({
               {workspace.analysis?.proposal?.risks?.map((risk, i) => <p key={i}>{risk}</p>)}
               {workspace.repositoryId && workspace.revision && workspace.analysis?.state !== 'stale' ? (
                 <div className="project-actions">
-                  <button type="button" onClick={() => onRetry?.({ repositoryId: workspace.repositoryId!, analysisRevision: workspace.revision!, projectId: workspace.projectId! }, false)}>重试解析 / 同步</button>
-                  <button type="button" onClick={() => onRetry?.({ repositoryId: workspace.repositoryId!, analysisRevision: workspace.revision!, projectId: workspace.projectId! }, true)}>重新解析模块</button>
+                  <button type="button" className="secondary-action" disabled={analyzing || !onRetry} onClick={() => onRetry?.({ repositoryId: workspace.repositoryId!, analysisRevision: workspace.revision!, projectId: workspace.projectId! }, false)}><RefreshCw size={13} />重试解析 / 同步</button>
+                  <button type="button" className="secondary-action" disabled={analyzing || !onRetry} onClick={() => onRetry?.({ repositoryId: workspace.repositoryId!, analysisRevision: workspace.revision!, projectId: workspace.projectId! }, true)}><RotateCcw size={13} />重新解析模块</button>
                 </div>
               ) : null}
               <details><summary>依赖关系（{workspace.dependencies?.length ?? 0}）</summary>
@@ -223,7 +250,7 @@ export function ModuleWorkspace({
               <details><summary>版本信息</summary><code>{workspace.repositoryId} / {workspace.projectId} / {workspace.revision}</code></details>
             </section>
           ) : null}
-          {!settingsOpen && explorer.history.length === 0 ? (
+          {!settingsOpen && !noTarget && explorer.history.length === 0 ? (
             <section className="history-configuration-prompt" role="status">
               <div className="history-configuration-icon"><History size={17} /></div>
               <div>
@@ -242,7 +269,7 @@ export function ModuleWorkspace({
               onNodeSelect={onNodeSelect}
             />
           ) : null}
-          {settingsOpen || mode === 'target' ? children : null}
+          {settingsOpen || (mode === 'target' && !noTarget) ? children : null}
         </div>
       </section>
     </div>

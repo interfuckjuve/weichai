@@ -109,6 +109,142 @@ function scriptedClient(
 }
 
 describe("ToolCallingArchitectRuntime", () => {
+  function projectPort() {
+    const port = queryPort();
+    const selected = evidence({ evidenceId: 'project:quote', relativePath: null, sourceRange: null,
+      value: { projectId: 'quote', kind: 'maven', displayName: 'Quote', relativePath: '',
+        manifestPaths: ['pom.xml'], languageIds: ['java'],
+        files: [{ relativePath: 'src/QuoteService.java', role: 'source', parseStatus: 'parsed' }] } });
+    vi.mocked(port.listProjects).mockResolvedValue({ projects: [selected,
+      evidence({ evidenceId: 'project:unrelated', value: { projectId: 'unrelated', files: [{ relativePath: 'unrelated/Secret.java' }] } }),
+    ] } as never);
+    vi.mocked(port.getDependencies).mockResolvedValue({ dependencies: [evidence({
+      evidenceId: 'dependency:quote', value: { sourceRelativePath: 'src/QuoteService.java',
+        targetReference: 'external.price', kind: 'import', resolution: 'unresolved', internal: false },
+    })] } as never);
+    return port;
+  }
+
+  it('provides selected-project dependencies and symbols before the first model call and permits a direct proposal', async () => {
+    const port = projectPort();
+    const client = scriptedClient([{ content: JSON.stringify(proposal()) }]);
+    const runtime = new ToolCallingArchitectRuntime({ queryPort: port, client });
+    const result = await runtime.proposeModulePlanWithEvidence({ ...request, projectId: 'quote' });
+    expect(result.proposal).toEqual(proposal());
+    expect(result.evidence.evidenceIds).toContain('dependency:quote');
+    expect(result.evidence.evidenceIds).not.toContain('project:unrelated');
+    const messages = JSON.stringify(vi.mocked(client.complete).mock.calls[0]![0]);
+    expect(messages).toContain('[INITIAL_PROJECT_CONTEXT]');
+    expect(messages).toContain('external.price');
+    expect(messages).toContain('unresolved');
+    expect(messages).toContain(symbolKey);
+    expect(messages).not.toContain('unrelated/Secret.java');
+    expect(port.getDependencies).toHaveBeenCalledWith({ ...scope, projectId: 'quote', direction: 'both', limit: 200 }, undefined);
+    expect(port.searchSymbols).toHaveBeenCalledWith({ ...scope, projectIds: ['quote'], query: '', limit: 100 }, undefined);
+    expect(port.readSourceExcerpt).not.toHaveBeenCalled();
+    expect(client.complete).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps optional source inspection available after preloading evidence', async () => {
+    const port = projectPort();
+    vi.mocked(port.readSourceExcerpt).mockResolvedValue({ source: evidence({ value: { text: 'class QuoteService {}' } }) } as never);
+    const client = scriptedClient([
+      { toolCalls: [{ id: 'source', name: 'read_source_excerpt', arguments: { relativePath: 'src/QuoteService.java', maxChars: 1000 } }] },
+      { content: JSON.stringify(proposal()) },
+    ]);
+    await new ToolCallingArchitectRuntime({ queryPort: port, client }).proposeModulePlan({ ...request, projectId: 'quote' });
+    expect(port.readSourceExcerpt).toHaveBeenCalledTimes(1);
+    expect(port.listProjects).toHaveBeenCalledTimes(1);
+    expect(client.complete).toHaveBeenCalledTimes(2);
+  });
+
+  it('allows the model to correct an invalid source range without forwarding it', async () => {
+    const port = projectPort();
+    vi.mocked(port.readSourceExcerpt).mockResolvedValue({ source: evidence({ value: { text: 'class QuoteService {}' } }) } as never);
+    const client = scriptedClient([
+      { toolCalls: [{ id: 'bad-range', name: 'read_source_excerpt', arguments: {
+        relativePath: 'src/QuoteService.java', sourceRange: { startLine: 1, endLine: 8 },
+      } }] },
+      { toolCalls: [{ id: 'corrected', name: 'read_source_excerpt', arguments: { relativePath: 'src/QuoteService.java', maxChars: 1000 } }] },
+      { content: JSON.stringify(proposal()) },
+    ]);
+    await new ToolCallingArchitectRuntime({ queryPort: port, client }).proposeModulePlan({ ...request, projectId: 'quote' });
+    expect(port.readSourceExcerpt).toHaveBeenCalledTimes(1);
+    const correction = vi.mocked(client.complete).mock.calls[1]![0].find((message) => message.toolCallId === 'bad-range');
+    expect(JSON.parse(correction!.content)).toMatchObject({ error: 'invalid_arguments' });
+  });
+
+  it('finishes with existing evidence when a batch exceeds the remaining query budget', async () => {
+    const port = projectPort();
+    const client = scriptedClient([
+      { toolCalls: [
+        { id: 'overview', name: 'get_repository_overview', arguments: {} },
+        { id: 'overflow', name: 'read_source_excerpt', arguments: { relativePath: 'src/QuoteService.java' } },
+      ] },
+      { content: JSON.stringify(proposal()) },
+    ]);
+    await new ToolCallingArchitectRuntime({ queryPort: port, client, maxToolCalls: 1 })
+      .proposeModulePlan({ ...request, projectId: 'quote' });
+    expect(port.getRepositoryOverview).toHaveBeenCalledTimes(1);
+    expect(port.readSourceExcerpt).not.toHaveBeenCalled();
+    const [messages, tools] = vi.mocked(client.complete).mock.calls[1]!;
+    expect(tools).toEqual([]);
+    expect(JSON.parse(messages.find((message) => message.toolCallId === 'overflow')!.content))
+      .toMatchObject({ error: 'query_budget_exhausted' });
+  });
+
+  it('paginates initial dependencies and preserves unresolved file relationships in compact groups', async () => {
+    const port = projectPort();
+    vi.mocked(port.getDependencies)
+      .mockResolvedValueOnce({ dependencies: [evidence({ evidenceId: 'dep:1', value: {
+        sourceRelativePath: 'src/QuoteService.java', targetReference: 'first', kind: 'invocation', resolution: 'unresolved',
+      } })], nextCursor: 'second' } as never)
+      .mockResolvedValueOnce({ dependencies: [evidence({ evidenceId: 'dep:2', value: {
+        sourceRelativePath: 'src/QuoteService.java', targetReference: 'second', kind: 'invocation', resolution: 'unresolved',
+      } })] } as never);
+    const client = scriptedClient([{ content: JSON.stringify(proposal()) }]);
+    await new ToolCallingArchitectRuntime({ queryPort: port, client }).proposeModulePlan({ ...request, projectId: 'quote' });
+    const content = vi.mocked(client.complete).mock.calls[0]![0][1]!.content;
+    const context = JSON.parse(content.split('[INITIAL_PROJECT_CONTEXT]\n')[1]!.split('\n')[0]!);
+    expect(context.dependencies.items).toHaveLength(1);
+    expect(context.dependencies.items[0]).toMatchObject({ count: 2, resolution: 'unresolved', targetReferences: ['first', 'second'] });
+    expect(context.dependencies.nextCursor).toBeUndefined();
+    expect(port.getDependencies).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: 'second' }), undefined);
+  });
+
+  it('returns valid bounded JSON and rejects evidence hidden by result trimming', async () => {
+    const hiddenId = 'symbol:hidden';
+    const port = queryPort({ symbols: Array.from({ length: 20 }, (_, index) => evidence({
+      evidenceId: index === 19 ? hiddenId : `symbol:${index}`, value: { symbolKey, signature: 'x'.repeat(500) },
+    })) });
+    const client = scriptedClient([
+      { toolCalls: [{ id: 'large', name: 'search_symbols', arguments: { query: 'Quote' } }] },
+      { content: JSON.stringify(proposal({ modules: [{ ...proposal().modules[0]!, evidenceIds: [hiddenId] }] })) },
+    ]);
+    await expect(new ToolCallingArchitectRuntime({ queryPort: port, client, maxToolResultChars: 2000, maxProposalRepairs: 0 })
+      .proposeModulePlan(request)).rejects.toThrow('not retrieved through SemanticQueryPort');
+    const content = vi.mocked(client.complete).mock.calls[1]![0].find((message) => message.toolCallId === 'large')!.content;
+    expect(content.length).toBeLessThanOrEqual(2000);
+    expect(JSON.parse(content)).toMatchObject({ truncated: true });
+    expect(content).not.toContain(hiddenId);
+  });
+
+  it('marks omitted initial records without admitting their hidden evidence and rejects wrong-revision preloads', async () => {
+    const port = projectPort();
+    vi.mocked(port.searchSymbols).mockResolvedValue({ symbols: [evidence({ value: { symbolKey, signature: 'x'.repeat(20000) } })], nextCursor: 'next-page' } as never);
+    const client = scriptedClient([{ content: JSON.stringify(proposal()) }]);
+    await expect(new ToolCallingArchitectRuntime({ queryPort: port, client, maxToolResultChars: 3000, maxProposalRepairs: 0 })
+      .proposeModulePlan({ ...request, projectId: 'quote' })).rejects.toThrow();
+    const messages = vi.mocked(client.complete).mock.calls[0]![0];
+    const user = messages.find((message) => message.role === 'user')!.content;
+    const context = JSON.parse(user.split('[INITIAL_PROJECT_CONTEXT]\n')[1]!.split('\n')[0]!);
+    expect(context.symbols).toMatchObject({ items: [], omittedFromPage: 1, nextCursor: 'next-page' });
+    vi.mocked(port.getDependencies).mockResolvedValue({ dependencies: [evidence({ analysisRevision: 'wrong' })] } as never);
+    await expect(new ToolCallingArchitectRuntime({ queryPort: port, client })
+      .proposeModulePlan({ ...request, projectId: 'quote' })).rejects.toThrow('different repository revision');
+    expect(client.complete).toHaveBeenCalledTimes(1);
+  });
+
   it("binds the plan to the structural revision hash and only sends tool-derived facts to the model", async () => {
     const port = queryPort();
     const client = scriptedClient([
@@ -251,11 +387,36 @@ describe("ToolCallingArchitectRuntime", () => {
         { toolCalls: [{ id: "tool-search", name: "search_symbols", arguments: { query: "QuoteService" } }] },
         { content: JSON.stringify(output) },
       ]);
-      const runtime = new ToolCallingArchitectRuntime({ queryPort: port, client });
+      const runtime = new ToolCallingArchitectRuntime({ queryPort: port, client, maxProposalRepairs: 0 });
       await expect(runtime.proposeModulePlan(request)).rejects.toThrow(
         output === staleHash ? "analysisHash" : "not retrieved through SemanticQueryPort",
       );
     }
+  });
+
+  it('returns validation feedback and only accepts a corrected evidence-bound proposal', async () => {
+    const port = projectPort();
+    const invalid = proposal({ modules: [{ ...proposal().modules[0]!, symbolKeys: [evidenceId] }] });
+    const client = scriptedClient([
+      { content: JSON.stringify(invalid) },
+      { content: JSON.stringify(proposal()) },
+    ]);
+    const result = await new ToolCallingArchitectRuntime({ queryPort: port, client })
+      .proposeModulePlan({ ...request, projectId: 'quote' });
+    expect(result).toEqual(proposal());
+    const [messages, tools] = vi.mocked(client.complete).mock.calls[1]!;
+    expect(tools).toEqual([]);
+    expect(messages.at(-1)!.content).toContain('not retrieved through SemanticQueryPort');
+    expect(messages.at(-1)!.content).toContain(evidenceId);
+  });
+
+  it('stops after two invalid proposal repairs without accepting fabricated citations', async () => {
+    const port = projectPort();
+    const invalid = proposal({ modules: [{ ...proposal().modules[0]!, evidenceIds: ['invented'] }] });
+    const client = scriptedClient(Array.from({ length: 3 }, () => ({ content: JSON.stringify(invalid) })));
+    await expect(new ToolCallingArchitectRuntime({ queryPort: port, client })
+      .proposeModulePlan({ ...request, projectId: 'quote' })).rejects.toThrow('not retrieved through SemanticQueryPort');
+    expect(client.complete).toHaveBeenCalledTimes(3);
   });
 
   it("rejects an unsupported tool before it can access implementation details", async () => {

@@ -37,7 +37,7 @@ import { RepositoryHealthCheck } from './repository-health';
 import { decorateRepositoryStatuses } from './repository-status';
 import { ServiceManager } from './service-manager';
 import { loadSettings, savePanelSettings } from './settings';
-import { buildModuleTarget } from './target-builder';
+import { addTargetWorkspace, selectedTargetWorkspaceFolders } from './target-workspace';
 import type { CodeIntelligencePresentation, RepositoryStatus } from './ui-types';
 
 // Keep the transaction implementation bundled by esbuild without making the
@@ -172,13 +172,17 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     output,
     services,
+    vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      void refreshModuleExplorer(codeIntelligence, { scanNewOnly: true }).catch((error) => output.appendLine(String(error)));
+    }),
+    vscode.window.registerTreeDataProvider<vscode.TreeItem>('forexplore.launcher', {
+      getTreeItem: (item) => item,
+      getChildren: () => [],
+    }),
     { dispose: () => codeIntelligence.dispose() },
     vscode.workspace.registerTextDocumentContentProvider(
       moduleMigrationPreviewScheme,
       moduleMigrationPreviews,
-    ),
-    vscode.commands.registerCommand('forexplore.startTranslation', () =>
-      startTranslation(context, services, health, codeIntelligence),
     ),
     vscode.commands.registerCommand('forexplore.showPanel', () =>
       showPanel(context, services, health, codeIntelligence),
@@ -263,101 +267,6 @@ export function deactivate(): void {
   activeCodeIntelligenceHost = null;
 }
 
-async function startTranslation(
-  context: vscode.ExtensionContext,
-  services: ServiceManager,
-  health: RepositoryHealthCheck,
-  codeIntelligence: CodeIntelligenceHost,
-): Promise<void> {
-  const editor = vscode.window.activeTextEditor;
-  if (!editor) {
-    void vscode.window.showInformationMessage('请先打开并选中一个目标方法。');
-    return;
-  }
-  if (editor.selection.isEmpty) {
-    void vscode.window.showWarningMessage('请先选中待实现的目标方法或其签名。');
-    return;
-  }
-
-  const document = editor.document;
-  if (document.uri.scheme !== 'file') {
-    void vscode.window.showErrorMessage('仅支持工作区中的本地受支持语言文件。');
-    return;
-  }
-  if (document.isDirty) {
-    void vscode.window.showWarningMessage('请先保存目标文件，再开始迁移，以便建立可校验的文件快照。');
-    return;
-  }
-  const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
-  if (!workspaceFolder) {
-    void vscode.window.showErrorMessage('目标文件必须位于已打开的工作区文件夹中。');
-    return;
-  }
-
-  const target = buildModuleTarget({
-    languageId: document.languageId,
-    selectedText: document.getText(editor.selection),
-    filePath: document.uri.fsPath,
-    fileBaseName: path.basename(document.uri.fsPath),
-    workspaceRoot: workspaceFolder.uri.fsPath,
-    startLine: editor.selection.start.line,
-  });
-  if (!target) {
-    void vscode.window.showErrorMessage(
-      `请在工作区内选择受支持语言的目标方法（当前为 ${document.languageId}）。`,
-    );
-    return;
-  }
-
-  const originalBytes = await vscode.workspace.fs.readFile(document.uri);
-  activeRun = {
-    workspaceFolder,
-    targetUri: document.uri,
-    target,
-    originalSha256: sha256(originalBytes),
-    originalContent: Buffer.from(originalBytes).toString('utf8'),
-    requirement: '',
-    candidates: [],
-    selectedCandidateId: null,
-    adaptation: null,
-  };
-
-  const settings = loadSettings();
-  const [serviceStatus, codeIntelligenceStatus] = await Promise.all([
-    services.refresh(),
-    synchronizeCodeIntelligence(codeIntelligence),
-  ]);
-  const [statuses, moduleExplorer] = await Promise.all([
-    refreshRepositoryStatus(services, health),
-    buildProjectExplorer(codeIntelligence, target),
-  ]);
-  moduleExplorerTargets = moduleExplorer.targets;
-  const runtime = services.getRuntimePresentation();
-
-  await TranslationPanel.createOrShow(
-    context,
-    {
-      target,
-      workspaceRoot: workspaceFolder.uri.fsPath,
-      settings: {
-        repositoryPaths: settings.repositoryPaths,
-        topK: settings.topK,
-      },
-      repositoryStatuses: statuses,
-      codeIntelligence: codeIntelligenceStatus,
-      serviceStatus,
-      moduleExplorer: moduleExplorer.presentation,
-      searchProvider: runtime.searchProvider,
-      adaptationProvider: runtime.adaptationProvider,
-    },
-    {
-      onMessage: (message) => {
-        void handlePanelMessage({ context, services, health, codeIntelligence }, message);
-      },
-    },
-  );
-}
-
 async function showPanel(
   context: vscode.ExtensionContext,
   services: ServiceManager,
@@ -368,21 +277,37 @@ async function showPanel(
     TranslationPanel.current.panel.reveal(vscode.ViewColumn.Beside);
     return;
   }
-  const editor = vscode.window.activeTextEditor;
-  if (editor && !editor.selection.isEmpty) {
-    await startTranslation(context, services, health, codeIntelligence);
-    return;
-  }
   const settings = loadSettings();
-  const presentation = await synchronizeCodeIntelligence(codeIntelligence);
-  const explorer = await buildProjectExplorer(codeIntelligence);
-  moduleExplorerTargets = explorer.targets;
-  await TranslationPanel.createOrShow(context, {
+  const panel = await TranslationPanel.createOrShow(context, {
     target: null, workspaceRoot: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '',
-    settings, repositoryStatuses: await refreshRepositoryStatus(services, health),
-    codeIntelligence: presentation, serviceStatus: await services.refresh(),
-    moduleExplorer: explorer.presentation, searchProvider: 'SeekDB', adaptationProvider: 'DeepSeek',
+    settings, repositoryStatuses: [],
+    codeIntelligence: { status: 'initializing', storage: 'seekdb', repositories: [] },
+    serviceStatus: services.serviceStatus,
+    moduleExplorer: {
+      generatedAt: new Date().toISOString(), history: [],
+      target: {
+        id: 'target:unselected', mode: 'target', name: '选择目标项目', rootLabel: '', tree: [],
+        stats: { modules: 0, files: 0, types: 0, methods: 0, implemented: 0, unimplemented: 0, unknown: 0, dependencies: 0 },
+        summary: { exists: false, path: '.forexplore/module-summary.json' },
+      },
+    }, searchProvider: 'SeekDB', adaptationProvider: 'DeepSeek',
   }, { onMessage: (message) => { void handlePanelMessage({ context, services, health, codeIntelligence }, message); } });
+  void (async () => {
+    try {
+      // Published indexing results are readable while another repository scans.
+      // Opening a panel must not enqueue a status read behind that scan.
+      await publishProjectView(codeIntelligence);
+      const [status, statuses] = await Promise.all([
+        services.refresh(),
+        refreshRepositoryStatus(services, health),
+      ]);
+      if (TranslationPanel.current !== panel) return;
+      panel.post({ type: 'SERVICE_STATUS', status });
+      panel.post({ type: 'REPOSITORY_STATUS', statuses });
+    } catch (error) {
+      if (TranslationPanel.current === panel) panel.post({ type: 'ERROR', message: errorMessage(error, '面板数据加载失败') });
+    }
+  })();
 }
 
 async function handlePanelMessage(
@@ -390,6 +315,13 @@ async function handlePanelMessage(
   message: WebviewToHostMessage,
 ): Promise<void> {
   switch (message.type) {
+    case 'ADD_TARGET_WORKSPACE':
+      try {
+        if (await addTargetWorkspace(message.mode)) await refreshModuleExplorer(host.codeIntelligence, { scanNewOnly: true });
+      } catch (error) {
+        publishError(errorMessage(error, '添加目标工作区失败'));
+      }
+      return;
     case 'READY':
       return;
     case 'START_SEARCH':
@@ -493,7 +425,7 @@ async function updatePanelSettings(
 
   publish({ type: 'SETTINGS_UPDATED', settings: saved });
   try {
-    const codeIntelligence = await synchronizeCodeIntelligence(host.codeIntelligence);
+    const codeIntelligence = await synchronizeCodeIntelligence(host.codeIntelligence, { scanNewOnly: true, scanRoles: ['history'] });
     const [statuses, explorer] = await Promise.all([
       refreshRepositoryStatus(host.services, host.health),
       buildProjectExplorer(host.codeIntelligence, activeRun?.target),
@@ -507,9 +439,12 @@ async function updatePanelSettings(
   }
 }
 
-async function refreshModuleExplorer(codeIntelligence: CodeIntelligenceHost): Promise<void> {
+async function refreshModuleExplorer(
+  codeIntelligence: CodeIntelligenceHost,
+  options: { scanNewOnly?: boolean } = {},
+): Promise<void> {
   try {
-    const presentation = await synchronizeCodeIntelligence(codeIntelligence);
+    const presentation = await synchronizeCodeIntelligence(codeIntelligence, options);
     const result = await buildProjectExplorer(codeIntelligence, activeRun?.target);
     moduleExplorerTargets = result.targets;
     publish({ type: 'MODULE_EXPLORER', explorer: result.presentation });
@@ -874,8 +809,7 @@ function codeIntelligenceRepositoryInputs(): Array<{
     localPath,
     role: 'history' as const,
   }));
-  const targets = (vscode.workspace.workspaceFolders ?? [])
-    .filter((folder) => folder.uri.scheme === 'file')
+  const targets = selectedTargetWorkspaceFolders()
     .map((folder) => ({
       localPath: folder.uri.fsPath,
       displayName: folder.name,
@@ -886,7 +820,7 @@ function codeIntelligenceRepositoryInputs(): Array<{
 
 async function synchronizeCodeIntelligence(
   host: CodeIntelligenceHost,
-  options: { forceFull?: boolean; scan?: boolean; scanRepositoryIds?: readonly string[] } = {},
+  options: { forceFull?: boolean; scan?: boolean; scanRepositoryIds?: readonly string[]; scanNewOnly?: boolean; scanRoles?: readonly ('history' | 'target')[] } = {},
 ): Promise<CodeIntelligencePresentation> {
   const result = await host.synchronize({
     repositories: codeIntelligenceRepositoryInputs(),
@@ -941,6 +875,7 @@ let projectViewQueue: Promise<void> = Promise.resolve();
 function publishProjectView(host: CodeIntelligenceHost): Promise<void> {
   projectViewQueue = projectViewQueue.catch(() => {}).then(async () => {
     if (!TranslationPanel.current) return;
+    publish({ type: 'CODE_INTELLIGENCE_STATUS', presentation: await host.presentation() });
     const explorer = await buildProjectExplorer(host, activeRun?.target);
     moduleExplorerTargets = explorer.targets;
     publish({ type: 'MODULE_EXPLORER', explorer: explorer.presentation });

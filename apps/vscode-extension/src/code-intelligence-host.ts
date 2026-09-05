@@ -198,6 +198,10 @@ export interface CodeIntelligenceRepositoryInput {
 
 export interface SynchronizeCodeIntelligenceRequest {
   scanRepositoryIds?: readonly string[];
+  /** Automatic history initialization must not crawl unrelated workspace targets. */
+  scanRoles?: readonly RepositoryRole[];
+  /** Settings changes initialize newly visible roots without rescanning existing ones. */
+  scanNewOnly?: boolean;
   repositories: readonly CodeIntelligenceRepositoryInput[];
   /** Full is useful for an explicit user refresh; ordinary refreshes reuse unchanged files. */
   forceFull?: boolean;
@@ -721,13 +725,17 @@ export class CodeIntelligenceHost {
       };
     }
 
-    const registered = new Map<RepositoryId, { repositoryId: RepositoryId; activeRevision: string | null }>();
+    const registered = new Map<RepositoryId, RepositoryRecord>();
+    const previouslyVisible = this.#visibleRepositoryIds;
     const failedRepositoryIds: RepositoryId[] = [];
     let registrationFailed = false;
     const normalizedInputs = await Promise.all(request.repositories.map(async (input) => ({
       ...input, localPath: await realpath(path.resolve(input.localPath)).catch(() => path.resolve(input.localPath)),
     })));
     const preferredInputs = preferredRepositoryInputs(normalizedInputs);
+    const requestedScanPaths = request.scanRoles
+      ? new Set(normalizedInputs.filter((input) => request.scanRoles!.includes(input.role)).map(repositoryInputKey))
+      : undefined;
     for (const input of preferredInputs) {
       try {
         const repositoryId = await this.repositoryIdFor(input.localPath);
@@ -749,12 +757,19 @@ export class CodeIntelligenceHost {
     if (this.#selectedTarget && !this.#visibleRepositoryIds.has(this.#selectedTarget)) {
       this.#selectedTarget = undefined;
     }
+    this.#onChange?.();
 
     const scannedRepositoryIds: RepositoryId[] = [];
     if (request.scan !== false) {
       for (const repository of registered.values()) {
         if (request.scanRepositoryIds && !request.scanRepositoryIds.includes(repository.repositoryId)) continue;
+        // A path explicitly configured as history can also be a workspace
+        // target. Role precedence must not suppress that requested scan.
+        if (requestedScanPaths && !requestedScanPaths.has(repositoryInputKey(repository))) continue;
+        if (request.scanNewOnly && previouslyVisible.has(repository.repositoryId) &&
+          (!requestedScanPaths || repository.activeRevision)) continue;
         try {
+          this.#output?.appendLine(`[forexplore] indexing ${repository.role} repository: ${repository.displayName}.`);
           await runtime.coordinator.run({
             repositoryId: repository.repositoryId,
             mode: request.forceFull || !repository.activeRevision ? 'full' : 'incremental',
@@ -763,11 +778,16 @@ export class CodeIntelligenceHost {
           const current = await runtime.registry.get(repository.repositoryId);
           if (current?.activeRevision) {
             const index = await runtime.store.getStructuralIndex({ repositoryId: current.repositoryId, analysisRevision: current.activeRevision });
-            for (const project of index?.projects ?? []) this.scheduleProject(project);
+            for (const project of index?.projects ?? []) {
+              if (repository.role === 'history' || index?.projects.length === 1 ||
+                project.projectId === this.#selectedProjects.get(repository.repositoryId)) this.scheduleProject(project);
+            }
           }
         } catch (error) {
           failedRepositoryIds.push(repository.repositoryId);
           this.logFailure(`index repository ${repository.repositoryId}`, error);
+        } finally {
+          this.#onChange?.();
         }
       }
     }
@@ -830,7 +850,7 @@ export class CodeIntelligenceHost {
       const index = await runtime.store.getStructuralIndex({ repositoryId: repository.repositoryId, analysisRevision });
       if (!index) return null;
       const projectId = index.projects.find((p) => p.projectId === this.#selectedProjects.get(repository.repositoryId))?.projectId
-        ?? index.projects[0]?.projectId;
+        ?? (repository.role === 'history' || index.projects.length === 1 ? index.projects[0]?.projectId : undefined);
       if (!projectId) return null;
       return {
         repository, index, projectId, selectedTarget: repository.repositoryId === target?.repositoryId,
@@ -915,7 +935,7 @@ export class CodeIntelligenceHost {
       const requestedProjectId = this.#selectedProjects.get(repository.repositoryId);
       const selectedProjectId = requestedProjectId && projects.some((project) => project.projectId === requestedProjectId)
         ? requestedProjectId
-        : projects[0]?.projectId ?? null;
+        : repository.role === 'history' || projects.length === 1 ? projects[0]?.projectId ?? null : null;
       if (requestedProjectId && requestedProjectId !== selectedProjectId) this.#selectedProjects.delete(repository.repositoryId);
       const projectAnalysis = projects.find((project) => project.projectId === selectedProjectId)?.analysis;
       return {

@@ -47,7 +47,7 @@ export interface IndexStore {
 
   putModuleArtifact(artifact: ModuleArtifactRecord): Promise<void>;
   listModuleArtifacts(scope: RepositoryRevisionScope): Promise<ModuleArtifactRecord[]>;
-  replaceSearchDocuments(scope: RepositoryRevisionScope, documents: SearchDocumentRecord[]): Promise<void>;
+  replaceSearchDocuments(scope: RepositoryRevisionScope, documents: SearchDocumentRecord[], moduleArtifactId?: string): Promise<void>;
   listSearchDocuments(scope: RepositoryRevisionScope): Promise<SearchDocumentRecord[]>;
   /** Optional full-text/vector-backed projection lookup; structural records remain authoritative. */
   searchSearchDocuments?(
@@ -69,6 +69,13 @@ interface RevisionContents {
   sourceTexts: Map<string, string>;
   moduleArtifacts: Map<string, ModuleArtifactRecord>;
   searchDocuments: Map<string, SearchDocumentRecord>;
+}
+
+export function validateSummaryReplacement(documents: SearchDocumentRecord[], moduleArtifactId?: string): void {
+  if (moduleArtifactId === undefined) return;
+  if (!moduleArtifactId || documents.some((document) => document.kind !== 'summary' || document.moduleArtifactId !== moduleArtifactId)) {
+    throw new Error('Partial projection replacement must contain only summaries for the selected artifact.');
+  }
 }
 
 /**
@@ -549,7 +556,9 @@ export class InMemoryIndexStore implements IndexStore {
   async replaceSearchDocuments(
     scope: RepositoryRevisionScope,
     documents: SearchDocumentRecord[],
+    moduleArtifactId?: string,
   ): Promise<void> {
+    validateSummaryReplacement(documents, moduleArtifactId);
     const contents = this.#contents.get(scopeKey(scope));
     if (!contents) throw new Error('Cannot project search documents before its structural index exists.');
     const revision = this.#revisions.get(scopeKey(scope));
@@ -563,6 +572,11 @@ export class InMemoryIndexStore implements IndexStore {
       this.#repositories.get(scope.repositoryId) ?? null,
     );
     const replacement = new Map<string, SearchDocumentRecord>();
+    if (moduleArtifactId !== undefined) {
+      for (const document of contents.searchDocuments.values()) {
+        if (document.kind !== 'summary' || document.moduleArtifactId !== moduleArtifactId) replacement.set(document.searchDocumentId, document);
+      }
+    }
     for (const document of documents) replacement.set(document.searchDocumentId, clone(document));
     contents.searchDocuments = replacement;
   }

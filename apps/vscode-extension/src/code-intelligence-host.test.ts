@@ -270,6 +270,92 @@ function javaCompilerProbeAnalysis(sha256 = 'sha-1'): RepositoryStaticAnalysis {
 }
 
 describe('CodeIntelligenceHost', () => {
+  it('initializes configured history without scanning the surrounding target workspace', async () => {
+    const target = await temporaryRepository('parent-workspace');
+    const history = path.join(target, 'account-stream-rs');
+    await mkdir(history);
+    const runtime = createRuntime();
+    const scan = vi.spyOn(runtime.coordinator, 'run');
+    const host = new CodeIntelligenceHost({ runtimeFactory: async () => runtime });
+    const repositories = [{ localPath: target, role: 'target' as const }, { localPath: history, role: 'history' as const }];
+    const result = await host.synchronize({ repositories, scanRoles: ['history'] });
+    const indexedHistory = result.presentation.repositories.find((repository) => repository.role === 'history')!;
+    const pendingTarget = result.presentation.repositories.find((repository) => repository.role === 'target')!;
+    expect(indexedHistory.analysisStatus).toBe('ready');
+    expect(pendingTarget.activeRevision).toBeNull();
+    expect(scan).toHaveBeenCalledExactlyOnceWith({ repositoryId: indexedHistory.repositoryId, mode: 'full' });
+    const refreshed = await host.synchronize({ repositories, scanRepositoryIds: [pendingTarget.repositoryId] });
+    expect(refreshed.scannedRepositoryIds).toEqual([pendingTarget.repositoryId]);
+    expect(refreshed.presentation.repositories.find((repository) => repository.role === 'target')?.analysisStatus).toBe('ready');
+    host.dispose();
+  });
+
+  it('indexes an existing unindexed workspace when its path is explicitly added to history', async () => {
+    const directory = await temporaryRepository('workspace-also-history');
+    const runtime = createRuntime();
+    const scan = vi.spyOn(runtime.coordinator, 'run');
+    const host = new CodeIntelligenceHost({ runtimeFactory: async () => runtime });
+    await host.synchronize({ repositories: [{ localPath: directory, role: 'target' }], scanRoles: ['history'] });
+    expect(scan).not.toHaveBeenCalled();
+    const result = await host.synchronize({ repositories: [
+      { localPath: directory, role: 'target' }, { localPath: directory, role: 'history' },
+    ], scanRoles: ['history'], scanNewOnly: true });
+    expect(scan).toHaveBeenCalledOnce();
+    expect(result.presentation.repositories).toHaveLength(1);
+    expect(result.presentation.repositories[0]).toMatchObject({ role: 'target', analysisStatus: 'ready' });
+    host.dispose();
+  });
+
+  it('publishes completed repositories while a later repository is still scanning', async () => {
+    const history = await temporaryRepository('a-history');
+    const target = await temporaryRepository('z-target');
+    const runtime = createRuntime();
+    const originalRun = runtime.coordinator.run.bind(runtime.coordinator);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let started!: () => void;
+    const scanning = new Promise<void>((resolve) => { started = resolve; });
+    runtime.coordinator.run = async (request) => {
+      if ((await runtime.registry.get(request.repositoryId))?.role === 'target') { started(); await gate; }
+      return originalRun(request);
+    };
+    const onChange = vi.fn();
+    const host = new CodeIntelligenceHost({ runtimeFactory: async () => runtime, onChange });
+    const synchronization = host.synchronize({ repositories: [
+      { localPath: history, role: 'history' }, { localPath: target, role: 'target' },
+    ] });
+    await scanning;
+    try {
+      const view = await host.presentation();
+      expect(view.repositories.find((repository) => repository.role === 'history')?.analysisStatus).toBe('ready');
+      expect(onChange).toHaveBeenCalledTimes(2);
+    } finally {
+      release();
+      await synchronization;
+      host.dispose();
+    }
+  });
+
+  it('initializes only newly added roots on settings saves and still refreshes existing roots explicitly', async () => {
+    const first = await temporaryRepository('existing-history');
+    const second = await temporaryRepository('new-history');
+    const runtime = createRuntime();
+    const host = new CodeIntelligenceHost({ runtimeFactory: async () => runtime, identityStore: new MemoryIdentityStore() });
+    const repositories = [{ localPath: first, role: 'history' as const }];
+    const initial = await host.synchronize({ repositories });
+    const original = initial.presentation.repositories[0]!;
+    repositories.push({ localPath: second, role: 'history' });
+    const added = await host.synchronize({ repositories, scanNewOnly: true });
+    expect(added.scannedRepositoryIds).toHaveLength(1);
+    expect(added.scannedRepositoryIds).not.toContain(original.repositoryId);
+    expect(added.presentation.repositories.find((item) => item.repositoryId === original.repositoryId)?.activeRevision)
+      .toBe(original.activeRevision);
+    expect((await host.synchronize({ repositories, scanNewOnly: true })).scannedRepositoryIds).toEqual([]);
+    expect((await host.synchronize({ repositories, scanRepositoryIds: [original.repositoryId] })).scannedRepositoryIds)
+      .toEqual([original.repositoryId]);
+    await host.dispose();
+  });
+
   it('runs target and history roots through one host-owned revision chain without leaking local paths', async () => {
     const history = await temporaryRepository('history');
     const target = await temporaryRepository('target');

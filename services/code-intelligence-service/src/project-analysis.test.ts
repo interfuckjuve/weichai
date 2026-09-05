@@ -54,6 +54,11 @@ describe('project understanding lifecycle', () => {
     await reopened.ensure(scopes[0]!, true);
     expect(plan).toHaveBeenCalledTimes(3);
     const artifacts = await runtime.store.listModuleArtifacts(index);
+    for (const artifact of artifacts) {
+      expect(artifact.contentHash).toMatch(/^[a-f0-9]{64}$/);
+      expect(`sha256:${artifact.contentHash}`).toBe(projectPlanHash(artifact.payload));
+      expect(artifact.planHash).toMatch(/^sha256:[a-f0-9]{64}$/);
+    }
     expect(artifacts.filter((a) => a.kind === 'module-summary' && a.status === 'current')).toHaveLength(2);
     expect((await runtime.store.listSearchDocuments(index)).filter((d) => d.kind === 'summary')).toHaveLength(2);
   });

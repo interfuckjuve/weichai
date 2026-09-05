@@ -154,6 +154,7 @@ export class AnalysisCoordinator {
     let ownsBuildingRevision = false;
 
     try {
+      const scanStarted = performance.now();
       const result = await this.scanner.scan({
         ...scope,
         root: repository.localPath,
@@ -162,6 +163,10 @@ export class AnalysisCoordinator {
         ...(changedPaths.length > 0 ? { changedPaths } : {}),
         signal: request.signal,
       });
+      console.info('[forexplore:performance]', JSON.stringify({ stage: 'scan', ...scope,
+        durationMs: Math.round(performance.now() - scanStarted), files: result.index.files.length,
+        symbols: result.index.symbols.length, dependencies: result.index.dependencyEdges.length,
+        reusedFiles: result.reusedFileCount ?? 0 }));
       request.signal?.throwIfAborted();
       if (
         result.index.repositoryId !== scope.repositoryId ||
@@ -193,8 +198,14 @@ export class AnalysisCoordinator {
       };
       await this.store.putRevision(building);
       ownsBuildingRevision = true;
+      const writeStarted = performance.now();
       await this.store.putStructuralIndex(result.index, result.sourceTexts);
+      console.info('[forexplore:performance]', JSON.stringify({ stage: 'structural-write', ...scope,
+        durationMs: Math.round(performance.now() - writeStarted) }));
+      const projectionStarted = performance.now();
       await this.projection.project(result.index, result.sourceTexts, request.signal);
+      console.info('[forexplore:performance]', JSON.stringify({ stage: 'search-projection', ...scope,
+        durationMs: Math.round(performance.now() - projectionStarted) }));
       const ready: AnalysisRevisionRecord = {
         ...building,
         status: 'ready',

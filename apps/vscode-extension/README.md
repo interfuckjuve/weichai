@@ -6,6 +6,10 @@ ForeXplore 将企业已有实现作为迁移证据：在任意受支持语言的
 
 ## 版本化代码智能索引
 
+索引写入事务的单条 SQL 超时预算至少为 60 秒，包含提交阶段；若连接原值更大则保留原值，事务结束后恢复连接设置。此设置不修改数据库全局配置。`[forexplore:performance]` 的 `seekdb-transaction` 日志分别记录事务总耗时和 `commitMs`，便于区分批量写入与提交等待。
+
+项目 Agent 首轮预载目标项目元数据、文件清单、静态依赖和符号信息，先依据这些证据划分模块，再按需查询源码或更多索引信息。初始依赖最多读取 200 条，符号最多读取 100 条，各清单按字符预算保留完整记录，并附带省略数量和分页信息。信息充分时可直接输出；未解析依赖仍保留原状态。其他项目的文件清单不会进入首轮上下文。
+
 扩展宿主将 `forexplore.repositoryPaths` 中的历史仓库和当前本地工作区目标工程注册到同一个版本化索引链路：`RepositoryRegistry → AnalysisCoordinator → Tree-sitter structural index → revision store → SemanticQueryPort`。运行 **ForeXplore: 刷新代码智能索引** 可增量复用未变文件；**ForeXplore: 重新索引检索仓库** 会重新检查全部文件；内容和解析器版本未变时保留原 revision。索引构建完成前，读者继续看到上一个 active revision。
 
 设置面板展示仓库、项目、索引状态、active revision、语言能力等级和项目解析状态；不会接收索引数据库连接、源码或 `localPath`。它可切换查看宿主验证过的历史 revision，但此操作严格只读，绝不会改写 `activeRevision`；历史 Summary 会明确标为过期，不能当作当前结果。扩展宿主保留现有 Java/C# `RepositoryStaticAnalysis` 作为模块迁移兼容制品，不能把旧快照 Summary 强行标记为新结构索引 revision 的当前 Summary。新鲜的 Java/C# 编译器探测快照只有在其 Java/C# 文件哈希与 active structural revision 完全相符时，才由宿主绑定为该 revision 的专用语义证据；绑定失败不会影响旧迁移流程。
@@ -112,8 +116,8 @@ export CODE_INTELLIGENCE_SEEKDB_VECTOR_DIMENSION='384' # optional; default shown
 ## 运行方式
 
 1. 在仓库根目录运行 `npm run dev:extension`。脚本会启动 SeekDB、两个本地服务，并打开 Extension Development Host。
-2. 在开发宿主中打开目标工作区；默认夹具是 Java 工程 `fixtures/target-system/commons-fileupload-java-skeleton`。
-3. 在 `src/main/java/org/apache/commons/fileupload/FileUploadBase.java` 选择 `parseRequest(RequestContext)`、`getItemIterator(RequestContext)` 或其他待实现方法，运行 **ForeXplore: 开始代码翻译**。
+2. 在面板左侧“目标工作区”的选择器中选择目标目录；已打开的 VS Code 工作区仅作为候选，不会自动作为目标工程。
+3. 运行 **ForeXplore: 打开翻译面板**，从目标项目的模块树中选择待实现的类或方法。
 4. 输入需求并检索全部语料候选。任意已支持语言的候选均可继续生成目标语言补丁。
 
 插件只调用真实的 SeekDB 检索服务和语言无关的适配服务。任一服务不可用时，插件会报错，不会回退到本地样例。
@@ -189,9 +193,13 @@ Webview → 宿主：`READY`、`START_SEARCH`、`SELECT_CANDIDATE`、`START_ADAP
 
 ## 历史库与目标项目解析
 
-运行 **ForeXplore: 打开翻译面板** 即可配置仓库，无需先选择方法。添加多个历史路径并保存后，各项目自动进入模块解析；顶部项目选择器切换目标或历史项目，页面展示其模块树、Summary 正文、覆盖范围、依赖和诊断。选择方法后才进入后续代码翻译流程。
+运行 **ForeXplore: 打开翻译面板** 即可配置仓库，无需先选择方法。添加多个历史路径并保存后，各项目自动进入模块解析；左侧“目标工作区 / 历史仓”各自的项目选择器切换当前项目，右侧展示模块树对应的 Summary、覆盖范围、依赖和诊断。选择方法后才进入后续代码翻译流程。
 
-普通刷新在内容未变化时复用原 revision 和 Summary。使用“刷新此仓库”检查单库变化，“重新解析模块”明确要求再次调用 Agent；“重试解析 / 同步”在仅投影失败时不会重复调用模型。历史版本展示保持只读。本地 .forexplore/module-summary.json 不参与当前模块树构建。
+目标选择器菜单提供已打开工作区、浏览目录和输入路径三个入口。选择保存在 `forexplore.targetRepositoryPaths`；只有明确选择且位于当前 VS Code 工作区的目录会作为目标工程。一个目录包含多个子项目时，结构索引完成后等待用户选择具体项目，再启动该项目的 Agent 解析。面板会逐仓库显示已完成结果。
+
+保存设置时只扫描新添加的仓库，已有仓库通过“刷新此仓库”检查变化。普通刷新在内容未变化时复用原 revision 和 Summary。“重新解析模块”明确要求再次调用 Agent；“重试解析 / 同步”在仅投影失败时不会重复调用模型。历史版本展示保持只读。本地 .forexplore/module-summary.json 不参与当前模块树构建。
+
+SeekDB 按行数和数据大小分批写入，项目 Summary 只替换自身的模块检索文档。宿主控制台中的 `[forexplore:performance]` 日志记录源码扫描、结构解析、数据库写入、检索投影和 Agent 分析耗时，以及文件、符号、依赖数量和 INSERT 次数。数据库写入验收可在仓库根目录运行 `npx tsx scripts/verify-indexing-performance.ts`，它使用本机 SeekDB 连接配置，创建独立临时数据库，验证索引一致性、Summary 更新范围及逐条/批量写入耗时，结束后删除测试数据库。
 
 扩展宿主启动前配置 SeekDB：
 

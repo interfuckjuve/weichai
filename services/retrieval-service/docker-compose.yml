@@ -8,6 +8,7 @@ services:
     environment:
       SEEKDB_DATABASE: forexplore
       MEMORY_LIMIT: 2G
+      LOG_DISK_SIZE: 8G
       CPU_COUNT: 2
     volumes:
       - seekdb-data:/var/lib/oceanbase

@@ -16,18 +16,6 @@ const extensionDevelopmentPath = path.resolve(extensionRoot);
 const fixtureWorkspace = fileURLToPath(
   new URL('../../../../../fixtures/target-system/commons-fileupload-java-skeleton', import.meta.url),
 );
-const fixtureFile = path.join(
-  fixtureWorkspace,
-  'src',
-  'main',
-  'java',
-  'org',
-  'apache',
-  'commons',
-  'fileupload',
-  'FileUploadBase.java',
-);
-
 async function main(): Promise<void> {
   try {
     const configuredExecutable = process.env.FOREXPLORE_TEST_VSCODE_PATH?.trim();
@@ -39,10 +27,6 @@ async function main(): Promise<void> {
       vscodeExecutablePath: executablePath,
       extensionDevelopmentPath,
       extensionTestsPath: suitePath,
-      extensionTestsEnv: {
-        FOREXPLORE_TEST_FIXTURE: fixtureFile,
-        FOREXPLORE_TEST_WORKSPACE: fixtureWorkspace,
-      },
       launchArgs: [
         '--disable-extensions',
         '--disable-workspace-trust',

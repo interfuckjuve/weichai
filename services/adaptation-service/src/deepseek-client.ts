@@ -111,15 +111,17 @@ export async function completeWithDeepSeekTools(
     body: JSON.stringify({
       model: modelConfig.model,
       messages: messages.map(deepSeekToolMessage),
-      tools: tools.map((tool) => ({
-        type: "function",
-        function: {
-          name: tool.name,
-          description: tool.description,
-          parameters: tool.inputSchema,
-        },
-      })),
-      tool_choice: "auto",
+      ...(tools.length ? {
+        tools: tools.map((tool) => ({
+          type: "function",
+          function: {
+            name: tool.name,
+            description: tool.description,
+            parameters: tool.inputSchema,
+          },
+        })),
+        tool_choice: "auto",
+      } : {}),
       thinking: { type: "disabled" },
       ...(options.temperature === undefined ? {} : { temperature: options.temperature }),
     }),

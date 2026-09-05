@@ -159,8 +159,12 @@ export async function scanRepositoryStructuralIndex(
   if (!Number.isInteger(maxFileBytes) || maxFileBytes < 1) {
     throw new Error('Repository scan maxFileBytes must be a positive integer.');
   }
+  const scanStarted = performance.now();
   const files = await collectSourceFiles(repositoryRoot, languageRegistry, maxFileBytes);
-  return buildStructuralIndex({
+  console.info('[forexplore:performance]', JSON.stringify({ stage: 'source-snapshot', repositoryId: request.repositoryId,
+    durationMs: Math.round(performance.now() - scanStarted), files: files.length }));
+  const parseStarted = performance.now();
+  const result = buildStructuralIndex({
     repositoryId: request.repositoryId,
     analysisRevision: request.analysisRevision,
     files,
@@ -169,6 +173,10 @@ export async function scanRepositoryStructuralIndex(
     languageRegistry,
     ...(request.previousIndex ? { previousIndex: request.previousIndex } : {}),
   });
+  console.info('[forexplore:performance]', JSON.stringify({ stage: 'structural-parse', repositoryId: request.repositoryId,
+    durationMs: Math.round(performance.now() - parseStarted), symbols: result.index.symbols.length,
+    dependencies: result.index.dependencyEdges.length }));
+  return result;
 }
 
 export const filesystemRepositoryStructuralScanner: RepositoryStructuralScanner = {

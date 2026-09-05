@@ -5,12 +5,12 @@ import type {
   RepositoryRecord,
   StructuralIndex,
 } from '@forexplore/contracts';
-import type { Pool } from 'mysql2/promise';
+import type { Pool, PoolConnection } from 'mysql2/promise';
 import { describe, expect, it, vi } from 'vitest';
 import { AnalysisCoordinator, type StructuralScanner } from './analysis-coordinator.js';
 import { InMemoryIndexStore } from './index-store.js';
 import { RepositoryRegistry } from './repository-registry.js';
-import { SeekDbIndexStore } from './seekdb-index-store.js';
+import { SeekDbIndexStore, seekDbIndexStoreInternals } from './seekdb-index-store.js';
 import { SeekDbProjection } from './seekdb-projection.js';
 
 const hash = (character: string): string => character.repeat(64);
@@ -219,6 +219,37 @@ describe('revision store hardening', () => {
     expect((await store.listSearchDocuments(index)).some((document) => document.kind === 'summary')).toBe(false);
   });
 
+  it('replaces one summary without reading source text or changing other summaries and source documents', async () => {
+    const store = new InMemoryIndexStore();
+    const index = structural();
+    await store.putRepository(repository());
+    await persistReady(store, index);
+    await store.activateRevision(index);
+    const projection = new SeekDbProjection(store);
+    await projection.project(index, new Map([['src/example.ts', 'export class Example {}']]));
+    const artifact = (id: string): ModuleArtifactRecord => ({
+      ...index, moduleArtifactId: id, kind: 'module-summary', status: 'current',
+      planHash: hash('e'), contentHash: hash('d'), createdAt: '2026-09-04T00:00:00.000Z',
+      updatedAt: '2026-09-04T00:00:00.000Z', payload: { title: id },
+    });
+    await store.putModuleArtifact(artifact('first'));
+    await store.putModuleArtifact(artifact('second'));
+    await projection.projectModuleArtifacts(index);
+    const before = await store.listSearchDocuments(index);
+    const readSource = vi.spyOn(store, 'getSourceText');
+    await store.putModuleArtifact({ ...artifact('first'), contentHash: hash('f'), payload: { title: 'updated' } });
+    await projection.projectModuleArtifacts(index, undefined, 'first');
+    const after = await store.listSearchDocuments(index);
+    expect(after.filter((document) => document.moduleArtifactId !== 'first'))
+      .toEqual(before.filter((document) => document.moduleArtifactId !== 'first'));
+    expect(after.find((document) => document.moduleArtifactId === 'first')?.text).toContain('updated');
+    expect(readSource).not.toHaveBeenCalled();
+    await store.replaceSearchDocuments(index, [], 'first');
+    expect(await store.listSearchDocuments(index)).toEqual(after.filter((document) => document.moduleArtifactId !== 'first'));
+    await expect(store.replaceSearchDocuments(index, before.filter((document) => document.kind === 'symbol'), 'second'))
+      .rejects.toThrow('only summaries');
+  });
+
   it('projects each analyzed project module as its own summary search document', async () => {
     const store = new InMemoryIndexStore();
     const index = structural();
@@ -273,6 +304,65 @@ describe('revision store hardening', () => {
 });
 
 describe('SeekDbIndexStore pre-write validation', () => {
+  it('applies an indexing timeout through commit and restores the pooled session afterwards', async () => {
+    let timeout = 10_000_000;
+    const connection = {
+      query: vi.fn(async (sql: string, params?: number[]) => {
+        if (sql.startsWith('SELECT @@')) return [[{ query_timeout: timeout }]];
+        timeout = params?.[0] ?? 60_000_000;
+        return [{}];
+      }),
+      beginTransaction: vi.fn(async () => { expect(timeout).toBe(60_000_000); }),
+      commit: vi.fn(async () => { expect(timeout).toBe(60_000_000); }),
+      rollback: vi.fn(), release: vi.fn(), destroy: vi.fn(),
+    };
+    const pool = { getConnection: async () => connection } as unknown as Pool;
+    await expect(seekDbIndexStoreInternals.withTransaction(pool, async () => 'saved')).resolves.toBe('saved');
+    expect(timeout).toBe(10_000_000);
+    expect(connection.release).toHaveBeenCalledOnce();
+    expect(connection.destroy).not.toHaveBeenCalled();
+    const original = new Error('commit timeout');
+    connection.commit.mockRejectedValueOnce(original);
+    connection.rollback.mockRejectedValueOnce(new Error('rollback timeout'));
+    await expect(seekDbIndexStoreInternals.withTransaction(pool, async () => 'saved')).rejects.toBe(original);
+    expect(connection.destroy).toHaveBeenCalledOnce();
+    expect(connection.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves a longer configured timeout and rolls back failed writes without retrying', async () => {
+    const connection = { query: vi.fn().mockResolvedValue([[{ query_timeout: 120_000_000 }]]),
+      beginTransaction: vi.fn(), commit: vi.fn(), rollback: vi.fn(), release: vi.fn(), destroy: vi.fn() };
+    const pool = { getConnection: async () => connection } as unknown as Pool;
+    const failure = new Error('write failed');
+    const operation = vi.fn().mockRejectedValue(failure);
+    await expect(seekDbIndexStoreInternals.withTransaction(pool, operation)).rejects.toBe(failure);
+    expect(operation).toHaveBeenCalledOnce();
+    expect(connection.query).toHaveBeenCalledTimes(1);
+    expect(connection.commit).not.toHaveBeenCalled();
+    expect(connection.rollback).toHaveBeenCalledOnce();
+    expect(connection.release).toHaveBeenCalledOnce();
+  });
+
+  it('batches inserts while preserving values, bounding payload size and propagating failures', async () => {
+    const query = vi.fn().mockResolvedValue([{}]);
+    const connection = { query } as unknown as PoolConnection;
+    const rows = Array.from({ length: 1000 }, (_, id) => ({ values: [id, `value '${id}`] }));
+    expect(await seekDbIndexStoreInternals.insertBatches(connection, 'INSERT INTO test (id, value)', rows)).toBe(4);
+    expect(query.mock.calls.flatMap((call) => call[1])).toEqual(rows.flatMap((row) => row.values));
+    expect(query.mock.calls.every((call) => (call[0].match(/\?/g) ?? []).length === call[1].length)).toBe(true);
+    query.mockClear();
+    const large = 'x'.repeat(150_000);
+    expect(await seekDbIndexStoreInternals.insertBatches(connection, 'INSERT INTO test (value)', [
+      { values: [large] }, { values: [large] }, { values: ['small'], vector: '0x00000000' },
+    ])).toBe(2);
+    query.mockClear();
+    expect(await seekDbIndexStoreInternals.insertBatches(connection, 'INSERT INTO test (value)', [])).toBe(0);
+    expect(query).not.toHaveBeenCalled();
+    query.mockRejectedValueOnce(new Error('write failed'));
+    await expect(seekDbIndexStoreInternals.insertBatches(connection, 'INSERT INTO test (value)', rows))
+      .rejects.toThrow('write failed');
+  });
+
   it('rejects malformed structural and search projection input before issuing a database query', async () => {
     const query = vi.fn();
     const pool = { query, getConnection: vi.fn(), end: vi.fn() } as unknown as Pool;

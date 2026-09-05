@@ -409,7 +409,7 @@ export class SemanticQueryService implements SemanticQueryPort {
   async searchSymbols(request: SearchSymbolsRequest, signal?: AbortSignal): Promise<SearchSymbolsResult> {
     const { index } = await this.#scope(request, signal);
     const query = request.query.trim().toLocaleLowerCase();
-    if (!query) throw new Error('Symbol search query must not be empty.');
+    if (!query && !request.projectIds?.length) throw new Error('Symbol search query must not be empty without a project filter.');
     const languageIds = request.languageIds ? new Set(request.languageIds) : null;
     const kinds = request.kinds ? new Set(request.kinds) : null;
     const projectIds = request.projectIds ? new Set(request.projectIds) : null;
@@ -429,11 +429,11 @@ export class SemanticQueryService implements SemanticQueryPort {
     // the authoritative, revision-scoped structural symbol before returning
     // it, and retains a deterministic structural fallback when no projection
     // is available (e.g. in-memory tests or a just-created revision).
-    const projection = await this.store.searchSearchDocuments?.(
+    const projection = query ? await this.store.searchSearchDocuments?.(
       request,
       query,
       Math.min(request.limit ?? MAX_LIMIT, MAX_LIMIT),
-    ) ?? [];
+    ) ?? [] : [];
     const matchesByKey = new Map(matches.map((symbol) => [symbol.symbolKey, symbol]));
     const ranked = projection
       .flatMap((document) => document.kind === 'symbol' && document.symbolKey

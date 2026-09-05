@@ -163,6 +163,18 @@ describe('SemanticQueryService', () => {
     expect(excerpt.excerpt?.value).toEqual({ text: 'export class First {}\n', truncated: false });
   });
 
+  it('lists symbols without a text query only inside an explicit project filter', async () => {
+    const store = new InMemoryIndexStore();
+    const structural = await seed(store, 'history-one', 'revision-one');
+    await store.activateRevision(structural);
+    const query = new SemanticQueryService(store);
+    const scope = { repositoryId: structural.repositoryId, analysisRevision: structural.analysisRevision };
+    const result = await query.searchSymbols({ ...scope, query: '', projectIds: [structural.projects[0]!.projectId] });
+    expect(result.symbols.map((symbol) => symbol.value.symbolKey)).toEqual(structural.symbols.map((symbol) => symbol.symbolKey));
+    expect((await query.searchSymbols({ ...scope, query: '', projectIds: ['another-project'] })).symbols).toEqual([]);
+    await expect(query.searchSymbols({ ...scope, query: '' })).rejects.toThrow('without a project filter');
+  });
+
   it('preserves unresolved dependencies instead of fabricating semantic definition/reference evidence', async () => {
     const store = new InMemoryIndexStore();
     const structural = await seed(store, 'history-one', 'revision-one');
