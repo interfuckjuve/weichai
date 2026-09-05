@@ -6,6 +6,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "vitest run src",
+    "verify": "tsx src/verification-cli.ts",
     "e2e": "tsx e2e/run-smoke-e2e.ts"
   },
   "exports": { ".": "./src/index.ts" },

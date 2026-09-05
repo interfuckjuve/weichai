@@ -1,5 +1,11 @@
 export const translationVerifierSchemaVersion = "1.0" as const;
 
+export * from "./verification-types.js";
+export { VerificationStrategyFactory } from "./verification-strategy-factory.js";
+export { VerificationService } from "./verification-service.js";
+export { DIFFERENTIAL_SMOKE_STRATEGY, createDifferentialSmokeProvider } from "./strategies/differential-smoke-strategy.js";
+export { createDefaultVerificationService } from "./default-verification-service.js";
+
 // smoke 差分报告类型(SmokeReport schema,src/smoke-types.ts)。
 export type {
   CaseResult,

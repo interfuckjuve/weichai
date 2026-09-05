@@ -13,9 +13,11 @@ agent 工作目录;宿主复查基线、读有界命令证据并做深度校验,
 
 旧实验修复行为需要显式 `mode:"diagnostic-repair"`(仅供诊断 E2E)。
 
-> 当前集成状态:本包提供独立 `runSmoke` API,但尚未实现并注册上游 V2
+> 当前集成状态:本包提供独立 `runSmoke` API 与通用 verification framework
+> entry/result 边界(`VerificationInput` → `VerificationResult`),但尚未实现并注册上游 V2
 > `MigrationBehaviorVerifierV2` provider。adaptation runtime 仍如实声明 behavior verification
-> disabled,因此本包当前不是 V2 生产写回门禁的一部分。
+> disabled,因此本包当前不是 V2 生产写回门禁的一部分。V2 生产接线、repair orchestration
+> 和 manifest 扩展将在 vertical-slice checkpoint 之后推进。
 
 ## 模块数据流
 
@@ -36,6 +38,10 @@ runSmoke(job, { mode:"verify-only", ... }, signal)
 
 | 模块 | 职责 |
 | --- | --- |
+| `verification-cli.ts` | 通用 verification CLI(`--list-strategies` / `--input` / `--output` / `--strategy`) |
+| `default-verification-service.ts` | 静态注册默认 service:当前只注册 `differential-smoke@1.0.0` |
+| `verification-service.ts` + `verification-strategy-factory.ts` | Strategy factory、默认/显式 strategy 选择、未知 strategy 显式失败 |
+| `verification-types.ts` | `VerificationInput` / `VerificationResult` / strategy descriptor/result envelope 合约 |
 | `strategies/smoke-runner.ts` | `runSmoke` verify-only 编排(布局/命令代理 env/深校验/证据评估/AbortError) |
 | `strategies/prompts/smoke-task.ts` | `buildSmokeTaskPrompt(input, mode)`:verify-only 与 diagnostic 模式简报 |
 | `strategies/helpers.ts` | `VERIFIER_COMMAND_ENTRY`、默认目录与工具约束常量 |
@@ -61,6 +67,20 @@ npm run build --workspace @forexplore/translation-verifier
 mvn -q -f services/translation-verifier/e2e/fixtures/dependencies/maven/pom.xml test
 dotnet build services/translation-verifier/e2e/fixtures/dependencies/dotnet/DependencyFixture.sln --nologo -v q
 
+# 列出静态注册策略(默认包含 differential-smoke 1.0.0)
+npm run verify --workspace @forexplore/translation-verifier -- --list-strategies
+
+# 通用 verification entry:读取 VerificationInput JSON,写 VerificationResult JSON
+npm run verify --workspace @forexplore/translation-verifier -- \
+  --input /path/to/verification-input.json \
+  --output /path/to/verification-result.json
+
+# 显式选择 strategy;未知 strategy 由 VerificationService/Factory 显式失败
+npm run verify --workspace @forexplore/translation-verifier -- \
+  --strategy differential-smoke \
+  --input /path/to/verification-input.json \
+  --output /path/to/verification-result.json
+
 # smoke E2E:离线路径(自主模式无离线回放,仅打印说明退出 0)
 npm run e2e --workspace @forexplore/translation-verifier -- --offline-only
 
@@ -74,6 +94,15 @@ DEEPSEEK_API_KEY=sk-xxx npm run e2e --workspace @forexplore/translation-verifier
 详见 `e2e/README.md`。
 
 ## API
+
+```ts
+createDefaultVerificationService(options?).verify(input, { strategyId?, keepWorkspace? }, signal)
+```
+
+- `VerificationInput`:通用 verification entry,携带 `AdaptationRequestV2`、analysis report、migration plan 与 translation patch envelope。
+- `VerificationResult`:通用 result boundary,携带 `strategyId`、`strategyVersion`、`subjectHash`、`status`、issues、artifacts、strategy report 与 content hash。
+- Strategy registration 是静态的:当前 default service 只注册 `differential-smoke@1.0.0`;不做 dynamic loading。
+- 未知 strategy 不由 CLI 静默回退或改写,由 `VerificationService` / `VerificationStrategyFactory` 报错。
 
 ```ts
 runSmoke(job: SmokeTaskInput, options?: SmokeRunOptions, signal?: AbortSignal): Promise<SmokeResult>

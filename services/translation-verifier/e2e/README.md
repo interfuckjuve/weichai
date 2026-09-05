@@ -40,8 +40,11 @@ dotnet build services/translation-verifier/e2e/fixtures/dependencies/dotnet/Depe
 ## 用法(仅真实 claude 黑盒路径)
 
 ```bash
-# 默认样例:diagnostic-repair(MimeUtility.DecodeText C# → Java)
+# 默认样例:diagnostic-repair(MimeUtility.DecodeText C# → Java),默认 strategy=differential-smoke
 DEEPSEEK_API_KEY=sk-xxx npx tsx services/translation-verifier/e2e/run-smoke-e2e.ts
+
+# 显式选择当前 E2E suite 支持的静态 strategy
+npx tsx services/translation-verifier/e2e/run-smoke-e2e.ts --offline-only --strategy differential-smoke
 
 # 显式指定 fixture 目录 / 加大超时
 npx tsx services/translation-verifier/e2e/run-smoke-e2e.ts \
@@ -61,6 +64,7 @@ npx tsx services/translation-verifier/e2e/run-smoke-e2e.ts --offline-only
 | `--fixture-dir <path>` | 否 | `e2e/fixtures/smoke-mime-util` | 任务输入目录(requirement.txt;经 `..` 定位 samples) |
 | `--api-key <key>` | 否 | `DEEPSEEK_API_KEY` | claude 自主会话 API Key |
 | `--timeout-ms <ms>` | 否 | `300000` | 单次 claude 自主会话超时 |
+| `--strategy <id>` | 否 | `differential-smoke` | 选择静态 E2E strategy suite;当前仅支持 `differential-smoke` |
 | `--offline-only` | 否 | - | 跳过真实 claude(仅打印说明退出 0) |
 | `--verify-only` | 否 | - | 生产 verify-only 模式(依赖 fixture 根 + 不变量校验) |
 | `--json` | 否 | - | 输出完整 SmokeResult JSON(含 SmokeReport) |

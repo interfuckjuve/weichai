@@ -15,11 +15,12 @@
  * 退出码:0=策略报告生成成功(status 非 error);1=status=error 或 verify-only
  * 不变量不满足;2=参数错误/缺 key。
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, resolve } from "node:path";
 import { runSmoke, type SmokeResult, type SmokeTaskInput } from "../src/strategies/smoke-runner.js";
 import type { SmokeReport } from "../src/smoke-types.js";
+import { DIFFERENTIAL_SMOKE_STRATEGY } from "../src/strategies/differential-smoke-strategy.js";
 import { createLogger } from "../src/logger.js";
 
 export interface SmokeE2EOptions {
@@ -31,10 +32,12 @@ export interface SmokeE2EOptions {
   offlineOnly: boolean;
   /** 生产 verify-only 模式:完整本地依赖 fixture 根。 */
   verifyOnly: boolean;
+  /** 静态注册策略 ID;当前 E2E suite 只覆盖 differential-smoke。 */
+  strategyId: string;
   json: boolean;
 }
 
-const VALUE_FLAGS = new Set(["--fixture-dir", "--api-key", "--timeout-ms"]);
+const VALUE_FLAGS = new Set(["--fixture-dir", "--api-key", "--timeout-ms", "--strategy"]);
 const BOOLEAN_FLAGS = new Set(["--json", "--offline-only", "--verify-only"]);
 
 export function parseArgs(argv: string[]): SmokeE2EOptions | { error: string } {
@@ -43,6 +46,7 @@ export function parseArgs(argv: string[]): SmokeE2EOptions | { error: string } {
     timeoutMs: 300_000,
     offlineOnly: false,
     verifyOnly: false,
+    strategyId: DIFFERENTIAL_SMOKE_STRATEGY.id,
     json: false,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -52,6 +56,7 @@ export function parseArgs(argv: string[]): SmokeE2EOptions | { error: string } {
       if (value === undefined) return { error: `Missing value for ${flag}.` };
       if (flag === "--fixture-dir") opts.fixtureDir = value;
       else if (flag === "--api-key") opts.apiKey = value;
+      else if (flag === "--strategy") opts.strategyId = value;
       else if (flag === "--timeout-ms") {
         if (!/^\d+$/.test(value)) return { error: `Invalid --timeout-ms: "${value}".` };
         opts.timeoutMs = Number(value);
@@ -164,6 +169,11 @@ export async function runSmokeE2E(argv: string[]): Promise<number> {
   }
   if (parsed.json) process.env.VERIFIER_LOG_LEVEL = "ERROR";
   const logger = createLogger("smoke-e2e");
+  if (parsed.strategyId !== DIFFERENTIAL_SMOKE_STRATEGY.id) {
+    logger.error(`unknown smoke E2E strategy: ${parsed.strategyId}`);
+    console.error(`error: unknown smoke E2E strategy: ${parsed.strategyId}`);
+    return 2;
+  }
 
   // 自主模式必须有真实 claude:key 预检(无离线回放路径)。
   const apiKey = parsed.apiKey ?? process.env.DEEPSEEK_API_KEY;
@@ -186,7 +196,7 @@ export async function runSmokeE2E(argv: string[]): Promise<number> {
   let result: SmokeResult;
   try {
     logger.info(
-      `run smoke ${mode} session (fixture=${fixtureDir}, timeoutMs=${parsed.timeoutMs})`,
+      `run smoke ${parsed.strategyId} ${mode} session (fixture=${fixtureDir}, timeoutMs=${parsed.timeoutMs})`,
     );
     result = await runSmoke(
       job,
@@ -238,5 +248,17 @@ export async function runSmokeE2E(argv: string[]): Promise<number> {
   return 0;
 }
 
-const exitCode = await runSmokeE2E(process.argv.slice(2));
-process.exitCode = exitCode;
+function isModuleEntryPoint(): boolean {
+  if (typeof process.argv[1] !== "string") return false;
+  const entryPath = fileURLToPath(import.meta.url);
+  try {
+    return realpathSync(process.argv[1]) === realpathSync(entryPath);
+  } catch {
+    return resolve(process.argv[1]) === resolve(entryPath);
+  }
+}
+
+if (isModuleEntryPoint()) {
+  const exitCode = await runSmokeE2E(process.argv.slice(2));
+  process.exitCode = exitCode;
+}

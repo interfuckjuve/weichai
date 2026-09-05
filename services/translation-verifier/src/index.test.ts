@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
 import * as verifier from "./index.js";
 
-const { buildSmokeTaskPrompt, runSmoke, translationVerifierSchemaVersion } = verifier;
+const {
+  buildSmokeTaskPrompt,
+  createDefaultVerificationService,
+  runSmoke,
+  translationVerifierSchemaVersion,
+  VerificationService,
+  VerificationStrategyFactory,
+} = verifier;
 
 describe("translation-verifier entry", () => {
   it("exposes the schema version constant", () => {
@@ -11,6 +18,12 @@ describe("translation-verifier entry", () => {
   it("exposes the smoke differential module API(runSmoke + prompt builder)", () => {
     expect(typeof runSmoke).toBe("function");
     expect(typeof buildSmokeTaskPrompt).toBe("function");
+  });
+
+  it("exposes the verification strategy framework API", () => {
+    expect(typeof VerificationStrategyFactory).toBe("function");
+    expect(typeof VerificationService).toBe("function");
+    expect(typeof createDefaultVerificationService).toBe("function");
   });
 
   it("does not expose the removed legacy driver API", () => {
