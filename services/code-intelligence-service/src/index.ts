@@ -50,6 +50,8 @@ export { SeekDbIndexStore, type SeekDbIndexStoreConfig } from './seekdb-index-st
 export { SeekDbProjection } from './seekdb-projection.js';
 export {
   HashSearchEmbeddingProvider,
+  ModelSearchEmbeddingProvider,
+  type ModelSearchEmbeddingConfig,
   type SearchEmbeddingProvider,
 } from './search-embedding.js';
 export {
@@ -127,7 +129,12 @@ export async function createCodeIntelligenceRuntime(
   const store: IndexStore = options.store ?? (
     options.seekdb ? new SeekDbIndexStore(options.seekdb) : new InMemoryIndexStore()
   );
-  if (options.initialize !== false) await store.initialize?.();
+  try {
+    if (options.initialize !== false) await store.initialize?.();
+  } catch (error) {
+    if (ownsStore) await store.close?.().catch(() => undefined);
+    throw error;
+  }
   const languageRegistry = options.languageRegistry ?? createDefaultLanguageRegistry();
   const registry = new RepositoryRegistry(store, options.registryOptions);
   const scanner = options.scanner ?? new RepositoryStructuralScanner({ languageRegistry });

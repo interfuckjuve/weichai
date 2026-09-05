@@ -532,6 +532,9 @@ async function startAdaptation(host: ExtensionHost, decisionNotes: string): Prom
   try {
     const run = requireActiveRun();
     const candidate = selectedRunCandidate(run);
+    if (run.target.kind === 'module' || candidate.kind === 'module') {
+      throw new Error('当前模块检索尚未接通多文件适配。');
+    }
     await assertTargetUnchanged(run);
     const status = await host.services.refresh();
     publish({ type: 'SERVICE_STATUS', status });

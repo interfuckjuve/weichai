@@ -144,13 +144,17 @@ export class OpenAiCompatibleEmbeddingProvider implements EmbeddingProvider {
     this.supportsDimensions = options?.supportsDimensions ?? true;
   }
 
-  async embed(texts: string[]): Promise<number[][]> {
+  async embed(texts: string[], signal?: AbortSignal): Promise<number[][]> {
+    signal?.throwIfAborted();
+    if (texts.length === 0) return [];
     let lastError: unknown;
     for (let attempt = 0; attempt <= this.maxRetries; attempt += 1) {
       try {
-        return await this.tryEmbed(texts);
+        signal?.throwIfAborted();
+        return await this.tryEmbed(texts, signal);
       } catch (error: unknown) {
         lastError = error;
+        signal?.throwIfAborted();
         if (attempt === this.maxRetries || !isRetryable(error)) throw error;
         const delay = this.baseDelayMs * 2 ** attempt;
         console.warn(
@@ -163,7 +167,7 @@ export class OpenAiCompatibleEmbeddingProvider implements EmbeddingProvider {
     throw lastError;
   }
 
-  private async tryEmbed(texts: string[]): Promise<number[][]> {
+  private async tryEmbed(texts: string[], signal?: AbortSignal): Promise<number[][]> {
     const response = await this.request(this.url, {
       method: 'POST',
       headers: {
@@ -176,7 +180,7 @@ export class OpenAiCompatibleEmbeddingProvider implements EmbeddingProvider {
         ...(this.supportsDimensions ? { dimensions: this.dimension } : {}),
         encoding_format: 'float',
       }),
-      signal: AbortSignal.timeout(this.timeoutMs),
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(this.timeoutMs)]) : AbortSignal.timeout(this.timeoutMs),
     });
     let body: unknown;
     try {

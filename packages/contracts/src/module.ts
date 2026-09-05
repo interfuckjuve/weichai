@@ -27,11 +27,20 @@ export interface ModuleNode {
 export interface ModuleTarget {
   id: string;
   name: string;
-  kind: 'class' | 'function';
+  kind: 'class' | 'function' | 'module';
   path: string;
   language: Language;
   signature: string;
   documentation?: string;
   line?: number;
   implementationStatus?: ImplementationStatus;
+  /** Complete module boundary when the target is a reviewed project module. */
+  module?: {
+    repositoryId?: string;
+    analysisRevision?: string;
+    projectId?: string;
+    sourceFiles: string[];
+    coreApis: string[];
+    dependsOn: string[];
+  };
 }

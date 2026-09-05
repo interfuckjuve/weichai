@@ -59,7 +59,7 @@ export function CandidatesStage({
           <div>
             <span>02 · 检索结果</span>
             <h1 id="candidate-browser-title">选择一个可复用实现</h1>
-            <p>候选按仓库和模块路径归组，先判断模块上下文，再选择具体类或函数。</p>
+            <p>{state.target?.name}</p>
           </div>
           <div className="candidate-result-stats" aria-label="检索结果规模">
             <span><strong>{repositoryCount}</strong> 仓库</span>
@@ -98,7 +98,7 @@ export function CandidatesStage({
                           <code title={item.signature}>{item.signature}</code>
                           <span className="candidate-tags">
                             <small>{item.language}</small>
-                            <small>{item.kind === 'class' ? '类' : '函数'}</small>
+                            <small>{item.kind === 'module' ? '模块' : item.kind === 'class' ? '类' : '函数'}</small>
                             <small>{item.license}</small>
                           </span>
                         </span>
@@ -152,10 +152,10 @@ export function CandidatesStage({
           type="button"
           className="primary-action"
           onClick={onAdapt}
-          disabled={adapting || !candidate}
+          disabled={adapting || !candidate || candidate.kind === 'module' || state.target?.kind === 'module'}
         >
           {adapting ? <span className="spinner" /> : <Sparkles size={15} />}
-          {adapting ? '正在生成适配…' : !candidate ? '请选择一个具体实现' : '使用所选实现生成适配'}
+          {adapting ? '正在生成适配…' : candidate?.kind === 'module' || state.target?.kind === 'module' ? '多文件适配暂不可用' : !candidate ? '请选择一个具体实现' : '使用所选实现生成适配'}
         </button>
       </section>
     </div>
@@ -163,7 +163,7 @@ export function CandidatesStage({
 }
 
 function CandidateDetail({ candidate }: { candidate: SearchCandidate }) {
-  const module = moduleIdentity(candidate.path);
+  const module = candidate.sourceModule ?? moduleIdentity(candidate.path);
   return (
     <section className="candidate-detail" aria-label="已选候选详情">
       <header className="candidate-detail-header">
@@ -181,6 +181,13 @@ function CandidateDetail({ candidate }: { candidate: SearchCandidate }) {
       </div>
 
       <p className="candidate-summary">{candidate.summary}</p>
+      {candidate.kind === 'module' ? <details open className="candidate-evidence">
+        <summary>模块文件（{candidate.sourceModule?.sourceFiles?.length ?? 0}）</summary>
+        <ul className="candidate-module-files">{candidate.sourceModule?.sourceFiles?.map((file) => <li key={file}><code>{file}</code></li>)}</ul>
+        <p>接口匹配：{candidate.moduleMatch?.matchedApis.join('、') || '暂无'}</p>
+        <p>尚无匹配证据：{candidate.moduleMatch?.missingApis.join('、') || '暂无'}；行为待验证</p>
+        {candidate.moduleMatch?.previewTruncated ? <p>以下为部分源码预览</p> : null}
+      </details> : null}
       <pre className="code-preview"><code>{candidate.preview}</code></pre>
 
       <details className="candidate-evidence">
@@ -232,7 +239,7 @@ function groupCandidatesByModule(candidates: SearchCandidate[]): CandidateModule
       ? { name: candidate.sourceModule.name, path: candidate.sourceModule.projectPath || '/' }
       : inferred;
     const id = candidate.sourceModule
-      ? JSON.stringify([candidate.sourceModule.repositoryId, candidate.sourceModule.analysisRevision, candidate.sourceModule.moduleId])
+      ? JSON.stringify([candidate.sourceModule.repositoryId, candidate.sourceModule.analysisRevision, candidate.sourceModule.projectId, candidate.sourceModule.moduleId])
       : JSON.stringify([candidate.repository, module.path]);
     const group = groups.get(id) ?? {
       id,

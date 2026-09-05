@@ -287,6 +287,8 @@ export interface SearchDocumentRecord extends RepositoryRevisionScope {
   contentHash: string;
   title: string;
   text: string;
+  /** Query-time scores, never authoritative persisted facts or calibrated probabilities. */
+  retrievalScore?: { semantic?: number; lexical?: number; fusion: number };
 }
 
 /** Complete output of a structural scan before optional semantic enrichment. */

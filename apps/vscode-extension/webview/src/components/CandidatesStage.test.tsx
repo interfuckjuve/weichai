@@ -148,4 +148,17 @@ describe('CandidatesStage', () => {
     expect(markup).toContain('没有找到可复用实现');
     expect(markup).toContain('返回“定义任务”调整目标或需求后重新检索');
   });
+
+  it('shows complete module files and does not offer single-file adaptation for a module', () => {
+    const module: SearchCandidate = { ...moduleCandidate('module', 'Payments', 'payments', 'Payments'), kind: 'module',
+      sourceModule: { ...moduleCandidate('module', 'Payments', 'payments', 'Payments').sourceModule!, sourceFiles: ['Payment.java', 'Receipt.java'] },
+      moduleMatch: { requiredApis: ['pay', 'refund'], matchedApis: ['pay'], missingApis: ['refund'], verification: 'interface-only', previewFiles: ['Payment.java'], previewTruncated: true } };
+    const markup = renderToStaticMarkup(<CandidatesStage state={{ ...state, target: { ...target, kind: 'module' },
+      candidates: [module], selectedCandidateId: module.id }} dispatch={vi.fn()} adaptationProvider="DeepSeek" onSelectCandidate={vi.fn()} onAdapt={vi.fn()} />);
+    expect(markup).toContain('Receipt.java');
+    expect(markup).toContain('refund');
+    expect(markup).toContain('行为待验证');
+    expect(markup).toContain('disabled=""');
+    expect(markup).toContain('多文件适配暂不可用');
+  });
 });

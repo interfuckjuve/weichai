@@ -1120,6 +1120,19 @@ button:disabled {
   line-height: 1.5;
 }
 
+.candidate-module-files {
+  margin: 10px 0;
+  padding-left: 20px;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.candidate-module-files code,
+.candidate-evidence p {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .score-bars {
   display: flex;
   flex-direction: column;

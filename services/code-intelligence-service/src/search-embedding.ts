@@ -1,7 +1,65 @@
+import { createHash } from 'node:crypto';
+import { OpenAiCompatibleEmbeddingProvider } from '@forexplore/retrieval-service/embedding';
+
 /** Minimal embedding abstraction kept within the code-intelligence boundary. */
 export interface SearchEmbeddingProvider {
   readonly dimension: number;
   embed(texts: readonly string[], signal?: AbortSignal): Promise<number[][]>;
+  embedQuery?(text: string, signal?: AbortSignal): Promise<number[]>;
+}
+
+export interface ModelSearchEmbeddingConfig {
+  url: string;
+  apiKey: string;
+  model: string;
+  supportsDimensions?: boolean;
+  queryPrefix?: string;
+  documentPrefix?: string;
+}
+
+/** Bounded content cache is scoped to one immutable model configuration. */
+export class ModelSearchEmbeddingProvider implements SearchEmbeddingProvider {
+  readonly #client: OpenAiCompatibleEmbeddingProvider;
+  readonly #cache = new Map<string, number[]>();
+  constructor(readonly dimension: number, private readonly config: ModelSearchEmbeddingConfig) {
+    const url = new URL(config.url);
+    if (!['http:', 'https:'].includes(url.protocol) || !config.model.trim() || !Number.isInteger(dimension) || dimension < 1) {
+      throw new Error('Embedding requires an HTTP endpoint, model and positive dimension.');
+    }
+    this.#client = new OpenAiCompatibleEmbeddingProvider(dimension, config.url, config.apiKey, config.model,
+      { supportsDimensions: config.supportsDimensions, timeoutMs: 8_000, maxRetries: 0 });
+  }
+  async embed(texts: readonly string[], signal?: AbortSignal): Promise<number[][]> {
+    return this.encode(texts.map((text) => `${this.config.documentPrefix ?? ''}${text}`), signal);
+  }
+  async embedQuery(text: string, signal?: AbortSignal): Promise<number[]> {
+    return (await this.encode([`${this.config.queryPrefix ?? ''}${text}`], signal))[0]!;
+  }
+  private async encode(texts: readonly string[], signal?: AbortSignal): Promise<number[][]> {
+    signal?.throwIfAborted();
+    const keys = texts.map((text) => createHash('sha256').update(text).digest('hex'));
+    const output = keys.map((key) => this.#cache.get(key));
+    const missing = new Map<string, { text: string; indices: number[] }>();
+    keys.forEach((key, index) => {
+      if (output[index]) { const vector = output[index]!; this.#cache.delete(key); this.#cache.set(key, vector); return; }
+      const entry = missing.get(key) ?? { text: texts[index]!, indices: [] };
+      entry.indices.push(index); missing.set(key, entry);
+    });
+    const entries = [...missing.entries()];
+    for (let offset = 0; offset < entries.length; offset += 16) {
+      signal?.throwIfAborted();
+      const batch = entries.slice(offset, offset + 16);
+      const vectors = await this.#client.embed(batch.map(([, entry]) => entry.text), signal);
+      batch.forEach(([key, entry], index) => {
+        const vector = vectors[index]!;
+        if (!vector.some((value) => value !== 0)) throw new Error('Embedding model returned a zero vector.');
+        this.#cache.set(key, vector);
+        entry.indices.forEach((position) => { output[position] = vector; });
+        while (this.#cache.size > 4096) this.#cache.delete(this.#cache.keys().next().value!);
+      });
+    }
+    return output.map((vector) => [...vector!]);
+  }
 }
 
 function fnv1a(value: string): number {

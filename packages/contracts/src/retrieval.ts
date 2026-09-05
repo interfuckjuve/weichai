@@ -38,7 +38,7 @@ export interface SearchCandidate {
   repository: string;
   license: string;
   language: Language;
-  kind: 'class' | 'function';
+  kind: 'class' | 'function' | 'module';
   path: string;
   signature: string;
   summary: string;
@@ -49,7 +49,7 @@ export interface SearchCandidate {
   risks: string[];
   /** LLM reranking rationale, only present when reranking is active. */
   rerankReason?: string;
-  /** Trusted module boundary that produced this second-stage symbol candidate. */
+  /** Version-bound module identity; symbols are optional implementation evidence. */
   sourceModule?: {
     repositoryId: RepositoryId;
     analysisRevision: AnalysisRevisionId;
@@ -58,5 +58,18 @@ export interface SearchCandidate {
     name: string;
     projectPath: string;
     purpose?: string;
+    sourceFiles?: string[];
+    coreApis?: string[];
+    dependsOn?: string[];
+    evidenceIds?: string[];
+  };
+  moduleMatch?: {
+    requiredApis: string[];
+    matchedApis: string[];
+    missingApis: string[];
+    /** API matches are metadata evidence, not proof of behavioral equivalence. */
+    verification: 'interface-only';
+    previewFiles: string[];
+    previewTruncated: boolean;
   };
 }

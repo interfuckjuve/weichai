@@ -4,7 +4,7 @@ import { workspacePresentationFromStructuralIndex, type ModuleExplorerBuildResul
 import type { ModuleExplorerNode, ModuleWorkspacePresentation } from './ui-types';
 
 /** The live product tree consumes only the registered index and durable module artifacts. */
-export async function buildProjectExplorer(host: CodeIntelligenceHost, currentTarget?: ModuleTarget): Promise<ModuleExplorerBuildResult> {
+export async function buildProjectExplorer(host: Pick<CodeIntelligenceHost, 'explorerData'>, currentTarget?: ModuleTarget): Promise<ModuleExplorerBuildResult> {
   const data = await host.explorerData();
   const targets = new Map<string, ModuleTarget>();
   let target: ModuleWorkspacePresentation = {
@@ -52,12 +52,26 @@ export async function buildProjectExplorer(host: CodeIntelligenceHost, currentTa
         visit(node.children);
       });
       visit(workspace.tree);
-      workspace.tree = analysis.proposal.modules.map((module) => ({
-        id: `module:${module.id}`, kind: 'module', name: module.name,
-        description: module.description, purpose: module.purpose, coreApis: module.coreApis,
-        domain: module.domain, language: module.language,
-        children: module.sourceFiles.flatMap((path) => byPath.get(path) ? [byPath.get(path)!] : []),
-      }));
+      const targetByPath = new Map<string, ModuleTarget>();
+      for (const item of result.targets.values()) if (!targetByPath.has(item.path)) targetByPath.set(item.path, item);
+      workspace.tree = analysis.proposal.modules.map((module): ModuleExplorerNode => {
+        const representative = module.sourceFiles.map((file) => targetByPath.get(file)).find(Boolean);
+        const targetId = mode === 'target' && !historical && analysis.state === 'ready' && representative
+          ? `module://${encodeURIComponent(JSON.stringify([repository.repositoryId, index.analysisRevision, projectId, module.id]))}` : undefined;
+        if (targetId && representative) result.targets.set(targetId, {
+          id: targetId, name: module.name, kind: 'module', path: representative.path, language: representative.language,
+          signature: (module.coreApis ?? []).join('\n'), documentation: module.purpose ?? module.description,
+          module: { repositoryId: repository.repositoryId, analysisRevision: index.analysisRevision, projectId,
+            sourceFiles: [...module.sourceFiles], coreApis: module.coreApis ?? [], dependsOn: [...module.dependsOn] },
+        });
+        return {
+          id: `module:${module.id}`, kind: 'module', name: module.name,
+          description: module.description, purpose: module.purpose, coreApis: module.coreApis,
+          domain: module.domain, language: module.language,
+          ...(targetId ? { targetId } : {}),
+          children: module.sourceFiles.flatMap((path) => byPath.get(path) ? [byPath.get(path)!] : []),
+        };
+      });
       const assigned = new Set(analysis.proposal.modules.flatMap((module) => module.sourceFiles));
       const unassigned = [...byPath].filter(([path]) => !assigned.has(path)).map(([, node]) => node);
       if (unassigned.length) workspace.tree.push({ id: 'unassigned', kind: 'folder', name: '未归属文件', children: unassigned });

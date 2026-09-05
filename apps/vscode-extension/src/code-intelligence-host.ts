@@ -31,6 +31,7 @@ export interface SeekDbRuntimeConfig {
   password: string;
   database: string;
   vectorDimension?: number;
+  embedding?: { url: string; apiKey: string; model: string; supportsDimensions?: boolean; queryPrefix?: string; documentPrefix?: string };
 }
 
 /** The narrow host composition input intentionally excludes scanners/DB handles from callers. */
@@ -506,6 +507,13 @@ export class CodeIntelligenceHost {
     topK: number;
   }, signal?: AbortSignal): Promise<SearchCandidate[]> {
     const runtime = await this.runtime();
+    const targetScope = request.target.module;
+    if (targetScope?.repositoryId && targetScope.analysisRevision) {
+      const targetRepository = await runtime.registry.get(targetScope.repositoryId);
+      if (targetRepository?.role !== 'target' || targetRepository.activeRevision !== targetScope.analysisRevision) {
+        throw new Error('目标模块版本已变化，请重新选择当前模块。');
+      }
+    }
     if (!runtime.moduleImplementationSearch) {
       throw new Error('当前代码智能运行时未提供模块检索能力。');
     }
@@ -1120,6 +1128,9 @@ export function codeIntelligenceRuntimeOptionsFromEnvironment(
   if (!Number.isInteger(vectorDimension) || vectorDimension <= 0) {
     throw new Error('CODE_INTELLIGENCE_SEEKDB_VECTOR_DIMENSION must be a positive integer.');
   }
+  const embeddingUrl = environment.CODE_INTELLIGENCE_EMBEDDING_URL?.trim();
+  const embeddingModel = environment.CODE_INTELLIGENCE_EMBEDDING_MODEL?.trim();
+  if (Boolean(embeddingUrl) !== Boolean(embeddingModel)) throw new Error('Configure both CODE_INTELLIGENCE_EMBEDDING_URL and CODE_INTELLIGENCE_EMBEDDING_MODEL.');
   return {
     seekdb: {
       host: environment.CODE_INTELLIGENCE_SEEKDB_HOST?.trim() || '127.0.0.1',
@@ -1128,6 +1139,12 @@ export function codeIntelligenceRuntimeOptionsFromEnvironment(
       password: environment.CODE_INTELLIGENCE_SEEKDB_PASSWORD ?? '',
       database,
       vectorDimension,
+      ...(embeddingUrl && embeddingModel ? { embedding: {
+        url: embeddingUrl, model: embeddingModel, apiKey: environment.CODE_INTELLIGENCE_EMBEDDING_API_KEY ?? '',
+        supportsDimensions: environment.CODE_INTELLIGENCE_EMBEDDING_SUPPORTS_DIMENSIONS !== 'false',
+        queryPrefix: environment.CODE_INTELLIGENCE_EMBEDDING_QUERY_PREFIX ?? '',
+        documentPrefix: environment.CODE_INTELLIGENCE_EMBEDDING_DOCUMENT_PREFIX ?? '',
+      } } : {}),
     },
   };
 }

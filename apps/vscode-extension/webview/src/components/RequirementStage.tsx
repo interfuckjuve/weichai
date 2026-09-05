@@ -66,7 +66,7 @@ export function RequirementStage({
               <span className="task-target-icon"><TargetIcon size={17} /></span>
               <div>
                 <strong>{target.name}</strong>
-                <span>{target.language} · {target.kind === 'class' ? '类' : '函数'}</span>
+                <span>{target.language} · {target.kind === 'module' ? '模块' : target.kind === 'class' ? '类' : '函数'}</span>
               </div>
               <span className={`task-target-status is-${target.implementationStatus ?? 'unknown'}`}>
                 {target.implementationStatus === 'implemented'

@@ -60,7 +60,7 @@ describe('project understanding lifecycle', () => {
       expect(artifact.planHash).toMatch(/^sha256:[a-f0-9]{64}$/);
     }
     expect(artifacts.filter((a) => a.kind === 'module-summary' && a.status === 'current')).toHaveLength(2);
-    expect((await runtime.store.listSearchDocuments(index)).filter((d) => d.kind === 'summary')).toHaveLength(2);
+    expect((await runtime.store.listSearchDocuments(index)).filter((d) => d.kind === 'summary')).toHaveLength(6);
   });
 
   it('retries a failed projection without making another model request', async () => {

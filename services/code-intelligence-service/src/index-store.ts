@@ -25,21 +25,24 @@ export interface IndexStore {
   close?(): Promise<void>;
 
   putRepository(repository: RepositoryRecord): Promise<void>;
-  getRepository(repositoryId: RepositoryId): Promise<RepositoryRecord | null>;
+  getRepository(repositoryId: RepositoryId, signal?: AbortSignal): Promise<RepositoryRecord | null>;
   listRepositories(): Promise<RepositoryRecord[]>;
   /** Removes a repository and all of its revision-scoped records. */
   removeRepository(repositoryId: RepositoryId): Promise<void>;
 
   putRevision(revision: AnalysisRevisionRecord): Promise<void>;
-  getRevision(scope: RepositoryRevisionScope): Promise<AnalysisRevisionRecord | null>;
+  getRevision(scope: RepositoryRevisionScope, signal?: AbortSignal): Promise<AnalysisRevisionRecord | null>;
   listRevisions(repositoryId: RepositoryId): Promise<AnalysisRevisionRecord[]>;
 
   /** Replaces only records in this revision; it never clears another repository. */
   putStructuralIndex(index: StructuralIndex, sourceTexts?: ReadonlyMap<string, string>): Promise<void>;
   getStructuralIndex(scope: RepositoryRevisionScope): Promise<StructuralIndex | null>;
   getSourceText(scope: RepositoryRevisionScope, relativePath: string): Promise<string | null>;
+  getSourcePreview?(scope: RepositoryRevisionScope, relativePath: string, maxChars: number, signal?: AbortSignal): Promise<{ text: string; truncated: boolean } | null>;
 
   listProjects(scope: RepositoryRevisionScope): Promise<ProjectRecord[]>;
+  getProject?(scope: RepositoryRevisionScope, projectId: string, signal?: AbortSignal): Promise<ProjectRecord | null>;
+  getModuleArtifacts?(scope: RepositoryRevisionScope, ids: readonly string[], signal?: AbortSignal): Promise<ModuleArtifactRecord[]>;
   listFiles(scope: RepositoryRevisionScope): Promise<IndexedFileRecord[]>;
   listSymbols(scope: RepositoryRevisionScope): Promise<SymbolRecord[]>;
   listDependencyEdges(scope: RepositoryRevisionScope): Promise<DependencyEdgeRecord[]>;
@@ -55,6 +58,7 @@ export interface IndexStore {
     query: string,
     limit: number,
     kind?: SearchDocumentRecord['kind'],
+    signal?: AbortSignal,
   ): Promise<SearchDocumentRecord[]>;
 
   /** Atomically flips the repository's active pointer after a completed build. */
@@ -515,8 +519,27 @@ export class InMemoryIndexStore implements IndexStore {
     return this.#contents.get(scopeKey(scope))?.sourceTexts.get(relativePath) ?? null;
   }
 
+  async getSourcePreview(scope: RepositoryRevisionScope, relativePath: string, maxChars: number): Promise<{ text: string; truncated: boolean } | null> {
+    if (!Number.isInteger(maxChars) || maxChars < 1 || maxChars > 32_000) throw new Error('Source preview must be bounded to 1..32000 characters.');
+    const source = await this.getSourceText(scope, relativePath);
+    return source === null ? null : { text: source.slice(0, maxChars), truncated: source.length > maxChars };
+  }
+
   async listProjects(scope: RepositoryRevisionScope): Promise<ProjectRecord[]> {
     return clone(this.#contents.get(scopeKey(scope))?.index.projects ?? []);
+  }
+
+  async getProject(scope: RepositoryRevisionScope, projectId: string): Promise<ProjectRecord | null> {
+    return clone(this.#contents.get(scopeKey(scope))?.index.projects.find((project) => project.projectId === projectId) ?? null);
+  }
+
+  async getModuleArtifacts(scope: RepositoryRevisionScope, ids: readonly string[]): Promise<ModuleArtifactRecord[]> {
+    if (ids.length > 200) throw new Error('At most 200 artifact IDs may be fetched.');
+    const artifacts = this.#contents.get(scopeKey(scope))?.moduleArtifacts;
+    return [...new Set(ids)].flatMap((id) => {
+      const artifact = artifacts?.get(id);
+      return artifact ? [clone(artifact)] : [];
+    });
   }
 
   async listFiles(scope: RepositoryRevisionScope): Promise<IndexedFileRecord[]> {
@@ -591,11 +614,13 @@ export class InMemoryIndexStore implements IndexStore {
     query: string,
     limit: number,
     kind: SearchDocumentRecord['kind'] = 'symbol',
+    signal?: AbortSignal,
   ): Promise<SearchDocumentRecord[]> {
+    signal?.throwIfAborted();
     const normalized = query.trim().toLocaleLowerCase();
     if (!normalized || !Number.isInteger(limit) || limit < 1) return [];
     const terms = normalized.split(/\s+/).filter(Boolean);
-    return (await this.listSearchDocuments(scope))
+    return [...(this.#contents.get(scopeKey(scope))?.searchDocuments.values() ?? [])]
       .filter((document) => document.kind === kind)
       .map((document) => ({
         document,
@@ -605,8 +630,8 @@ export class InMemoryIndexStore implements IndexStore {
       }))
       .filter(({ score }) => score > 0)
       .sort((left, right) => right.score - left.score || left.document.searchDocumentId.localeCompare(right.document.searchDocumentId))
-      .slice(0, limit)
-      .map(({ document }) => document);
+      .slice(0, Math.min(limit, 200))
+      .map(({ document, score }) => ({ ...clone(document), retrievalScore: { lexical: score, fusion: score } }));
   }
 
   async activateRevision(

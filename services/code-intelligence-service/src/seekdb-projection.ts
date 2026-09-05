@@ -94,7 +94,7 @@ function summaryDocuments(
       text,
     }];
   }
-  return record.proposal.modules.map((module: ProjectModule) => {
+  return record.proposal.modules.flatMap((module: ProjectModule) => {
     const text = JSON.stringify({
       projectId: record.projectId,
       moduleId: module.id,
@@ -108,7 +108,7 @@ function summaryDocuments(
       dependsOn: module.dependsOn,
     });
     const identity = `${artifact.moduleArtifactId}\u0000${module.id}`;
-    return {
+    const base: SearchDocumentRecord = {
       repositoryId: index.repositoryId,
       analysisRevision: index.analysisRevision,
       searchDocumentId: documentId(index, 'summary', identity),
@@ -119,6 +119,14 @@ function summaryDocuments(
       title: module.name,
       text,
     };
+    return [base, ...(['interface', 'dependency'] as const).map((view): SearchDocumentRecord => {
+      const viewText = JSON.stringify({ projectId: record.projectId, moduleId: module.id, view,
+        name: module.name, language: module.language,
+        ...(view === 'interface' ? { coreApis: module.coreApis ?? [], purpose: module.purpose }
+          : { sourceFiles: module.sourceFiles, dependsOn: module.dependsOn, domain: module.domain }) });
+      return { ...base, searchDocumentId: documentId(index, 'summary', `${identity}\u0000${view}`),
+        text: viewText, contentHash: documentHash(module.name, viewText) };
+    })];
   });
 }
 

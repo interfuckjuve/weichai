@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import { queryRows } from './abortable-query.js';
 import mysql, {
   type Pool,
   type PoolConnection,
@@ -33,6 +35,8 @@ import {
 } from './index-store.js';
 import {
   HashSearchEmbeddingProvider,
+  ModelSearchEmbeddingProvider,
+  type ModelSearchEmbeddingConfig,
   type SearchEmbeddingProvider,
 } from './search-embedding.js';
 
@@ -46,6 +50,7 @@ export interface SeekDbIndexStoreConfig {
   vectorDimension?: number;
   /** Host-configured model embedding provider; deterministic hashing is the safe local fallback. */
   embeddingProvider?: SearchEmbeddingProvider;
+  embedding?: ModelSearchEmbeddingConfig;
 }
 
 interface RepositoryRow extends RowDataPacket {
@@ -466,6 +471,11 @@ export class SeekDbIndexStore implements IndexStore {
   readonly #tables: Record<string, string>;
   readonly #vectorDimension: number;
   readonly #embeddingProvider: SearchEmbeddingProvider;
+  readonly #embeddingIdentity: string;
+  readonly #legacyHashCompatible: boolean;
+  readonly #persistEmbeddings: boolean;
+  #persistentEmbeddingHits = 0;
+  #embeddingProviderDocuments = 0;
 
   constructor(config: SeekDbIndexStoreConfig, private readonly pool: Pool = mysql.createPool({
     host: config.host,
@@ -481,7 +491,19 @@ export class SeekDbIndexStore implements IndexStore {
     if (!Number.isInteger(this.#vectorDimension) || this.#vectorDimension < 1) {
       throw new Error('SeekDB vectorDimension must be a positive integer.');
     }
-    this.#embeddingProvider = config.embeddingProvider ?? new HashSearchEmbeddingProvider(this.#vectorDimension);
+    if (config.embeddingProvider && config.embedding) throw new Error('Choose an embedding provider or model configuration.');
+    this.#embeddingProvider = config.embeddingProvider ?? (config.embedding
+      ? new ModelSearchEmbeddingProvider(this.#vectorDimension, config.embedding)
+      : new HashSearchEmbeddingProvider(this.#vectorDimension));
+    this.#legacyHashCompatible = !config.embedding && !config.embeddingProvider;
+    this.#persistEmbeddings = Boolean(config.embedding);
+    this.#embeddingIdentity = createHash('sha256').update(JSON.stringify({
+      dimension: this.#vectorDimension,
+      provider: config.embedding ? 'model-v1' : config.embeddingProvider ? config.embeddingProvider.constructor.name : 'hash-v1',
+      ...(config.embedding ? { url: config.embedding.url, model: config.embedding.model,
+        queryPrefix: config.embedding.queryPrefix ?? '', documentPrefix: config.embedding.documentPrefix ?? '',
+        supportsDimensions: config.embedding.supportsDimensions ?? true } : {}),
+    })).digest('hex');
     if (this.#embeddingProvider.dimension !== this.#vectorDimension) {
       throw new Error('SeekDB embeddingProvider dimension must match vectorDimension.');
     }
@@ -495,11 +517,16 @@ export class SeekDbIndexStore implements IndexStore {
       dependencyEdges: qualify('dependency_edges'),
       moduleArtifacts: qualify('module_artifacts'),
       searchDocuments: qualify('search_documents'),
+      embeddingConfiguration: qualify('search_embedding_configuration'),
+      embeddingCache: qualify('search_embedding_cache'),
       diagnostics: qualify('index_diagnostics'),
     };
   }
 
   async initialize(): Promise<void> {
+    const [versions] = await this.pool.query<RowDataPacket[]>('SELECT VERSION() AS version');
+    const version = /seekdb-v(\d+)\.(\d+)/i.exec(String(versions[0]?.version ?? ''));
+    const supportsAsyncIndex = version !== null && (Number(version[1]) > 1 || Number(version[1]) === 1 && Number(version[2]) >= 3);
     await this.pool.query(`CREATE DATABASE IF NOT EXISTS ${this.#database}`);
     await this.pool.query(`
       CREATE TABLE IF NOT EXISTS ${this.#tables.repositories} (
@@ -654,9 +681,72 @@ export class SeekDbIndexStore implements IndexStore {
         PRIMARY KEY (repository_id, analysis_revision, search_document_id),
         FULLTEXT INDEX idx_search_documents_text (search_text) WITH PARSER ik,
         VECTOR INDEX idx_search_documents_embedding (embedding)
-          WITH (DISTANCE=cosine, TYPE=hnsw, LIB=vsag)
+          WITH (DISTANCE=cosine, TYPE=hnsw, LIB=vsag${supportsAsyncIndex ? ', SYNC_MODE=immediate' : ''})
       ) ORGANIZATION = HEAP
     `);
+    if (supportsAsyncIndex) {
+      const [definitions] = await this.pool.query<RowDataPacket[]>(`SHOW CREATE TABLE ${this.#tables.searchDocuments}`);
+      const definition = String(definitions[0]?.['Create Table'] ?? '');
+      if (!/sync_mode\s*=\s*'?immediate'?/i.test(definition)) {
+        throw new Error('Search requires an immediate vector index before publishing ready revisions. Use a separate database and rebuild the existing asynchronous projection.');
+      }
+    }
+    await this.pool.query(`CREATE TABLE IF NOT EXISTS ${this.#tables.embeddingConfiguration} (
+      slot INT PRIMARY KEY, config_hash CHAR(64) NOT NULL
+    ) ORGANIZATION = HEAP`);
+    const [configured] = await this.pool.query<RowDataPacket[]>(`SELECT config_hash FROM ${this.#tables.embeddingConfiguration} WHERE slot = 1`);
+    if (!configured.length && !this.#legacyHashCompatible) {
+      const [existing] = await this.pool.query<RowDataPacket[]>(`SELECT search_document_id FROM ${this.#tables.searchDocuments} LIMIT 1`);
+      if (existing.length) throw new Error('Existing vectors have no model identity. Use a separate database and rebuild projections for this embedding model.');
+    }
+    await this.pool.query(`INSERT IGNORE INTO ${this.#tables.embeddingConfiguration} (slot, config_hash) VALUES (1, ?)`, [this.#embeddingIdentity]);
+    const [identity] = await this.pool.query<RowDataPacket[]>(`SELECT config_hash FROM ${this.#tables.embeddingConfiguration} WHERE slot = 1`);
+    if (String(identity[0]?.config_hash) !== this.#embeddingIdentity) {
+      throw new Error('Embedding model/configuration does not match stored vectors. Use a separate database and rebuild projections.');
+    }
+    if (this.#persistEmbeddings) await this.pool.query(`CREATE TABLE IF NOT EXISTS ${this.#tables.embeddingCache} (
+      content_hash CHAR(64) PRIMARY KEY, embedding JSON NOT NULL
+    ) ORGANIZATION = HEAP`);
+  }
+
+  get embeddingReuseStats(): { persistentHits: number; providerDocuments: number } {
+    return { persistentHits: this.#persistentEmbeddingHits, providerDocuments: this.#embeddingProviderDocuments };
+  }
+
+  /** Reuse exact model inputs across revisions and process restarts. Model identity is bound during initialize. */
+  private async embedDocuments(texts: readonly string[]): Promise<number[][]> {
+    if (!this.#persistEmbeddings || texts.length === 0) return this.#embeddingProvider.embed(texts);
+    const keys = texts.map((text) => createHash('sha256').update(this.#embeddingIdentity).update('\0').update(text).digest('hex'));
+    const unique = [...new Map(keys.map((key, index) => [key, texts[index]!])).entries()];
+    const vectors = new Map<string, number[]>();
+    for (let offset = 0; offset < unique.length; offset += 128) {
+      const batch = unique.slice(offset, offset + 128);
+      const [cached] = await this.pool.query<RowDataPacket[]>(`SELECT content_hash, embedding FROM ${this.#tables.embeddingCache}
+        WHERE content_hash IN (${batch.map(() => '?').join(',')})`, batch.map(([key]) => key));
+      for (const row of cached) {
+        const vector = typeof row.embedding === 'string' ? JSON.parse(row.embedding) : row.embedding;
+        if (!Array.isArray(vector)) throw new Error('Invalid persisted embedding.');
+        assertEmbedding(vector, this.#vectorDimension);
+        vectors.set(String(row.content_hash), vector);
+      }
+      this.#persistentEmbeddingHits += cached.length;
+      const missing = batch.filter(([key]) => !vectors.has(key));
+      for (let start = 0; start < missing.length; start += 16) {
+        const inputs = missing.slice(start, start + 16);
+        const encoded = await this.#embeddingProvider.embed(inputs.map(([, text]) => text));
+        if (encoded.length !== inputs.length) throw new Error('Embedding provider returned an unexpected document count.');
+        this.#embeddingProviderDocuments += inputs.length;
+        const parameters = inputs.flatMap(([key], index) => {
+          const vector = encoded[index]!;
+          assertEmbedding(vector, this.#vectorDimension);
+          vectors.set(key, vector);
+          return [key, JSON.stringify(vector)];
+        });
+        await this.pool.query(`INSERT IGNORE INTO ${this.#tables.embeddingCache} (content_hash, embedding)
+          VALUES ${inputs.map(() => '(?, ?)').join(',')}`, parameters);
+      }
+    }
+    return keys.map((key) => [...vectors.get(key)!]);
   }
 
   async close(): Promise<void> {
@@ -677,9 +767,9 @@ export class SeekDbIndexStore implements IndexStore {
     ]);
   }
 
-  async getRepository(repositoryId: RepositoryId): Promise<RepositoryRecord | null> {
-    const [rows] = await this.pool.query<RepositoryRow[]>(
-      `SELECT * FROM ${this.#tables.repositories} WHERE repository_id = ?`, [repositoryId],
+  async getRepository(repositoryId: RepositoryId, signal?: AbortSignal): Promise<RepositoryRecord | null> {
+    const rows = await queryRows<RepositoryRow[]>(this.pool,
+      `SELECT * FROM ${this.#tables.repositories} WHERE repository_id = ?`, [repositoryId], signal,
     );
     const row = rows[0];
     return row ? toRepository(row) : null;
@@ -753,11 +843,11 @@ export class SeekDbIndexStore implements IndexStore {
     });
   }
 
-  async getRevision(scope: RepositoryRevisionScope): Promise<AnalysisRevisionRecord | null> {
-    const [rows] = await this.pool.query<RevisionRow[]>(`
+  async getRevision(scope: RepositoryRevisionScope, signal?: AbortSignal): Promise<AnalysisRevisionRecord | null> {
+    const rows = await queryRows<RevisionRow[]>(this.pool, `
       SELECT * FROM ${this.#tables.analysisRevisions}
       WHERE repository_id = ? AND analysis_revision = ?
-    `, scopeParams(scope));
+    `, scopeParams(scope), signal);
     const row = rows[0];
     return row ? toRevision(row) : null;
   }
@@ -836,6 +926,38 @@ export class SeekDbIndexStore implements IndexStore {
       WHERE repository_id = ? AND analysis_revision = ? ORDER BY project_id
     `, scopeParams(scope));
     return rows.map((row) => toProject(scope, row));
+  }
+
+  async getProject(scope: RepositoryRevisionScope, projectId: string, signal?: AbortSignal): Promise<ProjectRecord | null> {
+    const rows = await queryRows<ProjectRow[]>(this.pool, `
+      SELECT project_id, kind, display_name, relative_path, manifest_paths, source_roots, test_roots, language_ids
+      FROM ${this.#tables.projects}
+      WHERE repository_id = ? AND analysis_revision = ? AND project_id = ? LIMIT 1
+    `, [...scopeParams(scope), projectId], signal);
+    return rows[0] ? toProject(scope, rows[0]) : null;
+  }
+
+  async getSourcePreview(scope: RepositoryRevisionScope, relativePath: string, maxChars: number, signal?: AbortSignal): Promise<{ text: string; truncated: boolean } | null> {
+    assertRelativePath(relativePath, 'Source preview path');
+    if (!Number.isInteger(maxChars) || maxChars < 1 || maxChars > 32_000) throw new Error('Source preview must be bounded to 1..32000 characters.');
+    const rows = await queryRows<RowDataPacket[]>(this.pool, `SELECT SUBSTRING(source_text, 1, ?) AS preview,
+      CHAR_LENGTH(source_text) > ? AS truncated FROM ${this.#tables.files}
+      WHERE repository_id = ? AND analysis_revision = ? AND relative_path = ? LIMIT 1`,
+    [maxChars, maxChars, ...scopeParams(scope), relativePath], signal);
+    return rows[0]?.preview == null ? null : { text: String(rows[0].preview), truncated: Boolean(Number(rows[0].truncated)) };
+  }
+
+  async getModuleArtifacts(scope: RepositoryRevisionScope, ids: readonly string[], signal?: AbortSignal): Promise<ModuleArtifactRecord[]> {
+    if (ids.length > 200) throw new Error('At most 200 artifact IDs may be fetched.');
+    const unique = [...new Set(ids)];
+    if (unique.length === 0) return [];
+    const rows = await queryRows<ModuleArtifactRow[]>(this.pool, `
+      SELECT module_artifact_id, kind, status, analysis_hash, plan_hash, content_hash, created_at, updated_at, payload
+      FROM ${this.#tables.moduleArtifacts}
+      WHERE repository_id = ? AND analysis_revision = ? AND module_artifact_id IN (${unique.map(() => '?').join(',')})
+      LIMIT 200
+    `, [...scopeParams(scope), ...unique], signal);
+    return rows.map((row) => toModuleArtifact(scope, row));
   }
 
   async listFiles(scope: RepositoryRevisionScope): Promise<IndexedFileRecord[]> {
@@ -951,7 +1073,7 @@ export class SeekDbIndexStore implements IndexStore {
       document.relativePath ?? '',
       document.text,
     ].join('\n'));
-    const embeddings = await this.#embeddingProvider.embed(searchable);
+    const embeddings = await this.embedDocuments(searchable);
     if (embeddings.length !== documents.length) {
       throw new Error('Search embedding provider returned an unexpected document count.');
     }
@@ -1028,11 +1150,15 @@ export class SeekDbIndexStore implements IndexStore {
     query: string,
     limit: number,
     kind: SearchDocumentRecord['kind'] = 'symbol',
+    signal?: AbortSignal,
   ): Promise<SearchDocumentRecord[]> {
+    signal?.throwIfAborted();
     const text = query.trim();
     if (!text || !Number.isInteger(limit) || limit < 1) return [];
     const boundedLimit = Math.min(limit, 200);
-    const [embedding] = await this.#embeddingProvider.embed([text]);
+    const embedding = this.#embeddingProvider.embedQuery
+      ? await this.#embeddingProvider.embedQuery(text, signal)
+      : (await this.#embeddingProvider.embed([text], signal))[0];
     if (!embedding) throw new Error('Search embedding provider omitted a query vector.');
     assertEmbedding(embedding, this.#vectorDimension);
     const candidateLimit = Math.min(Math.max(boundedLimit * 4, 24), 800);
@@ -1041,33 +1167,40 @@ export class SeekDbIndexStore implements IndexStore {
     `;
     const textMatch = 'MATCH(search_text) AGAINST (? IN NATURAL LANGUAGE MODE)';
     const [textRows, vectorRows] = await Promise.all([
-      this.pool.query<SearchDocumentRow[]>(`
+      queryRows<SearchDocumentRow[]>(this.pool, `
         SELECT ${select}, ${textMatch} AS text_score
         FROM ${this.#tables.searchDocuments}
         WHERE repository_id = ? AND analysis_revision = ? AND kind = ? AND ${textMatch}
         ORDER BY text_score DESC
         LIMIT ?
-      `, [text, ...scopeParams(scope), kind, text, candidateLimit]),
-      this.pool.query<SearchDocumentRow[]>(`
+      `, [text, ...scopeParams(scope), kind, text, candidateLimit], signal),
+      queryRows<SearchDocumentRow[]>(this.pool, `
         SELECT ${select}, GREATEST(0, 1 - cosine_distance(embedding, ${vectorHex(embedding)})) AS semantic_score
         FROM ${this.#tables.searchDocuments}
         WHERE repository_id = ? AND analysis_revision = ? AND kind = ?
         ORDER BY cosine_distance(embedding, ${vectorHex(embedding)})
         APPROXIMATE
         LIMIT ?
-      `, [...scopeParams(scope), kind, candidateLimit]),
+      `, [...scopeParams(scope), kind, candidateLimit], signal),
     ]);
+    signal?.throwIfAborted();
     const byId = new Map<string, { document: SearchDocumentRecord; score: number }>();
     const add = (rows: SearchDocumentRow[], rankWeight: number): void => {
       rows.forEach((row, index) => {
         const document = toSearchDocument(scope, row);
         const existing = byId.get(document.searchDocumentId);
         const score = (existing?.score ?? 0) + 1 / (60 + index + 1) * rankWeight;
+        document.retrievalScore = {
+          ...existing?.document.retrievalScore,
+          ...(row.semantic_score !== undefined ? { semantic: numberValue(row.semantic_score) } : {}),
+          ...(row.text_score !== undefined ? { lexical: numberValue(row.text_score) } : {}),
+          fusion: score,
+        };
         byId.set(document.searchDocumentId, { document, score });
       });
     };
-    add(textRows[0], 1);
-    add(vectorRows[0], 1);
+    add(textRows, 1);
+    add(vectorRows, 1);
     return [...byId.values()]
       .sort((left, right) => right.score - left.score || left.document.searchDocumentId.localeCompare(right.document.searchDocumentId))
       .slice(0, boundedLimit)

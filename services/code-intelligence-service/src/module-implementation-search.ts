@@ -11,6 +11,7 @@ import type {
   SymbolRecord,
 } from '@forexplore/contracts';
 import type { IndexStore } from './index-store.js';
+import { searchModules } from './module-matching.js';
 
 export interface ModuleImplementationSearchRequest {
   target: ModuleTarget;
@@ -131,6 +132,7 @@ export class ModuleImplementationSearchService implements ModuleImplementationSe
   constructor(private readonly store: IndexStore) {}
 
   async search(request: ModuleImplementationSearchRequest, signal?: AbortSignal): Promise<SearchCandidate[]> {
+    if (request.target.kind === 'module') return searchModules(this.store, request, signal);
     if (!Number.isInteger(request.topK) || request.topK < 1 || request.topK > 10) {
       throw new Error('Module implementation search topK must be between 1 and 10.');
     }
