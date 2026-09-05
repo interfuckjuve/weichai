@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
@@ -10,6 +11,7 @@ import {
 } from "@forexplore/translation-verifier";
 import {
   evaluateValidationPolicyGate,
+  canonicalJson,
   materializeMigrationRuntimeCapabilitySnapshot,
   validateAdaptationResultV2,
 } from "@forexplore/workflow-core";
@@ -157,7 +159,7 @@ function validVerificationResult(
   },
   descriptor: VerificationStrategyDescriptor = behaviorStrategyDescriptor,
 ): VerificationReceipt {
-  return { result: createVerificationResult({
+  const result = createVerificationResult({
     schemaVersion: "1.0",
     request: input.request,
     analysisReport: input.analysis as unknown as RepositoryIngestionJsonValue,
@@ -170,7 +172,10 @@ function validVerificationResult(
     },
   }, descriptor, output.status === "fail" && output.artifacts.length === 0
     ? { ...output, artifacts: [{ id: "repair-artifact", kind: "report", path: "repair.json", contentHash: "b".repeat(64), mediaType: "application/json" }] }
-    : output, () => adaptationV2TestNow), resultArtifact: { id: "verification-result:test", kind: "verification-result", path: "verification-result.json", contentHash: "c".repeat(64), size: 2, mediaType: "application/json" } };
+    : output, () => adaptationV2TestNow);
+  const path = "verification-result.json";
+  const bytes = Buffer.from(canonicalJson(result), "utf8");
+  return { result, resultArtifact: { id: `verification-result:${path}`, kind: "verification-result", path, contentHash: createHash("sha256").update(bytes).digest("hex"), size: bytes.length, mediaType: "application/json" } };
 }
 
 type VerificationResultMutation = (input: MigrationBehaviorVerificationInputV2) => VerificationResult;
