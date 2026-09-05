@@ -112,6 +112,14 @@ function canonicalPath(value: string, label: string): string {
   return path;
 }
 
+function canonicalArtifactPath(value: string, label: string): string {
+  const path = requiredText(value, label);
+  if (path.includes('\\\\')) throw new Error(`${label} must be a safe repository-relative path.`);
+  if (path.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(path) || path.split('/').some((segment) => segment === '.' || segment === '..' || segment === '')) {
+    throw new Error(`${label} must be a safe repository-relative path.`);
+  }
+  return path;
+}
 function contentAddress<T extends object>(
   prefix: string,
   payload: T,
@@ -1557,7 +1565,19 @@ function canonicalValidationRecords(
       throw new Error(`Validation record ${id} status is unsupported.`);
     }
     requiredText(record.summary, `Validation record ${id} summary`);
-    return { ...record };
+    const artifact = record.artifact === undefined
+      ? undefined
+      : {
+          id: requiredText(record.artifact.id, `Validation record ${id} artifact ID`),
+          kind: requiredText(record.artifact.kind, `Validation record ${id} artifact kind`),
+          path: canonicalArtifactPath(record.artifact.path, `Validation record ${id} artifact path`),
+          contentHash: requireSha256(record.artifact.contentHash, `Validation record ${id} artifact hash`),
+          mediaType: requiredText(record.artifact.mediaType, `Validation record ${id} artifact media type`),
+        };
+    if (artifact && record.artifactPath !== undefined && canonicalArtifactPath(record.artifactPath, `Validation record ${id} artifact path`) !== artifact.path) {
+      throw new Error(`Validation record ${id} legacy artifact path does not match its artifact.`);
+    }
+    return { ...record, ...(artifact === undefined ? {} : { artifact }) };
   }).sort((left, right) => left.id.localeCompare(right.id));
   const missing = policy.checks.filter((check) => check.required && !covered.has(check.id));
   if (missing.length > 0) {

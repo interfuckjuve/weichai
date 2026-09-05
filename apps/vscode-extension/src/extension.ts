@@ -86,6 +86,7 @@ import {
 } from './migration-workflow-v2-host';
 import { collectTargetContextV2 } from './target-context-v2';
 import { MigrationRunV2Store } from './migration-run-v2-store';
+import { manifestValidatorExecutions, mergeValidationArtifactPaths } from './migration-validation-projection';
 import type {
   TargetWorkspaceSelectionIdentity,
   TargetWorkspaceMigrationSelection,
@@ -1646,7 +1647,7 @@ async function applyCurrentRun(host: ExtensionHost): Promise<void> {
 
     const now = new Date().toISOString();
     const artifactStore = new MigrationRunV2Store(context.globalStorageUri);
-    const artifactPaths = await artifactStore.writeArtifacts(adaptationRequest.id, {
+    let artifactPaths = await artifactStore.writeArtifacts(adaptationRequest.id, {
       searchRequest: run.searchRequest,
       searchCandidate: selectedCandidateV2(run),
       indexedDocument: run.indexedDocument,
@@ -1656,6 +1657,7 @@ async function applyCurrentRun(host: ExtensionHost): Promise<void> {
       adaptationResult: adaptation,
       executionContext,
     });
+    artifactPaths = mergeValidationArtifactPaths(artifactPaths, adaptation);
     const approvedManifest = materializeMigrationRunManifestV2({
       status: 'approved',
       request: adaptationRequest,
@@ -2016,25 +2018,6 @@ function manifestProviderExecutions(
         artifactRefs,
       };
     });
-}
-
-function manifestValidatorExecutions(
-  result: AdaptationResultV2,
-): MigrationRunManifestV2['validators'] {
-  return result.validation.map((record) => {
-    if (!record.verifierId || !record.verifierVersion || !record.policyCheckId) {
-      throw new Error(`Validation record ${record.id} lacks durable verifier lineage.`);
-    }
-    return {
-      providerId: record.verifierId,
-      providerVersion: record.verifierVersion,
-      policyCheckId: record.policyCheckId,
-      validationRecordId: record.id,
-      subjectHash: result.patchHash,
-      status: record.status,
-      artifactRefs: [],
-    };
-  });
 }
 
 function validationForStage(
