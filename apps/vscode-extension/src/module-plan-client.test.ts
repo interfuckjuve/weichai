@@ -5,9 +5,12 @@ import {
   type RepositoryStaticAnalysis,
 } from '@forexplore/contracts';
 import {
+  buildLegacyModuleMigrationProposalFromSemantic,
   buildTrustedModuleMigrationPlan,
   modulePlanEndpoint,
+  requestSemanticModuleMigrationProposal,
   requestModuleMigrationProposal,
+  semanticModulePlanEndpoint,
 } from './module-plan-client';
 import type { localFetch } from './local-fetch';
 
@@ -93,6 +96,87 @@ describe('module-plan client', () => {
     });
     expect(JSON.parse(String(init?.body))).not.toHaveProperty('analysis');
     expect(JSON.parse(String(init?.body))).not.toHaveProperty('source');
+  });
+
+  it('sends a revision-scoped semantic planning request without a legacy snapshot', async () => {
+    const semanticResult = {
+      proposal: {
+        repositoryId: 'repo-1',
+        analysisRevision: 'revision-1',
+        analysisHash: 'structural-hash',
+        objective: proposal.objective,
+        modules: [],
+      },
+      evidence: {
+        repositoryId: 'repo-1',
+        analysisRevision: 'revision-1',
+        analysisHash: 'structural-hash',
+        planHash: 'sha256:plan',
+        evidenceIds: [],
+      },
+    };
+    const calls: Array<Parameters<typeof localFetch>> = [];
+    const fetcher = async (...args: Parameters<typeof localFetch>): Promise<Response> => {
+      calls.push(args);
+      return new Response(JSON.stringify(semanticResult), { status: 200 });
+    };
+
+    await requestSemanticModuleMigrationProposal(
+      'http://127.0.0.1:8788/api/?token=not-forwarded#fragment',
+      {
+        repositoryId: 'repo-1',
+        analysisRevision: 'revision-1',
+        projectId: 'project-1',
+        objective: proposal.objective,
+      },
+      fetcher,
+    );
+
+    expect(calls[0]?.[0]).toBe('http://127.0.0.1:8788/api/v1/semantic-module-plan');
+    const body = JSON.parse(String(calls[0]?.[1]?.body));
+    expect(body).toEqual({
+      repositoryId: 'repo-1',
+      analysisRevision: 'revision-1',
+      projectId: 'project-1',
+      objective: proposal.objective,
+    });
+    expect(body).not.toHaveProperty('snapshotId');
+    expect(semanticModulePlanEndpoint('http://127.0.0.1:8788')).toBe(
+      'http://127.0.0.1:8788/v1/semantic-module-plan',
+    );
+  });
+
+  it('maps a revision-scoped proposal to the legacy scheduler without inventing files', () => {
+    const legacy = buildLegacyModuleMigrationProposalFromSemantic(analysis, {
+      repositoryId: 'repo-1',
+      analysisRevision: 'revision-1',
+      analysisHash: 'structural-hash',
+      objective: proposal.objective,
+      modules: [{
+        id: 'service',
+        name: 'Service',
+        kind: 'feature',
+        description: 'The service feature.',
+        sourceFiles: ['src/Service.java'],
+        symbolKeys: ['example.Service'],
+        dependsOn: [],
+        writeSet: ['src/Service.java', 'src/Unknown.java'],
+        resourceLocks: [],
+        evidenceIds: ['evidence:service'],
+      }],
+    });
+
+    expect(legacy).toMatchObject({
+      snapshotId: analysis.snapshotId,
+      objective: proposal.objective,
+      fileAssignments: [{ path: 'src/Service.java', kind: 'module', moduleId: 'service' }],
+      modules: [{
+        id: 'service',
+        sourceFiles: ['src/Service.java'],
+        writeSet: ['src/Service.java'],
+        symbolIds: ['symbol:service'],
+      }],
+    });
   });
 
   it('keeps server rejection evidence rather than treating it as a proposal', async () => {

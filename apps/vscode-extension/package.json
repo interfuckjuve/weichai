@@ -15,6 +15,7 @@
   "main": "./dist/extension/extension.js",
   "files": [
     "dist/extension/**",
+    "dist/extension/node_modules/**",
     "dist/webview/**",
     "README.md"
   ],
@@ -23,6 +24,7 @@
     "onCommand:forexplore.showPanel",
     "onCommand:forexplore.checkRepositories",
     "onCommand:forexplore.reindex",
+    "onCommand:forexplore.refreshCodeIntelligence",
     "onCommand:forexplore.restoreLastCheckpoint",
     "onCommand:forexplore.indexModuleMigrationRepository",
     "onCommand:forexplore.reviewModuleMigrationPlan",
@@ -48,6 +50,10 @@
       {
         "command": "forexplore.reindex",
         "title": "ForeXplore: 重新索引检索仓库"
+      },
+      {
+        "command": "forexplore.refreshCodeIntelligence",
+        "title": "ForeXplore: 刷新代码智能索引"
       },
       {
         "command": "forexplore.restoreLastCheckpoint",
@@ -157,6 +163,7 @@
     "@forexplore/adaptation-service": "0.1.0",
     "@forexplore/adaptation-http-adapter": "0.1.0",
     "@forexplore/code-indexer": "0.1.0",
+    "@forexplore/code-intelligence-service": "0.1.0",
     "@forexplore/contracts": "0.1.0",
     "@forexplore/seekdb-adapter": "0.1.0",
     "@forexplore/workflow-core": "0.1.0",

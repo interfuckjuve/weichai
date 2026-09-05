@@ -374,7 +374,14 @@ describe('module migration planning', () => {
       decidedAt: NOW,
     }, SNAPSHOT, NOW);
     expect(arePlanApprovalsCurrent(approved)).toBe(true);
-    expect(materializeModuleSummary(approved).human.approvalsCurrent).toBe(true);
+    const approvedSummary = materializeModuleSummary(approved);
+    expect(approvedSummary.human.approvalsCurrent).toBe(true);
+    expect(approvedSummary.generated.modules.find((item) => item.id === 'a')).toMatchObject({
+      purpose: 'a module',
+      coreApis: ['symbol:a'],
+      language: 'Java',
+      domain: 'a',
+    });
 
     const rejected = recordModulePlanDecision(approved, {
       id: 'plan-rejection',

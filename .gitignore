@@ -9,6 +9,7 @@ dist/
 coverage/
 *.tsbuildinfo
 .vscode-test/
+.vscode-test-user/
 *.vsix
 .forexplore/
 
@@ -47,6 +48,7 @@ __pycache__/
 results/
 results_副本/
 output/
+tmp/
 
 # Claude Code local overrides (per-developer)
 .claude/settings.local.json

@@ -21,6 +21,7 @@ async function openFixtureWithSelection(): Promise<void> {
   if (!FIXTURE_WORKSPACE) throw new Error('FOREXPLORE_TEST_WORKSPACE env var is required.');
   const document = await vscode.workspace.openTextDocument(vscode.Uri.file(FIXTURE_FILE));
   const editor = await vscode.window.showTextDocument(document);
+  assert.strictEqual(document.languageId, 'java', 'Java fixture must be recognized as Java');
   const methodOffset = document.getText().indexOf('public List<FileItem> parseRequest(RequestContext ctx)');
   assert.ok(methodOffset >= 0, 'Java fixture must contain parseRequest');
   const fullRange = new vscode.Range(
@@ -37,11 +38,19 @@ async function openFixtureWithSelection(): Promise<void> {
 function findTranslationTab(): vscode.Tab | undefined {
   return vscode.window.tabGroups.all
     .flatMap((group) => group.tabs)
-    .find(
-      (tab) =>
-        tab.input instanceof vscode.TabInputWebview &&
-        tab.input.viewType === 'forexplore.translation',
-    );
+    .find(isTranslationTab);
+}
+
+/**
+ * VS Code 1.136 exposes an internally prefixed view type in TabInputWebview
+ * (`mainThreadWebview-forexplore.translation`), while older builds expose
+ * the contributed view type verbatim. Both identify the same panel.
+ */
+function isTranslationTab(tab: vscode.Tab): boolean {
+  return tab.input instanceof vscode.TabInputWebview && (
+    tab.input.viewType === 'forexplore.translation' ||
+    tab.input.viewType.endsWith('-forexplore.translation')
+  );
 }
 
 export async function run(): Promise<void> {
@@ -55,11 +64,16 @@ export async function run(): Promise<void> {
     'forexplore.showPanel',
     'forexplore.checkRepositories',
     'forexplore.reindex',
+    'forexplore.refreshCodeIntelligence',
     'forexplore.restoreLastCheckpoint',
   ]) {
     assert.ok(commands.includes(command), `command ${command} must be registered`);
   }
 
+  // Repository configuration and project analysis must be accessible before selecting a method.
+  await vscode.commands.executeCommand('forexplore.showPanel');
+  await waitFor(() => findTranslationTab() !== undefined);
+  assert.ok(findTranslationTab(), 'project panel must open without an editor selection');
   await openFixtureWithSelection();
   await vscode.commands.executeCommand('forexplore.startTranslation');
   await waitFor(() => findTranslationTab() !== undefined);
@@ -68,10 +82,6 @@ export async function run(): Promise<void> {
   // Re-running with an active selection must reuse the same panel.
   await vscode.commands.executeCommand('forexplore.startTranslation');
   const tabs = vscode.window.tabGroups.all.flatMap((group) => group.tabs);
-  const panels = tabs.filter(
-    (tab) =>
-      tab.input instanceof vscode.TabInputWebview &&
-      tab.input.viewType === 'forexplore.translation',
-  );
+  const panels = tabs.filter(isTranslationTab);
   assert.strictEqual(panels.length, 1, 'translation panel must be reused, not duplicated');
 }

@@ -109,6 +109,10 @@ function proposal(): ModuleMigrationProposal {
         name: "Quote contracts",
         kind: "shared-contract",
         description: "Public quote data contracts.",
+        purpose: "Define the public quote data contract.",
+        coreApis: ["Quote"],
+        language: "Java",
+        domain: "Quote contracts",
         sourceFiles: ["src/contracts/Quote.java"],
         symbolIds: ["symbol-quote"],
         dependsOn: [],
@@ -121,6 +125,10 @@ function proposal(): ModuleMigrationProposal {
         name: "Quote service",
         kind: "feature",
         description: "Quote orchestration service.",
+        purpose: "Orchestrate quote retrieval and contract usage.",
+        coreApis: ["QuoteService"],
+        language: "Java",
+        domain: "Quote orchestration",
         sourceFiles: ["src/service/QuoteService.java"],
         testFiles: ["test/service/QuoteServiceTest.java"],
         generatedFiles: ["generated/QuoteClient.java"],
@@ -296,6 +304,7 @@ describe("buildArchitectMessages", () => {
   it("keeps snapshot facts and planning intent in separate prompt sections", () => {
     const messages = buildArchitectMessages(request);
     expect(messages[0]?.content).toContain("Agenticodex");
+    expect(messages[0]?.content).toContain("purpose, coreApis, language, and domain");
     expect(messages[1]?.content).toContain("[IMMUTABLE_CONSTRAINTS]");
     expect(messages[1]?.content).toContain("[OUTPUT_SCHEMA]");
   });

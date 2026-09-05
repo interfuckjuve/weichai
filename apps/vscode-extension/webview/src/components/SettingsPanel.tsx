@@ -1,12 +1,21 @@
 import { FolderPlus, RefreshCw, Save, Settings2, Trash2, X } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import type { PanelSettingsPresentation } from '../../../src/protocol/messages';
-import type { RepositoryStatus } from '../../../src/ui-types';
+import type {
+  CodeIntelligencePresentation,
+  CodeIntelligenceRevisionPresentation,
+  RepositoryStatus,
+} from '../../../src/ui-types';
 
 interface SettingsPanelProps extends PanelSettingsPresentation {
   repositoryStatuses: RepositoryStatus[];
+  codeIntelligence?: CodeIntelligencePresentation | null;
   saving: boolean;
   onCheckRepositories(): void;
+  /** Selects only a host-verified opaque repository/revision pair for read-only display. */
+  onSelectCodeIntelligenceRevision(repositoryId: string, analysisRevision: string): void;
+  /** Selects only a project inside the host-verified revision. */
+  onSelectCodeIntelligenceProject(repositoryId: string, analysisRevision: string, projectId: string): void;
   onSave(settings: PanelSettingsPresentation): void;
   onCancel(): void;
 }
@@ -15,8 +24,11 @@ export function SettingsPanel({
   topK,
   repositoryPaths,
   repositoryStatuses,
+  codeIntelligence,
   saving,
   onCheckRepositories,
+  onSelectCodeIntelligenceRevision,
+  onSelectCodeIntelligenceProject,
   onSave,
   onCancel,
 }: SettingsPanelProps) {
@@ -68,6 +80,97 @@ export function SettingsPanel({
         />
         <div className="settings-range-scale"><span>1</span><span>10</span></div>
         <p className="muted-copy">每次检索展示 {draftTopK} 个候选方案。</p>
+      </section>
+
+      <section className="card settings-section" aria-label="代码智能索引状态">
+        <div className="card-heading">
+          <span>代码智能索引</span>
+          <strong>{codeIntelligenceStatusLabel(codeIntelligence)}</strong>
+        </div>
+        <p className="settings-intro">
+          代码智能状态仅展示仓库 ID、revision 和能力等级；该状态不携带本地路径、数据库连接或源码内容。
+        </p>
+        {codeIntelligence?.repositories.length ? (
+          <div className="code-intelligence-list">
+            {codeIntelligence.repositories.map((repository) => (
+              <div className="code-intelligence-row" key={repository.repositoryId}>
+                <div>
+                  <strong>{repository.displayName}</strong>
+                  <span>{repository.role === 'target' ? '目标工程' : '历史仓库'} · {repository.analysisStatus}</span>
+                </div>
+                <div className="code-intelligence-facts">
+                  <span className="code-intelligence-active-revision" title={repository.activeRevision ?? '尚未激活 revision'}>
+                    {repository.activeRevision ? `活动 revision ${shortId(repository.activeRevision)}` : '尚未索引'}
+                  </span>
+                  {repository.revisions.length ? (
+                    <label className="code-intelligence-revision-picker">
+                      <span>查看 revision</span>
+                      <select
+                        aria-label={`${repository.displayName} 的代码智能 revision`}
+                        value={repository.selectedRevision ?? ''}
+                        onChange={(event) => {
+                          if (event.target.value) {
+                            onSelectCodeIntelligenceRevision(repository.repositoryId, event.target.value);
+                          }
+                        }}
+                      >
+                        {!repository.selectedRevision ? <option value="">请选择可查询 revision</option> : null}
+                        {repository.revisions.map((revision) => (
+                          <option key={revision.analysisRevision} value={revision.analysisRevision}>
+                            {revisionLabel(revision)}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : null}
+                  {repository.selectedRevision && repository.activeRevision && repository.selectedRevision !== repository.activeRevision ? (
+                    <span className="code-intelligence-history-notice">
+                      正在查看历史 revision（只读）；活动 revision 未变
+                    </span>
+                  ) : null}
+                  <span>{repository.languages.length
+                    ? repository.languages.map((language) => `${language.languageId} · ${language.capabilityLevel}`).join('，')
+                    : '尚无语言能力数据'}</span>
+                  {repository.projects.length ? (
+                    <label className="code-intelligence-revision-picker">
+                      <span>目标项目</span>
+                      <select
+                        aria-label={`${repository.displayName} 的目标项目`}
+                        value={repository.selectedProjectId ?? ''}
+                        onChange={(event) => {
+                          if (event.target.value && repository.selectedRevision) {
+                            onSelectCodeIntelligenceProject(
+                              repository.repositoryId,
+                              repository.selectedRevision,
+                              event.target.value,
+                            );
+                          }
+                        }}
+                      >
+                        <option value="">请选择项目</option>
+                        {repository.projects.map((project) => (
+                          <option key={project.projectId} value={project.projectId}>
+                            {project.displayName} · {project.kind}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : null}
+                  <span className={`summary-status is-${repository.summary.status}`}>
+                    {summaryLabel(repository.summary.status)}
+                  </span>
+                  {repository.summary.status === 'stale' ? (
+                    <span className="code-intelligence-stale-warning">该 Summary 不属于活动 revision，不能作为当前结果使用。</span>
+                  ) : null}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="settings-empty">
+            <span>{codeIntelligence?.message ?? '尚未注册可索引仓库。'}</span>
+          </div>
+        )}
       </section>
 
       <section className="card settings-section">
@@ -149,6 +252,27 @@ export function SettingsPanel({
       </div>
     </form>
   );
+}
+
+function codeIntelligenceStatusLabel(value: CodeIntelligencePresentation | null | undefined): string {
+  if (!value || value.status === 'initializing') return '初始化中';
+  if (value.status === 'error') return '需要处理';
+  return value.storage === 'seekdb' ? 'SeekDB 已连接' : '内存开发存储';
+}
+
+function summaryLabel(status: 'missing' | 'current' | 'stale'): string {
+  if (status === 'current') return 'Summary 当前';
+  if (status === 'stale') return 'Summary 已过期';
+  return '尚无 Summary';
+}
+
+function shortId(value: string): string {
+  return value.length <= 18 ? value : `${value.slice(0, 18)}…`;
+}
+
+function revisionLabel(revision: CodeIntelligenceRevisionPresentation): string {
+  const state = revision.isActive ? '活动' : '历史';
+  return `${state} · ${shortId(revision.analysisRevision)} · ${revision.status}`;
 }
 
 function statusClass(status: RepositoryStatus): string {

@@ -13,6 +13,7 @@ import {
   type ModuleDependency,
   type ModuleFileAssignment,
   type ModuleMigrationProposal,
+  type ModuleSummaryLanguage,
   type RepositoryArchitectureRequest,
   type RepositoryStaticAnalysis,
   type StaticAnalysisFile,
@@ -61,9 +62,12 @@ Rules:
    non-empty reason and resource lock.
 6. Modules, file assignments, and dependencies must be internally consistent. Cite edge or symbol IDs in
    evidenceIds and dependency evidenceEdgeIds. Record uncertainty in risks rather than fabricating certainty.
-7. Module IDs must start with an ASCII letter or digit and otherwise contain only ASCII letters, digits, '.',
+7. Fill purpose, coreApis, language, and domain for each module-summary.json entry. Use snapshot symbol names
+   or signatures for coreApis; use [] when no public API is evident. Do not invent an API that is absent from
+   the snapshot.
+8. Module IDs must start with an ASCII letter or digit and otherwise contain only ASCII letters, digits, '.',
    '_', or '-'; never use whitespace, control characters, or separators such as '|'.
-8. Return JSON only. Do not use markdown fences or commentary.`;
+9. Return JSON only. Do not use markdown fences or commentary.`;
 
 const MAX_ARCHITECT_REPAIRS = 2;
 const MAX_INVALID_OUTPUT_CHARS = 12_000;
@@ -389,6 +393,10 @@ function validateFunctionalModule(
     "name",
     "kind",
     "description",
+    "purpose",
+    "coreApis",
+    "language",
+    "domain",
     "sourceFiles",
     "testFiles",
     "generatedFiles",
@@ -411,6 +419,16 @@ function validateFunctionalModule(
     `modules[${index}].kind`,
   );
   assertNonEmptyString(value.description, `modules[${index}].description`);
+  if (value.purpose !== undefined) assertNonEmptyString(value.purpose, `modules[${index}].purpose`);
+  if (value.domain !== undefined) assertNonEmptyString(value.domain, `modules[${index}].domain`);
+  if (value.coreApis !== undefined) assertStringArray(value.coreApis, `modules[${index}].coreApis`, true);
+  if (value.language !== undefined) {
+    assertEnum<ModuleSummaryLanguage>(
+      value.language,
+      ["TypeScript", "Python", "Java", "C#", "Rust", "Go", "Mixed", "Unknown"],
+      `modules[${index}].language`,
+    );
+  }
   assertStringArray(value.sourceFiles, `modules[${index}].sourceFiles`, false);
   assertStringArray(value.symbolIds, `modules[${index}].symbolIds`);
   assertStringArray(value.dependsOn, `modules[${index}].dependsOn`);
@@ -426,6 +444,7 @@ function validateFunctionalModule(
   assertUniqueStrings(value.writeSet, `modules[${index}].writeSet`);
   assertUniqueStrings(value.resourceLocks, `modules[${index}].resourceLocks`);
   assertUniqueStrings(value.evidenceIds, `modules[${index}].evidenceIds`);
+  if (value.coreApis !== undefined) assertUniqueStrings(value.coreApis, `modules[${index}].coreApis`);
   if (value.testFiles !== undefined) assertUniqueStrings(value.testFiles, `modules[${index}].testFiles`);
   if (value.generatedFiles !== undefined) assertUniqueStrings(value.generatedFiles, `modules[${index}].generatedFiles`);
 
@@ -601,6 +620,10 @@ function moduleMigrationProposalSchema(): Record<string, unknown> {
       name: "human-readable name",
       kind: "feature | shared-contract | infrastructure | integration | test-support | other",
       description: "string",
+      purpose: "Purpose summary for module-summary.json",
+      coreApis: ["Core API names or signatures present in the snapshot"],
+      language: "TypeScript | Python | Java | C# | Rust | Go | Mixed | Unknown",
+      domain: "Business or technical domain for module-summary.json",
       sourceFiles: ["snapshot source path"],
       testFiles: ["optional snapshot test path"],
       generatedFiles: ["optional snapshot generated path"],

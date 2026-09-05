@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { Settings2 } from 'lucide-react';
-import type { RepositoryStatus, ServiceStatus } from '../../src/ui-types';
+import type { CodeIntelligencePresentation, RepositoryStatus, ServiceStatus } from '../../src/ui-types';
 import type { ModuleExplorerMode, ModuleExplorerNode } from '../../src/ui-types';
 import {
   initialWorkflowState,
@@ -27,6 +27,7 @@ export default function App() {
   const [state, dispatch] = useReducer(workflowReducer, initialWorkflowState);
   const [payload, setPayload] = useState<PanelInitPayload | null>(null);
   const [repositoryStatuses, setRepositoryStatuses] = useState<RepositoryStatus[]>([]);
+  const [codeIntelligence, setCodeIntelligence] = useState<CodeIntelligencePresentation | null>(null);
   const [serviceStatus, setServiceStatus] = useState<ServiceStatus | null>(null);
   const [moduleExplorer, setModuleExplorer] = useState<PanelInitPayload['moduleExplorer'] | null>(null);
   const [explorerMode, setExplorerMode] = useState<ModuleExplorerMode>('target');
@@ -51,11 +52,12 @@ export default function App() {
           settingsRef.current = message.payload.settings;
           setPayload(message.payload);
           setRepositoryStatuses(message.payload.repositoryStatuses);
+          setCodeIntelligence(message.payload.codeIntelligence);
           setServiceStatus(message.payload.serviceStatus);
           setModuleExplorer(message.payload.moduleExplorer);
           setHistoryId((current) => current ?? message.payload.moduleExplorer.history[0]?.id ?? null);
           setError(null);
-          if (targetIdRef.current !== message.payload.target.id) {
+          if (message.payload.target && targetIdRef.current !== message.payload.target.id) {
             dispatch({ type: 'SELECT_TARGET', target: message.payload.target });
             setVisibleStep('requirement');
           }
@@ -72,6 +74,9 @@ export default function App() {
           break;
         case 'REPOSITORY_STATUS':
           setRepositoryStatuses(message.statuses);
+          break;
+        case 'CODE_INTELLIGENCE_STATUS':
+          setCodeIntelligence(message.presentation);
           break;
         case 'SERVICE_STATUS':
           setServiceStatus(message.status);
@@ -95,6 +100,12 @@ export default function App() {
           setExplorerMode('target');
           setSelectedNodeId(null);
           setSettingsOpen(false);
+          break;
+        case 'TARGET_CLEARED':
+          dispatch({ type: 'RESET' });
+          setPayload((current) => current ? { ...current, target: null } : current);
+          setSelectedNodeId(null);
+          setVisibleStep('target');
           break;
         case 'SETTINGS_UPDATED':
           settingsRef.current = message.settings;
@@ -182,6 +193,20 @@ export default function App() {
     bus.post({ type: 'SAVE_SETTINGS', settings });
   }
 
+  function handleSelectCodeIntelligenceRevision(repositoryId: string, analysisRevision: string): void {
+    setError(null);
+    bus.post({ type: 'SELECT_CODE_INTELLIGENCE_REVISION', repositoryId, analysisRevision });
+  }
+
+  function handleSelectCodeIntelligenceProject(
+    repositoryId: string,
+    analysisRevision: string,
+    projectId: string,
+  ): void {
+    setError(null);
+    bus.post({ type: 'SELECT_CODE_INTELLIGENCE_PROJECT', repositoryId, analysisRevision, projectId });
+  }
+
   function handleSelectWorkspaceTarget(targetId: string): void {
     if (targetId === state.target?.id) return;
     setError(null);
@@ -208,7 +233,7 @@ export default function App() {
     setVisibleStep(step);
   }
 
-  if (!payload || !state.target || !moduleExplorer) {
+  if (!payload || !moduleExplorer) {
     return (
       <div className="app">
         <div className="loading-state">正在初始化 ForeXplore 翻译面板…</div>
@@ -240,11 +265,32 @@ export default function App() {
         </button>
       </header>
 
+      <section className="project-selector" aria-label="项目选择">
+        {codeIntelligence?.repositories.map((repository) => (
+          <label key={repository.repositoryId}>
+            <span>{repository.role === 'target' ? '目标工程' : '历史项目'} · {repository.displayName}</span>
+            <select aria-label={`${repository.displayName} 项目`} value={repository.selectedProjectId ?? ''}
+              onChange={(event) => {
+                if (!repository.selectedRevision || !event.target.value) return;
+                setExplorerMode(repository.role === 'target' ? 'target' : 'history');
+                setHistoryId(repository.repositoryId);
+                setSelectedNodeId(null);
+                handleSelectCodeIntelligenceProject(repository.repositoryId, repository.selectedRevision, event.target.value);
+              }}>
+              <option value="">选择项目</option>
+              {repository.projects.map((project) => <option key={project.projectId} value={project.projectId}>
+                {project.displayName} · {project.relativePath || '.'} · {project.analysis?.state ?? 'missing'}
+              </option>)}
+            </select>
+            <button type="button" onClick={() => bus.post({ type: 'REFRESH_REPOSITORY', repositoryId: repository.repositoryId })}>刷新此仓库</button>
+          </label>
+        ))}
+      </section>
       <ModuleWorkspace
         explorer={moduleExplorer}
         mode={explorerMode}
         historyId={historyId}
-        currentTargetId={state.target.id}
+        currentTargetId={state.target?.id ?? ''}
         selectedNodeId={selectedNodeId}
         refreshing={refreshingExplorer}
         onModeChange={handleExplorerModeChange}
@@ -252,6 +298,7 @@ export default function App() {
         onNodeSelect={(node: ModuleExplorerNode) => { setSelectedNodeId(node.id); setSettingsOpen(false); }}
         onTargetSelect={handleSelectWorkspaceTarget}
         onRefresh={handleRefreshModuleExplorer}
+        onRetry={(scope, force) => bus.post({ type: 'RETRY_PROJECT_ANALYSIS', ...scope, force })}
         onOpenSettings={() => setSettingsOpen(true)}
         settingsOpen={settingsOpen}
       >
@@ -266,14 +313,17 @@ export default function App() {
             topK={payload.settings.topK}
             repositoryPaths={payload.settings.repositoryPaths}
             repositoryStatuses={repositoryStatuses}
+            codeIntelligence={codeIntelligence}
             saving={settingsSaving}
             onCheckRepositories={handleCheckRepositories}
+            onSelectCodeIntelligenceRevision={handleSelectCodeIntelligenceRevision}
+            onSelectCodeIntelligenceProject={handleSelectCodeIntelligenceProject}
             onSave={handleSaveSettings}
             onCancel={() => setSettingsOpen(false)}
           />
         ) : (
           <main className="stage-body">
-            {visibleStep === 'requirement' ? (
+            {visibleStep === 'requirement' && state.target ? (
               <RequirementStage
                 key={state.target.id}
                 state={state}
@@ -314,6 +364,7 @@ export default function App() {
       <FooterStatus
         serviceStatus={serviceStatus}
         repositoryStatuses={repositoryStatuses}
+        codeIntelligence={codeIntelligence}
         workspaceRoot={payload.workspaceRoot}
       />
     </div>

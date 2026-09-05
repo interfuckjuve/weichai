@@ -2,9 +2,11 @@ import type {
   ExecutionGroup,
   ExecutionWave,
   FunctionalModule,
+  Language,
   MigrationRunManifest,
   ModuleDependency,
   ModuleMigrationPlan,
+  ModuleSummaryLanguage,
   ModuleSummary,
   PlanDecision,
 } from '@forexplore/contracts';
@@ -211,6 +213,10 @@ function byId<T extends { id: string }>(left: T, right: T): number {
 function copyModule(module: FunctionalModule): FunctionalModule {
   return {
     ...module,
+    purpose: module.purpose?.trim() || module.description,
+    coreApis: sortedUnique((module.coreApis ?? module.symbolIds).filter((item) => item.trim())),
+    language: module.language ?? inferModuleLanguage(module),
+    domain: module.domain?.trim() || module.name,
     sourceFiles: sortedUnique(module.sourceFiles),
     testFiles: module.testFiles === undefined ? undefined : sortedUnique(module.testFiles),
     generatedFiles: module.generatedFiles === undefined ? undefined : sortedUnique(module.generatedFiles),
@@ -220,6 +226,29 @@ function copyModule(module: FunctionalModule): FunctionalModule {
     resourceLocks: sortedUnique(module.resourceLocks),
     evidenceIds: sortedUnique(module.evidenceIds),
   };
+}
+
+function inferModuleLanguage(module: FunctionalModule): ModuleSummaryLanguage {
+  const languages = [...new Set([
+    ...module.sourceFiles,
+    ...(module.testFiles ?? []),
+    ...(module.generatedFiles ?? []),
+  ].map(languageForPath).filter((value): value is Language => value !== undefined))]
+    .sort((left, right) => left.localeCompare(right));
+  if (languages.length === 0) return 'Unknown';
+  if (languages.length > 1) return 'Mixed';
+  return languages[0]!;
+}
+
+function languageForPath(filePath: string): Language | undefined {
+  const lower = filePath.toLowerCase();
+  if (lower.endsWith('.ts') || lower.endsWith('.tsx') || lower.endsWith('.js') || lower.endsWith('.jsx')) return 'TypeScript';
+  if (lower.endsWith('.py')) return 'Python';
+  if (lower.endsWith('.java')) return 'Java';
+  if (lower.endsWith('.cs')) return 'C#';
+  if (lower.endsWith('.rs')) return 'Rust';
+  if (lower.endsWith('.go')) return 'Go';
+  return undefined;
 }
 
 function canonicalDependencies(dependencies: readonly ModuleDependency[]): ModuleDependency[] {
