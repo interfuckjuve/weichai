@@ -46,7 +46,25 @@ import { sha256Hex } from './module-plan-utils';
 
 const NOW = '2026-09-02T12:00:00.000Z';
 
-function route(): MigrationRouteDescriptor {
+function route(includeOptionalPolicyCheck = false): MigrationRouteDescriptor {
+  const checks = [{
+    id: 'python-behavior',
+    label: 'Python behavior parity',
+    phase: 'behavior' as const,
+    required: true,
+    verifierId: 'python-behavior-verifier',
+    verifierVersion: '5.0.0',
+  }];
+  if (includeOptionalPolicyCheck) {
+    checks.push({
+      id: 'python-static-analysis',
+      label: 'Python static analysis',
+      phase: 'static-analysis' as const,
+      required: false,
+      verifierId: 'python-static-verifier',
+      verifierVersion: '1.0.0',
+    });
+  }
   return {
     schemaVersion: migrationRouteSchemaVersion,
     id: 'research-x-to-python-translate',
@@ -84,14 +102,7 @@ function route(): MigrationRouteDescriptor {
       id: 'research-x-python-policy',
       routeId: 'research-x-to-python-translate',
       routeVersion: '2.1.0',
-      checks: [{
-        id: 'python-behavior',
-        label: 'Python behavior parity',
-        phase: 'behavior',
-        required: true,
-        verifierId: 'python-behavior-verifier',
-        verifierVersion: '5.0.0',
-      }],
+      checks,
       createdAt: NOW,
     },
   };
@@ -217,9 +228,9 @@ function catalog(side: 'source' | 'target', repositoryIr: UnifiedRepositoryIR): 
   };
 }
 
-function executionFixture() {
-  const runtime = materializeMigrationRuntimeCapabilitySnapshot({ routes: [route()], createdAt: NOW });
-  const routeRef = createMigrationRouteSnapshotRef(runtime, route().id);
+function executionFixture(routeDescriptor = route()) {
+  const runtime = materializeMigrationRuntimeCapabilitySnapshot({ routes: [routeDescriptor], createdAt: NOW });
+  const routeRef = createMigrationRouteSnapshotRef(runtime, routeDescriptor.id);
   const sourceIr = ir('source');
   const targetIr = ir('target');
   const sourceCatalog = catalog('source', sourceIr);
@@ -923,6 +934,22 @@ describe('V2 migration execution contracts', () => {
       producer: fixture.adaptationResult.producer,
       createdAt: NOW,
     }, fixture.validationContext)).toThrow(/trigger validation record ids/i);
+  });
+
+  it('rejects repair histories whose trigger validation snapshot omits optional policy checks', () => {
+    const fixture = executionFixture(route(true));
+    const inputPatchHash = sha256Hex('repair-input-patch');
+
+    expect(() => materializeAdaptationResultV2({
+      request: fixture.adaptationRequest,
+      files: fixture.adaptationResult.files,
+      validation: fixture.adaptationResult.validation,
+      repairRounds: [repairRound(1, inputPatchHash, fixture.adaptationResult.patchHash, [
+        failingValidationRecord(inputPatchHash),
+      ])],
+      producer: fixture.adaptationResult.producer,
+      createdAt: NOW,
+    }, fixture.validationContext)).toThrow(/trigger validation snapshot/i);
   });
 
   it('rejects repair histories with too many rounds, gaps, or unchanged patch hashes', () => {
