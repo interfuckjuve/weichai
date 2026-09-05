@@ -2,9 +2,9 @@ import type { AdaptationRequestV2, FilePatch } from "@forexplore/contracts";
 import { calculatePatchHashV2 } from "@forexplore/workflow-core";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createVerificationResult, type VerificationInput, type VerificationStrategyDescriptor } from "./verification-types.js";
@@ -98,6 +98,48 @@ describe("runVerificationCli", () => {
     expect(existsSync(outputPath)).toBe(false);
   });
 
+  it("rejects non-regular input files before calling the service", async () => {
+    const errors: string[] = [];
+    const service = fakeService();
+    rmSync(inputPath, { force: true });
+    mkdirSync(inputPath);
+
+    const code = await runVerificationCli([
+      "--input", inputPath, "--output", outputPath,
+    ], dependencies(service, errors));
+
+    expect(code).toBe(1);
+    expect(errors.join("\n")).toContain("Verification input must be a regular file");
+    expect(service.verify).not.toHaveBeenCalled();
+  });
+
+  it("rejects oversized input content before calling the service", async () => {
+    const errors: string[] = [];
+    const service = fakeService();
+    writeFileSync(inputPath, "x".repeat(10 * 1024 * 1024 + 1), "utf8");
+
+    const code = await runVerificationCli([
+      "--input", inputPath, "--output", outputPath,
+    ], dependencies(service, errors));
+
+    expect(code).toBe(1);
+    expect(errors.join("\n")).toContain("Verification input file exceeds 10485760 bytes");
+    expect(service.verify).not.toHaveBeenCalled();
+  });
+
+  it("removes the temporary output file when atomic write fails", async () => {
+    const errors: string[] = [];
+    mkdirSync(outputPath, { recursive: true });
+
+    const code = await runVerificationCli([
+      "--input", inputPath, "--output", outputPath,
+    ], dependencies(fakeService(), errors));
+
+    expect(code).toBe(1);
+    expect(errors.join("\n")).toContain("Failed to write verification result");
+    expect(readdirSync(dirname(outputPath)).filter((name) => name.startsWith(`${basename(outputPath)}.`))).toEqual([]);
+  });
+
   it("returns exit code 1 for service errors", async () => {
     const errors: string[] = [];
     const service = fakeService();
@@ -126,6 +168,23 @@ describe("smoke E2E strategy parser", () => {
 
     expect(defaultOutput).toContain("跳过 smoke E2E");
     expect(explicitOutput).toContain("跳过 smoke E2E");
+  });
+
+  it("rejects a strategy flag without a value", () => {
+    const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+
+    try {
+      execFileSync("npm", ["run", "e2e", "--", "--strategy", "--offline-only"], {
+        cwd: packageRoot,
+        encoding: "utf8",
+        stdio: "pipe",
+      });
+      throw new Error("expected e2e command to fail");
+    } catch (error) {
+      const failure = error as { status?: number; stderr?: Buffer };
+      expect(failure.status).toBe(2);
+      expect(failure.stderr?.toString("utf8")).toContain("Missing value for --strategy");
+    }
   });
 
   it("reports unknown strategy explicitly", () => {

@@ -53,7 +53,7 @@ export function parseArgs(argv: string[]): SmokeE2EOptions | { error: string } {
     const flag = argv[i];
     if (VALUE_FLAGS.has(flag)) {
       const value = argv[i + 1];
-      if (value === undefined) return { error: `Missing value for ${flag}.` };
+      if (value === undefined || value.startsWith("--")) return { error: `Missing value for ${flag}.` };
       if (flag === "--fixture-dir") opts.fixtureDir = value;
       else if (flag === "--api-key") opts.apiKey = value;
       else if (flag === "--strategy") opts.strategyId = value;

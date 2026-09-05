@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readSync, realpathSync, renameSync, fstatSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDefaultVerificationService } from "./default-verification-service.js";
@@ -100,15 +100,29 @@ function parseArgs(argv: string[]): ParseResult {
 }
 
 function readVerificationInput(path: string): VerificationInput {
-  const stats = statSync(path);
-  if (stats.size > MAX_INPUT_BYTES) {
-    throw new Error(`Verification input file exceeds ${MAX_INPUT_BYTES} bytes.`);
-  }
-  const text = readFileSync(path, "utf8");
+  const fd = openSync(path, "r");
   try {
-    return JSON.parse(text) as VerificationInput;
-  } catch (error) {
-    throw new Error(`Invalid verification input JSON: ${errorMessage(error)}`);
+    const stats = fstatSync(fd);
+    if (!stats.isFile()) {
+      throw new Error("Verification input must be a regular file.");
+    }
+    const buffer = Buffer.alloc(MAX_INPUT_BYTES + 1);
+    let total = 0;
+    while (total <= MAX_INPUT_BYTES) {
+      const bytesRead = readSync(fd, buffer, total, buffer.length - total, null);
+      if (bytesRead === 0) break;
+      total += bytesRead;
+    }
+    if (total > MAX_INPUT_BYTES) {
+      throw new Error(`Verification input file exceeds ${MAX_INPUT_BYTES} bytes.`);
+    }
+    try {
+      return JSON.parse(buffer.toString("utf8", 0, total)) as VerificationInput;
+    } catch (error) {
+      throw new Error(`Invalid verification input JSON: ${errorMessage(error)}`);
+    }
+  } finally {
+    closeSync(fd);
   }
 }
 
@@ -119,6 +133,11 @@ function writeJsonAtomic(path: string, value: unknown): void {
     writeFileSync(tempPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
     renameSync(tempPath, path);
   } catch (error) {
+    try {
+      unlinkSync(tempPath);
+    } catch {
+      // Best-effort cleanup; preserve the original write/rename failure.
+    }
     throw new Error(`Failed to write verification result: ${errorMessage(error)}`);
   }
 }
