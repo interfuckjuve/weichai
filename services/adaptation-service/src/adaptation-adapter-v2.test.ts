@@ -10,6 +10,7 @@ import {
 } from "@forexplore/translation-verifier";
 import {
   evaluateValidationPolicyGate,
+  materializeMigrationRuntimeCapabilitySnapshot,
   validateAdaptationResultV2,
 } from "@forexplore/workflow-core";
 import {
@@ -448,6 +449,79 @@ describe("AdaptationAdapterV2", () => {
       inputPatchHash: expect.any(String),
       outputPatchHash: result.patchHash,
     });
+  });
+  it("uses the linked custom compiler identity for repair feedback without fabricating compiler artifacts", async () => {
+    const customProvider = { providerId: "acme.syntax-proof", providerVersion: "7.0.0" };
+    const serviceBaseline = createAdaptationRuntimeCapabilitySnapshot({
+      createdAt: adaptationV2TestNow,
+      analysisExecution: "disabled",
+      verifierExecution: "local-process",
+      workspaceMutationExecution: "disabled",
+    });
+    const executionBaseline = createAdaptationRuntimeCapabilitySnapshot({
+      createdAt: adaptationV2TestNow,
+      analysisExecution: "trusted-host",
+      verifierExecution: "local-process",
+      workspaceMutationExecution: "trusted-host",
+    });
+    const customize = (snapshot: typeof serviceBaseline) => materializeMigrationRuntimeCapabilitySnapshot({
+      createdAt: snapshot.createdAt,
+      routes: snapshot.routes.map((route) => ({
+        ...route,
+        stages: route.stages.map((stage) => stage.stage === "compile-validation"
+          ? { ...stage, providerId: customProvider.providerId, providerVersion: customProvider.providerVersion }
+          : stage),
+        validationPolicy: {
+          ...route.validationPolicy,
+          checks: route.validationPolicy.checks.map((check) => check.id === "target-compile"
+            ? { ...check, id: "syntax-proof", verifierId: customProvider.providerId, verifierVersion: customProvider.providerVersion }
+            : check),
+        },
+      })),
+    });
+    const fixture = createAdaptationV2TestFixture({
+      serviceRuntime: customize(serviceBaseline),
+      executionRuntime: customize(executionBaseline),
+    });
+    const compilerCalls: string[] = [];
+    const compiler = {
+      capability: () => customProvider,
+      validate: vi.fn(() => {
+        compilerCalls.push("validate");
+        return compilerCalls.length === 1
+          ? { status: "fail" as const, summary: "syntax error", failureReason: "compiler-failed" }
+          : { status: "pass" as const, summary: "compiled" };
+      }),
+    };
+    const providers = deterministicProviders();
+    providers.translator.repair = vi.fn(async (_input, _analysis, _plan, previous) => ({
+      ...previous,
+      generatedContent: previous.generatedContent + "\n# repaired",
+    }));
+    const verifier: MigrationBehaviorVerifierV2 = {
+      ...behaviorVerifier,
+      verifyWithReceipt: vi.fn(async (input) => validVerificationResult(input)),
+    };
+    const result = await new AdaptationAdapterV2({
+      runtimeCapabilities: fixture.serviceRuntime,
+      ...providers,
+      verifier,
+      compiler,
+      now: () => adaptationV2TestNow,
+    }).adapt(fixture.request, fixture.validationContext);
+
+    expect(providers.translator.repair).toHaveBeenCalledOnce();
+    const feedback = providers.translator.repair.mock.calls[0]![4];
+    expect(feedback.issues).toEqual([expect.objectContaining({
+      id: "compile-failure:syntax-proof",
+      kind: "compile-failure",
+      evidenceArtifactIds: [],
+    })]);
+    expect(feedback.validationRecordIds).toEqual(["validation:syntax-proof"]);
+    expect(result.repairRounds[0]).toMatchObject({
+      triggerValidationRecords: expect.arrayContaining([expect.objectContaining({ policyCheckId: "syntax-proof", status: "fail" })]),
+    });
+    expect(result.repairRounds[0]).not.toHaveProperty("compilerArtifact");
   });
   it("passes exact round, hash, and content to every verifier attempt", async () => {
     const fixture = createAdaptationV2TestFixture();
