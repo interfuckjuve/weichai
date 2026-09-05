@@ -373,6 +373,9 @@ export class AdaptationAdapterV2 implements CodeAdaptationPortV2 {
           ...(attempt.verification?.artifacts[0] ? { verificationArtifactPath: attempt.verification.artifacts[0].path } : {}),
         }, signal,
       ));
+      const candidateFiles = [buildProtectedPatch(request.target.entity.path, targetFile.content, repaired.generatedContent, located.value)];
+      const candidateHash = calculatePatchHashV2(candidateFiles);
+      if (candidateHash === attempt.patchHash) throw new Error("V2 repair must produce a new patch hash.");
       const nextAttempt = await this.#buildAttempt(
         nextRound, repaired, request, route, analysis, plan, targetEngineeringProvider,
         targetFile.content, located.value, signal,
@@ -836,7 +839,7 @@ function repairIssues(
   failed: ValidationRecord[],
 ): MigrationRepairIssueV2[] {
   const issues: MigrationRepairIssueV2[] = attempt.verification?.status === "fail"
-    ? attempt.verification.issues.map((issue) => structuredClone(issue))
+    ? attempt.verification.issues.map((issue) => ({ ...structuredClone(issue), evidenceArtifactIds: issue.evidenceArtifactIds.length > 0 ? issue.evidenceArtifactIds : attempt.verification!.artifacts.map((artifact) => artifact.id) }))
     : [];
   for (const record of failed) {
     if (record.phase === "compile") issues.push({
