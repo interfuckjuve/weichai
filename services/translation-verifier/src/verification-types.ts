@@ -159,6 +159,9 @@ export function assertVerificationInput(input: VerificationInput): VerificationI
 
   validateVerificationRequestArtifacts(input.request);
   const translationFiles = requireVerificationArray(input.translation.files, "Verification translation files") as FilePatch[];
+  if (translationFiles.length === 0) {
+    throw new Error("Verification translation must contain at least one patch.");
+  }
   validateVerificationTranslationFiles(translationFiles);
   const expectedPatchHash = requireSha256(
     calculatePatchHashV2(translationFiles),

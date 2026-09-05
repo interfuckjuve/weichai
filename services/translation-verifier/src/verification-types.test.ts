@@ -123,6 +123,11 @@ describe("verification-types", () => {
       .toThrow(/translation\.files\[0\].*repository-relative/i);
   });
 
+  it("rejects empty translation files even with the matching empty patch hash", () => {
+    expect(() => assertVerificationInput(inputWithTranslationFiles([])))
+      .toThrow(/at least one patch/i);
+  });
+
   it("rejects non-JSON generic payload values before cloning or hashing", () => {
     const cases = [
       () => {
