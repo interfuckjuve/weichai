@@ -1,6 +1,7 @@
 import type {
   AnalysisRevisionRecord,
   ModuleArtifactRecord,
+  ProjectAnalysisRecord,
   RepositoryRecord,
   StructuralIndex,
 } from '@forexplore/contracts';
@@ -216,6 +217,58 @@ describe('revision store hardening', () => {
     await store.activateRevision(replacement);
     expect((await store.listModuleArtifacts(index))[0]?.status).toBe('stale');
     expect((await store.listSearchDocuments(index)).some((document) => document.kind === 'summary')).toBe(false);
+  });
+
+  it('projects each analyzed project module as its own summary search document', async () => {
+    const store = new InMemoryIndexStore();
+    const index = structural();
+    await store.putRepository(repository());
+    await persistReady(store, index);
+    await store.activateRevision(index);
+    const projectId = index.projects[0]!.projectId;
+    const payload: ProjectAnalysisRecord = {
+      repositoryId: index.repositoryId,
+      analysisRevision: index.analysisRevision,
+      projectId,
+      analysisProfile: 'code-understanding/v1',
+      state: 'ready',
+      projection: 'pending',
+      updatedAt: '2026-09-04T00:00:01.000Z',
+      proposal: {
+        repositoryId: index.repositoryId,
+        analysisRevision: index.analysisRevision,
+        analysisHash: index.analysisHash,
+        objective: 'test',
+        modules: ['payments', 'audit'].map((id) => ({
+          id,
+          name: id,
+          kind: 'feature',
+          description: `${id} module`,
+          sourceFiles: ['src/example.ts'],
+          symbolKeys: [index.symbols[0]!.symbolKey],
+          dependsOn: [],
+          evidenceIds: [`project:${projectId}`],
+        })),
+      },
+    };
+    await store.putModuleArtifact({
+      repositoryId: index.repositoryId,
+      analysisRevision: index.analysisRevision,
+      moduleArtifactId: 'project-summary',
+      kind: 'module-summary',
+      status: 'current',
+      analysisHash: index.analysisHash,
+      planHash: hash('e'),
+      contentHash: hash('d'),
+      createdAt: payload.updatedAt,
+      updatedAt: payload.updatedAt,
+      payload,
+    });
+
+    await new SeekDbProjection(store).projectModuleArtifacts(index);
+    const summaries = (await store.listSearchDocuments(index)).filter((document) => document.kind === 'summary');
+    expect(summaries).toHaveLength(2);
+    expect(summaries.map((document) => JSON.parse(document.text).moduleId).sort()).toEqual(['audit', 'payments']);
   });
 });
 

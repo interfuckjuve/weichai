@@ -34,6 +34,20 @@ function candidate(id: string, title: string, path: string): SearchCandidate {
   };
 }
 
+function moduleCandidate(id: string, title: string, moduleId: string, moduleName: string): SearchCandidate {
+  return {
+    ...candidate(id, title, `src/shared/${title}.java`),
+    sourceModule: {
+      repositoryId: 'history-one',
+      analysisRevision: 'revision-one',
+      projectId: 'project-one',
+      moduleId,
+      name: moduleName,
+      projectPath: 'services/orders',
+    },
+  };
+}
+
 const candidates = [
   candidate('pay', 'submitPayment', 'src/payments/PaymentService.java'),
   candidate('refund', 'refundPayment', 'src/payments/RefundService.java'),
@@ -97,6 +111,27 @@ describe('CandidatesStage', () => {
 
     act(() => root.unmount());
     reactTestEnvironment.IS_REACT_ACT_ENVIRONMENT = false;
+  });
+
+  it('groups candidates by the reviewed module identity instead of their directory', () => {
+    const moduleCandidates = [
+      moduleCandidate('create', 'createOrder', 'orders', '订单模块'),
+      moduleCandidate('cancel', 'cancelOrder', 'orders', '订单模块'),
+      moduleCandidate('refund', 'refundOrder', 'refunds', '退款模块'),
+    ];
+    const markup = renderToStaticMarkup(
+      <CandidatesStage
+        state={{ ...state, candidates: moduleCandidates }}
+        dispatch={vi.fn()}
+        adaptationProvider="DeepSeek"
+        onSelectCandidate={vi.fn()}
+        onAdapt={vi.fn()}
+      />,
+    );
+
+    expect(markup).toContain('订单模块');
+    expect(markup).toContain('退款模块');
+    expect(markup).toContain('<strong>2</strong> 模块');
   });
 
   it('shows an actionable empty state', () => {

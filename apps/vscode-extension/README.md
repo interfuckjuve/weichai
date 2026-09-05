@@ -144,14 +144,13 @@ npm run dev:adaptation
 ```json
 {
   "forexplore.executionMode": "real",
-  "forexplore.retrievalApiUrl": "http://127.0.0.1:8787",
   "forexplore.adaptationApiUrl": "http://127.0.0.1:8788",
   "forexplore.topK": 4,
   "forexplore.repositoryPaths": []
 }
 ```
 
-翻译面板右上角的“设置”界面可调整每次检索的候选方案数量，并添加或删除多个本地历史代码仓路径。首次使用且路径为空时，面板会提示进入该设置界面。每个已保存路径作为一个可切换的 01A 历史仓；未配置时不会使用机器相关的示例默认路径。`forexplore.repositoryPaths` 保存后会注册历史库并执行统一结构索引及按项目的 Agent 模块解析。代码理解结果存入 SeekDB；旧版代码片段检索服务的授权范围仍由该服务配置决定。
+翻译面板右上角的“设置”界面可调整每次检索的候选方案数量，并添加或删除多个本地历史代码仓路径。首次使用且路径为空时，面板会提示进入该设置界面。每个已保存路径作为一个可切换的 01A 历史仓；未配置时不会使用机器相关的示例默认路径。`forexplore.repositoryPaths` 保存后会注册历史库并执行统一结构索引及按项目的 Agent 模块解析。代码理解结果存入 SeekDB；检索先选择相关模块，再只在这些模块拥有的符号中返回候选。
 
 ## 写回保护
 

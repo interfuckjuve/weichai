@@ -22,7 +22,7 @@ const baseStatuses: RepositoryStatus[] = [
 ];
 
 describe('decorateRepositoryStatuses', () => {
-  it('marks usable paths as service-managed when retrieval is connected', () => {
+  it('directs usable paths to the code-intelligence status', () => {
     const serviceStatus: ServiceStatus = {
       retrieval: 'connected',
       adaptation: 'connected',
@@ -32,7 +32,7 @@ describe('decorateRepositoryStatuses', () => {
     expect(decorated[0]).toMatchObject({
       indexed: false,
       stale: false,
-      message: '本地路径可读；检索范围由服务端已索引仓库决定',
+      message: '本地路径可读；索引与模块 Summary 状态请查看代码索引区域',
     });
   });
 

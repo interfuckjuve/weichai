@@ -5,11 +5,13 @@ import path from 'node:path';
 import type {
   AnalysisRevisionRecord,
   ModuleArtifactRecord,
+  ModuleTarget,
   RepositoryId,
   RepositoryRecord,
   RepositoryRole,
   RepositoryRevisionScope,
   RepositoryStaticAnalysis,
+  SearchCandidate,
   ProjectId,
   ProjectAnalysisPort, ProjectAnalysisResult, ProjectAnalysisScope, ProjectAnalysisRecord,
   StructuralIndex,
@@ -83,6 +85,14 @@ export interface CodeIntelligenceRuntime {
   /** Trusted host bridge for legacy compiler-probe evidence; never expose it to Agent/MCP callers. */
   javaCsharpSpecializedProvider?: HostJavaCsharpSpecializedProvider;
   queryPort: SemanticQueryPort;
+  moduleImplementationSearch?: {
+    search(request: {
+      target: ModuleTarget;
+      requirement: string;
+      topK: number;
+      repositoryIds: readonly RepositoryId[];
+    }, signal?: AbortSignal): Promise<SearchCandidate[]>;
+  };
   close(): Promise<void>;
 }
 
@@ -483,6 +493,22 @@ export class CodeIntelligenceHost {
     if (!selected) return null;
     const projects = await (await this.runtime()).queryPort.listProjects(scope);
     return projects.projects.some((project) => project.value.projectId === selected) ? selected : null;
+  }
+
+  /** Runs module-first retrieval only across this window's current historical repositories. */
+  async searchHistoricalImplementations(request: {
+    target: ModuleTarget;
+    requirement: string;
+    topK: number;
+  }, signal?: AbortSignal): Promise<SearchCandidate[]> {
+    const runtime = await this.runtime();
+    if (!runtime.moduleImplementationSearch) {
+      throw new Error('当前代码智能运行时未提供模块检索能力。');
+    }
+    const repositoryIds = (await runtime.registry.list?.() ?? [])
+      .filter((repository) => repository.role === 'history' && this.#visibleRepositoryIds.has(repository.repositoryId))
+      .map((repository) => repository.repositoryId);
+    return runtime.moduleImplementationSearch.search({ ...request, repositoryIds }, signal);
   }
 
   /** Returns the active structural index for trusted host-side presentation. */

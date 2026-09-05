@@ -54,6 +54,7 @@ export interface IndexStore {
     scope: RepositoryRevisionScope,
     query: string,
     limit: number,
+    kind?: SearchDocumentRecord['kind'],
   ): Promise<SearchDocumentRecord[]>;
 
   /** Atomically flips the repository's active pointer after a completed build. */
@@ -575,11 +576,13 @@ export class InMemoryIndexStore implements IndexStore {
     scope: RepositoryRevisionScope,
     query: string,
     limit: number,
+    kind: SearchDocumentRecord['kind'] = 'symbol',
   ): Promise<SearchDocumentRecord[]> {
     const normalized = query.trim().toLocaleLowerCase();
     if (!normalized || !Number.isInteger(limit) || limit < 1) return [];
     const terms = normalized.split(/\s+/).filter(Boolean);
     return (await this.listSearchDocuments(scope))
+      .filter((document) => document.kind === kind)
       .map((document) => ({
         document,
         score: terms.reduce((total, term) =>

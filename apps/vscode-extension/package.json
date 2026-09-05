@@ -100,7 +100,7 @@
           "type": "string",
           "enum": ["real"],
           "default": "real",
-          "description": "调用本地 SeekDB 检索服务和语言无关的适配服务；两个服务都必须健康。"
+          "description": "使用扩展内置的 SeekDB 模块检索和语言无关的适配服务。"
         },
         "forexplore.repositoryPaths": {
           "type": "array",
@@ -108,7 +108,7 @@
             "type": "string"
           },
           "default": [],
-          "description": "历史代码仓的本地目录。未配置时翻译面板会提示添加路径；本地可读不代表目录已被远端检索服务索引。"
+          "description": "历史代码仓的本地目录。保存后由扩展建立版本化结构索引、项目模块 Summary 和模块内候选索引。"
         },
         "forexplore.topK": {
           "type": "number",
@@ -116,11 +116,6 @@
           "minimum": 1,
           "maximum": 10,
           "description": "每次检索返回的候选方案数量。"
-        },
-        "forexplore.retrievalApiUrl": {
-          "type": "string",
-          "default": "http://127.0.0.1:8787",
-          "description": "检索服务地址。"
         },
         "forexplore.adaptationApiUrl": {
           "type": "string",
@@ -165,7 +160,6 @@
     "@forexplore/code-indexer": "0.1.0",
     "@forexplore/code-intelligence-service": "0.1.0",
     "@forexplore/contracts": "0.1.0",
-    "@forexplore/seekdb-adapter": "0.1.0",
     "@forexplore/workflow-core": "0.1.0",
     "lucide-react": "^1.24.0",
     "react": "^19.2.7",

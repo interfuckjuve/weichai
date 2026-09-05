@@ -2,7 +2,7 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { RepositoryStaticAnalysis } from '@forexplore/contracts';
 import {
   CodeIntelligenceHost,
@@ -501,4 +501,31 @@ it('reuses a compatible semantic query listener owned by another host', async ()
     firstHost.dispose();
     secondHost.dispose();
   }
+});
+
+it('scopes module-first retrieval to this window historical repositories', async () => {
+  const history = await temporaryRepository('search-history');
+  const target = await temporaryRepository('search-target');
+  const runtime = createRuntime();
+  const search = vi.fn(async () => []);
+  runtime.moduleImplementationSearch = { search };
+  const host = new CodeIntelligenceHost({ runtimeFactory: async () => runtime });
+  await host.synchronize({
+    repositories: [
+      { localPath: history, role: 'history' },
+      { localPath: target, role: 'target' },
+    ],
+    scan: false,
+  });
+
+  await host.searchHistoricalImplementations({
+    target: { id: 'target', name: 'run', kind: 'function', path: 'run.ts', language: 'TypeScript', signature: 'run()' },
+    requirement: 'run work',
+    topK: 3,
+  });
+
+  const historicalIds = (await runtime.registry.list!())
+    .filter((repository) => repository.role === 'history')
+    .map((repository) => repository.repositoryId);
+  expect(search).toHaveBeenCalledWith(expect.objectContaining({ repositoryIds: historicalIds }), undefined);
 });

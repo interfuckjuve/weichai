@@ -561,17 +561,11 @@ async function startSearch(
   try {
     const run = requireActiveRun();
     await assertTargetUnchanged(run);
-    const status = await host.services.refresh();
-    publish({ type: 'SERVICE_STATUS', status });
-    const runtime = host.services.getRuntimePorts();
-    const candidates = await runtime.ports.search.search({
+    await host.codeIntelligence.waitForProjects();
+    const candidates = await host.codeIntelligence.searchHistoricalImplementations({
       target: run.target,
       requirement: message.requirement.trim(),
       topK: message.topK,
-      // Local paths are presentation-only checks; only the server can state
-      // which repositories were indexed. An empty scope means its configured
-      // authorized index, not a fake "configured-repositories" filter.
-      repositoryScopes: [],
     });
     run.requirement = message.requirement.trim();
     run.candidates = candidates;
@@ -606,8 +600,7 @@ async function startAdaptation(host: ExtensionHost, decisionNotes: string): Prom
     await assertTargetUnchanged(run);
     const status = await host.services.refresh();
     publish({ type: 'SERVICE_STATUS', status });
-    const runtime = host.services.getRuntimePorts();
-    const rawResult = await runtime.ports.adaptation.adapt({
+    const rawResult = await host.services.getAdaptationPort().adapt({
       target: run.target,
       candidate,
       requirement: run.requirement,

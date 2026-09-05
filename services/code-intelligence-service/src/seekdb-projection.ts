@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import type {
   ModuleArtifactRecord,
+  ProjectAnalysisRecord,
+  ProjectModule,
   SearchDocumentRecord,
   StructuralIndex,
   SymbolRecord,
@@ -60,11 +62,11 @@ function fragmentDocument(index: StructuralIndex, relativePath: string, source: 
   };
 }
 
-function summaryDocument(
+function summaryDocuments(
   index: StructuralIndex,
   artifact: ModuleArtifactRecord,
   activeRevision: string | null | undefined = undefined,
-): SearchDocumentRecord | null {
+): SearchDocumentRecord[] {
   // A search projection is never allowed to make an unbound or stale summary
   // look current. The authoritative store enforces the same rule on writes;
   // this defensive check also protects alternate IndexStore implementations.
@@ -75,22 +77,49 @@ function summaryDocument(
     !artifact.planHash?.trim() ||
     artifact.analysisHash !== index.analysisHash ||
     activeRevision !== index.analysisRevision
-  ) return null;
-  const text = typeof artifact.payload === 'string'
-    ? artifact.payload
-    : JSON.stringify(artifact.payload);
-  const title = `Module summary ${artifact.moduleArtifactId}`;
-  return {
-    repositoryId: index.repositoryId,
-    analysisRevision: index.analysisRevision,
-    searchDocumentId: documentId(index, 'summary', artifact.moduleArtifactId),
-    kind: 'summary',
-    relativePath: null,
-    moduleArtifactId: artifact.moduleArtifactId,
-    contentHash: documentHash(title, text),
-    title,
-    text,
-  };
+  ) return [];
+  const record = artifact.payload as Partial<ProjectAnalysisRecord>;
+  if (!record.proposal || !Array.isArray(record.proposal.modules)) {
+    const text = typeof artifact.payload === 'string' ? artifact.payload : JSON.stringify(artifact.payload);
+    const title = `Module summary ${artifact.moduleArtifactId}`;
+    return [{
+      repositoryId: index.repositoryId,
+      analysisRevision: index.analysisRevision,
+      searchDocumentId: documentId(index, 'summary', artifact.moduleArtifactId),
+      kind: 'summary',
+      relativePath: null,
+      moduleArtifactId: artifact.moduleArtifactId,
+      contentHash: documentHash(title, text),
+      title,
+      text,
+    }];
+  }
+  return record.proposal.modules.map((module: ProjectModule) => {
+    const text = JSON.stringify({
+      projectId: record.projectId,
+      moduleId: module.id,
+      name: module.name,
+      kind: module.kind,
+      description: module.description,
+      purpose: module.purpose,
+      domain: module.domain,
+      language: module.language,
+      coreApis: module.coreApis ?? [],
+      dependsOn: module.dependsOn,
+    });
+    const identity = `${artifact.moduleArtifactId}\u0000${module.id}`;
+    return {
+      repositoryId: index.repositoryId,
+      analysisRevision: index.analysisRevision,
+      searchDocumentId: documentId(index, 'summary', identity),
+      kind: 'summary' as const,
+      relativePath: null,
+      moduleArtifactId: artifact.moduleArtifactId,
+      contentHash: documentHash(module.name, text),
+      title: module.name,
+      text,
+    };
+  });
 }
 
 /**
@@ -115,8 +144,7 @@ export class SeekDbProjection implements SearchProjection {
     const repository = await this.store.getRepository(index.repositoryId);
     const artifacts = await this.store.listModuleArtifacts(index);
     for (const artifact of artifacts) {
-      const document = summaryDocument(index, artifact, repository?.activeRevision);
-      if (document) documents.push(document);
+      documents.push(...summaryDocuments(index, artifact, repository?.activeRevision));
     }
     await this.store.replaceSearchDocuments(index, documents);
   }
@@ -135,6 +163,6 @@ export const seekDbProjectionInternals = {
   documentHash,
   documentId,
   fragmentDocument,
-  summaryDocument,
+  summaryDocuments,
   symbolDocument,
 };

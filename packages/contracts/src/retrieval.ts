@@ -1,3 +1,4 @@
+import type { AnalysisRevisionId, ProjectId, RepositoryId } from './code-intelligence';
 import type { Language, ModuleTarget } from './module';
 
 export interface SearchRequest {
@@ -48,4 +49,14 @@ export interface SearchCandidate {
   risks: string[];
   /** LLM reranking rationale, only present when reranking is active. */
   rerankReason?: string;
+  /** Trusted module boundary that produced this second-stage symbol candidate. */
+  sourceModule?: {
+    repositoryId: RepositoryId;
+    analysisRevision: AnalysisRevisionId;
+    projectId: ProjectId;
+    moduleId: string;
+    name: string;
+    projectPath: string;
+    purpose?: string;
+  };
 }

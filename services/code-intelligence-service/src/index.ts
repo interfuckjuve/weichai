@@ -25,6 +25,7 @@ import {
   type SemanticProvider,
   type SemanticQueryServiceOptions,
 } from './semantic-query-service.js';
+import { ModuleImplementationSearchService } from './module-implementation-search.js';
 
 export {
   AnalysisCoordinator,
@@ -68,6 +69,11 @@ export {
   type SemanticProvider,
   type SemanticQueryServiceOptions,
 } from './semantic-query-service.js';
+export {
+  ModuleImplementationSearchService,
+  type ModuleImplementationSearchPort,
+  type ModuleImplementationSearchRequest,
+} from './module-implementation-search.js';
 
 export interface CreateCodeIntelligenceRuntimeOptions {
   /** An injected store is useful in tests and avoids making MCP own storage. */
@@ -95,6 +101,7 @@ export interface CodeIntelligenceRuntime {
   lspSessionManager: LspSessionManager;
   javaCsharpSpecializedProvider: JavaCsharpSpecializedProvider;
   queryPort: SemanticQueryPort;
+  moduleImplementationSearch: ModuleImplementationSearchService;
   close(): Promise<void>;
 }
 
@@ -137,6 +144,7 @@ export async function createCodeIntelligenceRuntime(
     languageCapabilities: languageCapabilities(languageRegistry),
     semanticProviders,
   });
+  const moduleImplementationSearch = new ModuleImplementationSearchService(store);
   const coordinator = new AnalysisCoordinator(
     registry,
     store,
@@ -151,6 +159,7 @@ export async function createCodeIntelligenceRuntime(
     lspSessionManager,
     javaCsharpSpecializedProvider,
     queryPort,
+    moduleImplementationSearch,
     async close(): Promise<void> {
       if (ownsStore) await store.close?.();
     },

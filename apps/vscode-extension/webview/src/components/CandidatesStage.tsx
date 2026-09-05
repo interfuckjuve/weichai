@@ -227,8 +227,13 @@ function CandidateDetail({ candidate }: { candidate: SearchCandidate }) {
 function groupCandidatesByModule(candidates: SearchCandidate[]): CandidateModuleGroup[] {
   const groups = new Map<string, CandidateModuleGroup>();
   candidates.forEach((candidate, index) => {
-    const module = moduleIdentity(candidate.path);
-    const id = JSON.stringify([candidate.repository, module.path]);
+    const inferred = moduleIdentity(candidate.path);
+    const module = candidate.sourceModule
+      ? { name: candidate.sourceModule.name, path: candidate.sourceModule.projectPath || '/' }
+      : inferred;
+    const id = candidate.sourceModule
+      ? JSON.stringify([candidate.sourceModule.repositoryId, candidate.sourceModule.analysisRevision, candidate.sourceModule.moduleId])
+      : JSON.stringify([candidate.repository, module.path]);
     const group = groups.get(id) ?? {
       id,
       name: module.name,

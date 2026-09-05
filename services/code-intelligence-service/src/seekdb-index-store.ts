@@ -961,6 +961,7 @@ export class SeekDbIndexStore implements IndexStore {
     scope: RepositoryRevisionScope,
     query: string,
     limit: number,
+    kind: SearchDocumentRecord['kind'] = 'symbol',
   ): Promise<SearchDocumentRecord[]> {
     const text = query.trim();
     if (!text || !Number.isInteger(limit) || limit < 1) return [];
@@ -977,18 +978,18 @@ export class SeekDbIndexStore implements IndexStore {
       this.pool.query<SearchDocumentRow[]>(`
         SELECT ${select}, ${textMatch} AS text_score
         FROM ${this.#tables.searchDocuments}
-        WHERE repository_id = ? AND analysis_revision = ? AND kind = 'symbol' AND ${textMatch}
+        WHERE repository_id = ? AND analysis_revision = ? AND kind = ? AND ${textMatch}
         ORDER BY text_score DESC
         LIMIT ?
-      `, [text, ...scopeParams(scope), text, candidateLimit]),
+      `, [text, ...scopeParams(scope), kind, text, candidateLimit]),
       this.pool.query<SearchDocumentRow[]>(`
         SELECT ${select}, GREATEST(0, 1 - cosine_distance(embedding, ${vectorHex(embedding)})) AS semantic_score
         FROM ${this.#tables.searchDocuments}
-        WHERE repository_id = ? AND analysis_revision = ? AND kind = 'symbol'
+        WHERE repository_id = ? AND analysis_revision = ? AND kind = ?
         ORDER BY cosine_distance(embedding, ${vectorHex(embedding)})
         APPROXIMATE
         LIMIT ?
-      `, [...scopeParams(scope), candidateLimit]),
+      `, [...scopeParams(scope), kind, candidateLimit]),
     ]);
     const byId = new Map<string, { document: SearchDocumentRecord; score: number }>();
     const add = (rows: SearchDocumentRow[], rankWeight: number): void => {
