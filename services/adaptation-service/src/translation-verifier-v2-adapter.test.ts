@@ -81,12 +81,13 @@ describe("TranslationVerifierV2Adapter", () => {
       artifacts: [],
       strategyReport: { cases: 1 },
     }, () => "2026-09-05T00:00:00.000Z");
+    const receipt = { result, resultArtifact: { id: "verification-result:test", kind: "verification-result" as const, path: "verification-result.json", contentHash: "c".repeat(64), size: 2, mediaType: "application/json" as const } };
     const service = {
-      verify: vi.fn(async () => result),
-    } satisfies Pick<VerificationService, "verify">;
+      verifyWithReceipt: vi.fn(async () => receipt),
+    } satisfies Pick<VerificationService, "verifyWithReceipt">;
     const adapter = new TranslationVerifierV2Adapter(service);
 
-    await expect(adapter.verify({
+    await expect(adapter.verifyWithReceipt({
       request,
       analysis,
       plan,
@@ -94,15 +95,15 @@ describe("TranslationVerifierV2Adapter", () => {
       round: 1,
       files,
       patchHash,
-    } satisfies MigrationBehaviorVerificationInputV2, signal)).resolves.toBe(result);
+    } satisfies MigrationBehaviorVerificationInputV2, signal)).resolves.toBe(receipt);
 
     expect(adapter.providerId).toBe("forexplore.translation-verifier.differential");
     expect(adapter.providerVersion).toBe("1.0.0");
     expect(adapter.strategyDescriptor).toEqual(DIFFERENTIAL_SMOKE_STRATEGY);
     expect(adapter.strategyDescriptor).not.toBe(DIFFERENTIAL_SMOKE_STRATEGY);
     expect(Object.isFrozen(adapter.strategyDescriptor)).toBe(true);
-    expect(service.verify).toHaveBeenCalledOnce();
-    expect(service.verify).toHaveBeenCalledWith(
+    expect(service.verifyWithReceipt).toHaveBeenCalledOnce();
+    expect(service.verifyWithReceipt).toHaveBeenCalledWith(
       expect.objectContaining({
         schemaVersion: "1.0",
         request,

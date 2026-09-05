@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { RepositoryIngestionJsonValue } from "@forexplore/contracts";
 import {
   createVerificationResult,
+  type VerificationReceipt,
   type VerificationResult,
   type VerificationStrategyDescriptor,
 } from "@forexplore/translation-verifier";
@@ -91,7 +92,7 @@ const behaviorVerifier: MigrationBehaviorVerifierV2 = {
   providerId: "forexplore.translation-verifier.differential",
   providerVersion: "1.0.0",
   strategyDescriptor: behaviorStrategyDescriptor,
-  async verify(input) {
+  async verifyWithReceipt(input) {
     const samples = ["  alpha ", "Beta"];
     const tsxCli = fileURLToPath(
       new URL("../../../node_modules/tsx/dist/cli.mjs", import.meta.url),
@@ -153,8 +154,8 @@ function validVerificationResult(
     strategyReport: {},
   },
   descriptor: VerificationStrategyDescriptor = behaviorStrategyDescriptor,
-): VerificationResult {
-  return createVerificationResult({
+): VerificationReceipt {
+  return { result: createVerificationResult({
     schemaVersion: "1.0",
     request: input.request,
     analysisReport: input.analysis as unknown as RepositoryIngestionJsonValue,
@@ -167,7 +168,7 @@ function validVerificationResult(
     },
   }, descriptor, output.status === "fail" && output.artifacts.length === 0
     ? { ...output, artifacts: [{ id: "repair-artifact", kind: "report", path: "repair.json", contentHash: "b".repeat(64), mediaType: "application/json" }] }
-    : output, () => adaptationV2TestNow);
+    : output, () => adaptationV2TestNow), resultArtifact: { id: "verification-result:test", kind: "verification-result", path: "verification-result.json", contentHash: "c".repeat(64), size: 2, mediaType: "application/json" } };
 }
 
 type VerificationResultMutation = (input: MigrationBehaviorVerificationInputV2) => VerificationResult;
@@ -233,7 +234,7 @@ describe("AdaptationAdapterV2", () => {
         policyCheckId: "behavior-differential",
         status: "pass",
         required: true,
-        artifactPath: ".forexplore/evidence/typescript-python-normalize.json",
+        artifactPath: "verification-result.json",
       }),
       expect.objectContaining({ policyCheckId: "patch-boundary", status: "pass" }),
       expect.objectContaining({ policyCheckId: "target-compile", status: "pass" }),
@@ -272,27 +273,21 @@ describe("AdaptationAdapterV2", () => {
   });
 
   it.each<[string, VerificationResultMutation]>([
-    ["stale subjectHash", (input) => ({ ...validVerificationResult(input), subjectHash: "f".repeat(64) })],
+    ["stale subjectHash", (input) => ({ ...validVerificationResult(input).result, subjectHash: "f".repeat(64) })],
     ["wrong round", (input) => {
-      const result = validVerificationResult(input);
+      const result = validVerificationResult(input).result;
       return { ...result, round: result.round + 1 };
     }],
-    ["invalid contentHash", (input) => ({ ...validVerificationResult(input), contentHash: "f".repeat(64) })],
-    ["wrong strategyId", (input) => validVerificationResult(input, undefined, {
-      ...behaviorStrategyDescriptor,
-      id: "unexpected-strategy",
-    })],
-    ["wrong strategyVersion", (input) => validVerificationResult(input, undefined, {
-      ...behaviorStrategyDescriptor,
-      version: "9.9.9",
-    })],
+    ["invalid contentHash", (input) => ({ ...validVerificationResult(input).result, contentHash: "f".repeat(64) })],
+    ["wrong strategyId", (input) => validVerificationResult(input, undefined, { ...behaviorStrategyDescriptor, id: "unexpected-strategy" }).result],
+    ["wrong strategyVersion", (input) => validVerificationResult(input, undefined, { ...behaviorStrategyDescriptor, version: "9.9.9" }).result],
   ])("fails closed when the behavior verifier returns a %s", async (_name, mutate) => {
     const fixture = createAdaptationV2TestFixture();
     const verifier: MigrationBehaviorVerifierV2 = {
       providerId: "forexplore.translation-verifier.differential",
       providerVersion: "1.0.0",
       strategyDescriptor: behaviorStrategyDescriptor,
-      verify: vi.fn(async (input) => mutate(input)),
+  verifyWithReceipt: vi.fn(async (input) => ({ result: mutate(input), resultArtifact: { id: "verification-result:test", kind: "verification-result" as const, path: "verification-result.json", contentHash: "c".repeat(64), size: 2, mediaType: "application/json" as const } })),
     };
     const adapter = new AdaptationAdapterV2({
       runtimeCapabilities: fixture.serviceRuntime,
@@ -319,7 +314,7 @@ describe("AdaptationAdapterV2", () => {
   });
   it("runs one repair from behavior failure to pass and records normalized feedback", async () => {
     const fixture = createAdaptationV2TestFixture();
-    const verifier: MigrationBehaviorVerifierV2 = { ...behaviorVerifier, verify: vi.fn()
+    const verifier: MigrationBehaviorVerifierV2 = { ...behaviorVerifier, verifyWithReceipt: vi.fn()
       .mockImplementationOnce(async (input) => validVerificationResult(input, { status: "fail", summary: "diverged", issues: [{ id: "div", kind: "behavioral-divergence", message: "different", evidenceArtifactIds: [] }], artifacts: [], strategyReport: {} }))
       .mockImplementationOnce(async (input) => validVerificationResult(input)) };
     const providers = deterministicProviders();
@@ -333,7 +328,7 @@ describe("AdaptationAdapterV2", () => {
 
   it("caps three behavior failures at two chained repairs", async () => {
     const fixture = createAdaptationV2TestFixture();
-    const verifier: MigrationBehaviorVerifierV2 = { ...behaviorVerifier, verify: vi.fn(async (input) => validVerificationResult(input, { status: "fail", summary: "fail", issues: [{ id: `issue-${input.round}`, kind: "behavioral-divergence", message: "fail", evidenceArtifactIds: [] }], artifacts: [], strategyReport: {} })) };
+    const verifier: MigrationBehaviorVerifierV2 = { ...behaviorVerifier, verifyWithReceipt: vi.fn(async (input) => validVerificationResult(input, { status: "fail", summary: "fail", issues: [{ id: `issue-${input.round}`, kind: "behavioral-divergence", message: "fail", evidenceArtifactIds: [] }], artifacts: [], strategyReport: {} })) };
     const providers = deterministicProviders();
     providers.translator.repair = vi.fn(async (_i, _a, _p, previous) => ({ ...previous, generatedContent: previous.generatedContent + "\n# repair" }));
     const result = await new AdaptationAdapterV2({ runtimeCapabilities: fixture.serviceRuntime, ...providers, verifier }).adapt(fixture.request, fixture.validationContext);
@@ -358,7 +353,7 @@ describe("AdaptationAdapterV2", () => {
   });
   it("does not repair required unverified behavior", async () => {
     const fixture = createAdaptationV2TestFixture();
-    const verifier: MigrationBehaviorVerifierV2 = { ...behaviorVerifier, verify: vi.fn(async (input) => validVerificationResult(input, {
+    const verifier: MigrationBehaviorVerifierV2 = { ...behaviorVerifier, verifyWithReceipt: vi.fn(async (input) => validVerificationResult(input, {
       status: "unverified",
       summary: "Required behavior evidence is unavailable.",
       issues: [],
@@ -374,7 +369,7 @@ describe("AdaptationAdapterV2", () => {
 
   it.each(["pass", "warn"] as const)("does not repair behavior %s", async (status) => {
     const fixture = createAdaptationV2TestFixture();
-    const verifier: MigrationBehaviorVerifierV2 = { ...behaviorVerifier, verify: vi.fn(async (input) => validVerificationResult(input, { status, summary: status, issues: [], artifacts: [], strategyReport: {} })) };
+    const verifier: MigrationBehaviorVerifierV2 = { ...behaviorVerifier, verifyWithReceipt: vi.fn(async (input) => validVerificationResult(input, { status, summary: status, issues: [], artifacts: [], strategyReport: {} })) };
     const providers = deterministicProviders();
     providers.translator.repair = vi.fn();
     const result = await new AdaptationAdapterV2({ runtimeCapabilities: fixture.serviceRuntime, ...providers, verifier }).adapt(fixture.request, fixture.validationContext);
@@ -384,17 +379,17 @@ describe("AdaptationAdapterV2", () => {
 
   it("rejects an unchanged repair before another verification", async () => {
     const fixture = createAdaptationV2TestFixture();
-    const verifier: MigrationBehaviorVerifierV2 = { ...behaviorVerifier, verify: vi.fn(async (input) => validVerificationResult(input, { status: "fail", summary: "fail", issues: [{ id: "x", kind: "behavioral-divergence", message: "x", evidenceArtifactIds: [] }], artifacts: [], strategyReport: {} })) };
+    const verifier: MigrationBehaviorVerifierV2 = { ...behaviorVerifier, verifyWithReceipt: vi.fn(async (input) => validVerificationResult(input, { status: "fail", summary: "fail", issues: [{ id: "x", kind: "behavioral-divergence", message: "x", evidenceArtifactIds: [] }], artifacts: [], strategyReport: {} })) };
     const providers = deterministicProviders();
     providers.translator.repair = vi.fn(async () => ({ schemaVersion: "1.0", generatedContent: adaptationV2GeneratedContent, completedSteps: [], unresolved: [] }));
     await expect(new AdaptationAdapterV2({ runtimeCapabilities: fixture.serviceRuntime, ...providers, verifier }).adapt(fixture.request, fixture.validationContext)).rejects.toThrow("new patch hash");
-    expect(verifier.verify).toHaveBeenCalledTimes(1);
+    expect(verifier.verifyWithReceipt).toHaveBeenCalledTimes(1);
   });
 
   it("propagates the original AbortError from repair", async () => {
     const fixture = createAdaptationV2TestFixture();
     const abort = new DOMException("aborted", "AbortError");
-    const verifier: MigrationBehaviorVerifierV2 = { ...behaviorVerifier, verify: vi.fn(async (input) => validVerificationResult(input, { status: "fail", summary: "fail", issues: [{ id: "x", kind: "behavioral-divergence", message: "x", evidenceArtifactIds: [] }], artifacts: [], strategyReport: {} })) };
+    const verifier: MigrationBehaviorVerifierV2 = { ...behaviorVerifier, verifyWithReceipt: vi.fn(async (input) => validVerificationResult(input, { status: "fail", summary: "fail", issues: [{ id: "x", kind: "behavioral-divergence", message: "x", evidenceArtifactIds: [] }], artifacts: [], strategyReport: {} })) };
     const providers = deterministicProviders();
     providers.translator.repair = vi.fn(async () => { throw abort; });
     try { await new AdaptationAdapterV2({ runtimeCapabilities: fixture.serviceRuntime, ...providers, verifier }).adapt(fixture.request, fixture.validationContext); } catch (error) { expect(error).toBe(abort); }
@@ -421,7 +416,7 @@ describe("AdaptationAdapterV2", () => {
     }));
     const verifier: MigrationBehaviorVerifierV2 = {
       ...behaviorVerifier,
-      verify: vi.fn(async (input) => validVerificationResult(input)),
+      verifyWithReceipt: vi.fn(async (input) => validVerificationResult(input)),
     };
     const result = await new AdaptationAdapterV2({
       runtimeCapabilities: fixture.serviceRuntime,
@@ -453,7 +448,7 @@ describe("AdaptationAdapterV2", () => {
   it("passes exact round, hash, and content to every verifier attempt", async () => {
     const fixture = createAdaptationV2TestFixture();
     const inputs: MigrationBehaviorVerificationInputV2[] = [];
-    const verifier: MigrationBehaviorVerifierV2 = { ...behaviorVerifier, verify: vi.fn(async (input) => { inputs.push(input); return validVerificationResult(input, { status: input.round < 2 ? "fail" : "pass", summary: "s", issues: input.round < 2 ? [{ id: "x", kind: "behavioral-divergence", message: "x", evidenceArtifactIds: [] }] : [], artifacts: [], strategyReport: {} }); }) };
+    const verifier: MigrationBehaviorVerifierV2 = { ...behaviorVerifier, verifyWithReceipt: vi.fn(async (input) => { inputs.push(input); return validVerificationResult(input, { status: input.round < 2 ? "fail" : "pass", summary: "s", issues: input.round < 2 ? [{ id: "x", kind: "behavioral-divergence", message: "x", evidenceArtifactIds: [] }] : [], artifacts: [], strategyReport: {} }); }) };
     const providers = deterministicProviders();
     providers.translator.repair = vi.fn(async (_i, _a, _p, previous) => ({ ...previous, generatedContent: previous.generatedContent + "\n# repair" }));
     const result = await new AdaptationAdapterV2({ runtimeCapabilities: fixture.serviceRuntime, ...providers, verifier }).adapt(fixture.request, fixture.validationContext);

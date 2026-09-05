@@ -8,6 +8,8 @@ import type {
 import { calculatePatchHashV2, canonicalJson } from "@forexplore/workflow-core";
 
 export interface VerificationResultArtifact {
+  id: string;
+  kind: "verification-result";
   path: string;
   contentHash: string;
   size: number;

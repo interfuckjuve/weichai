@@ -14,6 +14,8 @@ import {
 } from "./verification-types.js";
 
 export interface VerificationResultArtifact {
+  id: string;
+  kind: "verification-result";
   path: string;
   contentHash: string;
   size: number;
@@ -59,10 +61,6 @@ export class VerificationService {
     options: { strategyId?: string; keepWorkspace?: boolean } = {},
     signal?: AbortSignal,
   ): Promise<VerificationResult> {
-    if (signal?.aborted && !isAbortError(signal.reason)) {
-      const descriptor = this.#descriptor(options.strategyId ?? this.#defaultStrategyId);
-      return this.#unverified(input, descriptor, signal.reason, []);
-    }
     return (await this.verifyWithReceipt(input, options, signal)).result;
   }
 

@@ -28,7 +28,7 @@ export function createAdaptationV2Runtime(
     analyzer?: MigrationAnalyzerV2;
     planner?: MigrationPlannerV2;
     translator?: MigrationTranslatorV2;
-    verificationService?: Pick<VerificationService, "verify">;
+    verificationService?: Pick<VerificationService, "verifyWithReceipt">;
   } = {},
 ): AdaptationV2Runtime {
   const createdAt = options.createdAt ?? new Date().toISOString();

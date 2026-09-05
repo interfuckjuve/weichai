@@ -49,15 +49,13 @@ const providers = {
 describe("createAdaptationV2Runtime", () => {
   it("executes V2 verification through the server-owned local verifier", async () => {
     const fixture = createAdaptationV2TestFixture();
-    const verify = vi.fn<VerificationService["verify"]>(async (input) =>
-      createVerificationResult(input, {
+    const verify = vi.fn<VerificationService["verifyWithReceipt"]>(async (input) => ({ result: createVerificationResult(input, {
         id: "forexplore.translation-verifier.differential",
         version: "1.0.0",
         displayName: "Fixture differential verifier",
       }, {
         status: "pass", summary: "verified", issues: [], artifacts: [], strategyReport: {},
-      }, () => adaptationV2TestNow),
-    );
+      }, () => adaptationV2TestNow), resultArtifact: { id: "verification-result:runtime", kind: "verification-result", path: "verification-result.json", contentHash: "c".repeat(64), size: 2, mediaType: "application/json" } }));
     const runtime = createAdaptationV2Runtime({
       apiKey: "test-key",
       verificationWorkspaceRoot: "/tmp/workspaces",
@@ -67,7 +65,7 @@ describe("createAdaptationV2Runtime", () => {
       createdAt: adaptationV2TestNow,
       targetEngineeringRegistry: undefined,
       ...providers,
-      verificationService: { verify } satisfies Pick<VerificationService, "verify">,
+      verificationService: { verifyWithReceipt: verify } satisfies Pick<VerificationService, "verifyWithReceipt">,
     });
 
     const result = await runtime.adapterV2.adapt(fixture.request, fixture.validationContext);

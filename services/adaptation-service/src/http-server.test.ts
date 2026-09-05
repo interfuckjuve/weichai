@@ -243,7 +243,7 @@ function deterministicAdapterV2(
       providerId: 'forexplore.translation-verifier.differential',
       providerVersion: '1.0.0',
       strategyDescriptor: httpBehaviorStrategyDescriptor,
-      verify: async (input) => createVerificationResult({
+      verifyWithReceipt: async (input) => ({ result: createVerificationResult({
         schemaVersion: '1.0',
         request: input.request,
         analysisReport: input.analysis as unknown as RepositoryIngestionJsonValue,
@@ -266,7 +266,7 @@ function deterministicAdapterV2(
           mediaType: 'application/json',
         }],
         strategyReport: { fixture: true },
-      }, () => adaptationV2TestNow),
+      }, () => adaptationV2TestNow), resultArtifact: { id: 'verification-result:http', kind: 'verification-result', path: 'verification-result.json', contentHash: 'c'.repeat(64), size: 2, mediaType: 'application/json' }, }),
     },
     compiler: {
       capability: (languageId) => languageId === 'python'

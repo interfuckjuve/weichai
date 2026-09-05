@@ -1,7 +1,7 @@
 import type { AdaptationRequestV2, FilePatch } from "@forexplore/contracts";
 import { calculatePatchHashV2 } from "@forexplore/workflow-core";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -45,6 +45,15 @@ describe("VerificationService", () => {
     expect(service.listStrategies().map((descriptor) => descriptor.id)).toEqual(["first", "second"]);
   });
 
+  it("persists an exact identified receipt result artifact", async () => {
+    const receipt = await serviceWith([provider("first")], "first").verifyWithReceipt(input());
+    const bytes = readFileSync(join(artifactRoot, receipt.resultArtifact.path));
+    expect(JSON.parse(bytes.toString("utf8"))).toEqual(receipt.result);
+    expect(receipt.resultArtifact.id).toContain(receipt.resultArtifact.path);
+    expect(receipt.resultArtifact.contentHash).toBe(createHash("sha256").update(bytes).digest("hex"));
+    expect(receipt.resultArtifact.size).toBe(bytes.byteLength);
+    expect(receipt.resultArtifact.kind).toBe("verification-result");
+  });
   it("normalizes a strategy exception but preserves caller cancellation", async () => {
     const failingService = serviceWith([provider("failing", async () => { throw new Error("boom"); })], "failing");
     expect((await failingService.verify(input())).status).toBe("unverified");
@@ -88,7 +97,7 @@ describe("VerificationService", () => {
     expect(result.status).toBe("unverified");
     expect(result.issues[0]?.message).toBe("caller stopped");
     expect(executed).toBe(false);
-    expect(existsSync(workspaceRoot)).toBe(false);
+    expect(existsSync(workspaceRoot)).toBe(true);
   });
 
   it("turns result identity mismatches and timeouts into unverified framework errors", async () => {

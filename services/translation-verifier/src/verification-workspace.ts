@@ -112,7 +112,7 @@ export function createVerificationWorkspace(
     },
     writeFrameworkResult(content) {
       if (closed) throw new Error("Verification workspace is closed.");
-      const durablePath = `${durablePrefix}/verification-result.json`;
+      const durablePath = `${durablePrefix}/verification-result-${createHash("sha256").update(content).digest("hex")}.json`;
       const { destination, parent, rootRealPath } = safeArtifactDestination(artifactRoot, durablePath);
       const temporary = resolve(parent, `.tmp-${process.pid}-${Date.now()}-${randomBytes(4).toString("hex")}`);
       try {
@@ -124,7 +124,14 @@ export function createVerificationWorkspace(
         rmSync(temporary, { force: true });
         throw error;
       }
-      return { path: durablePath, contentHash: createHash("sha256").update(content).digest("hex"), size: content.byteLength, mediaType: "application/json" };
+      return {
+        id: `verification-result:${durablePath}`,
+        kind: "verification-result",
+        path: durablePath,
+        contentHash: createHash("sha256").update(content).digest("hex"),
+        size: content.byteLength,
+        mediaType: "application/json",
+      };
     },
     cleanup() {
       closed = true;

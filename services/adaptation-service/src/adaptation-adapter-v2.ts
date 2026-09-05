@@ -18,7 +18,9 @@ import {
   assertVerificationResult,
   type VerificationInput,
   type VerificationIssue,
+  type VerificationReceipt,
   type VerificationResult,
+  type VerificationResultArtifact,
   type VerificationStrategyDescriptor,
 } from "@forexplore/translation-verifier";
 import {
@@ -109,7 +111,7 @@ interface MigrationAttemptV2 {
   files: FilePatch[];
   patchHash: string;
   validation: ValidationRecord[];
-  verification?: VerificationResult;
+  verification?: VerificationReceipt;
 }
 
 const MAX_MIGRATION_REPAIR_ROUNDS = 2;
@@ -170,10 +172,10 @@ export interface MigrationBehaviorVerificationInputV2 {
 export interface MigrationBehaviorVerifierV2 extends ProviderIdentity {
   readonly strategyDescriptor: VerificationStrategyDescriptor;
 
-  verify(
+  verifyWithReceipt(
     input: MigrationBehaviorVerificationInputV2,
     signal?: AbortSignal,
-  ): Promise<VerificationResult>;
+  ): Promise<VerificationReceipt>;
 }
 
 export interface MigrationCompilerV2 {
@@ -373,8 +375,8 @@ export class AdaptationAdapterV2 implements CodeAdaptationPortV2 {
           inputPatchHash: attempt.patchHash,
           issues,
           validationRecordIds: failed.map((record) => record.id).sort(),
-          ...(attempt.verification ? { verificationResultHash: attempt.verification.contentHash } : {}),
-          ...(attempt.verification?.artifacts[0] ? { verificationArtifactPath: attempt.verification.artifacts[0].path } : {}),
+          ...(attempt.verification ? { verificationResultHash: attempt.verification.result.contentHash } : {}),
+          ...(attempt.verification ? { verificationArtifactPath: attempt.verification.resultArtifact.path } : {}),
         }, signal,
       ));
       const candidateFiles = [buildProtectedPatch(request.target.entity.path, targetFile.content, repaired.generatedContent, located.value)];
@@ -392,9 +394,11 @@ export class AdaptationAdapterV2 implements CodeAdaptationPortV2 {
         triggerValidationRecordIds: failed.map((record) => record.id).sort(),
         triggerValidationRecords: structuredClone(attempt.validation),
         issues,
-        ...(attempt.verification ? { verificationResultHash: attempt.verification.contentHash } : {}),
-        verifierArtifacts: [
-          ...(attempt.verification?.artifacts.map(({ id, kind, path, contentHash, mediaType }) => ({ id, kind, path, contentHash, mediaType })) ?? []),        ],
+          ...(attempt.verification ? { verificationResultHash: attempt.verification.result.contentHash } : {}),
+          verifierArtifacts: attempt.verification ? [
+            artifactRef(attempt.verification.resultArtifact),
+            ...attempt.verification.result.artifacts.map(artifactRef),
+          ] : [],
         provider: providerRef(this.#translator),
         createdAt: this.#now(),
       });
@@ -442,7 +446,7 @@ export class AdaptationAdapterV2 implements CodeAdaptationPortV2 {
     patchHash: string,
     targetAdapter: ProviderIdentity,
     signal: AbortSignal | undefined,
-  ): Promise<{ validation: ValidationRecord[]; verification?: VerificationResult }> {
+  ): Promise<{ validation: ValidationRecord[]; verification?: VerificationReceipt }> {
     const compiler = this.#compiler.capability(request.target.entity.languageId);
     if (compiler) requireProvider(route, "compile-validation", compiler);
     if (this.#verifier) requireProvider(route, "behavior-validation", this.#verifier);
@@ -461,7 +465,7 @@ export class AdaptationAdapterV2 implements CodeAdaptationPortV2 {
         }
       : undefined;
     const verification = behaviorInput && this.#verifier
-      ? await this.#verifier.verify(behaviorInput, signal)
+      ? await this.#verifier.verifyWithReceipt(behaviorInput, signal)
       : undefined;
     const behaviorEvidence = behaviorInput && this.#verifier && verification
       ? verificationResultEvidence(
@@ -789,17 +793,21 @@ function behaviorVerificationInput(input: MigrationBehaviorVerificationInputV2):
   };
 }
 
+function artifactRef(artifact: { id: string; kind: string; path: string; contentHash: string; mediaType: string }): { id: string; kind: string; path: string; contentHash: string; mediaType: string } {
+  return { id: artifact.id, kind: artifact.kind, path: artifact.path, contentHash: artifact.contentHash, mediaType: artifact.mediaType };
+}
+
 function verificationResultEvidence(
-  result: VerificationResult,
+  receipt: VerificationReceipt,
   input: VerificationInput,
   descriptor: VerificationStrategyDescriptor,
 ): MigrationValidationEvidenceV2 {
   try {
-    const verified = assertVerificationResult(result, input, descriptor);
+    const verified = assertVerificationResult(receipt.result, input, descriptor);
     return {
       status: verified.status,
       summary: verified.summary,
-      ...(verified.artifacts[0] === undefined ? {} : { artifactPath: verified.artifacts[0].path }),
+      artifactPath: receipt.resultArtifact.path,
       ...(verified.status === "fail" || verified.status === "unverified") && verified.issues[0] !== undefined
         ? { failureReason: verified.issues[0].kind }
         : {},
@@ -845,8 +853,8 @@ function repairIssues(
   attempt: MigrationAttemptV2,
   failed: ValidationRecord[],
 ): MigrationRepairIssueV2[] {
-  const issues: MigrationRepairIssueV2[] = attempt.verification?.status === "fail"
-    ? attempt.verification.issues.map((issue) => ({ ...structuredClone(issue), evidenceArtifactIds: issue.evidenceArtifactIds.length > 0 ? issue.evidenceArtifactIds : attempt.verification!.artifacts.map((artifact) => artifact.id) }))
+  const issues: MigrationRepairIssueV2[] = attempt.verification?.result.status === "fail"
+    ? attempt.verification.result.issues.map((issue) => ({ ...structuredClone(issue), evidenceArtifactIds: issue.evidenceArtifactIds.length > 0 ? issue.evidenceArtifactIds : attempt.verification!.result.artifacts.map((artifact) => artifact.id) }))
     : [];
   for (const record of failed) {
     if (isCompilerFailure(record)) {
