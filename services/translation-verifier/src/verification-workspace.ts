@@ -32,6 +32,7 @@ export function createVerificationWorkspace(
   const targetRoot = resolve(targetSideRoot, "project");
   const agentRoot = resolve(root, "agent");
   const written: VerificationArtifact[] = [];
+  let closed = false;
 
   try {
     for (const directory of [sourceRoot, targetRoot, agentRoot, resolve(sourceSideRoot, ".forexplore-tests"), resolve(targetSideRoot, ".forexplore-tests")]) {
@@ -74,6 +75,7 @@ export function createVerificationWorkspace(
     },
     deadlineAt: Number.POSITIVE_INFINITY,
     writeArtifact(artifact) {
+      if (closed) throw new Error("Verification workspace is closed.");
       const artifactPath = safeRelativePath(artifact.path, "Verification artifact path");
       const source = safeExistingFile(agentRoot, artifactPath, "Verification artifact source");
       const { destination, parent, rootRealPath } = safeArtifactDestination(artifactRoot, artifactPath);
@@ -106,6 +108,7 @@ export function createVerificationWorkspace(
       return written.map((artifact) => ({ ...artifact }));
     },
     cleanup() {
+      closed = true;
       if (!options.keepWorkspace) rmSync(root, { recursive: true, force: true });
     },
   };

@@ -62,12 +62,12 @@ export class VerificationService {
       const timeoutSignal = AbortSignal.timeout(this.#timeoutMs);
       const combinedSignal = signal === undefined ? timeoutSignal : AbortSignal.any([signal, timeoutSignal]);
       workspace.context.deadlineAt = Date.now() + this.#timeoutMs;
-      const result = await strategy.verify(input, workspace.context, combinedSignal);
+      const result = await waitForStrategy(strategy.verify(input, workspace.context, combinedSignal), combinedSignal);
       assertVerificationResult(result, input, descriptor);
       assertArtifactsMatch(result.artifacts, workspace.writtenArtifacts());
       return result;
     } catch (error) {
-      if (signal?.aborted && isAbortError(error)) throw error;
+      if (signal?.aborted && error === signal.reason && isAbortError(error)) throw error;
       return this.#unverified(input, descriptor, error, workspace?.writtenArtifacts() ?? []);
     } finally {
       workspace?.cleanup();
@@ -94,12 +94,13 @@ export class VerificationService {
     artifacts: VerificationResult["artifacts"],
   ): VerificationResult {
     const message = errorMessage(error);
+    const timeout = isNamedError(error, "TimeoutError");
     return createVerificationResult(input, descriptor, {
       status: "unverified",
       summary: `Verification framework could not complete: ${message}`,
       issues: [{
-        id: "framework-error",
-        kind: "framework-error",
+        id: timeout ? "strategy-timeout" : "framework-error",
+        kind: timeout ? "strategy-timeout" : "framework-error",
         message,
         evidenceArtifactIds: [],
       }],
@@ -110,6 +111,30 @@ export class VerificationService {
       },
     }, this.#now);
   }
+}
+
+function waitForStrategy<T>(strategyPromise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(abortReasonOf(signal));
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = (): void => finish(() => reject(abortReasonOf(signal)));
+
+    signal.addEventListener("abort", onAbort, { once: true });
+    strategyPromise.then(
+      (value) => finish(() => resolve(value)),
+      (error: unknown) => finish(() => reject(error)),
+    );
+  });
+}
+
+function abortReasonOf(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException("This operation was aborted", "AbortError");
 }
 
 function assertArtifactsMatch(resultArtifacts: VerificationResult["artifacts"], writtenArtifacts: VerificationResult["artifacts"]): void {

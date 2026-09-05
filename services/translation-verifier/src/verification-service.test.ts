@@ -113,6 +113,61 @@ describe("VerificationService", () => {
     expect(timeout.summary).toBe("Verification framework could not complete: Verification strategy timed out");
   });
 
+  it("returns promptly on a non-cooperative strategy timeout and cleans the workspace", async () => {
+    const seenRoots: string[] = [];
+    const service = serviceWith([provider("stuck", async (_inputValue, context) => {
+      seenRoots.push(context.workspace.root);
+      return new Promise<VerificationResult>(() => {});
+    })], "stuck", { timeoutMs: 25 });
+
+    const startedAt = Date.now();
+    const result = await service.verify(input());
+
+    expect(Date.now() - startedAt).toBeLessThan(500);
+    expect(result.status).toBe("unverified");
+    expect(result.summary).toBe("Verification framework could not complete: Verification strategy timed out");
+    expect(result.issues).toEqual([{
+      id: "strategy-timeout",
+      kind: "strategy-timeout",
+      message: "Verification strategy timed out",
+      evidenceArtifactIds: [],
+    }]);
+    expect(result.strategyReport).toEqual({
+      frameworkError: "Verification strategy timed out",
+      errorName: "TimeoutError",
+    });
+    expect(existsSync(seenRoots[0]!)).toBe(false);
+  });
+
+  it("rejects late artifact writes after a timed-out strategy returns to the caller", async () => {
+    let writeLateArtifact!: () => Promise<VerificationResult["artifacts"][number]> | VerificationResult["artifacts"][number];
+    let keptWorkspace: string | undefined;
+    const service = serviceWith([provider("late-writer", async (_inputValue, context) => {
+      keptWorkspace = context.workspace.root;
+      writeLateArtifact = () => {
+        const evidencePath = join(context.workspace.evidenceRoot, "reports/late.json");
+        mkdirSync(dirname(evidencePath), { recursive: true });
+        writeFileSync(evidencePath, "{}\n", "utf8");
+        return context.writeArtifact({
+          id: "late-artifact",
+          kind: "report",
+          path: "reports/late.json",
+          contentHash: "0".repeat(64),
+          mediaType: "application/json",
+        });
+      };
+      return new Promise<VerificationResult>(() => {});
+    })], "late-writer", { timeoutMs: 25 });
+
+    const result = await service.verify(input(), { keepWorkspace: true });
+    expect(result.status).toBe("unverified");
+    expect(keptWorkspace).toBeDefined();
+    expect(existsSync(keptWorkspace!)).toBe(true);
+
+    await expect(Promise.resolve().then(() => writeLateArtifact())).rejects.toThrow(/closed/i);
+    expect(existsSync(join(artifactRoot, "reports/late.json"))).toBe(false);
+  });
+
   it("requires result artifacts to match artifacts written through the workspace", async () => {
     const unwrittenArtifact = {
       id: "artifact-1",

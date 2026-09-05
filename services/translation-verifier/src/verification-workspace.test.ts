@@ -86,6 +86,25 @@ describe("createVerificationWorkspace", () => {
     workspace.cleanup();
   });
 
+  it("rejects artifact writes after cleanup even when the workspace is kept", async () => {
+    const workspace = createVerificationWorkspace(input(), { workspaceRoot, artifactRoot, keepWorkspace: true });
+    const evidencePath = join(workspace.context.workspace.evidenceRoot, "reports/late.json");
+    mkdirSync(dirname(evidencePath), { recursive: true });
+    writeFileSync(evidencePath, "{}\n", "utf8");
+
+    workspace.cleanup();
+
+    expect(existsSync(workspace.context.workspace.root)).toBe(true);
+    await expect(Promise.resolve().then(() => workspace.context.writeArtifact({
+      id: "late-artifact",
+      kind: "report",
+      path: "reports/late.json",
+      contentHash: "0".repeat(64),
+      mediaType: "application/json",
+    }))).rejects.toThrow(/closed/i);
+    expect(existsSync(join(artifactRoot, "reports/late.json"))).toBe(false);
+  });
+
   it("rejects symlinked and dangling artifact path components", async () => {
     const workspace = createVerificationWorkspace(input(), { workspaceRoot, artifactRoot });
     const evidencePath = join(workspace.context.workspace.evidenceRoot, "reports/result.json");
