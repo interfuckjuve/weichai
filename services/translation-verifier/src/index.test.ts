@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import * as verifier from "./index.js";
 
-const { buildSmokeTaskPrompt, runSmoke, translationVerifierSchemaVersion } = verifier;
+const {
+  buildSmokeTaskPrompt,
+  createVerificationResult,
+  runSmoke,
+  translationVerifierSchemaVersion,
+} = verifier;
 
 describe("translation-verifier entry", () => {
   it("exposes the schema version constant", () => {
@@ -13,6 +18,10 @@ describe("translation-verifier entry", () => {
     expect(typeof buildSmokeTaskPrompt).toBe("function");
   });
 
+  it("exposes the stable verification contract", () => {
+    expect(typeof createVerificationResult).toBe("function");
+  });
+
   it("does not expose the removed legacy driver API", () => {
     expect(verifier).not.toHaveProperty("verify");
     expect(verifier).not.toHaveProperty("executeSide");
@@ -22,3 +31,4 @@ describe("translation-verifier entry", () => {
     expect(verifier).not.toHaveProperty("TestMigratorAgent");
   });
 });
+
