@@ -174,7 +174,7 @@ differential-smoke@1.0.0 -> DifferentialSmokeStrategy
 9. Persist registered artifacts.
 10. Clean the temporary workspace after persistence.
 
-`VerificationStrategyContext` exposes capabilities rather than mandatory phases:
+`VerificationStrategyContext` exposes only lifecycle capabilities shared by every strategy:
 
 ```ts
 export interface VerificationStrategyContext {
@@ -186,13 +186,14 @@ export interface VerificationStrategyContext {
     evidenceRoot: string;
   };
   deadlineAt: number;
-  runCommand: ControlledCommandRunner;
   writeArtifact: VerificationArtifactWriter;
 }
 ```
 
-A strategy may ignore `runCommand` or any workspace area. The framework does not require compile,
-run, case, runner, or mechanical-comparison concepts.
+A strategy may ignore any workspace area. Command execution, LLM clients, property engines, and
+other method-specific dependencies are captured by the provider's `create` closure rather than
+added to the common context. The framework does not require compile, run, case, runner, or
+mechanical-comparison concepts.
 
 ## 9. Unified Output
 
@@ -394,8 +395,10 @@ run bounded cleanup. Prompt text, source content, credentials, and unrestricted 
 from default logs.
 
 Local execution is not a security sandbox. Generated runners and translated code execute with the
-adaptation-service OS user's permissions. Existing command allowlisting, sanitized build environment,
-deadline, bounded output, process-tree termination, and workspace baseline controls remain required.
+adaptation-service OS user's permissions. Strategies that execute commands must provide controls
+appropriate to their method. The differential strategy retains its existing command allowlisting,
+sanitized build environment, deadline, bounded output, process-tree termination, and workspace
+baseline controls.
 
 ## 15. Error Semantics
 
