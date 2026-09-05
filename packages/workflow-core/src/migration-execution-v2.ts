@@ -36,6 +36,10 @@ import {
   type TargetContextSnapshotV2,
   type ValidationPhase,
   type ValidationPolicyCheck,
+  type MigrationLocatedArtifactRefV2,
+  type MigrationRepairIssueV2,
+  type MigrationRepairRoundV2,
+  type RepositoryIngestionJsonValue,
   type ValidationRecord,
 } from '@forexplore/contracts';
 import { canonicalJson, sha256Hex, sortedUnique } from './module-plan-utils';
@@ -1562,10 +1566,153 @@ function canonicalValidationRecords(
   return result;
 }
 
+function canonicalRepositoryIngestionJsonValue(
+  value: RepositoryIngestionJsonValue,
+  label: string,
+): RepositoryIngestionJsonValue {
+  const serialized = canonicalJson(value);
+  if (serialized === undefined) throw new Error(`${label} must be JSON-compatible.`);
+  return JSON.parse(serialized) as RepositoryIngestionJsonValue;
+}
+
+function canonicalLocatedArtifactRefs(
+  refs: readonly MigrationLocatedArtifactRefV2[],
+  label: string,
+): MigrationLocatedArtifactRefV2[] {
+  const seen = new Set<string>();
+  return refs.map((ref) => {
+    const id = requiredText(ref.id, `${label} artifact ID`);
+    if (seen.has(id)) throw new Error(`${label} contains duplicate artifact references.`);
+    seen.add(id);
+    return {
+      id,
+      path: canonicalPath(ref.path, `${label} artifact ${id} path`),
+      contentHash: requireSha256(ref.contentHash, `${label} artifact ${id} hash`),
+    };
+  }).sort((left, right) => left.id.localeCompare(right.id));
+}
+
+function canonicalUniqueTextList(values: readonly string[], label: string): string[] {
+  const normalized = values.map((value) => requiredText(value, label));
+  const result = sortedUnique(normalized);
+  if (result.length !== normalized.length) {
+    throw new Error(`${label} contains duplicate entries.`);
+  }
+  return result;
+}
+
+function canonicalRepairIssues(
+  issues: readonly MigrationRepairIssueV2[],
+  label: string,
+  verifierArtifacts: readonly MigrationLocatedArtifactRefV2[],
+): MigrationRepairIssueV2[] {
+  if (issues.length === 0) throw new Error(`${label} must include at least one repair issue.`);
+  const artifactIds = new Set(verifierArtifacts.map((artifact) => artifact.id));
+  const seen = new Set<string>();
+  return issues.map((issue) => {
+    const id = requiredText(issue.id, `${label} issue ID`);
+    if (seen.has(id)) throw new Error(`${label} repeats issue ID ${id}.`);
+    seen.add(id);
+    const evidenceArtifactIds = canonicalUniqueTextList(
+      issue.evidenceArtifactIds,
+      `${label} issue ${id} evidence artifact ID`,
+    );
+    if (evidenceArtifactIds.length === 0) {
+      throw new Error(`${label} issue ${id} must reference at least one evidence artifact.`);
+    }
+    if (evidenceArtifactIds.some((artifactId) => !artifactIds.has(artifactId))) {
+      throw new Error(`${label} issue ${id} cites an unknown evidence artifact.`);
+    }
+    return {
+      id,
+      kind: requiredText(issue.kind, `${label} issue ${id} kind`),
+      message: requiredText(issue.message, `${label} issue ${id} message`),
+      ...(issue.caseId === undefined ? {} : { caseId: requiredText(issue.caseId, `${label} issue ${id} case ID`) }),
+      ...(issue.sourceObservation === undefined
+        ? {}
+        : { sourceObservation: canonicalRepositoryIngestionJsonValue(issue.sourceObservation, `${label} issue ${id} source observation`) }),
+      ...(issue.targetObservation === undefined
+        ? {}
+        : { targetObservation: canonicalRepositoryIngestionJsonValue(issue.targetObservation, `${label} issue ${id} target observation`) }),
+      evidenceArtifactIds,
+    };
+  }).sort((left, right) => left.id.localeCompare(right.id));
+}
+
+function canonicalRepairRounds(
+  rounds: readonly MigrationRepairRoundV2[],
+  finalPatchHash: string,
+  policy: MaterializedValidationPolicySnapshot,
+  routeRef: MigrationRouteSnapshotRef,
+  route: MaterializedMigrationRouteDescriptor,
+): MigrationRepairRoundV2[] {
+  if (rounds.length > 2) throw new Error('Repair history may contain at most two rounds.');
+  const sorted = [...rounds].sort((left, right) => left.round - right.round);
+  let previousOutputPatchHash: string | undefined;
+  const canonicalRounds = sorted.map((round, index) => {
+    if (round.round !== index + 1) throw new Error('Repair rounds must be contiguous from one.');
+    const inputPatchHash = requireSha256(round.inputPatchHash, `Repair round ${round.round} input patch hash`);
+    const outputPatchHash = requireSha256(round.outputPatchHash, `Repair round ${round.round} output patch hash`);
+    if (inputPatchHash === outputPatchHash) {
+      throw new Error(`Repair round ${round.round} must produce a new patch hash.`);
+    }
+    if (index > 0 && inputPatchHash !== previousOutputPatchHash) {
+      throw new Error(`Repair round ${round.round} does not chain from the previous patch.`);
+    }
+    const provider = canonicalProvider(round.provider, `Repair round ${round.round}`);
+    assertProviderMatchesRouteStage(provider, route, ['translation', 'patch-generation'], `Repair round ${round.round}`);
+    const triggerValidationRecords = canonicalValidationRecords(
+      round.triggerValidationRecords,
+      policy,
+      routeRef,
+      inputPatchHash,
+    );
+    const triggerValidationRecordIds = canonicalUniqueTextList(
+      round.triggerValidationRecordIds,
+      `Repair round ${round.round} trigger validation record ID`,
+    );
+    const requiredFailedRecordIds = canonicalUniqueTextList(
+      triggerValidationRecords
+        .filter((record) => record.required && record.status === 'fail')
+        .map((record) => record.id),
+      `Repair round ${round.round} required failed trigger validation record ID`,
+    );
+    if (requiredFailedRecordIds.length === 0) {
+      throw new Error(`Repair round ${round.round} must include at least one required failed trigger validation record.`);
+    }
+    if (canonicalJson(triggerValidationRecordIds) !== canonicalJson(requiredFailedRecordIds)) {
+      throw new Error(`Repair round ${round.round} trigger validation record IDs do not match the required failed records.`);
+    }
+    const verifierArtifacts = canonicalLocatedArtifactRefs(round.verifierArtifacts, `Repair round ${round.round}`);
+    const issues = canonicalRepairIssues(round.issues, `Repair round ${round.round}`, verifierArtifacts);
+    const verificationResultHash = round.verificationResultHash === undefined
+      ? undefined
+      : requireSha256(round.verificationResultHash, `Repair round ${round.round} verification result hash`);
+    previousOutputPatchHash = outputPatchHash;
+    return {
+      round: round.round,
+      inputPatchHash,
+      outputPatchHash,
+      triggerValidationRecordIds,
+      triggerValidationRecords,
+      issues,
+      ...(verificationResultHash === undefined ? {} : { verificationResultHash }),
+      verifierArtifacts,
+      provider,
+      createdAt: requireTimestamp(round.createdAt, `Repair round ${round.round} creation time`),
+    };
+  });
+  if (canonicalRounds.length > 0 && canonicalRounds.at(-1)!.outputPatchHash !== finalPatchHash) {
+    throw new Error('Final repair round output does not match the adaptation patch.');
+  }
+  return canonicalRounds;
+}
+
 export interface MaterializeAdaptationResultV2Input {
   request: AdaptationRequestV2;
   files: AdaptationResultV2['files'];
   validation: ValidationRecord[];
+  repairRounds?: MigrationRepairRoundV2[];
   producer: MigrationProviderRefV2;
   createdAt: string;
 }
@@ -1587,6 +1734,13 @@ export function materializeAdaptationResultV2(
     input.request.route,
     patchHash,
   );
+  const repairRounds = canonicalRepairRounds(
+    input.repairRounds ?? [],
+    patchHash,
+    input.request.validationPolicy,
+    input.request.route,
+    route,
+  );
   return contentAddress('adaptation-result-v2', {
     schemaVersion: migrationExecutionV2SchemaVersion,
     requestId: input.request.id,
@@ -1604,6 +1758,7 @@ export function materializeAdaptationResultV2(
     files,
     validationPolicy: input.request.validationPolicy,
     validation,
+    repairRounds,
     producer,
     createdAt: requireTimestamp(input.createdAt, 'Adaptation result creation time'),
   });
@@ -1743,40 +1898,6 @@ function canonicalValidatorExecutions(
   return canonical;
 }
 
-function canonicalRepairRounds(
-  rounds: MigrationRunManifestV2['repairRounds'],
-  result: AdaptationResultV2,
-  route: MaterializedMigrationRouteDescriptor,
-): MigrationRunManifestV2['repairRounds'] {
-  const sorted = [...rounds].sort((left, right) => left.round - right.round);
-  for (let index = 0; index < sorted.length; index += 1) {
-    const round = sorted[index]!;
-    if (round.round !== index + 1) throw new Error('Manifest repair rounds must be contiguous from one.');
-    requireSha256(round.inputPatchHash, `Repair round ${round.round} input patch hash`);
-    requireSha256(round.outputPatchHash, `Repair round ${round.round} output patch hash`);
-    if (index > 0 && round.inputPatchHash !== sorted[index - 1]!.outputPatchHash) {
-      throw new Error(`Repair round ${round.round} does not chain from the previous patch.`);
-    }
-    const provider = canonicalProvider(round.provider, `Repair round ${round.round}`);
-    assertProviderMatchesRouteStage(provider, route, ['translation', 'patch-generation'], `Repair round ${round.round}`);
-    sorted[index] = {
-      round: round.round,
-      inputPatchHash: round.inputPatchHash,
-      outputPatchHash: round.outputPatchHash,
-      triggerValidationRecordIds: canonicalTextList(
-        round.triggerValidationRecordIds,
-        `Repair round ${round.round} validation record ID`,
-      ),
-      provider,
-      createdAt: requireTimestamp(round.createdAt, `Repair round ${round.round} creation time`),
-    };
-  }
-  if (sorted.length > 0 && sorted.at(-1)!.outputPatchHash !== result.patchHash) {
-    throw new Error('Final repair round output does not match the adaptation patch.');
-  }
-  return sorted;
-}
-
 function canonicalCheckpoint(
   checkpoint: NonNullable<MigrationRunManifestV2['checkpoint']>,
 ): NonNullable<MigrationRunManifestV2['checkpoint']> {
@@ -1871,6 +1992,25 @@ export function materializeMigrationRunManifestV2(
   if (input.status === 'rolled-back' && recovery?.status !== 'completed') {
     throw new Error('Rolled-back migration manifest requires completed recovery evidence.');
   }
+  const resultRepairRounds = canonicalRepairRounds(
+    input.result.repairRounds,
+    input.result.patchHash,
+    input.result.validationPolicy,
+    input.request.route,
+    route,
+  );
+  if (input.repairRounds !== undefined) {
+    const manifestRepairRounds = canonicalRepairRounds(
+      input.repairRounds,
+      input.result.patchHash,
+      input.result.validationPolicy,
+      input.request.route,
+      route,
+    );
+    if (canonicalJson(manifestRepairRounds) !== canonicalJson(resultRepairRounds)) {
+      throw new Error('Migration manifest repair history must match its adaptation result.');
+    }
+  }
   const artifactPaths = Object.fromEntries(
     Object.entries(input.artifactPaths)
       .map(([key, value]) => [requiredText(key, 'Manifest artifact path key'), canonicalPath(value, 'Manifest artifact path')])
@@ -1899,7 +2039,7 @@ export function materializeMigrationRunManifestV2(
       paths: input.result.files.map((file) => file.path).sort(),
       createdAt: input.result.createdAt,
     },
-    repairRounds: canonicalRepairRounds(input.repairRounds ?? [], input.result, route),
+    repairRounds: resultRepairRounds,
     ...(checkpoint === undefined ? {} : { checkpoint }),
     ...(recovery === undefined ? {} : { recovery }),
     artifactPaths,

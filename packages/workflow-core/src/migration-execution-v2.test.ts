@@ -7,6 +7,7 @@ import {
   type MigrationRouteDescriptor,
   type RepositoryModuleCatalog,
   type UnifiedRepositoryIR,
+  type MigrationRepairRoundV2,
   type ValidationRecord,
 } from '@forexplore/contracts';
 import { describe, expect, it } from 'vitest';
@@ -530,7 +531,85 @@ function executionFixture() {
   };
 }
 
+function failingValidationRecord(subjectHash: string): ValidationRecord {
+  return {
+    id: 'validation-repair-trigger',
+    label: 'Repair trigger',
+    status: 'fail',
+    required: true,
+    policyCheckId: 'python-behavior',
+    routeId: 'research-x-to-python-translate',
+    routeVersion: '2.1.0',
+    phase: 'behavior',
+    verifierId: 'python-behavior-verifier',
+    verifierVersion: '5.0.0',
+    subjectHash,
+    command: 'python -m pytest',
+    summary: 'First attempt failed.',
+    failureReason: 'Assertion mismatch',
+  };
+}
+
+function repairRound(
+  round: number,
+  inputPatchHash: string,
+  outputPatchHash: string,
+  triggerValidationRecords: ValidationRecord[],
+): MigrationRepairRoundV2 {
+  const verifierArtifactId = `repair-verifier-artifact-${round}`;
+  return {
+    round,
+    inputPatchHash,
+    outputPatchHash,
+    triggerValidationRecordIds: triggerValidationRecords
+      .filter((record) => record.required && record.status === 'fail')
+      .map((record) => record.id)
+      .sort((left, right) => left.localeCompare(right)),
+    triggerValidationRecords,
+    issues: [{
+      id: `repair-issue-${round}`,
+      kind: 'translation-gap',
+      message: `Round ${round} requires a new patch.`,
+      caseId: `case-${round}`,
+      sourceObservation: { round, side: 'source' },
+      targetObservation: { round, side: 'target' },
+      evidenceArtifactIds: [verifierArtifactId],
+    }],
+    verificationResultHash: sha256Hex(`repair-verification-${round}`),
+    verifierArtifacts: [{
+      id: verifierArtifactId,
+      path: `artifacts/repair-${round}.json`,
+      contentHash: sha256Hex(`repair-artifact-${round}`),
+    }],
+    provider: { providerId: 'open-language-translator', providerVersion: '4.0.0' },
+    createdAt: NOW,
+  };
+}
+
+function oneRoundRepairFixture() {
+  const fixture = executionFixture();
+  const inputPatchHash = sha256Hex('repair-input-patch');
+  const triggerValidationRecords = [failingValidationRecord(inputPatchHash)];
+  const repairRounds = [repairRound(1, inputPatchHash, fixture.adaptationResult.patchHash, triggerValidationRecords)];
+  const result = materializeAdaptationResultV2({
+    request: fixture.adaptationRequest,
+    files: fixture.adaptationResult.files,
+    validation: fixture.adaptationResult.validation,
+    repairRounds,
+    producer: fixture.adaptationResult.producer,
+    createdAt: NOW,
+  }, fixture.validationContext);
+  return {
+    fixture,
+    inputPatchHash,
+    triggerValidationRecords,
+    repairRounds,
+    result,
+  };
+}
+
 describe('V2 migration execution contracts', () => {
+
   it('validates composed runtime ownership, stage overrides, and deterministic availability', () => {
     const serviceRoute: MigrationRouteDescriptor = {
       ...route(),
@@ -750,6 +829,175 @@ describe('V2 migration execution contracts', () => {
       ...fixture.indexedDocument,
       candidate: unreviewedCandidate,
     })).toThrow(/lacks exact reviewed catalog lineage/);
+  });
+
+  it('materializes an empty repair history for zero-repair results', () => {
+    const fixture = executionFixture();
+    expect(fixture.adaptationResult.repairRounds).toEqual([]);
+    expect(validateAdaptationResultV2(
+      fixture.adaptationResult,
+      fixture.adaptationRequest,
+      fixture.validationContext,
+    )).toBe(fixture.adaptationResult);
+  });
+
+  it('materializes canonical repair history on results and inherits it in manifests', () => {
+    const { fixture, inputPatchHash, triggerValidationRecords, repairRounds, result } = oneRoundRepairFixture();
+    expect(result.repairRounds).toHaveLength(1);
+    expect(result.repairRounds[0]).toMatchObject({
+      round: 1,
+      inputPatchHash,
+      outputPatchHash: fixture.adaptationResult.patchHash,
+      triggerValidationRecordIds: [triggerValidationRecords[0]!.id],
+      triggerValidationRecords,
+      issues: [{
+        id: 'repair-issue-1',
+        kind: 'translation-gap',
+        message: 'Round 1 requires a new patch.',
+        caseId: 'case-1',
+        sourceObservation: { round: 1, side: 'source' },
+        targetObservation: { round: 1, side: 'target' },
+        evidenceArtifactIds: ['repair-verifier-artifact-1'],
+      }],
+      verificationResultHash: sha256Hex('repair-verification-1'),
+      verifierArtifacts: [{
+        id: 'repair-verifier-artifact-1',
+        path: 'artifacts/repair-1.json',
+        contentHash: sha256Hex('repair-artifact-1'),
+      }],
+      provider: { providerId: 'open-language-translator', providerVersion: '4.0.0' },
+      createdAt: NOW,
+    });
+    expect(validateAdaptationResultV2(result, fixture.adaptationRequest, fixture.validationContext))
+      .toBe(result);
+
+    const checkpoint = {
+      id: 'checkpoint-1',
+      contentHash: '1'.repeat(64),
+      recoverable: true,
+      createdAt: NOW,
+    };
+    const recovery = {
+      status: 'completed' as const,
+      checkpointId: 'checkpoint-1',
+      provider: { providerId: 'workspace-recovery', providerVersion: '1.0.0' },
+      artifactRefs: [],
+      updatedAt: NOW,
+    };
+    for (const status of ['planned', 'approved', 'executing', 'completed', 'rolled-back'] as const) {
+      const manifest = materializeMigrationRunManifestV2({
+        status,
+        request: fixture.adaptationRequest,
+        result,
+        providers: fixture.providers,
+        validators: fixture.validators,
+        ...(status === 'planned' || status === 'approved' ? {} : { checkpoint, recovery }),
+        artifactPaths: { manifest: '.forexplore/run-v2.json' },
+        createdAt: NOW,
+        updatedAt: NOW,
+      }, fixture.validationContext);
+      expect(manifest.repairRounds).toEqual(result.repairRounds);
+      expect(validateMigrationRunManifestV2(
+        manifest,
+        fixture.adaptationRequest,
+        result,
+        fixture.validationContext,
+      )).toBe(manifest);
+    }
+    expect(repairRounds).toEqual(result.repairRounds);
+  });
+
+  it('rejects repair histories whose trigger validation IDs do not match the required failures', () => {
+    const fixture = executionFixture();
+    const inputPatchHash = sha256Hex('repair-input-patch');
+    const triggerValidationRecords = [failingValidationRecord(inputPatchHash)];
+    const repairRounds = [repairRound(1, inputPatchHash, fixture.adaptationResult.patchHash, triggerValidationRecords)];
+    expect(() => materializeAdaptationResultV2({
+      request: fixture.adaptationRequest,
+      files: fixture.adaptationResult.files,
+      validation: fixture.adaptationResult.validation,
+      repairRounds: [{
+        ...repairRounds[0]!,
+        triggerValidationRecordIds: [],
+      }],
+      producer: fixture.adaptationResult.producer,
+      createdAt: NOW,
+    }, fixture.validationContext)).toThrow(/trigger validation record ids/i);
+  });
+
+  it('rejects repair histories with too many rounds, gaps, or unchanged patch hashes', () => {
+    const fixture = executionFixture();
+    const finalPatchHash = fixture.adaptationResult.patchHash;
+    const firstInputHash = sha256Hex('repair-input-1');
+    const secondInputHash = sha256Hex('repair-input-2');
+    const thirdInputHash = sha256Hex('repair-input-3');
+    const first = repairRound(1, firstInputHash, sha256Hex('repair-output-1'), [failingValidationRecord(firstInputHash)]);
+    const second = repairRound(2, first.outputPatchHash, sha256Hex('repair-output-2'), [failingValidationRecord(first.outputPatchHash)]);
+    const third = repairRound(3, second.outputPatchHash, finalPatchHash, [failingValidationRecord(second.outputPatchHash)]);
+
+    expect(() => materializeAdaptationResultV2({
+      request: fixture.adaptationRequest,
+      files: fixture.adaptationResult.files,
+      validation: fixture.adaptationResult.validation,
+      repairRounds: [first, second, third],
+      producer: fixture.adaptationResult.producer,
+      createdAt: NOW,
+    }, fixture.validationContext)).toThrow(/at most two/i);
+
+    expect(() => materializeAdaptationResultV2({
+      request: fixture.adaptationRequest,
+      files: fixture.adaptationResult.files,
+      validation: fixture.adaptationResult.validation,
+      repairRounds: [
+        repairRound(1, firstInputHash, first.outputPatchHash, [failingValidationRecord(firstInputHash)]),
+        repairRound(3, first.outputPatchHash, finalPatchHash, [failingValidationRecord(first.outputPatchHash)]),
+      ],
+      producer: fixture.adaptationResult.producer,
+      createdAt: NOW,
+    }, fixture.validationContext)).toThrow(/contiguous/i);
+
+    expect(() => materializeAdaptationResultV2({
+      request: fixture.adaptationRequest,
+      files: fixture.adaptationResult.files,
+      validation: fixture.adaptationResult.validation,
+      repairRounds: [repairRound(1, thirdInputHash, thirdInputHash, [failingValidationRecord(thirdInputHash)])],
+      producer: fixture.adaptationResult.producer,
+      createdAt: NOW,
+    }, fixture.validationContext)).toThrow(/new patch hash/i);
+  });
+
+  it('rejects manifest repair history that diverges from the result', () => {
+    const { fixture, result, repairRounds } = oneRoundRepairFixture();
+    expect(() => materializeMigrationRunManifestV2({
+      status: 'completed',
+      request: fixture.adaptationRequest,
+      result,
+      providers: fixture.providers,
+      validators: fixture.validators,
+      repairRounds: repairRounds.map((round) => ({
+        ...round,
+        issues: round.issues.map((issue) => ({
+          ...issue,
+          message: 'Different repair evidence.',
+        })),
+      })),
+      checkpoint: {
+        id: 'checkpoint-1',
+        contentHash: '1'.repeat(64),
+        recoverable: true,
+        createdAt: NOW,
+      },
+      recovery: {
+        status: 'completed',
+        checkpointId: 'checkpoint-1',
+        provider: { providerId: 'workspace-recovery', providerVersion: '1.0.0' },
+        artifactRefs: [],
+        updatedAt: NOW,
+      },
+      artifactPaths: { manifest: '.forexplore/run-v2.json' },
+      createdAt: NOW,
+      updatedAt: NOW,
+    }, fixture.validationContext)).toThrow(/repair history/i);
   });
 
   it('rejects missing required verifier evidence and completed runs without checkpoints', () => {

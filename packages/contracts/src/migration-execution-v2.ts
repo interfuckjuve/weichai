@@ -257,6 +257,7 @@ export interface AdaptationResultV2 {
   files: FilePatch[];
   validationPolicy: MaterializedValidationPolicySnapshot;
   validation: ValidationRecord[];
+  repairRounds: MigrationRepairRoundV2[];
   producer: MigrationProviderRefV2;
   createdAt: string;
   contentHash: string;
@@ -293,11 +294,29 @@ export interface MigrationPatchRecordV2 {
   createdAt: string;
 }
 
+export interface MigrationLocatedArtifactRefV2 extends MigrationArtifactRefV2 {
+  path: string;
+}
+
+export interface MigrationRepairIssueV2 {
+  id: string;
+  kind: string;
+  message: string;
+  caseId?: string;
+  sourceObservation?: RepositoryIngestionJsonValue;
+  targetObservation?: RepositoryIngestionJsonValue;
+  evidenceArtifactIds: string[];
+}
+
 export interface MigrationRepairRoundV2 {
   round: number;
   inputPatchHash: string;
   outputPatchHash: string;
   triggerValidationRecordIds: string[];
+  triggerValidationRecords: ValidationRecord[];
+  issues: MigrationRepairIssueV2[];
+  verificationResultHash?: string;
+  verifierArtifacts: MigrationLocatedArtifactRefV2[];
   provider: MigrationProviderRefV2;
   createdAt: string;
 }
