@@ -514,7 +514,7 @@ describe("AdaptationAdapterV2", () => {
     expect(providers.translator.repair).toHaveBeenCalledOnce();
     const feedback = providers.translator.repair.mock.calls[0]![4];
     expect(feedback.issues).toEqual([expect.objectContaining({
-      id: "compile-failure:syntax-proof",
+      id: "compile-failure:validation:syntax-proof",
       kind: "compile-failure",
       evidenceArtifactIds: [],
     })]);
