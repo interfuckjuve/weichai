@@ -69,6 +69,7 @@ export interface SearchCandidate {
     missingApis: string[];
     /** API matches are metadata evidence, not proof of behavioral equivalence. */
     verification: 'interface-only';
+    reranker?: { model: string; score: number };
     previewFiles: string[];
     previewTruncated: boolean;
   };

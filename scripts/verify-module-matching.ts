@@ -6,6 +6,7 @@ import path from 'node:path';
 import mysql from 'mysql2/promise';
 import { createCodeIntelligenceRuntime, SeekDbIndexStore, ProjectAnalysisCoordinator, projectAnalysisObjective, projectPlanHash, ModelSearchEmbeddingProvider } from '../services/code-intelligence-service/src/index';
 import { CodeIntelligenceHost } from '../apps/vscode-extension/src/code-intelligence-host';
+import { buildStructuralIndex } from '../services/code-indexer/src/structural-index';
 import type { ModuleTarget, ProjectAnalysisScope } from '../packages/contracts/src';
 
 // Explicit synthetic contracts exercise the real model, SQL and product host; they are not enterprise quality labels.
@@ -22,6 +23,12 @@ const fixtures = [
 ];
 
 async function main() {
+  const reportIndex = process.argv.indexOf('--report');
+  const reportPath = reportIndex >= 0 ? process.argv[reportIndex + 1] : undefined;
+  assert(reportIndex < 0 || reportPath, '--report requires an output path');
+  const moduleReranker = process.argv.includes('--rerank') ? {
+    url: 'http://127.0.0.1:4022/v1/rerank', model: 'Xenova/bge-reranker-base@280bcc27a84e0b898c251e06fddb25171bd9b101', timeoutMs: 4_000,
+  } : undefined;
   const endpoint = process.env.CODE_INTELLIGENCE_EMBEDDING_URL ?? 'http://127.0.0.1:4021/v1/embeddings';
   assert(['127.0.0.1', 'localhost'].includes(new URL(endpoint).hostname), 'This acceptance run uses a local model only.');
   const database = `module_accept_${randomUUID().replaceAll('-', '')}`;
@@ -33,8 +40,11 @@ async function main() {
   const store = new SeekDbIndexStore(config);
   const metrics: unknown[] = [];
   let cacheReuse: unknown;
+  const loadMetrics: unknown[] = [];
+  let incremental: unknown;
+  let acceptanceReport: Record<string, unknown> = { passed: false, startedAt: new Date().toISOString(), metrics, loadMetrics, moduleReranker };
   try {
-    const runtime = await createCodeIntelligenceRuntime({ store });
+    const runtime = await createCodeIntelligenceRuntime({ store, moduleReranker });
     const inputs = [];
     const plan = async (scope: ProjectAnalysisScope & { objective: string }) => {
       const index = (await store.getStructuralIndex(scope))!;
@@ -96,12 +106,38 @@ async function main() {
           }
         }
         assert(results.length > 0, 'No module candidates');
+        if (moduleReranker) assert(results.every((result) => result.moduleMatch?.reranker?.model === moduleReranker.model));
         assert.equal(results[0]!.sourceModule!.moduleId, query.expected, 'Synthetic semantic smoke test ranked the wrong module first');
         assert(results.every((result) => result.kind === 'module' && result.sourceModule!.sourceFiles!.length === 3));
         assert.equal(new Set(results.map((result) => result.id)).size, results.length);
         metrics.push({ query: query.requirement, expected: query.expected, top1: results[0]!.sourceModule!.moduleId,
           hitAt3: results.some((result) => result.sourceModule!.moduleId === query.expected), durationMs,
           modules: results.map((result) => ({ id: result.sourceModule!.moduleId, score: result.score.overall })) });
+      }
+      for (const concurrency of [1, 4, 8, 16]) {
+        const samples: Array<{ durationMs: number; correct: boolean; error?: string }> = [];
+        for (let round = 0; round < 2; round++) {
+          samples.push(...await Promise.all(Array.from({ length: concurrency }, async (_, index) => {
+            const query = queries[(index + round) % queries.length]!;
+            const target: ModuleTarget = { id: query.expected, name: query.name, kind: 'module', path: 'Target.java', language: 'Java', signature: '',
+              module: { sourceFiles: ['Target.java'], coreApis: [], dependsOn: [] } };
+            const started = performance.now();
+            try {
+              const result = await host.searchHistoricalImplementations({ target, requirement: query.requirement, topK: 3 });
+              return { durationMs: Math.round(performance.now() - started), correct: result[0]?.sourceModule?.moduleId === query.expected };
+            } catch (error) {
+              return { durationMs: Math.round(performance.now() - started), correct: false, error: error instanceof Error ? error.message : String(error) };
+            }
+          })));
+        }
+        const durations = samples.map((sample) => sample.durationMs).sort((a, b) => a - b);
+        const percentile = (fraction: number) => durations[Math.max(0, Math.ceil(durations.length * fraction) - 1)];
+        loadMetrics.push({ concurrency, cache: 'warm query/document cache', queries: samples.length,
+          meanMs: Math.round(durations.reduce((a, b) => a + b, 0) / durations.length),
+          p50Ms: percentile(0.5), p95Ms: percentile(0.95), p99Ms: percentile(0.99),
+          errors: samples.filter((sample) => sample.error).length,
+          correctWithinTenSeconds: samples.filter((sample) => sample.correct && sample.durationMs <= 10_000).length, samples });
+        if (!moduleReranker) assert(samples.every((sample) => sample.correct), `Synthetic retrieval failed at concurrency ${concurrency}`);
       }
     } finally { store.getStructuralIndex = oldRead; }
     const reopened = new SeekDbIndexStore(config);
@@ -115,23 +151,52 @@ async function main() {
       assert(reopened.embeddingReuseStats.persistentHits > 0);
       cacheReuse = reopened.embeddingReuseStats;
     } finally { await reopened.close(); }
+    const expiry = repositories.repositories.find((repository) => repository.displayName === 'expiry')!;
+    const priorStats = store.embeddingReuseStats;
+    await writeFile(path.join(root, 'expiry', 'policy.ts'), 'export function expiresAt(now: number, ttl: number) { return now + Math.max(0, ttl); }');
+    const updated = await runtime.coordinator.run({ repositoryId: expiry.repositoryId, mode: 'incremental' });
+    assert.equal(updated.reusedFileCount, 2);
+    assert.deepEqual(updated.changedPaths, ['policy.ts']);
+    const actual = (await store.getStructuralIndex(updated.scope))!;
+    const files = await Promise.all(actual.files.map(async (file) => ({ relativePath: file.relativePath, content: (await store.getSourceText(updated.scope, file.relativePath))! })));
+    const full = buildStructuralIndex({ ...updated.scope, files }).index;
+    const normalized = (index: typeof actual) => ({ ...index,
+      projects: [...index.projects].sort((a, b) => a.projectId.localeCompare(b.projectId)),
+      files: [...index.files].sort((a, b) => a.fileId.localeCompare(b.fileId)),
+      symbols: [...index.symbols].sort((a, b) => a.symbolId.localeCompare(b.symbolId)),
+      dependencyEdges: [...index.dependencyEdges].sort((a, b) => a.dependencyEdgeId.localeCompare(b.dependencyEdgeId)),
+      diagnostics: [...index.diagnostics].sort((a, b) => a.diagnosticId.localeCompare(b.diagnosticId)) });
+    assert.equal(projectPlanHash(normalized(actual)), projectPlanHash(normalized(full)), 'Incremental and full structural builds differ');
+    const afterStats = store.embeddingReuseStats;
+    incremental = { changedPaths: updated.changedPaths, reusedFiles: updated.reusedFileCount, equivalentToFull: true,
+      persistentVectorHits: afterStats.persistentHits - priorStats.persistentHits,
+      providerDocuments: afterStats.providerDocuments - priorStats.providerDocuments };
+    assert(afterStats.persistentHits > priorStats.persistentHits);
+    assert(afterStats.providerDocuments > priorStats.providerDocuments);
     const other = new SeekDbIndexStore({ ...config, embedding: { ...config.embedding, model: 'different-model' } });
     try { await assert.rejects(other.initialize(), /does not match stored vectors/); } finally { await other.close(); }
-    const report = { passed: true, scope: 'synthetic integration; not enterprise accuracy acceptance',
+    const loadPassed = loadMetrics.every((value) => { const row = value as { queries: number; correctWithinTenSeconds: number }; return row.queries === row.correctWithinTenSeconds; });
+    const report = { passed: loadPassed, integrationPassed: true, scope: 'synthetic integration and load; not enterprise accuracy acceptance',
       realDatabase: true, realEmbedding: true, moduleAnalysis: 'explicit fixture contracts', productHost: true,
-      modelIdentityIsolation: true, cacheReuse, databaseVersion: (await admin.query('SELECT VERSION() AS version'))[0],
+      modelIdentityIsolation: true, cacheReuse, incremental, loadMetrics, moduleReranker,
+      loadPassed,
+      databaseVersion: (await admin.query('SELECT VERSION() AS version'))[0],
       model: config.embedding.model, cpu: cpus()[0]?.model, memoryBytes: totalmem(), metrics };
     console.log(JSON.stringify(report, null, 2));
-    const reportIndex = process.argv.indexOf('--report');
-    if (reportIndex >= 0) {
-      assert(process.argv[reportIndex + 1], '--report requires an output path');
-      await writeFile(process.argv[reportIndex + 1]!, JSON.stringify(report, null, 2));
-    }
+    acceptanceReport = { ...acceptanceReport, ...report };
+    if (!loadPassed) process.exitCode = 1;
+  } catch (error) {
+    acceptanceReport.error = error instanceof Error ? error.message : String(error);
+    throw error;
   } finally {
-    await store.close();
-    await admin.query(`DROP DATABASE IF EXISTS ${database}`);
-    await admin.end();
-    await rm(root, { recursive: true, force: true });
+    try {
+      await store.close();
+      await admin.query(`DROP DATABASE IF EXISTS ${database}`);
+      await admin.end();
+      await rm(root, { recursive: true, force: true });
+    } finally {
+      if (reportPath) await writeFile(reportPath, JSON.stringify(acceptanceReport, null, 2));
+    }
   }
 }
 void main().catch((error) => { console.error(error); process.exitCode = 1; });

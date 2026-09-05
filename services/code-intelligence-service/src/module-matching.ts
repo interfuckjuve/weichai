@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { ModuleTarget, ProjectAnalysisRecord, ProjectModule, RepositoryRevisionScope, SearchCandidate } from '@forexplore/contracts';
 import type { IndexStore } from './index-store.js';
 import { projectPlanHash } from './project-analysis.js';
+import type { ModuleReranker } from './module-reranker.js';
 
 export interface ModuleMatchRequest {
   target: ModuleTarget;
@@ -36,17 +37,17 @@ async function mapBounded<T, R>(items: readonly T[], concurrency: number, work: 
 }
 
 /** Module metadata is fetched only for recalled IDs; no full structural index is hydrated. */
-export async function searchModules(store: IndexStore, request: ModuleMatchRequest, parentSignal?: AbortSignal): Promise<SearchCandidate[]> {
+export async function searchModules(store: IndexStore, request: ModuleMatchRequest, parentSignal?: AbortSignal, reranker?: ModuleReranker): Promise<SearchCandidate[]> {
   const controller = new AbortController();
   const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(10_000), ...(parentSignal ? [parentSignal] : [])]);
   try {
-    return await searchModuleSnapshot(store, request, signal);
+    return await searchModuleSnapshot(store, request, signal, reranker);
   } finally {
     controller.abort(new Error('Module search finished'));
   }
 }
 
-async function searchModuleSnapshot(store: IndexStore, request: ModuleMatchRequest, signal: AbortSignal): Promise<SearchCandidate[]> {
+async function searchModuleSnapshot(store: IndexStore, request: ModuleMatchRequest, signal: AbortSignal, reranker?: ModuleReranker): Promise<SearchCandidate[]> {
   if (!Number.isInteger(request.topK) || request.topK < 1 || request.topK > 10) throw new Error('Module search topK must be between 1 and 10.');
   const repositoryIds = [...new Set(request.repositoryIds)];
   if (repositoryIds.length === 0 || repositoryIds.length > 32) throw new Error('Module search requires between 1 and 32 historical repositories.');
@@ -99,7 +100,7 @@ async function searchModuleSnapshot(store: IndexStore, request: ModuleMatchReque
       });
     });
     return [...byModule.values()];
-  })).flat().sort((a, b) => b.score - a.score || JSON.stringify([a.repositoryId, a.projectId, a.module.id]).localeCompare(JSON.stringify([b.repositoryId, b.projectId, b.module.id]))).slice(0, request.topK);
+  })).flat().sort((a, b) => b.score - a.score || JSON.stringify([a.repositoryId, a.projectId, a.module.id]).localeCompare(JSON.stringify([b.repositoryId, b.projectId, b.module.id]))).slice(0, reranker ? Math.min(20, Math.max(8, request.topK * 2)) : request.topK);
 
   const result = await mapBounded(hits, 4, async (hit): Promise<SearchCandidate> => {
     signal.throwIfAborted();
@@ -128,11 +129,18 @@ async function searchModuleSnapshot(store: IndexStore, request: ModuleMatchReque
         verification: 'interface-only', previewFiles, previewTruncated: files.length > previewFiles.length || parts.some((part) => part.truncated) },
     };
   });
+  let ranked = result;
+  if (reranker && result.length > 0) {
+    const ordering = await reranker.rank(query, result.map((candidate) => [candidate.title, candidate.summary,
+      candidate.signature, candidate.dependencies.join('\n'), candidate.preview].join('\n')), signal);
+    ranked = ordering.map(({ index, score }) => ({ ...result[index]!, score: { ...result[index]!.score, overall: score },
+      moduleMatch: { ...result[index]!.moduleMatch!, reranker: { model: reranker.model, score } } }));
+  }
   for (const hit of hits) {
     signal.throwIfAborted();
     if ((await store.getRepository(hit.repositoryId, signal))?.activeRevision !== hit.analysisRevision) throw new Error('Repository revision changed during module search; retry against the current snapshot.');
   }
-  return result;
+  return ranked.slice(0, request.topK);
 }
 
 function moduleLanguage(language: string | undefined, files: string[]): ModuleTarget['language'] {

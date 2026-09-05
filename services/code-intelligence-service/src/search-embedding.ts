@@ -4,6 +4,8 @@ import { OpenAiCompatibleEmbeddingProvider } from '@forexplore/retrieval-service
 /** Minimal embedding abstraction kept within the code-intelligence boundary. */
 export interface SearchEmbeddingProvider {
   readonly dimension: number;
+  /** Immutable model/revision, preprocessing and instruction identity, required for persisted custom providers. */
+  readonly identity?: string;
   embed(texts: readonly string[], signal?: AbortSignal): Promise<number[][]>;
   embedQuery?(text: string, signal?: AbortSignal): Promise<number[]>;
 }
@@ -19,15 +21,19 @@ export interface ModelSearchEmbeddingConfig {
 
 /** Bounded content cache is scoped to one immutable model configuration. */
 export class ModelSearchEmbeddingProvider implements SearchEmbeddingProvider {
+  readonly identity: string;
   readonly #client: OpenAiCompatibleEmbeddingProvider;
   readonly #cache = new Map<string, number[]>();
   constructor(readonly dimension: number, private readonly config: ModelSearchEmbeddingConfig) {
+    this.config = Object.freeze({ ...config });
     const url = new URL(config.url);
     if (!['http:', 'https:'].includes(url.protocol) || !config.model.trim() || !Number.isInteger(dimension) || dimension < 1) {
       throw new Error('Embedding requires an HTTP endpoint, model and positive dimension.');
     }
     this.#client = new OpenAiCompatibleEmbeddingProvider(dimension, config.url, config.apiKey, config.model,
       { supportsDimensions: config.supportsDimensions, timeoutMs: 8_000, maxRetries: 0 });
+    this.identity = createHash('sha256').update(JSON.stringify({ dimension, url: config.url, model: config.model,
+      supportsDimensions: config.supportsDimensions ?? true, queryPrefix: config.queryPrefix ?? '', documentPrefix: config.documentPrefix ?? '' })).digest('hex');
   }
   async embed(texts: readonly string[], signal?: AbortSignal): Promise<number[][]> {
     return this.encode(texts.map((text) => `${this.config.documentPrefix ?? ''}${text}`), signal);
@@ -92,6 +98,7 @@ function features(text: string): string[] {
  * setups instead of silently storing NULL embeddings.
  */
 export class HashSearchEmbeddingProvider implements SearchEmbeddingProvider {
+  readonly identity = 'hash-v1';
   constructor(readonly dimension = 384) {
     if (!Number.isInteger(dimension) || dimension < 1) {
       throw new Error('Search embedding dimension must be a positive integer.');

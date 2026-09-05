@@ -12,6 +12,7 @@ import type {
 } from '@forexplore/contracts';
 import type { IndexStore } from './index-store.js';
 import { searchModules } from './module-matching.js';
+import type { ModuleReranker } from './module-reranker.js';
 
 export interface ModuleImplementationSearchRequest {
   target: ModuleTarget;
@@ -129,10 +130,10 @@ function queryText(request: ModuleImplementationSearchRequest): string {
 
 /** Searches current reviewed project summaries first, then ranks symbols owned by the selected modules. */
 export class ModuleImplementationSearchService implements ModuleImplementationSearchPort {
-  constructor(private readonly store: IndexStore) {}
+  constructor(private readonly store: IndexStore, private readonly reranker?: ModuleReranker) {}
 
   async search(request: ModuleImplementationSearchRequest, signal?: AbortSignal): Promise<SearchCandidate[]> {
-    if (request.target.kind === 'module') return searchModules(this.store, request, signal);
+    if (request.target.kind === 'module') return searchModules(this.store, request, signal, this.reranker);
     if (!Number.isInteger(request.topK) || request.topK < 1 || request.topK > 10) {
       throw new Error('Module implementation search topK must be between 1 and 10.');
     }

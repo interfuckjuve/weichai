@@ -140,6 +140,9 @@ export class AnalysisCoordinator {
         analysisRevision: repository.activeRevision,
       })
       : null;
+    const previousRevision = previousIndex ? await this.store.getRevision(previousIndex) : null;
+    const effectiveMode = mode === 'incremental' && previousRevision && previousRevision.indexerVersion !== this.#indexerVersion
+      ? 'full' : mode;
     const analysisRevision = this.#revisionIdGenerator();
     if (!/^[-A-Za-z0-9._]+$/.test(analysisRevision)) {
       throw new Error('Analysis coordinator generated an invalid analysisRevision.');
@@ -158,9 +161,9 @@ export class AnalysisCoordinator {
       const result = await this.scanner.scan({
         ...scope,
         root: repository.localPath,
-        mode,
-        ...(previousIndex ? { previousIndex } : {}),
-        ...(changedPaths.length > 0 ? { changedPaths } : {}),
+        mode: effectiveMode,
+        ...(effectiveMode === 'incremental' && previousIndex ? { previousIndex } : {}),
+        ...(effectiveMode === 'incremental' && changedPaths.length > 0 ? { changedPaths } : {}),
         signal: request.signal,
       });
       console.info('[forexplore:performance]', JSON.stringify({ stage: 'scan', ...scope,
@@ -174,7 +177,6 @@ export class AnalysisCoordinator {
       ) {
         throw new Error('Structural scanner returned an index for a different analysis revision.');
       }
-      const previousRevision = previousIndex ? await this.store.getRevision(previousIndex) : null;
       if (previousIndex && previousRevision?.indexerVersion === this.#indexerVersion &&
           previousIndex.analysisHash === result.index.analysisHash) {
         const status = previousIndex.diagnostics.some((item) => item.severity === 'error')

@@ -37,6 +37,7 @@ export interface SeekDbRuntimeConfig {
 /** The narrow host composition input intentionally excludes scanners/DB handles from callers. */
 export interface CreateCodeIntelligenceRuntimeOptions {
   seekdb?: SeekDbRuntimeConfig;
+  moduleReranker?: { url: string; model: string; timeoutMs?: number };
 }
 
 export interface CodeIntelligenceEnvironmentOptions {
@@ -1131,7 +1132,12 @@ export function codeIntelligenceRuntimeOptionsFromEnvironment(
   const embeddingUrl = environment.CODE_INTELLIGENCE_EMBEDDING_URL?.trim();
   const embeddingModel = environment.CODE_INTELLIGENCE_EMBEDDING_MODEL?.trim();
   if (Boolean(embeddingUrl) !== Boolean(embeddingModel)) throw new Error('Configure both CODE_INTELLIGENCE_EMBEDDING_URL and CODE_INTELLIGENCE_EMBEDDING_MODEL.');
+  const rerankerUrl = environment.CODE_INTELLIGENCE_RERANK_URL?.trim();
+  const rerankerModel = environment.CODE_INTELLIGENCE_RERANK_MODEL?.trim();
+  if (Boolean(rerankerUrl) !== Boolean(rerankerModel)) throw new Error('Configure both CODE_INTELLIGENCE_RERANK_URL and CODE_INTELLIGENCE_RERANK_MODEL.');
   return {
+    ...(rerankerUrl && rerankerModel ? { moduleReranker: { url: rerankerUrl, model: rerankerModel,
+      timeoutMs: Number(environment.CODE_INTELLIGENCE_RERANK_TIMEOUT_MS ?? 4_000) } } : {}),
     seekdb: {
       host: environment.CODE_INTELLIGENCE_SEEKDB_HOST?.trim() || '127.0.0.1',
       port,

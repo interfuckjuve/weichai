@@ -24,6 +24,24 @@ afterEach(async () => {
 });
 
 describe('versioned repository pipeline', () => {
+  it('reparses unchanged source after an indexer version change before publishing the new revision', async () => {
+    const root = await repositoryRoot();
+    await source(root, 'package.json', '{"name":"versioned"}');
+    await source(root, 'service.ts', 'export function run() { return 1; }');
+    const store = new InMemoryIndexStore();
+    const first = await createCodeIntelligenceRuntime({ store, coordinatorOptions: { indexerVersion: 'parser-v1' } });
+    await first.registry.register({ repositoryId: 'versioned', localPath: root, role: 'history' });
+    const before = await first.coordinator.run({ repositoryId: 'versioned' });
+    const second = await createCodeIntelligenceRuntime({ store, coordinatorOptions: { indexerVersion: 'parser-v2' } });
+    const after = await second.coordinator.run({ repositoryId: 'versioned', mode: 'incremental' });
+    expect(after.scope.analysisRevision).not.toBe(before.scope.analysisRevision);
+    expect(after.reusedFileCount).toBe(0);
+    expect(await store.getRevision(after.scope)).toMatchObject({ indexerVersion: 'parser-v2', status: 'ready' });
+    const stable = await second.coordinator.run({ repositoryId: 'versioned', mode: 'incremental' });
+    expect(stable.scope).toEqual(after.scope);
+    expect(stable.reusedFileCount).toBe(2);
+  });
+
   it('indexes two registered repositories independently and incrementally reparses only changed files', async () => {
     const firstRoot = await repositoryRoot();
     const secondRoot = await repositoryRoot();

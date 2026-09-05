@@ -26,6 +26,9 @@ import {
   type SemanticQueryServiceOptions,
 } from './semantic-query-service.js';
 import { ModuleImplementationSearchService } from './module-implementation-search.js';
+import { LocalModuleReranker, type ModuleRerankerConfig } from './module-reranker.js';
+
+export { LocalModuleReranker, type ModuleReranker, type ModuleRerankerConfig } from './module-reranker.js';
 
 export {
   AnalysisCoordinator,
@@ -81,6 +84,7 @@ export interface CreateCodeIntelligenceRuntimeOptions {
   /** An injected store is useful in tests and avoids making MCP own storage. */
   store?: IndexStore;
   seekdb?: SeekDbIndexStoreConfig;
+  moduleReranker?: ModuleRerankerConfig;
   languageRegistry?: LanguageRegistry;
   scanner?: StructuralScanner;
   projection?: SearchProjection;
@@ -125,6 +129,7 @@ export async function createCodeIntelligenceRuntime(
   if (options.store && options.seekdb) {
     throw new Error('Choose an injected IndexStore or a SeekDB configuration, not both.');
   }
+  const moduleReranker = options.moduleReranker ? new LocalModuleReranker(options.moduleReranker) : undefined;
   const ownsStore = !options.store;
   const store: IndexStore = options.store ?? (
     options.seekdb ? new SeekDbIndexStore(options.seekdb) : new InMemoryIndexStore()
@@ -151,7 +156,7 @@ export async function createCodeIntelligenceRuntime(
     languageCapabilities: languageCapabilities(languageRegistry),
     semanticProviders,
   });
-  const moduleImplementationSearch = new ModuleImplementationSearchService(store);
+  const moduleImplementationSearch = new ModuleImplementationSearchService(store, moduleReranker);
   const coordinator = new AnalysisCoordinator(
     registry,
     store,

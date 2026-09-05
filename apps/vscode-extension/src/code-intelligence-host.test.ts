@@ -520,6 +520,20 @@ describe('CodeIntelligenceHost', () => {
       CODE_INTELLIGENCE_SEEKDB_DATABASE: 'invalid-name',
     })).toThrow(/SQL identifier/);
   });
+
+  it('preserves model instructions and carries paired local reranker settings to the runtime', () => {
+    const environment = { CODE_INTELLIGENCE_SEEKDB_DATABASE: 'module_models',
+      CODE_INTELLIGENCE_EMBEDDING_URL: 'http://127.0.0.1:4021/v1/embeddings', CODE_INTELLIGENCE_EMBEDDING_MODEL: 'pinned-e5',
+      CODE_INTELLIGENCE_EMBEDDING_QUERY_PREFIX: 'query: ', CODE_INTELLIGENCE_EMBEDDING_DOCUMENT_PREFIX: 'passage: ',
+      CODE_INTELLIGENCE_EMBEDDING_SUPPORTS_DIMENSIONS: 'false', CODE_INTELLIGENCE_RERANK_URL: 'http://127.0.0.1:4022/v1/rerank',
+      CODE_INTELLIGENCE_RERANK_MODEL: 'pinned-bge' };
+    expect(codeIntelligenceRuntimeOptionsFromEnvironment(environment)).toMatchObject({
+      seekdb: { embedding: { queryPrefix: 'query: ', documentPrefix: 'passage: ', supportsDimensions: false } },
+      moduleReranker: { url: environment.CODE_INTELLIGENCE_RERANK_URL, model: 'pinned-bge', timeoutMs: 4000 },
+    });
+    expect(() => codeIntelligenceRuntimeOptionsFromEnvironment({ ...environment, CODE_INTELLIGENCE_RERANK_MODEL: '' })).toThrow('both');
+    expect(() => codeIntelligenceRuntimeOptionsFromEnvironment({ ...environment, CODE_INTELLIGENCE_EMBEDDING_MODEL: '' })).toThrow('both');
+  });
 });
 
 it('processes a saved configuration that arrives during a scan, including removals', async () => {

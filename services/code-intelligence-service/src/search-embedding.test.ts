@@ -4,6 +4,22 @@ import { HashSearchEmbeddingProvider, ModelSearchEmbeddingProvider } from './sea
 afterEach(() => vi.restoreAllMocks());
 
 describe('model embedding adapter', () => {
+  it('pins preprocessing and identity against later configuration mutations', async () => {
+    const requests: string[][] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const body = JSON.parse(String(init?.body)); requests.push(body.input);
+      return new Response(JSON.stringify({ data: [{ index: 0, embedding: [1, 0] }] }));
+    });
+    const config = { url: 'http://127.0.0.1/embeddings', apiKey: '', model: 'test-model', documentPrefix: 'passage: ' };
+    const provider = new ModelSearchEmbeddingProvider(2, config);
+    const identity = provider.identity;
+    config.documentPrefix = 'changed: ';
+    await provider.embed(['same']);
+    expect(requests).toEqual([['passage: same']]);
+    expect(provider.identity).toBe(identity);
+    expect(new ModelSearchEmbeddingProvider(2, config).identity).not.toBe(identity);
+  });
+
   it('deduplicates content, separates query/document instructions and protects cached vectors', async () => {
     const requests: string[][] = [];
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {

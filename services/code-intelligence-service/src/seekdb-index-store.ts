@@ -492,6 +492,9 @@ export class SeekDbIndexStore implements IndexStore {
       throw new Error('SeekDB vectorDimension must be a positive integer.');
     }
     if (config.embeddingProvider && config.embedding) throw new Error('Choose an embedding provider or model configuration.');
+    if (config.embeddingProvider && !config.embeddingProvider.identity?.trim()) {
+      throw new Error('Custom persisted embedding providers require an immutable model/configuration identity.');
+    }
     this.#embeddingProvider = config.embeddingProvider ?? (config.embedding
       ? new ModelSearchEmbeddingProvider(this.#vectorDimension, config.embedding)
       : new HashSearchEmbeddingProvider(this.#vectorDimension));
@@ -499,7 +502,7 @@ export class SeekDbIndexStore implements IndexStore {
     this.#persistEmbeddings = Boolean(config.embedding);
     this.#embeddingIdentity = createHash('sha256').update(JSON.stringify({
       dimension: this.#vectorDimension,
-      provider: config.embedding ? 'model-v1' : config.embeddingProvider ? config.embeddingProvider.constructor.name : 'hash-v1',
+      provider: config.embedding ? 'model-v1' : config.embeddingProvider ? config.embeddingProvider.identity : 'hash-v1',
       ...(config.embedding ? { url: config.embedding.url, model: config.embedding.model,
         queryPrefix: config.embedding.queryPrefix ?? '', documentPrefix: config.embedding.documentPrefix ?? '',
         supportsDimensions: config.embedding.supportsDimensions ?? true } : {}),
