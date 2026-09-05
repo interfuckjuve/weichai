@@ -298,7 +298,7 @@ describe('adaptation HTTP API', () => {
     const snapshot = createAdaptationRuntimeCapabilitySnapshot({
       createdAt: '2026-09-02T00:00:00.000Z',
       analysisExecution: 'trusted-host',
-      verifierExecution: 'trusted-isolated',
+      verifierExecution: 'local-process',
       workspaceMutationExecution: 'trusted-host',
     });
     const configuredUrl = await listen(adapter, { runtimeCapabilitySnapshot: snapshot });
@@ -313,7 +313,7 @@ describe('adaptation HTTP API', () => {
     const snapshot = createAdaptationRuntimeCapabilitySnapshot({
       createdAt: '2026-09-02T00:00:00.000Z',
       analysisExecution: 'trusted-host',
-      verifierExecution: 'trusted-isolated',
+      verifierExecution: 'local-process',
       workspaceMutationExecution: 'trusted-host',
     });
     const tampered = structuredClone(snapshot);
@@ -439,13 +439,13 @@ describe('adaptation HTTP API', () => {
     const serviceRuntime = createAdaptationRuntimeCapabilitySnapshot({
       createdAt: adaptationV2TestNow,
       analysisExecution: 'disabled',
-      verifierExecution: 'trusted-isolated',
+      verifierExecution: 'local-process',
       workspaceMutationExecution: 'disabled',
     });
     const validCombined = createAdaptationRuntimeCapabilitySnapshot({
       createdAt: adaptationV2TestNow,
       analysisExecution: 'trusted-host',
-      verifierExecution: 'trusted-isolated',
+      verifierExecution: 'local-process',
       workspaceMutationExecution: 'trusted-host',
     });
     const maliciousCombined = materializeMigrationRuntimeCapabilitySnapshot({

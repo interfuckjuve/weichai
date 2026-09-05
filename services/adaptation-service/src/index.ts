@@ -39,6 +39,9 @@ export type {
 } from "./adaptation-adapter-v2";
 
 export { TranslationVerifierV2Adapter } from "./translation-verifier-v2-adapter";
+export { createAdaptationV2Runtime } from "./adaptation-v2-runtime";
+export type { AdaptationV2Runtime } from "./adaptation-v2-runtime";
+
 
 export { BackfillAdapter } from "./backfill-adapter";
 export type {

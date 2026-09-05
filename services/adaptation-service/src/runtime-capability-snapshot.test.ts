@@ -14,7 +14,7 @@ describe("createAdaptationRuntimeCapabilitySnapshot", () => {
     const snapshot = createAdaptationRuntimeCapabilitySnapshot({
       createdAt,
       analysisExecution: "trusted-host",
-      verifierExecution: "trusted-isolated",
+      verifierExecution: "local-process",
       workspaceMutationExecution: "trusted-host",
     });
 
@@ -91,7 +91,7 @@ describe("createAdaptationRuntimeCapabilitySnapshot", () => {
     const snapshot = createAdaptationRuntimeCapabilitySnapshot({
       createdAt,
       analysisExecution: "trusted-host",
-      verifierExecution: "trusted-isolated",
+      verifierExecution: "local-process",
       workspaceMutationExecution: "trusted-host",
       compilerRegistry,
       routeRegistrations: [{

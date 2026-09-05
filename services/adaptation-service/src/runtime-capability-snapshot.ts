@@ -27,7 +27,7 @@ import {
 } from "./context-collector";
 export type WorkspaceMutationExecution = "disabled" | "trusted-host";
 export type RepositoryAnalysisExecution = "disabled" | "trusted-host";
-export type BehaviorVerifierExecution = "disabled" | "trusted-isolated";
+export type BehaviorVerifierExecution = "disabled" | "local-process";
 
 export const adaptationServiceOwnedRouteStages = [
   "context-collection",
@@ -228,12 +228,16 @@ function buildRoute(
         "behavior-verifier-route-unavailable",
         `No differential verifier route is registered for ${route.sourceLanguageId} to ${route.targetLanguageId}.`,
       )
-    : options.verifierExecution !== "trusted-isolated"
-      ? unavailable(
+    : options.verifierExecution === "local-process"
+      ? {
+          status: "available" as const,
+          reasonCodes: ["local-process-execution"],
+          summary: "Behavior verification executes as local processes on the adaptation-service host and is not isolated.",
+        }
+      : unavailable(
           "behavior-verifier-execution-disabled",
-          "Differential execution is disabled because no externally isolated executor is configured.",
-        )
-      : available();
+          "Differential execution is disabled because no local process executor is configured.",
+        );
   const applyAvailability = options.workspaceMutationExecution === "trusted-host"
     ? available()
     : unavailable(

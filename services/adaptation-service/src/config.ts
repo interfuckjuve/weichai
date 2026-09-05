@@ -1,3 +1,4 @@
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join, resolve } from "node:path";
 
@@ -15,6 +16,11 @@ export interface AdaptationServiceConfig {
   projectRoot: string;
   /** Server-owned analysis snapshot location used by the read-only planner. */
   analysisRoot: string;
+  /** Server-owned local behavior verification workspace. */
+  verificationWorkspaceRoot: string;
+  /** Server-owned verification evidence artifacts. */
+  verificationArtifactRoot: string;
+  verificationTimeoutMs: number;
 }
 
 function positiveInteger(value: string | undefined, fallback: number, name: string): number {
@@ -52,6 +58,19 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AdaptationServ
     analysisRoot: resolveConfiguredPath(
       env.ADAPTATION_ANALYSIS_ROOT?.trim(),
       join(projectRoot, ".forexplore", "analysis"),
+    ),
+    verificationWorkspaceRoot: resolveConfiguredPath(
+      env.ADAPTATION_VERIFICATION_WORKSPACE_ROOT?.trim(),
+      join(tmpdir(), "forexplore-verification-workspaces"),
+    ),
+    verificationArtifactRoot: resolveConfiguredPath(
+      env.ADAPTATION_VERIFICATION_ARTIFACT_ROOT?.trim(),
+      join(projectRoot, ".forexplore", "verification-artifacts"),
+    ),
+    verificationTimeoutMs: positiveInteger(
+      env.ADAPTATION_VERIFICATION_TIMEOUT_MS,
+      300000,
+      "ADAPTATION_VERIFICATION_TIMEOUT_MS",
     ),
   };
 }

@@ -7,13 +7,7 @@ import { FileStaticAnalysisSnapshotStore } from './analysis-snapshot-store.js';
 import { ModuleDiscoveryAgent } from './module-discovery-agent.js';
 import { ModuleSummaryAgent } from './module-summary-agent.js';
 import { createDefaultTargetEngineeringAdapterRegistry } from './context-collector.js';
-import { createAdaptationRuntimeCapabilitySnapshot } from './runtime-capability-snapshot.js';
-import {
-  AdaptationAdapterV2,
-  DeepSeekMigrationAnalyzerV2,
-  DeepSeekMigrationPlannerV2,
-  DeepSeekMigrationTranslatorV2,
-} from './adaptation-adapter-v2.js';
+import { createAdaptationV2Runtime } from './adaptation-v2-runtime.js';
 
 const config = loadConfig();
 const targetEngineeringRegistry = createDefaultTargetEngineeringAdapterRegistry();
@@ -25,21 +19,8 @@ const adapter = new AdaptationAdapter({
   targetEngineeringRegistry,
 });
 
-const runtimeCapabilitySnapshot = createAdaptationRuntimeCapabilitySnapshot({
-  createdAt: new Date().toISOString(),
-  analysisExecution: 'disabled',
-  verifierExecution: 'disabled',
-  workspaceMutationExecution: 'disabled',
-  targetEngineeringRegistry,
-});
-const migrationAgentsV2 = { apiKey: config.apiKey };
-const adapterV2 = new AdaptationAdapterV2({
-  runtimeCapabilities: runtimeCapabilitySnapshot,
-  analyzer: new DeepSeekMigrationAnalyzerV2(migrationAgentsV2),
-  planner: new DeepSeekMigrationPlannerV2(migrationAgentsV2),
-  translator: new DeepSeekMigrationTranslatorV2(migrationAgentsV2),
-  targetEngineeringRegistry,
-});
+const runtime = createAdaptationV2Runtime(config, { targetEngineeringRegistry });
+const { runtimeCapabilitySnapshot, adapterV2 } = runtime;
 
 const server = createHttpServer({
   adapter,
@@ -59,7 +40,8 @@ server.listen(config.port, config.host, () => {
   console.log(`Target project: ${config.projectRoot}`);
   console.log(`Static analysis snapshots: ${config.analysisRoot}`);
   console.log(`Runtime capability snapshot: ${runtimeCapabilitySnapshot.id}`);
-  console.log('Behavior verification: disabled (no isolated executor configured)');
+  console.log('Behavior verification: local process on adaptation-service host (not isolated)');
+  console.log(`Verification artifacts: ${config.verificationArtifactRoot}`);
 });
 
 async function shutdown(): Promise<void> {

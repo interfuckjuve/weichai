@@ -182,13 +182,13 @@ export function createAdaptationV2TestFixture(
   const serviceRuntime = options.serviceRuntime ?? createAdaptationRuntimeCapabilitySnapshot({
     createdAt: adaptationV2TestNow,
     analysisExecution: "disabled",
-    verifierExecution: "trusted-isolated",
+    verifierExecution: "local-process",
     workspaceMutationExecution: "disabled",
   });
   const runtime = options.executionRuntime ?? createAdaptationRuntimeCapabilitySnapshot({
     createdAt: adaptationV2TestNow,
     analysisExecution: "trusted-host",
-    verifierExecution: "trusted-isolated",
+    verifierExecution: "local-process",
     workspaceMutationExecution: "trusted-host",
   });
   const route = routeByExactPair(runtime, "typescript", "python")!;

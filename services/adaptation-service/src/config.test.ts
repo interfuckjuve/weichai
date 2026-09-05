@@ -11,6 +11,9 @@ describe("adaptation service config", () => {
     expect(config.apiKey).toBe("demo-key");
     expect(config.skeletonProjectPath).toMatch(/commons-fileupload-java-skeleton$/);
     expect(config.projectRoot).toBe(config.skeletonProjectPath);
+    expect(config.verificationWorkspaceRoot).toMatch(/forexplore-verification-workspaces$/);
+    expect(config.verificationArtifactRoot).toMatch(/\.forexplore\/verification-artifacts$/);
+    expect(config.verificationTimeoutMs).toBe(300000);
   });
 
   it("reads explicit skeleton and backfill roots", () => {
@@ -54,6 +57,19 @@ describe("adaptation service config", () => {
     expect(config.host).toBe("0.0.0.0");
     expect(config.port).toBe(9090);
     expect(config.corsOrigin).toBe("https://example.com");
+  });
+
+  it("reads verification roots and positive timeout", () => {
+    const config = loadConfig({
+      DEEPSEEK_API_KEY: "sk-test",
+      ADAPTATION_VERIFICATION_WORKSPACE_ROOT: "/tmp/verification-workspaces",
+      ADAPTATION_VERIFICATION_ARTIFACT_ROOT: "/tmp/verification-artifacts",
+      ADAPTATION_VERIFICATION_TIMEOUT_MS: "1234",
+    });
+
+    expect(config.verificationWorkspaceRoot).toBe("/tmp/verification-workspaces");
+    expect(config.verificationArtifactRoot).toBe("/tmp/verification-artifacts");
+    expect(config.verificationTimeoutMs).toBe(1234);
   });
 
   it("fails fast when the DeepSeek key is missing", () => {
