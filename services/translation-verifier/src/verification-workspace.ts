@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, resolve, sep } from "node:path";
 import { applyHunksStrict, newFileContent } from "@forexplore/workflow-core";
-import type { VerificationArtifact, VerificationInput, VerificationStrategyContext } from "./verification-types.js";
+import type { VerificationArtifact, VerificationInput, VerificationStrategyContext, VerificationResultArtifact } from "./verification-types.js";
 import { assertVerificationInput } from "./verification-types.js";
 
 export interface VerificationWorkspaceOptions {
@@ -15,6 +15,7 @@ export interface VerificationWorkspaceHandle {
   context: VerificationStrategyContext;
   writtenArtifacts(): VerificationArtifact[];
   keptDir?: string;
+  writeFrameworkResult(content: Uint8Array): VerificationResultArtifact;
   cleanup(): void;
 }
 
@@ -108,6 +109,22 @@ export function createVerificationWorkspace(
     ...(options.keepWorkspace ? { keptDir: root } : {}),
     writtenArtifacts() {
       return written.map((artifact) => ({ ...artifact }));
+    },
+    writeFrameworkResult(content) {
+      if (closed) throw new Error("Verification workspace is closed.");
+      const durablePath = `${durablePrefix}/verification-result.json`;
+      const { destination, parent, rootRealPath } = safeArtifactDestination(artifactRoot, durablePath);
+      const temporary = resolve(parent, `.tmp-${process.pid}-${Date.now()}-${randomBytes(4).toString("hex")}`);
+      try {
+        assertRealPathContained(parent, rootRealPath, "Verification result parent");
+        writeFileSync(temporary, content);
+        assertRealPathContained(temporary, rootRealPath, "Verification result temporary file");
+        renameSync(temporary, destination);
+      } catch (error) {
+        rmSync(temporary, { force: true });
+        throw error;
+      }
+      return { path: durablePath, contentHash: createHash("sha256").update(content).digest("hex"), size: content.byteLength, mediaType: "application/json" };
     },
     cleanup() {
       closed = true;

@@ -1617,7 +1617,7 @@ function canonicalRepairIssues(
       issue.evidenceArtifactIds,
       `${label} issue ${id} evidence artifact ID`,
     );
-    if (evidenceArtifactIds.length === 0) {
+    if (evidenceArtifactIds.length === 0 && issue.kind !== "compile-failure") {
       throw new Error(`${label} issue ${id} must reference at least one evidence artifact.`);
     }
     if (evidenceArtifactIds.some((artifactId) => !artifactIds.has(artifactId))) {

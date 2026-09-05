@@ -36,6 +36,7 @@ export function createAdaptationV2Runtime(
     workspaceRoot: config.verificationWorkspaceRoot,
     artifactRoot: config.verificationArtifactRoot,
     timeoutMs: config.verificationTimeoutMs,
+    apiKey: config.apiKey,
   });
   const verifier = new TranslationVerifierV2Adapter(verificationService);
   const agents = { apiKey: config.apiKey };

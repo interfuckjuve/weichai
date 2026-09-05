@@ -394,9 +394,7 @@ export class AdaptationAdapterV2 implements CodeAdaptationPortV2 {
         issues,
         ...(attempt.verification ? { verificationResultHash: attempt.verification.contentHash } : {}),
         verifierArtifacts: [
-          ...(attempt.verification?.artifacts.map(({ id, kind, path, contentHash, mediaType }) => ({ id, kind, path, contentHash, mediaType })) ?? []),
-          ...failed.filter((record) => record.policyCheckId === "target-compile").map((record) => ({ id: `compile-failure:${record.id}`, kind: "compiler-diagnostic", path: ".forexplore/evidence/compiler-diagnostics.txt", contentHash: "0".repeat(64), mediaType: "text/plain" })),
-        ],
+          ...(attempt.verification?.artifacts.map(({ id, kind, path, contentHash, mediaType }) => ({ id, kind, path, contentHash, mediaType })) ?? []),        ],
         provider: providerRef(this.#translator),
         createdAt: this.#now(),
       });
@@ -802,7 +800,9 @@ function verificationResultEvidence(
       status: verified.status,
       summary: verified.summary,
       ...(verified.artifacts[0] === undefined ? {} : { artifactPath: verified.artifacts[0].path }),
-      ...(verified.issues[0] === undefined ? {} : { failureReason: verified.issues[0].kind }),
+      ...(verified.status === "fail" || verified.status === "unverified") && verified.issues[0] !== undefined
+        ? { failureReason: verified.issues[0].kind }
+        : {},
     };
   } catch (error) {
     return {
@@ -849,14 +849,21 @@ function repairIssues(
     ? attempt.verification.issues.map((issue) => ({ ...structuredClone(issue), evidenceArtifactIds: issue.evidenceArtifactIds.length > 0 ? issue.evidenceArtifactIds : attempt.verification!.artifacts.map((artifact) => artifact.id) }))
     : [];
   for (const record of failed) {
-    if (record.policyCheckId === "target-compile") issues.push({
-      id: `compile-failure:${record.id}`,
-      kind: "compile-failure",
-      message: record.summary,
-      evidenceArtifactIds: [`compile-failure:${record.id}`],
-    });
+    if (isCompilerFailure(record)) {
+      issues.push({
+        id: `compile-failure:${record.id}`,
+        kind: "compile-failure",
+        message: record.summary,
+        evidenceArtifactIds: [],
+      });
+    }
   }
   return issues;
+}
+
+function isCompilerFailure(record: ValidationRecord): boolean {
+  return (record.phase === "compile" || record.phase === "syntax") &&
+    /compiler|compile/i.test(record.verifierId ?? "");
 }
 
 function providerRef(provider: ProviderIdentity): MigrationProviderRefV2 {

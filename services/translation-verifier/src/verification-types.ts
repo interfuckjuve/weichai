@@ -7,6 +7,18 @@ import type {
 } from "@forexplore/contracts";
 import { calculatePatchHashV2, canonicalJson } from "@forexplore/workflow-core";
 
+export interface VerificationResultArtifact {
+  path: string;
+  contentHash: string;
+  size: number;
+  mediaType: "application/json";
+}
+
+export interface VerificationReceipt {
+  result: VerificationResult;
+  resultArtifact: VerificationResultArtifact;
+}
+
 export interface VerificationStrategyDescriptor {
   id: string;
   version: string;

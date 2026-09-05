@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { canonicalJson } from "@forexplore/workflow-core";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { VerificationStrategyFactory } from "./verification-strategy-factory.js";
@@ -10,6 +12,18 @@ import {
   type VerificationResult,
   type VerificationStrategyDescriptor,
 } from "./verification-types.js";
+
+export interface VerificationResultArtifact {
+  path: string;
+  contentHash: string;
+  size: number;
+  mediaType: "application/json";
+}
+
+export interface VerificationReceipt {
+  result: VerificationResult;
+  resultArtifact: VerificationResultArtifact;
+}
 
 export interface VerificationServiceOptions {
   factory: VerificationStrategyFactory;
@@ -45,13 +59,24 @@ export class VerificationService {
     options: { strategyId?: string; keepWorkspace?: boolean } = {},
     signal?: AbortSignal,
   ): Promise<VerificationResult> {
+    if (signal?.aborted && !isAbortError(signal.reason)) {
+      const descriptor = this.#descriptor(options.strategyId ?? this.#defaultStrategyId);
+      return this.#unverified(input, descriptor, signal.reason, []);
+    }
+    return (await this.verifyWithReceipt(input, options, signal)).result;
+  }
+
+  async verifyWithReceipt(
+    input: VerificationInput,
+    options: { strategyId?: string; keepWorkspace?: boolean } = {},
+    signal?: AbortSignal,
+  ): Promise<VerificationReceipt> {
     assertVerificationInput(input);
     const strategyId = options.strategyId ?? this.#defaultStrategyId;
     const descriptor = this.#descriptor(strategyId);
 
     let workspace: ReturnType<typeof createVerificationWorkspace> | undefined;
     try {
-      if (signal?.aborted) throw signal.reason ?? new Error("Caller aborted verification");
       const strategy = this.#factory.create(strategyId);
       workspace = createVerificationWorkspace(input, {
         workspaceRoot: this.#workspaceRoot,
@@ -65,10 +90,16 @@ export class VerificationService {
       const result = await waitForStrategy(strategy.verify(input, workspace.context, combinedSignal), combinedSignal);
       assertVerificationResult(result, input, descriptor);
       assertArtifactsMatch(result.artifacts, workspace.writtenArtifacts());
-      return result;
+      const receiptBytes = Buffer.from(canonicalJson(result), "utf8");
+      const resultArtifact = workspace.writeFrameworkResult(receiptBytes);
+      return { result, resultArtifact };
     } catch (error) {
       if (signal?.aborted && error === signal.reason && isAbortError(error)) throw error;
-      return this.#unverified(input, descriptor, error, workspace?.writtenArtifacts() ?? []);
+      const result = this.#unverified(input, descriptor, error, workspace?.writtenArtifacts() ?? []);
+      if (workspace === undefined) throw error;
+      const receiptBytes = Buffer.from(canonicalJson(result), "utf8");
+      const resultArtifact = workspace.writeFrameworkResult(receiptBytes);
+      return { result, resultArtifact };
     } finally {
       workspace?.cleanup();
     }

@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { dirname, join, basename } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { AdaptationRequestV2, FilePatch, ModifiedFilePatch } from "@forexplore/contracts";
 import type { VerificationArtifact, VerificationInput } from "./verification-types.js";
 import { createVerificationWorkspace } from "./verification-workspace.js";
 
