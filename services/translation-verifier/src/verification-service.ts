@@ -48,21 +48,24 @@ export class VerificationService {
     assertVerificationInput(input);
     const strategyId = options.strategyId ?? this.#defaultStrategyId;
     const descriptor = this.#descriptor(strategyId);
-    const strategy = this.#factory.create(strategyId);
-    signal?.throwIfAborted();
 
     let workspace: ReturnType<typeof createVerificationWorkspace> | undefined;
     try {
+      if (signal?.aborted) throw signal.reason ?? new Error("Caller aborted verification");
+      const strategy = this.#factory.create(strategyId);
       workspace = createVerificationWorkspace(input, {
         workspaceRoot: this.#workspaceRoot,
         artifactRoot: this.#artifactRoot,
         keepWorkspace: options.keepWorkspace,
       });
+      if (signal?.aborted) throw signal.reason ?? new Error("Caller aborted verification");
       const timeoutSignal = AbortSignal.timeout(this.#timeoutMs);
       const combinedSignal = signal === undefined ? timeoutSignal : AbortSignal.any([signal, timeoutSignal]);
       workspace.context.deadlineAt = Date.now() + this.#timeoutMs;
       const result = await strategy.verify(input, workspace.context, combinedSignal);
-      return assertVerificationResult(result, input, descriptor);
+      assertVerificationResult(result, input, descriptor);
+      assertArtifactsMatch(result.artifacts, workspace.writtenArtifacts());
+      return result;
     } catch (error) {
       if (signal?.aborted && isAbortError(error)) throw error;
       return this.#unverified(input, descriptor, error, workspace?.writtenArtifacts() ?? []);
@@ -109,6 +112,29 @@ export class VerificationService {
   }
 }
 
+function assertArtifactsMatch(resultArtifacts: VerificationResult["artifacts"], writtenArtifacts: VerificationResult["artifacts"]): void {
+  if (resultArtifacts.length !== writtenArtifacts.length) {
+    throw new Error("Verification result artifacts must match artifacts written through the workspace.");
+  }
+  const writtenById = new Map<string, VerificationResult["artifacts"][number]>();
+  for (const artifact of writtenArtifacts) {
+    if (writtenById.has(artifact.id)) throw new Error("Verification workspace artifact IDs must be unique.");
+    writtenById.set(artifact.id, artifact);
+  }
+  for (const artifact of resultArtifacts) {
+    const written = writtenById.get(artifact.id);
+    if (
+      written === undefined ||
+      written.kind !== artifact.kind ||
+      written.path !== artifact.path ||
+      written.contentHash !== artifact.contentHash ||
+      written.mediaType !== artifact.mediaType
+    ) {
+      throw new Error("Verification result artifacts must match artifacts written through the workspace.");
+    }
+  }
+}
+
 function isAbortError(error: unknown): boolean {
   return isNamedError(error, "AbortError");
 }
@@ -120,8 +146,9 @@ function errorName(error: unknown): string {
 }
 
 function errorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  if (typeof error === "string") return error;
+  if (isNamedError(error, "TimeoutError")) return "Verification strategy timed out";
+  if (error instanceof Error && error.message.trim().length > 0) return error.message;
+  if (typeof error === "string" && error.trim().length > 0) return error;
   return "Unknown verification error";
 }
 

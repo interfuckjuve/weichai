@@ -1,7 +1,7 @@
 import type { AdaptationRequestV2, FilePatch, ModifiedFilePatch } from "@forexplore/contracts";
 import { calculatePatchHashV2 } from "@forexplore/workflow-core";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -82,6 +82,40 @@ describe("createVerificationWorkspace", () => {
 
     expect(() => workspace.context.writeArtifact({ ...written, path: "/tmp/result.json" })).toThrow(/relative path/i);
     expect(() => workspace.context.writeArtifact({ ...written, path: "../result.json" })).toThrow(/relative path/i);
+
+    workspace.cleanup();
+  });
+
+  it("rejects symlinked and dangling artifact path components", async () => {
+    const workspace = createVerificationWorkspace(input(), { workspaceRoot, artifactRoot });
+    const evidencePath = join(workspace.context.workspace.evidenceRoot, "reports/result.json");
+    mkdirSync(dirname(evidencePath), { recursive: true });
+    writeFileSync(evidencePath, "{}\n", "utf8");
+
+    const outside = join(root, "outside");
+    mkdirSync(outside, { recursive: true });
+    mkdirSync(artifactRoot, { recursive: true });
+    symlinkSync(outside, join(artifactRoot, "reports"), "dir");
+
+    expect(() => workspace.context.writeArtifact({
+      id: "artifact-symlink",
+      kind: "report",
+      path: "reports/result.json",
+      contentHash: "0".repeat(64),
+      mediaType: "application/json",
+    })).toThrow(/symlink/i);
+    expect(existsSync(join(outside, "result.json"))).toBe(false);
+
+    unlinkSync(join(artifactRoot, "reports"));
+    symlinkSync(join(root, "missing"), join(artifactRoot, "reports"), "dir");
+
+    expect(() => workspace.context.writeArtifact({
+      id: "artifact-dangling",
+      kind: "report",
+      path: "reports/result.json",
+      contentHash: "0".repeat(64),
+      mediaType: "application/json",
+    })).toThrow(/symlink/i);
 
     workspace.cleanup();
   });

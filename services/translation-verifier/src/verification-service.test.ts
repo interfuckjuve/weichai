@@ -1,9 +1,9 @@
 import type { AdaptationRequestV2, FilePatch } from "@forexplore/contracts";
 import { calculatePatchHashV2 } from "@forexplore/workflow-core";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VerificationService } from "./verification-service.js";
 import { VerificationStrategyFactory } from "./verification-strategy-factory.js";
@@ -63,6 +63,34 @@ describe("VerificationService", () => {
     expect(existsSync(workspaceRoot) ? readdirSync(workspaceRoot) : []).toEqual([]);
   });
 
+  it("normalizes empty strategy errors to a nonempty framework issue", async () => {
+    const emptyError = serviceWith([provider("empty-error", async () => { throw new Error(""); })], "empty-error");
+    const result = await emptyError.verify(input());
+    expect(result.status).toBe("unverified");
+    expect(result.summary).toBe("Verification framework could not complete: Unknown verification error");
+    expect(result.issues[0]?.message).toBe("Unknown verification error");
+
+    const emptyString = serviceWith([provider("empty-string", async () => { throw ""; })], "empty-string");
+    expect((await emptyString.verify(input())).issues[0]?.message).toBe("Unknown verification error");
+  });
+
+  it("normalizes a pre-aborted non-AbortError without executing the strategy", async () => {
+    let executed = false;
+    const service = serviceWith([provider("first", async (inputValue) => {
+      executed = true;
+      return okResult(inputValue, descriptor("first"));
+    })], "first");
+    const controller = new AbortController();
+    controller.abort(new Error("caller stopped"));
+
+    const result = await service.verify(input(), {}, controller.signal);
+
+    expect(result.status).toBe("unverified");
+    expect(result.issues[0]?.message).toBe("caller stopped");
+    expect(executed).toBe(false);
+    expect(existsSync(workspaceRoot)).toBe(false);
+  });
+
   it("turns result identity mismatches and timeouts into unverified framework errors", async () => {
     const wrongResult = serviceWith([provider("first", async (inputValue) => ({
       ...okResult(inputValue, descriptor("first")),
@@ -78,7 +106,44 @@ describe("VerificationService", () => {
       });
       throw new Error("unreachable");
     })], "slow", { timeoutMs: 1 });
-    expect((await timeoutService.verify(input())).status).toBe("unverified");
+    const timeout = await timeoutService.verify(input());
+    expect(timeout.status).toBe("unverified");
+    expect(timeout.strategyId).toBe("slow");
+    expect(timeout.subjectHash).toBe(input().translation.patchHash);
+    expect(timeout.summary).toBe("Verification framework could not complete: Verification strategy timed out");
+  });
+
+  it("requires result artifacts to match artifacts written through the workspace", async () => {
+    const unwrittenArtifact = {
+      id: "artifact-1",
+      kind: "report",
+      path: "reports/result.json",
+      contentHash: sha256("{}\n"),
+      mediaType: "application/json",
+    };
+    const missing = serviceWith([provider("first", async (inputValue) => createVerificationResult(inputValue, descriptor("first"), {
+      status: "pass",
+      summary: "verified",
+      issues: [],
+      artifacts: [unwrittenArtifact],
+      strategyReport: {},
+    }, () => now))], "first");
+    expect((await missing.verify(input())).status).toBe("unverified");
+
+    const altered = serviceWith([provider("first", async (inputValue, context) => {
+      const evidencePath = join(context.workspace.evidenceRoot, "reports/result.json");
+      mkdirSync(dirname(evidencePath), { recursive: true });
+      writeFileSync(evidencePath, "{}\n", "utf8");
+      const written = await context.writeArtifact(unwrittenArtifact);
+      return createVerificationResult(inputValue, descriptor("first"), {
+        status: "pass",
+        summary: "verified",
+        issues: [],
+        artifacts: [{ ...written, contentHash: "f".repeat(64) }],
+        strategyReport: {},
+      }, () => now);
+    })], "first");
+    expect((await altered.verify(input())).status).toBe("unverified");
   });
 
   it("cleans temporary workspaces unless keepWorkspace is requested", async () => {

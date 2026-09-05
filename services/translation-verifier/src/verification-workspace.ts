@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve, sep } from "node:path";
 import { applyHunksStrict, newFileContent } from "@forexplore/workflow-core";
 import type { VerificationArtifact, VerificationInput, VerificationStrategyContext } from "./verification-types.js";
@@ -75,18 +75,20 @@ export function createVerificationWorkspace(
     deadlineAt: Number.POSITIVE_INFINITY,
     writeArtifact(artifact) {
       const artifactPath = safeRelativePath(artifact.path, "Verification artifact path");
-      const source = safePath(agentRoot, artifactPath, "Verification artifact path");
-      const destination = safePath(artifactRoot, artifactPath, "Verification artifact path");
+      const source = safeExistingFile(agentRoot, artifactPath, "Verification artifact source");
+      const { destination, parent, rootRealPath } = safeArtifactDestination(artifactRoot, artifactPath);
       const content = readFileSync(source);
       const stored: VerificationArtifact = {
         ...artifact,
         path: artifactPath,
         contentHash: createHash("sha256").update(content).digest("hex"),
       };
-      mkdirSync(dirname(destination), { recursive: true });
-      const temporary = resolve(dirname(destination), `.tmp-${process.pid}-${Date.now()}-${randomBytes(4).toString("hex")}`);
+      const temporary = resolve(parent, `.tmp-${process.pid}-${Date.now()}-${randomBytes(4).toString("hex")}`);
       try {
+        assertRealPathContained(parent, rootRealPath, "Verification artifact parent");
         writeFileSync(temporary, content);
+        assertRealPathContained(temporary, rootRealPath, "Verification artifact temporary file");
+        assertRealPathContained(parent, rootRealPath, "Verification artifact parent");
         renameSync(temporary, destination);
       } catch (error) {
         rmSync(temporary, { force: true });
@@ -113,6 +115,72 @@ function writeStagedFile(root: string, path: string, content: string, label: str
   const destination = safePath(root, path, label);
   mkdirSync(dirname(destination), { recursive: true });
   writeFileSync(destination, content, "utf8");
+}
+
+function safeExistingFile(root: string, path: string, label: string): string {
+  const file = safePath(root, path, label);
+  const baseRealPath = realpathSync(resolve(root));
+  const parts = safeRelativePath(path, label).split("/");
+  let current = resolve(root);
+  for (const [index, part] of parts.entries()) {
+    current = resolve(current, part);
+    const stat = lstatSync(current);
+    if (stat.isSymbolicLink()) throw new Error(`${label} must not contain symlink path components.`);
+    if (index < parts.length - 1 && !stat.isDirectory()) {
+      throw new Error(`${label} parent must be a directory.`);
+    }
+    assertRealPathContained(current, baseRealPath, label);
+  }
+  if (!lstatSync(file).isFile()) throw new Error(`${label} must be a file.`);
+  return file;
+}
+
+function safeArtifactDestination(root: string, path: string): { destination: string; parent: string; rootRealPath: string } {
+  const artifactPath = safeRelativePath(path, "Verification artifact path");
+  const base = resolve(root);
+  mkdirSync(base, { recursive: true });
+  if (lstatSync(base).isSymbolicLink()) throw new Error("Verification artifact root must not be a symlink.");
+  const rootRealPath = realpathSync(base);
+  const parts = artifactPath.split("/");
+  const fileName = parts.pop()!;
+  let parent = base;
+
+  for (const part of parts) {
+    parent = resolve(parent, part);
+    const stat = lstatIfExists(parent);
+    if (stat !== undefined) {
+      if (stat.isSymbolicLink()) throw new Error("Verification artifact path must not contain symlink path components.");
+      if (!stat.isDirectory()) throw new Error("Verification artifact path parent must be a directory.");
+    } else {
+      mkdirSync(parent);
+    }
+    assertRealPathContained(parent, rootRealPath, "Verification artifact path");
+  }
+
+  const destination = resolve(parent, fileName);
+  const destinationStat = lstatIfExists(destination);
+  if (destinationStat !== undefined) {
+    if (destinationStat.isSymbolicLink()) throw new Error("Verification artifact path must not contain symlink path components.");
+    if (!destinationStat.isFile()) throw new Error("Verification artifact path destination must be a file.");
+    assertRealPathContained(destination, rootRealPath, "Verification artifact path");
+  }
+  return { destination, parent, rootRealPath };
+}
+
+function lstatIfExists(path: string): ReturnType<typeof lstatSync> | undefined {
+  try {
+    return lstatSync(path);
+  } catch (error) {
+    if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+function assertRealPathContained(path: string, rootRealPath: string, label: string): void {
+  const realPath = realpathSync(path);
+  if (realPath !== rootRealPath && !realPath.startsWith(`${rootRealPath}${sep}`)) {
+    throw new Error(`${label} must stay within the artifact root.`);
+  }
 }
 
 function safePath(root: string, path: string, label: string): string {
