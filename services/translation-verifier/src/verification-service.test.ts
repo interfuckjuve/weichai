@@ -190,11 +190,12 @@ describe("VerificationService", () => {
       mkdirSync(dirname(evidencePath), { recursive: true });
       writeFileSync(evidencePath, "{}\n", "utf8");
       const written = await context.writeArtifact(unwrittenArtifact);
+      expect(written.path).toMatch(/^attempt-/);
       return createVerificationResult(inputValue, descriptor("first"), {
         status: "pass",
         summary: "verified",
         issues: [],
-        artifacts: [{ ...written, contentHash: "f".repeat(64) }],
+        artifacts: [{ ...written, path: written.path, contentHash: "f".repeat(64) }],
         strategyReport: {},
       }, () => now);
     })], "first");

@@ -1,9 +1,8 @@
-import type { AdaptationRequestV2, FilePatch, ModifiedFilePatch } from "@forexplore/contracts";
-import { calculatePatchHashV2 } from "@forexplore/workflow-core";
 import { createHash } from "node:crypto";
+import { calculatePatchHashV2 } from "@forexplore/workflow-core";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, basename } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { VerificationArtifact, VerificationInput } from "./verification-types.js";
 import { createVerificationWorkspace } from "./verification-workspace.js";
@@ -11,6 +10,8 @@ import { createVerificationWorkspace } from "./verification-workspace.js";
 const sourceContent = "export function source() {\n  return 1;\n}\n";
 const originalTargetContent = "def target():\n    raise NotImplementedError()\n";
 const translatedTargetContent = "def target():\n    return 1\n";
+const firstArtifactContent = "{\"ok\":true,\"attempt\":1}\n";
+const secondArtifactContent = "{\"ok\":true,\"attempt\":2}\n";
 
 let root: string;
 let workspaceRoot: string;
@@ -54,36 +55,47 @@ describe("createVerificationWorkspace", () => {
       .toThrow(/original hash/i);
   });
 
-  it("writes artifacts beneath artifactRoot with SHA-256 metadata and rejects unsafe names", async () => {
-    const workspace = createVerificationWorkspace(input(), { workspaceRoot, artifactRoot });
-    const evidencePath = join(workspace.context.workspace.evidenceRoot, "reports/result.json");
-    mkdirSync(dirname(evidencePath), { recursive: true });
-    writeFileSync(evidencePath, "{\"ok\":true}\n", "utf8");
+  it("namespaces durable artifacts by attempt while preserving the strategy-relative source path", async () => {
+    const firstWorkspace = createVerificationWorkspace(input(), { workspaceRoot, artifactRoot });
+    const secondWorkspace = createVerificationWorkspace(input(), { workspaceRoot, artifactRoot });
 
-    const written = await workspace.context.writeArtifact({
+    const firstEvidencePath = join(firstWorkspace.context.workspace.evidenceRoot, "reports/result.json");
+    const secondEvidencePath = join(secondWorkspace.context.workspace.evidenceRoot, "reports/result.json");
+    mkdirSync(dirname(firstEvidencePath), { recursive: true });
+    mkdirSync(dirname(secondEvidencePath), { recursive: true });
+    writeFileSync(firstEvidencePath, firstArtifactContent, "utf8");
+    writeFileSync(secondEvidencePath, secondArtifactContent, "utf8");
+
+    const firstArtifact = await firstWorkspace.context.writeArtifact({
       id: "artifact-1",
       kind: "report",
       path: "reports/result.json",
       contentHash: "0".repeat(64),
       mediaType: "application/json",
     });
-
-    expect(written).toEqual({
-      id: "artifact-1",
+    const secondArtifact = await secondWorkspace.context.writeArtifact({
+      id: "artifact-2",
       kind: "report",
       path: "reports/result.json",
-      contentHash: sha256("{\"ok\":true}\n"),
+      contentHash: "0".repeat(64),
       mediaType: "application/json",
-    } satisfies VerificationArtifact);
-    expect(readFileSync(join(artifactRoot, "reports/result.json"), "utf8")).toBe("{\"ok\":true}\n");
-    expect(readdirSync(join(artifactRoot, "reports"))).toEqual(["result.json"]);
-    expect(workspace.writtenArtifacts()).toEqual([written]);
-    expect(workspace.writtenArtifacts()[0]).not.toBe(written);
+    });
 
-    expect(() => workspace.context.writeArtifact({ ...written, path: "/tmp/result.json" })).toThrow(/relative path/i);
-    expect(() => workspace.context.writeArtifact({ ...written, path: "../result.json" })).toThrow(/relative path/i);
+    const firstAttemptDir = firstArtifact.path.split("/")[0];
+    const secondAttemptDir = secondArtifact.path.split("/")[0];
+    expect(firstAttemptDir).toMatch(/^attempt-[A-Za-z0-9-]+$/);
+    expect(secondAttemptDir).toMatch(/^attempt-[A-Za-z0-9-]+$/);
+    expect(firstArtifact.path).toBe(`${firstAttemptDir}/reports/result.json`);
+    expect(secondArtifact.path).toBe(`${secondAttemptDir}/reports/result.json`);
+    expect(secondArtifact.path).not.toBe(firstArtifact.path);
+    expect(readFileSync(join(artifactRoot, firstArtifact.path), "utf8")).toBe(firstArtifactContent);
+    expect(readFileSync(join(artifactRoot, secondArtifact.path), "utf8")).toBe(secondArtifactContent);
+    expect(readdirSync(artifactRoot).sort()).toEqual([firstAttemptDir, secondAttemptDir].sort());
+    expect(firstWorkspace.writtenArtifacts()).toEqual([firstArtifact]);
+    expect(secondWorkspace.writtenArtifacts()).toEqual([secondArtifact]);
 
-    workspace.cleanup();
+    firstWorkspace.cleanup();
+    secondWorkspace.cleanup();
   });
 
   it("rejects artifact writes after cleanup even when the workspace is kept", async () => {
@@ -112,9 +124,9 @@ describe("createVerificationWorkspace", () => {
     writeFileSync(evidencePath, "{}\n", "utf8");
 
     const outside = join(root, "outside");
-    mkdirSync(outside, { recursive: true });
-    mkdirSync(artifactRoot, { recursive: true });
-    symlinkSync(outside, join(artifactRoot, "reports"), "dir");
+    const attemptDir = `attempt-${basename(workspace.context.workspace.root).replace(/^verification-/, "")}`;
+    mkdirSync(join(artifactRoot, attemptDir), { recursive: true });
+    symlinkSync(outside, join(artifactRoot, attemptDir, "reports"), "dir");
 
     expect(() => workspace.context.writeArtifact({
       id: "artifact-symlink",
@@ -125,8 +137,8 @@ describe("createVerificationWorkspace", () => {
     })).toThrow(/symlink/i);
     expect(existsSync(join(outside, "result.json"))).toBe(false);
 
-    unlinkSync(join(artifactRoot, "reports"));
-    symlinkSync(join(root, "missing"), join(artifactRoot, "reports"), "dir");
+    unlinkSync(join(artifactRoot, attemptDir, "reports"));
+    symlinkSync(join(root, "missing"), join(artifactRoot, attemptDir, "reports"), "dir");
 
     expect(() => workspace.context.writeArtifact({
       id: "artifact-dangling",

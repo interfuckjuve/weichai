@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, resolve, sep } from "node:path";
 import { applyHunksStrict, newFileContent } from "@forexplore/workflow-core";
 import type { VerificationArtifact, VerificationInput, VerificationStrategyContext } from "./verification-types.js";
 import { assertVerificationInput } from "./verification-types.js";
@@ -25,6 +25,7 @@ export function createVerificationWorkspace(
   assertVerificationInput(input);
   mkdirSync(options.workspaceRoot, { recursive: true });
   const root = mkdtempSync(resolve(options.workspaceRoot, "verification-"));
+  const durablePrefix = `attempt-${basename(root).replace(/^verification-/, "")}`;
   const artifactRoot = resolve(options.artifactRoot);
   const sourceSideRoot = resolve(root, "source");
   const targetSideRoot = resolve(root, "target");
@@ -76,13 +77,14 @@ export function createVerificationWorkspace(
     deadlineAt: Number.POSITIVE_INFINITY,
     writeArtifact(artifact) {
       if (closed) throw new Error("Verification workspace is closed.");
-      const artifactPath = safeRelativePath(artifact.path, "Verification artifact path");
-      const source = safeExistingFile(agentRoot, artifactPath, "Verification artifact source");
-      const { destination, parent, rootRealPath } = safeArtifactDestination(artifactRoot, artifactPath);
+      const sourcePath = safeRelativePath(artifact.path, "Verification artifact path");
+      const durablePath = `${durablePrefix}/${sourcePath}`;
+      const source = safeExistingFile(agentRoot, sourcePath, "Verification artifact source");
+      const { destination, parent, rootRealPath } = safeArtifactDestination(artifactRoot, durablePath);
       const content = readFileSync(source);
       const stored: VerificationArtifact = {
         ...artifact,
-        path: artifactPath,
+        path: durablePath,
         contentHash: createHash("sha256").update(content).digest("hex"),
       };
       const temporary = resolve(parent, `.tmp-${process.pid}-${Date.now()}-${randomBytes(4).toString("hex")}`);
