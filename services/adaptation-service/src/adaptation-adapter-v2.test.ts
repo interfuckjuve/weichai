@@ -2,7 +2,10 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import type { RepositoryIngestionJsonValue } from "@forexplore/contracts";
-import { createVerificationResult } from "@forexplore/translation-verifier";
+import {
+  createVerificationResult,
+  type VerificationResult,
+} from "@forexplore/translation-verifier";
 import {
   evaluateValidationPolicyGate,
   validateAdaptationResultV2,
@@ -10,6 +13,7 @@ import {
 import {
   AdaptationAdapterV2,
   type MigrationAnalyzerV2,
+  type MigrationBehaviorVerificationInputV2,
   type MigrationBehaviorVerifierV2,
   type MigrationPlannerV2,
   type MigrationTranslatorV2,
@@ -93,24 +97,8 @@ const behaviorVerifier: MigrationBehaviorVerifierV2 = {
       ],
       { encoding: "utf8" },
     ).trim();
-    const descriptor = {
-      id: "forexplore.translation-verifier.differential",
-      version: "1.0.0",
-      displayName: "Fixture Differential Verifier",
-    };
-    return createVerificationResult({
-      schemaVersion: "1.0",
-      request: input.request,
-      analysisReport: input.analysis as unknown as RepositoryIngestionJsonValue,
-      migrationPlan: input.plan as unknown as RepositoryIngestionJsonValue,
-      translation: {
-        round: input.round,
-        generatedContent: input.translation.generatedContent,
-        files: input.files,
-        patchHash: input.patchHash,
-      },
-    }, descriptor, sourceOutput === targetOutput
-      ? {
+    return sourceOutput === targetOutput
+      ? validVerificationResult(input, {
           status: "pass",
           summary: "Controlled local TypeScript and Python fixture drivers returned identical outputs.",
           issues: [],
@@ -122,8 +110,8 @@ const behaviorVerifier: MigrationBehaviorVerifierV2 = {
             mediaType: "application/json",
           }],
           strategyReport: { sourceOutput, targetOutput },
-        }
-      : {
+        })
+      : validVerificationResult(input, {
           status: "fail",
           summary: `Differential output mismatch: ${sourceOutput} != ${targetOutput}`,
           issues: [{
@@ -134,9 +122,39 @@ const behaviorVerifier: MigrationBehaviorVerifierV2 = {
           }],
           artifacts: [],
           strategyReport: { sourceOutput, targetOutput },
-        }, () => adaptationV2TestNow);
+        });
   },
 };
+
+function validVerificationResult(
+  input: MigrationBehaviorVerificationInputV2,
+  output: Parameters<typeof createVerificationResult>[2] = {
+    status: "pass",
+    summary: "Verifier passed.",
+    issues: [],
+    artifacts: [],
+    strategyReport: {},
+  },
+): VerificationResult {
+  return createVerificationResult({
+    schemaVersion: "1.0",
+    request: input.request,
+    analysisReport: input.analysis as unknown as RepositoryIngestionJsonValue,
+    migrationPlan: input.plan as unknown as RepositoryIngestionJsonValue,
+    translation: {
+      round: input.round,
+      generatedContent: input.translation.generatedContent,
+      files: input.files,
+      patchHash: input.patchHash,
+    },
+  }, {
+    id: "forexplore.translation-verifier.differential",
+    version: "1.0.0",
+    displayName: "Fixture Differential Verifier",
+  }, output, () => adaptationV2TestNow);
+}
+
+type VerificationResultMutation = (result: VerificationResult) => VerificationResult;
 
 describe("AdaptationAdapterV2", () => {
   it("uses the full TypeScript bundle and adapter-owned Python facts to produce a validated patch", async () => {
@@ -210,5 +228,40 @@ describe("AdaptationAdapterV2", () => {
       allowed: false,
       blockers: [expect.objectContaining({ policyCheckId: "behavior-differential" })],
     });
+  });
+
+  it.each<[string, VerificationResultMutation]>([
+    ["stale subjectHash", (result) => ({ ...result, subjectHash: "f".repeat(64) })],
+    ["wrong round", (result) => ({ ...result, round: result.round + 1 })],
+    ["invalid contentHash", (result) => ({ ...result, contentHash: "f".repeat(64) })],
+  ])("fails closed when the behavior verifier returns a %s", async (_name, mutate) => {
+    const fixture = createAdaptationV2TestFixture();
+    const verifier: MigrationBehaviorVerifierV2 = {
+      providerId: "forexplore.translation-verifier.differential",
+      providerVersion: "1.0.0",
+      verify: vi.fn(async (input) => mutate(validVerificationResult(input))),
+    };
+    const adapter = new AdaptationAdapterV2({
+      runtimeCapabilities: fixture.serviceRuntime,
+      ...deterministicProviders(),
+      verifier,
+      now: () => adaptationV2TestNow,
+    });
+
+    const result = await adapter.adapt(fixture.request, fixture.validationContext);
+    const behavior = result.validation.find((record) =>
+      record.policyCheckId === "behavior-differential");
+
+    expect(behavior).toMatchObject({
+      status: "unverified",
+      required: true,
+      subjectHash: result.patchHash,
+      failureReason: "invalid-verifier-result",
+    });
+    expect(evaluateValidationPolicyGate(
+      fixture.request.validationPolicy,
+      result.validation,
+      { subjectHash: result.patchHash },
+    ).allowed).toBe(false);
   });
 });

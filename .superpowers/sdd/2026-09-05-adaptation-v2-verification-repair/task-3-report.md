@@ -64,3 +64,36 @@ npm run build --workspace @forexplore/adaptation-service
 ## 剩余关注
 
 - `VerificationResult` 到 `ValidationRecord` 当前只投影 status、summary、第一个 artifact path、第一个 issue kind；完整 repair consumption 留给后续任务使用 stable result。
+
+## Important Finding 修复证据
+
+### RED
+
+新增 `AdaptationAdapterV2` malformed verifier result table test，覆盖：
+
+- stale `subjectHash`。
+- wrong `round`。
+- invalid `contentHash`。
+
+RED 命令：
+
+```bash
+cd /Users/zen/Studio/projects/client/weichai/.worktrees/verification-strategy-framework
+npx vitest run services/adaptation-service/src/adaptation-adapter-v2.test.ts
+```
+
+RED 结果：3 个新增 case 失败；behavior `ValidationRecord` 仍为 `pass`，说明旧实现会接受 malformed full result。
+
+### GREEN
+
+修复后在 consumption boundary 重建 exact `VerificationInput`，并调用 `assertVerificationResult`。验证失败只转为当前 patch 的 `unverified` evidence，`failureReason` 固定为 `invalid-verifier-result`；verifier call 本身的异常不在该边界 catch。
+
+最终验证：
+
+```bash
+cd /Users/zen/Studio/projects/client/weichai/.worktrees/verification-strategy-framework
+npx vitest run services/adaptation-service/src/translation-verifier-v2-adapter.test.ts services/adaptation-service/src/adaptation-adapter-v2.test.ts services/adaptation-service/src/http-server.test.ts
+npm run build --workspace @forexplore/adaptation-service
+```
+
+结果：focused tests 为 3 个 test files、24 个 tests 通过；adaptation-service build 通过。

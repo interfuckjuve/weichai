@@ -6,12 +6,17 @@ import type {
   MaterializedMigrationRouteDescriptor,
   MigrationProviderRefV2,
   MigrationRuntimeCapabilitySnapshot,
+  RepositoryIngestionJsonValue,
   SourceImplementationBundleV2,
   TargetContextSnapshotV2,
   ValidationRecord,
   ValidationStatus,
 } from "@forexplore/contracts";
-import type { VerificationResult } from "@forexplore/translation-verifier";
+import {
+  assertVerificationResult,
+  type VerificationInput,
+  type VerificationResult,
+} from "@forexplore/translation-verifier";
 import {
   calculatePatchHashV2,
   materializeAdaptationResultV2,
@@ -360,8 +365,8 @@ export class AdaptationAdapterV2 implements CodeAdaptationPortV2 {
 
     const behaviorCheck = request.validationPolicy.checks.find((check) =>
       this.#verifier && providerMatches(check, this.#verifier));
-    const behaviorEvidence = behaviorCheck && this.#verifier
-      ? verificationResultEvidence(await this.#verifier.verify({
+    const behaviorInput: MigrationBehaviorVerificationInputV2 | undefined = behaviorCheck && this.#verifier
+      ? {
           request,
           analysis,
           plan,
@@ -369,7 +374,13 @@ export class AdaptationAdapterV2 implements CodeAdaptationPortV2 {
           round: 0,
           files,
           patchHash,
-        }, signal))
+        }
+      : undefined;
+    const behaviorEvidence = behaviorInput && this.#verifier
+      ? verificationResultEvidence(
+          await this.#verifier.verify(behaviorInput, signal),
+          behaviorVerificationInput(behaviorInput),
+        )
       : undefined;
     signal?.throwIfAborted();
     const compileEvidence = compiler
@@ -652,13 +663,50 @@ function indentGeneratedContent(content: string, indentation: string): string {
   }).join("\n");
 }
 
-function verificationResultEvidence(result: VerificationResult): MigrationValidationEvidenceV2 {
+function behaviorVerificationInput(input: MigrationBehaviorVerificationInputV2): VerificationInput {
   return {
-    status: result.status,
-    summary: result.summary,
-    ...(result.artifacts[0] === undefined ? {} : { artifactPath: result.artifacts[0].path }),
-    ...(result.issues[0] === undefined ? {} : { failureReason: result.issues[0].kind }),
+    schemaVersion: "1.0",
+    request: input.request,
+    analysisReport: input.analysis as unknown as RepositoryIngestionJsonValue,
+    migrationPlan: input.plan as unknown as RepositoryIngestionJsonValue,
+    translation: {
+      round: input.round,
+      generatedContent: input.translation.generatedContent,
+      files: input.files,
+      patchHash: input.patchHash,
+    },
   };
+}
+
+function verificationResultEvidence(
+  result: VerificationResult,
+  input: VerificationInput,
+): MigrationValidationEvidenceV2 {
+  try {
+    const verified = assertVerificationResult(result, input, {
+      id: result.strategyId,
+      version: result.strategyVersion,
+      displayName: "Behavior verifier result",
+    });
+    return {
+      status: verified.status,
+      summary: verified.summary,
+      ...(verified.artifacts[0] === undefined ? {} : { artifactPath: verified.artifacts[0].path }),
+      ...(verified.issues[0] === undefined ? {} : { failureReason: verified.issues[0].kind }),
+    };
+  } catch (error) {
+    return {
+      status: "unverified",
+      summary: `Behavior verifier returned an invalid result for the current patch: ${messageOf(error)}`,
+      failureReason: "invalid-verifier-result",
+    };
+  }
+}
+
+function messageOf(error: unknown): string {
+  return error instanceof Error && error.message.trim().length > 0
+    ? error.message
+    : "unknown verification result validation error";
 }
 
 function compilerEvidence(result: CompileResult, command: string): MigrationValidationEvidenceV2 {
