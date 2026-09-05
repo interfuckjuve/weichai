@@ -400,10 +400,12 @@ describe("AdaptationAdapterV2", () => {
     const route = fixture.serviceRuntime.routes.find((candidate) => candidate.id === fixture.request.route.routeId)!;
     const compilerStage = route.stages.find((stage) => stage.stage === "compile-validation")!;
     const compilerCalls: string[] = [];
+    const callOrder: string[] = [];
     const compiler = {
       capability: () => ({ providerId: compilerStage.providerId, providerVersion: compilerStage.providerVersion }),
       validate: () => {
         compilerCalls.push("validate");
+        callOrder.push("compile");
         return compilerCalls.length === 1
           ? { status: "fail" as const, summary: "syntax error", failureReason: "compiler-failed" }
           : { status: "pass" as const, summary: "compiled" };
@@ -416,7 +418,7 @@ describe("AdaptationAdapterV2", () => {
     }));
     const verifier: MigrationBehaviorVerifierV2 = {
       ...behaviorVerifier,
-      verifyWithReceipt: vi.fn(async (input) => validVerificationResult(input)),
+      verifyWithReceipt: vi.fn(async (input) => { callOrder.push("verify"); return validVerificationResult(input); }),
     };
     const result = await new AdaptationAdapterV2({
       runtimeCapabilities: fixture.serviceRuntime,
@@ -426,11 +428,13 @@ describe("AdaptationAdapterV2", () => {
       now: () => adaptationV2TestNow,
     }).adapt(fixture.request, fixture.validationContext);
 
+    expect(callOrder).toEqual(["compile", "verify", "compile", "verify"]);
     expect(providers.translator.repair).toHaveBeenCalledOnce();
     const feedback = providers.translator.repair.mock.calls[0]![4];
     expect(feedback.issues).toEqual([expect.objectContaining({
       kind: "compile-failure",
       message: "syntax error",
+      evidenceArtifactIds: [],
     })]);
     expect(feedback.validationRecordIds).toEqual(["validation:target-compile"]);
     expect(feedback.inputPatchHash).toBe(result.repairRounds[0]!.inputPatchHash);

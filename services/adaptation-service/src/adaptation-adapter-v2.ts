@@ -366,7 +366,7 @@ export class AdaptationAdapterV2 implements CodeAdaptationPortV2 {
         record.required && record.status === "unverified");
       const failed = attempt.validation.filter((record) => record.required && record.status === "fail");
       if (requiredUnverified || failed.length === 0 || repairRounds.length >= MAX_MIGRATION_REPAIR_ROUNDS) break;
-      const issues = repairIssues(attempt, failed);
+      const issues = repairIssues(attempt, failed, this.#compiler.capability(request.target.entity.languageId));
       const nextRound = repairRounds.length + 1;
       const repaired = validateTranslation(await this.#translator.repair(
         evidenceInput, analysis, plan, attempt.translation,
@@ -453,6 +453,14 @@ export class AdaptationAdapterV2 implements CodeAdaptationPortV2 {
 
     const behaviorCheck = request.validationPolicy.checks.find((check) =>
       this.#verifier && providerMatches(check, this.#verifier));
+    const compileEvidence = compiler
+      ? this.#compiler.validate(
+          request.target.entity.languageId,
+          translation.generatedContent,
+          request.target.entity.name,
+        )
+      : undefined;
+    signal?.throwIfAborted();
     const behaviorInput: MigrationBehaviorVerificationInputV2 | undefined = behaviorCheck && this.#verifier
       ? {
           request,
@@ -474,15 +482,6 @@ export class AdaptationAdapterV2 implements CodeAdaptationPortV2 {
           this.#verifier.strategyDescriptor,
         )
       : undefined;
-    signal?.throwIfAborted();
-    const compileEvidence = compiler
-      ? this.#compiler.validate(
-          request.target.entity.languageId,
-          translation.generatedContent,
-          request.target.entity.name,
-        )
-      : undefined;
-
     return {
       validation: request.validationPolicy.checks.map((check): ValidationRecord => {
       const evidence = providerMatches(check, targetAdapter)
@@ -852,12 +851,13 @@ function providerMatches(
 function repairIssues(
   attempt: MigrationAttemptV2,
   failed: ValidationRecord[],
+  compiler?: ProviderIdentity,
 ): MigrationRepairIssueV2[] {
   const issues: MigrationRepairIssueV2[] = attempt.verification?.result.status === "fail"
     ? attempt.verification.result.issues.map((issue) => ({ ...structuredClone(issue), evidenceArtifactIds: issue.evidenceArtifactIds.length > 0 ? issue.evidenceArtifactIds : attempt.verification!.result.artifacts.map((artifact) => artifact.id) }))
     : [];
   for (const record of failed) {
-    if (isCompilerFailure(record)) {
+    if (compiler && isCompilerFailure(record, compiler)) {
       issues.push({
         id: `compile-failure:${record.id}`,
         kind: "compile-failure",
@@ -869,9 +869,10 @@ function repairIssues(
   return issues;
 }
 
-function isCompilerFailure(record: ValidationRecord): boolean {
-  return (record.phase === "compile" || record.phase === "syntax") &&
-    /compiler|compile/i.test(record.verifierId ?? "");
+function isCompilerFailure(record: ValidationRecord, compiler: ProviderIdentity): boolean {
+  return record.verifierId === compiler.providerId &&
+    record.verifierVersion === compiler.providerVersion &&
+    (record.phase === "compile" || record.phase === "syntax");
 }
 
 function providerRef(provider: ProviderIdentity): MigrationProviderRefV2 {
