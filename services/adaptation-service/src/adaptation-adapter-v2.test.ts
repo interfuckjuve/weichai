@@ -18,6 +18,7 @@ import {
   type MigrationAnalyzerV2,
   type MigrationBehaviorVerificationInputV2,
   type MigrationBehaviorVerifierV2,
+  type MigrationPlannerV2,
   type MigrationTranslatorV2,
   type MigrationTranslationV2,
 } from "./adaptation-adapter-v2";
@@ -357,7 +358,13 @@ describe("AdaptationAdapterV2", () => {
   });
   it("does not repair required unverified behavior", async () => {
     const fixture = createAdaptationV2TestFixture();
-    const verifier: MigrationBehaviorVerifierV2 = { ...behaviorVerifier, verify: vi.fn(async (input) => ({ ...validVerificationResult(input), status: "unverified" })) };
+    const verifier: MigrationBehaviorVerifierV2 = { ...behaviorVerifier, verify: vi.fn(async (input) => validVerificationResult(input, {
+      status: "unverified",
+      summary: "Required behavior evidence is unavailable.",
+      issues: [],
+      artifacts: [],
+      strategyReport: {},
+    })) };
     const providers = deterministicProviders();
     providers.translator.repair = vi.fn();
     const result = await new AdaptationAdapterV2({ runtimeCapabilities: fixture.serviceRuntime, ...providers, verifier }).adapt(fixture.request, fixture.validationContext);
