@@ -388,6 +388,56 @@ describe("AdaptationAdapterV2", () => {
     try { await new AdaptationAdapterV2({ runtimeCapabilities: fixture.serviceRuntime, ...providers, verifier }).adapt(fixture.request, fixture.validationContext); } catch (error) { expect(error).toBe(abort); }
   });
 
+  it("repairs an available compiler failure with normalized feedback", async () => {
+    const fixture = createAdaptationV2TestFixture();
+    const route = fixture.serviceRuntime.routes.find((candidate) => candidate.id === fixture.request.route.routeId)!;
+    const compilerStage = route.stages.find((stage) => stage.stage === "compile-validation")!;
+    const compilerCalls: string[] = [];
+    const compiler = {
+      capability: () => ({ providerId: compilerStage.providerId, providerVersion: compilerStage.providerVersion }),
+      validate: () => {
+        compilerCalls.push("validate");
+        return compilerCalls.length === 1
+          ? { status: "fail" as const, summary: "syntax error", failureReason: "compiler-failed" }
+          : { status: "pass" as const, summary: "compiled" };
+      },
+    };
+    const providers = deterministicProviders();
+    providers.translator.repair = vi.fn(async (_input, _analysis, _plan, previous) => ({
+      ...previous,
+      generatedContent: previous.generatedContent + "\n# repaired",
+    }));
+    const verifier: MigrationBehaviorVerifierV2 = {
+      ...behaviorVerifier,
+      verify: vi.fn(async (input) => validVerificationResult(input)),
+    };
+    const result = await new AdaptationAdapterV2({
+      runtimeCapabilities: fixture.serviceRuntime,
+      ...providers,
+      verifier,
+      compiler,
+      now: () => adaptationV2TestNow,
+    }).adapt(fixture.request, fixture.validationContext);
+
+    expect(providers.translator.repair).toHaveBeenCalledOnce();
+    const feedback = providers.translator.repair.mock.calls[0]![4];
+    expect(feedback.issues).toEqual([expect.objectContaining({
+      kind: "compile-failure",
+      message: "syntax error",
+    })]);
+    expect(feedback.validationRecordIds).toEqual(["validation:target-compile"]);
+    expect(feedback.inputPatchHash).toBe(result.repairRounds[0]!.inputPatchHash);
+    expect(JSON.stringify(feedback)).not.toContain("strategyReport");
+    expect(result.validation.find((record) => record.policyCheckId === "target-compile")).toMatchObject({
+      status: "pass",
+      subjectHash: result.patchHash,
+    });
+    expect(result.repairRounds[0]).toMatchObject({
+      triggerValidationRecords: expect.arrayContaining([expect.objectContaining({ policyCheckId: "target-compile", status: "fail" })]),
+      inputPatchHash: expect.any(String),
+      outputPatchHash: result.patchHash,
+    });
+  });
   it("passes exact round, hash, and content to every verifier attempt", async () => {
     const fixture = createAdaptationV2TestFixture();
     const inputs: MigrationBehaviorVerificationInputV2[] = [];

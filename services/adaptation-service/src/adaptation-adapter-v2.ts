@@ -389,7 +389,10 @@ export class AdaptationAdapterV2 implements CodeAdaptationPortV2 {
         triggerValidationRecords: structuredClone(attempt.validation),
         issues,
         ...(attempt.verification ? { verificationResultHash: attempt.verification.contentHash } : {}),
-        verifierArtifacts: attempt.verification?.artifacts.map(({ id, kind, path, contentHash, mediaType }) => ({ id, kind, path, contentHash, mediaType })) ?? [],
+        verifierArtifacts: [
+          ...(attempt.verification?.artifacts.map(({ id, kind, path, contentHash, mediaType }) => ({ id, kind, path, contentHash, mediaType })) ?? []),
+          ...failed.filter((record) => record.policyCheckId === "target-compile").map((record) => ({ id: `compile-failure:${record.id}`, kind: "compiler-diagnostic", path: ".forexplore/evidence/compiler-diagnostics.txt", contentHash: "0".repeat(64), mediaType: "text/plain" })),
+        ],
         provider: providerRef(this.#translator),
         createdAt: this.#now(),
       });
@@ -842,11 +845,11 @@ function repairIssues(
     ? attempt.verification.issues.map((issue) => ({ ...structuredClone(issue), evidenceArtifactIds: issue.evidenceArtifactIds.length > 0 ? issue.evidenceArtifactIds : attempt.verification!.artifacts.map((artifact) => artifact.id) }))
     : [];
   for (const record of failed) {
-    if (record.phase === "compile") issues.push({
+    if (record.policyCheckId === "target-compile") issues.push({
       id: `compile-failure:${record.id}`,
       kind: "compile-failure",
       message: record.summary,
-      evidenceArtifactIds: [],
+      evidenceArtifactIds: [`compile-failure:${record.id}`],
     });
   }
   return issues;
