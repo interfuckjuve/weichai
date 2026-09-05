@@ -238,11 +238,13 @@ function validateIssue(issue: VerificationIssue): VerificationIssue {
   };
 }
 
+function requireVerificationArray<T>(value: readonly T[], label: string): T[];
+function requireVerificationArray(value: unknown, label: string): unknown[];
 function requireVerificationArray(value: unknown, label: string): unknown[] {
   if (!Array.isArray(value)) {
     throw new Error(`${label} must be an array.`);
   }
-  return value;
+  return [...value];
 }
 
 function validateArtifact(artifact: VerificationArtifact): VerificationArtifact {

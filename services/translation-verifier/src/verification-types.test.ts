@@ -21,7 +21,7 @@ function input(): VerificationInput {
       path: "src/fixture.ts",
       additions: 1,
       deletions: 0,
-      expectedAbsent: true,
+      expectedAbsent: true as const,
       hunks: [
         {
           header: "@@ -0,0 +1,1 @@",
