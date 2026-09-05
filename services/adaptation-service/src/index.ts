@@ -26,6 +26,7 @@ export type {
   DeepSeekMigrationAgentsV2Options,
   MigrationAnalysisV2,
   MigrationAnalyzerV2,
+  MigrationBehaviorVerificationInputV2,
   MigrationBehaviorVerifierV2,
   MigrationCompilerV2,
   MigrationEvidenceInputV2,
@@ -36,6 +37,8 @@ export type {
   MigrationTranslatorV2,
   MigrationValidationEvidenceV2,
 } from "./adaptation-adapter-v2";
+
+export { TranslationVerifierV2Adapter } from "./translation-verifier-v2-adapter";
 
 export { BackfillAdapter } from "./backfill-adapter";
 export type {

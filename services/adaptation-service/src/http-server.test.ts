@@ -6,6 +6,7 @@ import type {
   ModuleMigrationProposal,
   MigrationRuntimeCapabilitySnapshot,
   RepositoryArchitectureRequest,
+  RepositoryIngestionJsonValue,
   RepositoryStaticAnalysis,
   SearchCandidate,
 } from '@forexplore/contracts';
@@ -18,6 +19,7 @@ import {
   materializeMigrationRuntimeCapabilitySnapshot,
   validateAdaptationResultV2,
 } from '@forexplore/workflow-core';
+import { createVerificationResult } from '@forexplore/translation-verifier';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createHttpServer,
@@ -225,11 +227,34 @@ function deterministicAdapterV2(
     verifier: {
       providerId: 'forexplore.translation-verifier.differential',
       providerVersion: '1.0.0',
-      verify: async () => ({
+      verify: async (input) => createVerificationResult({
+        schemaVersion: '1.0',
+        request: input.request,
+        analysisReport: input.analysis as unknown as RepositoryIngestionJsonValue,
+        migrationPlan: input.plan as unknown as RepositoryIngestionJsonValue,
+        translation: {
+          round: input.round,
+          generatedContent: input.translation.generatedContent,
+          files: input.files,
+          patchHash: input.patchHash,
+        },
+      }, {
+        id: 'forexplore.translation-verifier.differential',
+        version: '1.0.0',
+        displayName: 'Fixture Differential Verifier',
+      }, {
         status: 'pass',
         summary: 'Controlled local test-fixture verifier passed.',
-        artifactPath: '.forexplore/evidence/http-v2.json',
-      }),
+        issues: [],
+        artifacts: [{
+          id: 'http-v2-report',
+          kind: 'report',
+          path: '.forexplore/evidence/http-v2.json',
+          contentHash: 'a'.repeat(64),
+          mediaType: 'application/json',
+        }],
+        strategyReport: { fixture: true },
+      }, () => adaptationV2TestNow),
     },
     compiler: {
       capability: (languageId) => languageId === 'python'

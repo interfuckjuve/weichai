@@ -1,6 +1,8 @@
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
+import type { RepositoryIngestionJsonValue } from "@forexplore/contracts";
+import { createVerificationResult } from "@forexplore/translation-verifier";
 import {
   evaluateValidationPolicyGate,
   validateAdaptationResultV2,
@@ -87,22 +89,52 @@ const behaviorVerifier: MigrationBehaviorVerifierV2 = {
       python,
       [
         "-c",
-        `${input.generatedContent}\nimport json\nprint(json.dumps([normalize(v) for v in ${JSON.stringify(samples)}], separators=(',', ':')))`,
+        `${input.translation.generatedContent}\nimport json\nprint(json.dumps([normalize(v) for v in ${JSON.stringify(samples)}], separators=(',', ':')))`,
       ],
       { encoding: "utf8" },
     ).trim();
-    return sourceOutput === targetOutput
+    const descriptor = {
+      id: "forexplore.translation-verifier.differential",
+      version: "1.0.0",
+      displayName: "Fixture Differential Verifier",
+    };
+    return createVerificationResult({
+      schemaVersion: "1.0",
+      request: input.request,
+      analysisReport: input.analysis as unknown as RepositoryIngestionJsonValue,
+      migrationPlan: input.plan as unknown as RepositoryIngestionJsonValue,
+      translation: {
+        round: input.round,
+        generatedContent: input.translation.generatedContent,
+        files: input.files,
+        patchHash: input.patchHash,
+      },
+    }, descriptor, sourceOutput === targetOutput
       ? {
           status: "pass",
           summary: "Controlled local TypeScript and Python fixture drivers returned identical outputs.",
-          command: "node/tsx + python controlled local test-fixture drivers",
-          artifactPath: ".forexplore/evidence/typescript-python-normalize.json",
+          issues: [],
+          artifacts: [{
+            id: "typescript-python-normalize-report",
+            kind: "report",
+            path: ".forexplore/evidence/typescript-python-normalize.json",
+            contentHash: "a".repeat(64),
+            mediaType: "application/json",
+          }],
+          strategyReport: { sourceOutput, targetOutput },
         }
       : {
           status: "fail",
           summary: `Differential output mismatch: ${sourceOutput} != ${targetOutput}`,
-          failureReason: "behavioral-divergence",
-        };
+          issues: [{
+            id: "behavioral-divergence",
+            kind: "behavioral-divergence",
+            message: "Controlled local fixture drivers returned different outputs.",
+            evidenceArtifactIds: [],
+          }],
+          artifacts: [],
+          strategyReport: { sourceOutput, targetOutput },
+        }, () => adaptationV2TestNow);
   },
 };
 

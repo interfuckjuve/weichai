@@ -11,6 +11,7 @@ import type {
   ValidationRecord,
   ValidationStatus,
 } from "@forexplore/contracts";
+import type { VerificationResult } from "@forexplore/translation-verifier";
 import {
   calculatePatchHashV2,
   materializeAdaptationResultV2,
@@ -119,18 +120,21 @@ export interface MigrationValidationEvidenceV2 {
   failureReason?: string;
 }
 
+export interface MigrationBehaviorVerificationInputV2 {
+  request: AdaptationRequestV2;
+  analysis: MigrationAnalysisV2;
+  plan: MigrationPlanV2;
+  translation: MigrationTranslationV2;
+  round: number;
+  files: FilePatch[];
+  patchHash: string;
+}
+
 export interface MigrationBehaviorVerifierV2 extends ProviderIdentity {
   verify(
-    input: {
-      request: AdaptationRequestV2;
-      analysis: MigrationAnalysisV2;
-      plan: MigrationPlanV2;
-      generatedContent: string;
-      files: FilePatch[];
-      patchHash: string;
-    },
+    input: MigrationBehaviorVerificationInputV2,
     signal?: AbortSignal,
-  ): Promise<MigrationValidationEvidenceV2>;
+  ): Promise<VerificationResult>;
 }
 
 export interface MigrationCompilerV2 {
@@ -323,7 +327,7 @@ export class AdaptationAdapterV2 implements CodeAdaptationPortV2 {
       route,
       analysis,
       plan,
-      translation.generatedContent,
+      translation,
       files,
       patchHash,
       targetEngineeringProvider,
@@ -344,7 +348,7 @@ export class AdaptationAdapterV2 implements CodeAdaptationPortV2 {
     route: MaterializedMigrationRouteDescriptor,
     analysis: MigrationAnalysisV2,
     plan: MigrationPlanV2,
-    generatedContent: string,
+    translation: MigrationTranslationV2,
     files: FilePatch[],
     patchHash: string,
     targetAdapter: ProviderIdentity,
@@ -357,20 +361,21 @@ export class AdaptationAdapterV2 implements CodeAdaptationPortV2 {
     const behaviorCheck = request.validationPolicy.checks.find((check) =>
       this.#verifier && providerMatches(check, this.#verifier));
     const behaviorEvidence = behaviorCheck && this.#verifier
-      ? await this.#verifier.verify({
+      ? verificationResultEvidence(await this.#verifier.verify({
           request,
           analysis,
           plan,
-          generatedContent,
+          translation,
+          round: 0,
           files,
           patchHash,
-        }, signal)
+        }, signal))
       : undefined;
     signal?.throwIfAborted();
     const compileEvidence = compiler
       ? this.#compiler.validate(
           request.target.entity.languageId,
-          generatedContent,
+          translation.generatedContent,
           request.target.entity.name,
         )
       : undefined;
@@ -645,6 +650,15 @@ function indentGeneratedContent(content: string, indentation: string): string {
     const current = line.match(/^\s*/)?.[0].length ?? 0;
     return `${indentation}${line.slice(Math.min(current, baseIndent))}`.trimEnd();
   }).join("\n");
+}
+
+function verificationResultEvidence(result: VerificationResult): MigrationValidationEvidenceV2 {
+  return {
+    status: result.status,
+    summary: result.summary,
+    ...(result.artifacts[0] === undefined ? {} : { artifactPath: result.artifacts[0].path }),
+    ...(result.issues[0] === undefined ? {} : { failureReason: result.issues[0].kind }),
+  };
 }
 
 function compilerEvidence(result: CompileResult, command: string): MigrationValidationEvidenceV2 {

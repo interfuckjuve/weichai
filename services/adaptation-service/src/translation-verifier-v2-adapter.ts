@@ -1,0 +1,31 @@
+import type { RepositoryIngestionJsonValue } from "@forexplore/contracts";
+import type { VerificationResult, VerificationService } from "@forexplore/translation-verifier";
+import type {
+  MigrationBehaviorVerificationInputV2,
+  MigrationBehaviorVerifierV2,
+} from "./adaptation-adapter-v2";
+
+export class TranslationVerifierV2Adapter implements MigrationBehaviorVerifierV2 {
+  readonly providerId = "forexplore.translation-verifier.differential";
+  readonly providerVersion = "1.0.0";
+
+  constructor(private readonly service: Pick<VerificationService, "verify">) {}
+
+  verify(
+    input: MigrationBehaviorVerificationInputV2,
+    signal?: AbortSignal,
+  ): Promise<VerificationResult> {
+    return this.service.verify({
+      schemaVersion: "1.0",
+      request: input.request,
+      analysisReport: input.analysis as unknown as RepositoryIngestionJsonValue,
+      migrationPlan: input.plan as unknown as RepositoryIngestionJsonValue,
+      translation: {
+        round: input.round,
+        generatedContent: input.translation.generatedContent,
+        files: input.files,
+        patchHash: input.patchHash,
+      },
+    }, {}, signal);
+  }
+}
