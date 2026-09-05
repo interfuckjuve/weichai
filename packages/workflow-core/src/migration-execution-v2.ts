@@ -1669,7 +1669,7 @@ function canonicalRepairRounds(
     );
     const expectedTriggerPolicyCheckIds = policy.checks.map((check) => check.id).sort((left, right) => left.localeCompare(right));
     const actualTriggerPolicyCheckIds = triggerValidationRecords
-      .map((record) => record.policyCheckId)
+      .map((record): string => record.policyCheckId!)
       .sort((left, right) => left.localeCompare(right));
     if (canonicalJson(actualTriggerPolicyCheckIds) !== canonicalJson(expectedTriggerPolicyCheckIds)) {
       throw new Error(`Repair round ${round.round} trigger validation snapshot must include exactly one record for every policy check.`);
