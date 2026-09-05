@@ -78,6 +78,8 @@ The dependency direction remains one way:
 ```text
 @forexplore/contracts
        ^
+@forexplore/workflow-core
+       ^
 @forexplore/translation-verifier
        ^
 @forexplore/adaptation-service
@@ -85,9 +87,11 @@ The dependency direction remains one way:
 VS Code Extension / HTTP adapters
 ```
 
-The generic verification API remains in `@forexplore/translation-verifier`. Existing V2 wire
-artifacts and `ValidationRecord` remain in `@forexplore/contracts`. The adaptation service imports
-the verifier package through its public export and does not import verifier source internals.
+The generic verification API remains in `@forexplore/translation-verifier`. The verifier reuses
+`workflow-core`'s language-neutral `applyHunksStrict`, `newFileContent`, and canonical JSON helpers
+instead of duplicating patch or content-addressing logic. Existing V2 wire artifacts and
+`ValidationRecord` remain in `@forexplore/contracts`. The adaptation service imports the verifier
+package through its public export and does not import verifier source internals.
 
 ## 6. Unified Input
 
@@ -451,10 +455,11 @@ separate from deterministic local acceptance tests.
 The first implementation checkpoint is the smallest runnable vertical slice:
 
 1. Public input/result/issue/artifact types in `translation-verifier`.
-2. Static provider factory.
-3. `VerificationService` with temporary workspace ownership and result validation.
-4. `DifferentialSmokeStrategy` adapter over existing `runSmoke`.
-5. CLI strategy selection and factory/service tests.
+2. A package dependency on `@forexplore/workflow-core` for strict patch application and canonical JSON.
+3. Static provider factory.
+4. `VerificationService` with temporary workspace ownership and result validation.
+5. `DifferentialSmokeStrategy` adapter over existing `runSmoke`.
+6. CLI strategy selection and factory/service tests.
 
 After this slice runs and its focused tests pass, implementation stops for user confirmation as
 required by the repository delivery process.
