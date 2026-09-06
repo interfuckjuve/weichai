@@ -703,7 +703,7 @@ export class SeekDbIndexStore implements IndexStore {
     if (supportsAsyncIndex) {
       const [definitions] = await this.pool.query<RowDataPacket[]>(`SHOW CREATE TABLE ${this.#tables.searchDocuments}`);
       if (!/sync_mode\s*=\s*'?immediate'?/i.test(String(definitions[0]?.['Create Table'] ?? ''))) {
-        throw new Error('Existing asynchronous search index requires a data-preserving migration. Run scripts/migrate-seekdb-vector-index.ts after reviewing its temporary write fence. Existing analysis data is retained.');
+        throw new Error('Existing search index uses an incompatible asynchronous configuration. If the old analysis data is disposable, run scripts/reset-code-intelligence-index.ts --database <database> --apply, then reload the extension and reanalyze the selected repositories.');
       }
     }
     if (this.#persistEmbeddings) await this.pool.query(`CREATE TABLE IF NOT EXISTS ${this.#tables.embeddingCache} (

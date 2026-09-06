@@ -2,7 +2,7 @@
 
 回退基线：`c701acb`，第一阶段提交：`fa4cdae`，实施分支：`main`。验收定义见 [验收标准](module-intelligence-acceptance.zh-CN.md)。未完成项不视为验收通过。
 
-旧库兼容问题的后续维护方案见 [保留数据的索引迁移](seekdb-index-migration.zh-CN.md)。该工具支持在原数据库内保留数据迁移；不再把更换数据库作为唯一恢复路径。
+用户明确不保留旧数据后，恢复方案改为 [丢弃旧索引并重新初始化](seekdb-index-reset.zh-CN.md)。保留数据迁移及写入拦截工具已撤下，使用原数据库名重建空索引。
 
 ## 已实现
 
