@@ -2,9 +2,7 @@ import { describe, expect, it } from "vitest";
 import * as verifier from "./index.js";
 
 const {
-  buildSmokeTaskPrompt,
   createDefaultVerificationService,
-  runSmoke,
   translationVerifierSchemaVersion,
   VerificationService,
   VerificationStrategyFactory,
@@ -15,9 +13,10 @@ describe("translation-verifier entry", () => {
     expect(translationVerifierSchemaVersion).toBe("1.0");
   });
 
-  it("exposes the smoke differential module API(runSmoke + prompt builder)", () => {
-    expect(typeof runSmoke).toBe("function");
-    expect(typeof buildSmokeTaskPrompt).toBe("function");
+  it("keeps smoke internals out of the framework API", () => {
+    expect(verifier).not.toHaveProperty("runSmoke");
+    expect(verifier).not.toHaveProperty("buildSmokeTaskPrompt");
+    expect(verifier).not.toHaveProperty("evaluateSmokeReport");
   });
 
   it("exposes the verification strategy framework API", () => {

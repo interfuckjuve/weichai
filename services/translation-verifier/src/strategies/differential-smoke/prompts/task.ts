@@ -1,15 +1,15 @@
 /**
  * 「冒烟差分验证」自主任务提示词(纯函数,可单测)。
  *
- * 报告契约内嵌 SmokeReport(src/smoke-types.ts)精确字段 + 精简示例 JSON;
+ * 报告契约内嵌 SmokeReport(types.ts)精确字段 + 精简示例 JSON;
  * claude 自主完成后把报告写入工作目录 report.json,写完即结束。
  *
  * mode(默认 "verify-only"):verify-only 禁止目标侧修复(rounds 恒为 0、
  * targetFiles 恒为空,converged 只表示所有差异得到决定性裁决);需要诊断/修复
  * 实验的 E2E 必须显式选择 diagnostic-repair(保留目标修复轮措辞)。
- * 命令代理/路径等运行期上下文由 runner 在宿主侧追加(见 smoke-runner.ts)。
+ * 命令代理/路径等运行期上下文由 runner 在宿主侧追加(见 runner.ts)。
  */
-import type { SideFile, SmokeMode, VerifierLanguage } from "../../smoke-types.js";
+import type { SideFile, SmokeMode, VerifierLanguage } from "../types.js";
 
 export interface SmokeTaskInput {
   requirement: string;

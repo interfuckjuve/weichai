@@ -1,8 +1,8 @@
 import { rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { createLogger, type Logger } from "./logger.js";
-import { runManagedProcess } from "./process-tree.js";
+import { createLogger, type Logger } from "../../logger.js";
+import { runManagedProcess } from "../../process-tree.js";
 
 /** claude 会话思考投入级别(low 快速决策;默认由模型/CLI 决定,历史实测 high)。 */
 export type EffortLevel = "low" | "medium" | "high" | "xhigh" | "max";

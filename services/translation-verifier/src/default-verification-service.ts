@@ -1,4 +1,4 @@
-import { createDifferentialSmokeProvider, type DifferentialSmokeStrategyOptions, DIFFERENTIAL_SMOKE_STRATEGY } from "./strategies/differential-smoke-strategy.js";
+import { createDifferentialSmokeProvider, type DifferentialSmokeStrategyOptions, DIFFERENTIAL_SMOKE_STRATEGY } from "./strategies/differential-smoke/strategy.js";
 import { VerificationService, type VerificationServiceOptions } from "./verification-service.js";
 import { VerificationStrategyFactory } from "./verification-strategy-factory.js";
 

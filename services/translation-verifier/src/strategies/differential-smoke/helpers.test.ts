@@ -10,6 +10,6 @@ describe("smoke helper paths", () => {
   it("resolves package, workspace and verifier-command paths", () => {
     expect(packageRoot.endsWith("services/translation-verifier")).toBe(true);
     expect(defaultWorkspaceRoot()).toBe(resolve(packageRoot, "test-results"));
-    expect(VERIFIER_COMMAND_ENTRY).toBe(join(packageRoot, "src", "verifier-command.ts"));
+    expect(VERIFIER_COMMAND_ENTRY).toBe(join(packageRoot, "src", "strategies", "differential-smoke", "verifier-command.ts"));
   });
 });

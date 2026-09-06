@@ -218,9 +218,12 @@ describe("VerificationService", () => {
   });
 
   it("turns result identity mismatches and timeouts into unverified framework errors", async () => {
-    const wrongResult = serviceWith([provider("first", async (inputValue) => ({
-      ...okResult(inputValue, descriptor("first")),
-      subjectHash: "f".repeat(64),
+    const wrongResult = serviceWith([provider("first", async () => ({
+      status: "fail",
+      summary: "invalid",
+      issues: [],
+      artifacts: [],
+      strategyReport: {},
     }))], "first");
     const mismatch = await wrongResult.verify(input());
     expect(mismatch.status).toBe("unverified");

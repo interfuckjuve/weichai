@@ -1,16 +1,16 @@
 /**
  * 请求级验证工作区文件基线(shared standard-library helpers)。
  *
- * 类型 WorkspaceBaseline 声明在 smoke-types.ts(Task 1);本模块提供其唯一
+ * 类型 WorkspaceBaseline 声明在 types.ts;本模块提供其唯一
  * 文件系统实现:创建时哈希 workspace 内全部受保护文件,写入 baseline.json;
  * 断言时复查哈希,并只允许专用 runner 根、登记的产物目录和固定可变文件出现
- * 新内容。构建命令代理(Task 3)与 smoke-runner(Task 4)都以本模块为唯一事实源,
+ * 新内容。构建命令代理与 runner 都以本模块为唯一事实源,
  * adaptation-service 不得重复实现。
  */
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
-import type { WorkspaceBaseline } from "./smoke-types.js";
+import type { WorkspaceBaseline } from "./types.js";
 
 /** 固定 runner 根(相对 workspaceRoot;双侧 runner 是唯一可写源码区)。 */
 const CANONICAL_RUNNER_ROOTS = [

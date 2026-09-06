@@ -3,9 +3,9 @@ import {
   validCommandEvidence,
   validSmokeCase,
   validSmokeReport,
-} from "./smoke-test-fixtures.js";
-import type { CommandEvidence, SmokeReport } from "./smoke-types.js";
-import { evaluateSmokeReport } from "./smoke-evaluation.js";
+} from "./test-fixtures.js";
+import type { CommandEvidence, SmokeReport } from "./types.js";
+import { evaluateSmokeReport } from "./evaluation.js";
 
 describe("evaluateSmokeReport", () => {
   it("只有 translation-bug 产生 fail", () => {

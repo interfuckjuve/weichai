@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildSmokeTaskPrompt, type SmokeTaskInput } from "./smoke-task.js";
+import { buildSmokeTaskPrompt, type SmokeTaskInput } from "./task.js";
 
 /** mime-util 场景夹具:Java 源 + C# 目标,双侧 root 与文件齐全。 */
 const baseInput: SmokeTaskInput = {

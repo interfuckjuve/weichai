@@ -5,15 +5,15 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { validSmokeCase, validSmokeReport } from "../smoke-test-fixtures.js";
-import type { SmokeResult } from "./smoke-runner.js";
-import { createDefaultVerificationService } from "../default-verification-service.js";
+import { validSmokeCase, validSmokeReport } from "./test-fixtures.js";
+import type { SmokeResult } from "./runner.js";
+import { createDefaultVerificationService } from "../../default-verification-service.js";
 import {
   DIFFERENTIAL_SMOKE_STRATEGY,
   DifferentialSmokeStrategy,
   type RunSmokeImpl,
-} from "./differential-smoke-strategy.js";
-import type { VerificationArtifact, VerificationInput, VerificationStrategyContext } from "../verification-types.js";
+} from "./strategy.js";
+import type { VerificationArtifact, VerificationInput, VerificationStrategyContext } from "../../verification-types.js";
 
 let root: string;
 
@@ -26,7 +26,7 @@ afterEach(() => {
 });
 
 describe("DifferentialSmokeStrategy", () => {
-  it("maps the existing smoke result into the stable envelope", async () => {
+  it("maps the existing smoke result into strategy output", async () => {
     const report = validSmokeReport({ cases: [validSmokeCase("translation-bug")] });
     const fakeRunSmoke = vi.fn(async () => ({
       status: "fail" as const,
@@ -42,7 +42,7 @@ describe("DifferentialSmokeStrategy", () => {
     const result = await strategy.verify(input(), workspace);
 
     expect(fakeRunSmoke).toHaveBeenCalledOnce();
-    expect(result.strategyId).toBe("differential-smoke");
+    expect(result).not.toHaveProperty("strategyId");
     expect(result.status).toBe("fail");
     expect(result.issues[0]).toMatchObject({ kind: "behavioral-divergence", caseId: "c1" });
     expect(result.strategyReport).toEqual(report);

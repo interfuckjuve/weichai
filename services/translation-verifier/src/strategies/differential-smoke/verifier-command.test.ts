@@ -10,8 +10,8 @@ import {
   pidFilePath,
   readPids,
   waitFor,
-} from "./process-test-helpers.js";
-import { sanitizedBuildEnvironment } from "./process-tree.js";
+} from "../../process-test-helpers.js";
+import { sanitizedBuildEnvironment } from "../../process-tree.js";
 import { runVerifierCommand, runVerifierCommandCli } from "./verifier-command.js";
 import { createWorkspaceBaseline, writeWorkspaceBaseline } from "./workspace-baseline.js";
 
@@ -406,8 +406,8 @@ const mavenAvailable = toolAvailable(MAVEN, ["-v"]);
 const dotnetAvailable = toolAvailable(DOTNET, ["--version"]);
 
 describe("真实依赖 fixture(离线本地构建)", () => {
-  const mavenFixture = fileURLToPath(new URL("../e2e/fixtures/dependencies/maven", import.meta.url));
-  const dotnetFixture = fileURLToPath(new URL("../e2e/fixtures/dependencies/dotnet", import.meta.url));
+  const mavenFixture = fileURLToPath(new URL("../../../e2e/fixtures/dependencies/maven", import.meta.url));
+  const dotnetFixture = fileURLToPath(new URL("../../../e2e/fixtures/dependencies/dotnet", import.meta.url));
 
   it.runIf(mavenAvailable)("Maven reactor runner 解析 sibling module 依赖", async () => {
     const ws = fixtureProjectWorkspace(mavenFixture);

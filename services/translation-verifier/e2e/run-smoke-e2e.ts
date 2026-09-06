@@ -18,9 +18,9 @@
 import { readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, resolve } from "node:path";
-import { runSmoke, type SmokeResult, type SmokeTaskInput } from "../src/strategies/smoke-runner.js";
-import type { SmokeReport } from "../src/smoke-types.js";
-import { DIFFERENTIAL_SMOKE_STRATEGY } from "../src/strategies/differential-smoke-strategy.js";
+import { runSmoke, type SmokeResult, type SmokeTaskInput } from "../src/strategies/differential-smoke/runner.js";
+import type { SmokeReport } from "../src/strategies/differential-smoke/types.js";
+import { DIFFERENTIAL_SMOKE_STRATEGY } from "../src/strategies/differential-smoke/strategy.js";
 import { createLogger } from "../src/logger.js";
 
 export interface SmokeE2EOptions {

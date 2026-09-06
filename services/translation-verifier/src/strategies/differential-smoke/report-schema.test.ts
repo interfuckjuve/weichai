@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { validSmokeCase, validSmokeReport } from "../smoke-test-fixtures.js";
+import { validSmokeCase, validSmokeReport } from "./test-fixtures.js";
 import { assertSmokeReport } from "./report-schema.js";
 
 describe("assertSmokeReport", () => {

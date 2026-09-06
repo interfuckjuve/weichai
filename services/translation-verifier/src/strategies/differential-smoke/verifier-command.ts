@@ -17,8 +17,8 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { CommandEvidence, SmokeSide } from "./smoke-types.js";
-import { DEFAULT_MAX_OUTPUT_BYTES, runManagedProcess, sanitizedBuildEnvironment } from "./process-tree.js";
+import type { CommandEvidence, SmokeSide } from "./types.js";
+import { DEFAULT_MAX_OUTPUT_BYTES, runManagedProcess, sanitizedBuildEnvironment } from "../../process-tree.js";
 import { assertWorkspaceBaseline } from "./workspace-baseline.js";
 
 /** 构建/运行阶段。 */
@@ -225,7 +225,7 @@ function envString(env: NodeJS.ProcessEnv, name: string): string | undefined {
  * CLI 入口:固定边界(工作区/基线/证据路径/deadline)只从环境变量读取,
  * agent 无法通过 argv 覆盖;返回被代理命令的退出码(超时/失败为 1)。
  * 调用形态:
- *   npx tsx <pkgRoot>/src/verifier-command.ts --side source --phase compile --cwd source/project -- mvn -q test
+ *   npx tsx <pkgRoot>/src/strategies/differential-smoke/verifier-command.ts --side source --phase compile --cwd source/project -- mvn -q test
  */
 export async function runVerifierCommandCli(
   argv: string[],

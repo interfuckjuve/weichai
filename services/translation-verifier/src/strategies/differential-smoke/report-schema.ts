@@ -9,7 +9,7 @@
  *
  * 仅使用 Node 标准库,不新增 schema 依赖;错误消息约定:<字段路径> <原因>。
  */
-import type { SmokeMode, SmokeReport } from "../smoke-types.js";
+import type { SmokeMode, SmokeReport } from "./types.js";
 
 /** 大小/数量上限(防御 agent 超限输出)。 */
 const MAX_CASES = 200;

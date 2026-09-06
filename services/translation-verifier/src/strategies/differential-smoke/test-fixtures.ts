@@ -3,8 +3,8 @@ import type {
   SmokeCaseVerdict,
   SmokeDecision,
   SmokeReport,
-} from "./smoke-types.js";
-import { VERIFIER_COMMAND_ENTRY } from "./strategies/helpers.js";
+} from "./types.js";
+import { VERIFIER_COMMAND_ENTRY } from "./helpers.js";
 
 export function validSmokeCase(decision: SmokeDecision = "pass"): SmokeCaseVerdict {
   const result = {

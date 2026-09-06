@@ -89,7 +89,7 @@ export interface VerificationStrategy {
     input: VerificationInput,
     context: VerificationStrategyContext,
     signal?: AbortSignal,
-  ): Promise<VerificationResult>;
+  ): Promise<VerificationStrategyOutput>;
 }
 
 export interface VerificationStrategyProvider {

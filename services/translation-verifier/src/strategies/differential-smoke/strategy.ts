@@ -1,12 +1,12 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { RepositoryIngestionJsonValue } from "@forexplore/contracts";
-import type { EffortLevel, SpawnClaude } from "../claude-client.js";
-import type { SmokeCaseVerdict, VerifierLanguage } from "../smoke-types.js";
-import { createVerificationResult, type VerificationArtifact, type VerificationInput, type VerificationIssue, type VerificationResult, type VerificationStrategy, type VerificationStrategyContext, type VerificationStrategyDescriptor, type VerificationStrategyProvider } from "../verification-types.js";
-import { createWorkspaceBaseline, writeWorkspaceBaseline } from "../workspace-baseline.js";
-import { runSmoke, type SmokeResult, type SmokeRunOptions } from "./smoke-runner.js";
-import type { SmokeTaskInput } from "./prompts/smoke-task.js";
+import type { EffortLevel, SpawnClaude } from "./claude-client.js";
+import type { SmokeCaseVerdict, VerifierLanguage } from "./types.js";
+import type { VerificationArtifact, VerificationInput, VerificationIssue, VerificationStrategy, VerificationStrategyContext, VerificationStrategyDescriptor, VerificationStrategyOutput, VerificationStrategyProvider } from "../../verification-types.js";
+import { createWorkspaceBaseline, writeWorkspaceBaseline } from "./workspace-baseline.js";
+import { runSmoke, type SmokeResult, type SmokeRunOptions } from "./runner.js";
+import type { SmokeTaskInput } from "./prompts/task.js";
 
 export const DIFFERENTIAL_SMOKE_STRATEGY: VerificationStrategyDescriptor = {
   id: "differential-smoke",
@@ -48,13 +48,13 @@ export class DifferentialSmokeStrategy implements VerificationStrategy {
     input: VerificationInput,
     context: VerificationStrategyContext,
     signal?: AbortSignal,
-  ): Promise<VerificationResult> {
+  ): Promise<VerificationStrategyOutput> {
     const sourceLanguageId = input.request.route?.sourceLanguageId ?? input.request.candidate.entity.languageId;
     const targetLanguageId = input.request.route?.targetLanguageId ?? input.request.target.entity.languageId;
     const sourceLanguage = languageFor(sourceLanguageId);
     const targetLanguage = languageFor(targetLanguageId);
     if (sourceLanguage === undefined || targetLanguage === undefined) {
-      return createVerificationResult(input, DIFFERENTIAL_SMOKE_STRATEGY, {
+      return {
         status: "unverified",
         summary: `Unsupported differential smoke language route: ${sourceLanguageId} -> ${targetLanguageId}`,
         issues: [{
@@ -65,12 +65,12 @@ export class DifferentialSmokeStrategy implements VerificationStrategy {
         }],
         artifacts: [],
         strategyReport: { unsupportedLanguages: { sourceLanguageId, targetLanguageId } },
-      });
+      };
     }
 
     const insufficientContext = insufficientContextReason(input);
     if (insufficientContext !== undefined) {
-      return createVerificationResult(input, DIFFERENTIAL_SMOKE_STRATEGY, {
+      return {
         status: "unverified",
         summary: "Differential smoke verification requires additional migration context.",
         issues: [{
@@ -81,7 +81,7 @@ export class DifferentialSmokeStrategy implements VerificationStrategy {
         }],
         artifacts: [],
         strategyReport: { preflight: insufficientContext.details },
-      });
+      };
     }
 
     prepareCallerOwnedWorkspace(context);
@@ -92,13 +92,13 @@ export class DifferentialSmokeStrategy implements VerificationStrategy {
     );
     const artifact = await writeSmokeReportArtifact(context, smoke);
 
-    return createVerificationResult(input, DIFFERENTIAL_SMOKE_STRATEGY, {
+    return {
       status: smokeStatus(smoke),
       summary: smoke.summary,
       issues: smokeIssues(smoke, artifact.id),
       artifacts: [artifact],
       strategyReport: smoke.report as unknown as RepositoryIngestionJsonValue,
-    });
+    };
   }
 }
 
@@ -185,7 +185,7 @@ async function writeSmokeReportArtifact(
   });
 }
 
-function smokeStatus(smoke: SmokeResult): VerificationResult["status"] {
+function smokeStatus(smoke: SmokeResult): VerificationStrategyOutput["status"] {
   if (smoke.status === "pass") return "pass";
   if (smoke.status === "fail") return "fail";
   return "unverified";

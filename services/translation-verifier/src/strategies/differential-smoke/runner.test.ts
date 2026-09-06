@@ -9,13 +9,13 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { SpawnClaude } from "../claude-client.js";
-import { validCommandEvidence, validSmokeReport } from "../smoke-test-fixtures.js";
-import type { CommandEvidence, SmokeReport } from "../smoke-types.js";
-import { createWorkspaceBaseline, writeWorkspaceBaseline } from "../workspace-baseline.js";
+import type { SpawnClaude } from "./claude-client.js";
+import { validCommandEvidence, validSmokeReport } from "./test-fixtures.js";
+import type { CommandEvidence, SmokeReport } from "./types.js";
+import { createWorkspaceBaseline, writeWorkspaceBaseline } from "./workspace-baseline.js";
 import { VERIFIER_COMMAND_ENTRY } from "./helpers.js";
-import { runSmoke } from "./smoke-runner.js";
-import type { SmokeTaskInput } from "./prompts/smoke-task.js";
+import { runSmoke } from "./runner.js";
+import type { SmokeTaskInput } from "./prompts/task.js";
 
 const validReport = validSmokeReport;
 const validEvidence = validCommandEvidence;

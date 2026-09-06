@@ -9,7 +9,7 @@
  *
  * 本模块是宿主侧纯函数:不做 I/O,命令证据来自命令代理日志(不信任模型自述的输出)。
  */
-import type { CommandEvidence, SmokeCaseVerdict, SmokeMode, SmokeReport } from "./smoke-types.js";
+import type { CommandEvidence, SmokeCaseVerdict, SmokeMode, SmokeReport } from "./types.js";
 
 export interface SmokeEvaluation {
   status: "pass" | "fail" | "unverified";

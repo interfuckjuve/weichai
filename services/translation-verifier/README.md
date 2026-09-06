@@ -57,15 +57,15 @@ runSmoke(job: SmokeTaskInput, options?: SmokeRunOptions, signal?: AbortSignal): 
 | `verification-service.ts`, `verification-strategy-factory.ts` | Strategy orchestration, timeout/cancellation, receipts |
 | `verification-workspace.ts` | Staging, patch application, durable artifact persistence and cleanup |
 | `verification-types.ts` | Input, result, descriptor, and receipt validation |
-| `strategies/differential-smoke-strategy.ts` | Framework-to-smoke mapping and context preflight |
-| `strategies/smoke-runner.ts` | Verify-only execution and evidence evaluation |
-| `strategies/prompts/smoke-task.ts` | Verify-only and diagnostic task prompts |
-| `strategies/helpers.ts`, `strategies/workspace.ts` | Tool constraints and internal workspace lifecycle |
-| `strategies/report.ts`, `report-schema.ts` | Bounded report reading and deep schema validation |
-| `workspace-baseline.ts` | Request-level protected-file baseline |
-| `verifier-command.ts`, `process-tree.ts` | Controlled execution, environment, evidence, process cleanup |
-| `smoke-evaluation.ts` | Pure smoke outcome policy |
-| `claude-client.ts`, `logger.ts` | Claude process integration and bounded, redacted logging |
+| `strategies/differential-smoke/strategy.ts` | Framework-to-smoke mapping and context preflight |
+| `strategies/differential-smoke/runner.ts` | Verify-only execution and evidence evaluation |
+| `strategies/differential-smoke/prompts/task.ts` | Verify-only and diagnostic task prompts |
+| `strategies/differential-smoke/helpers.ts`, `workspace.ts` | Tool constraints and internal workspace lifecycle |
+| `strategies/differential-smoke/report.ts`, `report-schema.ts` | Bounded report reading and deep schema validation |
+| `strategies/differential-smoke/workspace-baseline.ts` | Request-level protected-file baseline |
+| `strategies/differential-smoke/verifier-command.ts`, `process-tree.ts` | Controlled execution, environment, evidence, process cleanup |
+| `strategies/differential-smoke/evaluation.ts` | Pure smoke outcome policy |
+| `strategies/differential-smoke/claude-client.ts`, `logger.ts` | Claude process integration and bounded, redacted logging |
 
 ## Commands
 

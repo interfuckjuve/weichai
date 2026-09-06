@@ -92,8 +92,8 @@ export class VerificationService {
         if (signal?.aborted) throw signal.reason ?? new Error("Caller aborted verification");
         try {
           const strategy = this.#factory.create(strategyId);
-          result = await waitForStrategy(strategy.verify(input, workspace.context, combinedSignal), combinedSignal);
-          assertVerificationResult(result, input, descriptor);
+          const strategyOutput = await waitForStrategy(strategy.verify(input, workspace.context, combinedSignal), combinedSignal);
+          result = createVerificationResult(input, descriptor, strategyOutput, this.#now);
           assertArtifactsMatch(result.artifacts, workspace.writtenArtifacts());
         } catch (error) {
           if (isAbortError(error)) throw error;

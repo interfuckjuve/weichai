@@ -16,16 +16,16 @@
  */
 import { cpSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import type { EffortLevel, SpawnClaude } from "../claude-client.js";
-import { runClaude } from "../claude-client.js";
-import { evaluateSmokeReport, type SmokeEvaluation } from "../smoke-evaluation.js";
-import type { CommandEvidence, SmokeMode, SmokeReport } from "../smoke-types.js";
-import { assertWorkspaceBaseline, createWorkspaceBaseline, writeWorkspaceBaseline } from "../workspace-baseline.js";
+import type { EffortLevel, SpawnClaude } from "./claude-client.js";
+import { runClaude } from "./claude-client.js";
+import { evaluateSmokeReport, type SmokeEvaluation } from "./evaluation.js";
+import type { CommandEvidence, SmokeMode, SmokeReport } from "./types.js";
+import { assertWorkspaceBaseline, createWorkspaceBaseline, writeWorkspaceBaseline } from "./workspace-baseline.js";
 import { DEFAULT_DISALLOWED_TOOLS, defaultWorkspaceRoot, VERIFIER_COMMAND_ENTRY } from "./helpers.js";
-import { buildSmokeTaskPrompt, type SmokeTaskInput } from "./prompts/smoke-task.js";
+import { buildSmokeTaskPrompt, type SmokeTaskInput } from "./prompts/task.js";
 import { errorSummary, readReport } from "./report.js";
 import { assertSmokeReport } from "./report-schema.js";
-import { createLogger } from "../logger.js";
+import { createLogger } from "../../logger.js";
 import { createWorkspace, type WorkspaceHandle } from "./workspace.js";
 
 export type SmokeStatus = "pass" | "fail" | "error";
