@@ -14,10 +14,11 @@ agent 工作目录;宿主复查基线、读有界命令证据并做深度校验,
 旧实验修复行为需要显式 `mode:"diagnostic-repair"`(仅供诊断 E2E)。
 
 > 当前集成状态:本包提供独立 `runSmoke` API 与通用 verification framework
-> entry/result 边界(`VerificationInput` → `VerificationResult`),但尚未实现并注册上游 V2
-> `MigrationBehaviorVerifierV2` provider。adaptation runtime 仍如实声明 behavior verification
-> disabled,因此本包当前不是 V2 生产写回门禁的一部分。V2 生产接线、repair orchestration
-> 和 manifest 扩展将在 vertical-slice checkpoint 之后推进。
+> entry/result 边界(`VerificationInput` → `VerificationResult`),并已注册上游 V2
+> `MigrationBehaviorVerifierV2` provider。adaptation runtime 默认使用静态
+> `differential-smoke@1.0.0` verifier；receipt artifacts 由 verifier workspace 持久化并校验。
+> 适配运行时在本机 local process 执行，未提供安全隔离 sandbox；生产部署需要由外部
+> runtime/container 边界承担隔离职责。
 
 ## 模块数据流
 

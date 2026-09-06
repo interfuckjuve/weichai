@@ -1909,6 +1909,10 @@ function canonicalValidatorExecutions(
     ) {
       throw new Error(`Manifest validator ${entry.policyCheckId} does not match policy/provider/patch evidence.`);
     }
+    const expectedArtifactRefs = record.artifact === undefined ? [] : [{ id: record.artifact.id, contentHash: record.artifact.contentHash }];
+    if (canonicalJson(entry.artifactRefs) !== canonicalJson(expectedArtifactRefs)) {
+      throw new Error(`Manifest validator ${entry.policyCheckId} artifact references do not match its validation record.`);
+    }
     return {
       ...canonicalProvider(entry, `Manifest validator ${entry.policyCheckId}`),
       policyCheckId: entry.policyCheckId,
@@ -2036,6 +2040,11 @@ export function materializeMigrationRunManifestV2(
     );
     if (canonicalJson(manifestRepairRounds) !== canonicalJson(resultRepairRounds)) {
       throw new Error('Migration manifest repair history must match its adaptation result.');
+    }
+  }
+  for (const record of input.result.validation) {
+    if (record.artifact !== undefined && input.artifactPaths[record.artifact.id] !== record.artifact.path) {
+      throw new Error(`Manifest artifact path ${record.artifact.id} does not match its validation artifact.`);
     }
   }
   const artifactPaths = Object.fromEntries(

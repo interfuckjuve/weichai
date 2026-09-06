@@ -1,9 +1,11 @@
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, resolve, sep } from "node:path";
 import { applyHunksStrict, newFileContent } from "@forexplore/workflow-core";
 import type { VerificationArtifact, VerificationInput, VerificationStrategyContext, VerificationResultArtifact } from "./verification-types.js";
 import { assertVerificationInput } from "./verification-types.js";
+
+const MAX_ARTIFACT_BYTES = 10 * 1024 * 1024;
 
 export class VerificationArtifactPersistenceError extends Error {
   constructor(message: string, options?: { cause?: unknown }) {
@@ -39,8 +41,11 @@ export function createVerificationWorkspace(
   const sourceRoot = resolve(sourceSideRoot, "project");
   const targetRoot = resolve(targetSideRoot, "project");
   const agentRoot = resolve(root, "agent");
-  const written: VerificationArtifact[] = [];
   let closed = false;
+  const written: VerificationArtifact[] = [];
+  const writtenIds = new Set<string>();
+  const writtenPaths = new Set<string>();
+  let writtenBytes = 0;
 
   try {
     for (const directory of [sourceRoot, targetRoot, agentRoot, resolve(sourceSideRoot, ".forexplore-tests"), resolve(targetSideRoot, ".forexplore-tests")]) {
@@ -87,6 +92,13 @@ export function createVerificationWorkspace(
       const sourcePath = safeRelativePath(artifact.path, "Verification artifact path");
       const durablePath = `${durablePrefix}/${sourcePath}`;
       const source = safeExistingFile(agentRoot, sourcePath, "Verification artifact source");
+      const sourceSize = statSync(source).size;
+      if (sourceSize > MAX_ARTIFACT_BYTES || writtenBytes + sourceSize > MAX_ARTIFACT_BYTES) {
+        throw new VerificationArtifactPersistenceError("Verification artifact size budget exceeded.");
+      }
+      if (writtenIds.has(artifact.id) || writtenPaths.has(durablePath)) {
+        throw new VerificationArtifactPersistenceError("Verification artifact ID or path was already written.");
+      }
       const content = readFileSync(source);
       const stored: VerificationArtifact = {
         ...artifact,
@@ -97,12 +109,17 @@ export function createVerificationWorkspace(
       try {
         const { destination, parent, rootRealPath } = safeArtifactDestination(artifactRoot, durablePath);
         temporary = resolve(parent, `.tmp-${process.pid}-${Date.now()}-${randomBytes(4).toString("hex")}`);
+        const destinationStat = lstatIfExists(destination);
+        if (destinationStat !== undefined) throw new Error("Verification artifact destination already exists.");
         assertRealPathContained(parent, rootRealPath, "Verification artifact parent");
         writeFileSync(temporary, content);
         assertRealPathContained(temporary, rootRealPath, "Verification artifact temporary file");
         assertRealPathContained(parent, rootRealPath, "Verification artifact parent");
         renameSync(temporary, destination);
         written.push({ ...stored });
+        writtenIds.add(stored.id);
+        writtenPaths.add(stored.path);
+        writtenBytes += content.byteLength;
       } catch (error) {
         if (temporary !== undefined) rmSync(temporary, { force: true });
         throw new VerificationArtifactPersistenceError(`Verification artifact persistence failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
@@ -121,12 +138,13 @@ export function createVerificationWorkspace(
     writeFrameworkResult(content) {
       if (closed) throw new Error("Verification workspace is closed.");
       const durablePath = `${durablePrefix}/verification-result-${createHash("sha256").update(content).digest("hex")}.json`;
-      const { destination, parent, rootRealPath } = safeArtifactDestination(artifactRoot, durablePath);
-      const temporary = resolve(parent, `.tmp-${process.pid}-${Date.now()}-${randomBytes(4).toString("hex")}`);
+      const temporary = resolve(resolve(artifactRoot), `.tmp-${process.pid}-${Date.now()}-${randomBytes(4).toString("hex")}`);
       try {
+        const { destination, parent, rootRealPath } = safeArtifactDestination(artifactRoot, durablePath);
         assertRealPathContained(parent, rootRealPath, "Verification result parent");
         writeFileSync(temporary, content);
         assertRealPathContained(temporary, rootRealPath, "Verification result temporary file");
+        if (lstatIfExists(destination) !== undefined) throw new Error("Verification result destination already exists.");
         renameSync(temporary, destination);
       } catch (error) {
         rmSync(temporary, { force: true });
