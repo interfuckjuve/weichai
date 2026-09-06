@@ -5,6 +5,12 @@ import { applyHunksStrict, newFileContent } from "@forexplore/workflow-core";
 import type { VerificationArtifact, VerificationInput, VerificationStrategyContext, VerificationResultArtifact } from "./verification-types.js";
 import { assertVerificationInput } from "./verification-types.js";
 
+export class VerificationArtifactPersistenceError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "VerificationArtifactPersistenceError";
+  }
+}
 export interface VerificationWorkspaceOptions {
   workspaceRoot: string;
   artifactRoot: string;
@@ -81,25 +87,27 @@ export function createVerificationWorkspace(
       const sourcePath = safeRelativePath(artifact.path, "Verification artifact path");
       const durablePath = `${durablePrefix}/${sourcePath}`;
       const source = safeExistingFile(agentRoot, sourcePath, "Verification artifact source");
-      const { destination, parent, rootRealPath } = safeArtifactDestination(artifactRoot, durablePath);
       const content = readFileSync(source);
       const stored: VerificationArtifact = {
         ...artifact,
         path: durablePath,
         contentHash: createHash("sha256").update(content).digest("hex"),
       };
-      const temporary = resolve(parent, `.tmp-${process.pid}-${Date.now()}-${randomBytes(4).toString("hex")}`);
+      let temporary: string | undefined;
       try {
+        const { destination, parent, rootRealPath } = safeArtifactDestination(artifactRoot, durablePath);
+        temporary = resolve(parent, `.tmp-${process.pid}-${Date.now()}-${randomBytes(4).toString("hex")}`);
         assertRealPathContained(parent, rootRealPath, "Verification artifact parent");
         writeFileSync(temporary, content);
         assertRealPathContained(temporary, rootRealPath, "Verification artifact temporary file");
         assertRealPathContained(parent, rootRealPath, "Verification artifact parent");
         renameSync(temporary, destination);
+        written.push({ ...stored });
       } catch (error) {
-        rmSync(temporary, { force: true });
-        throw error;
+        if (temporary !== undefined) rmSync(temporary, { force: true });
+        throw new VerificationArtifactPersistenceError(`Verification artifact persistence failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
       }
-      written.push({ ...stored });
+
       return { ...stored };
     },
   };
@@ -122,7 +130,7 @@ export function createVerificationWorkspace(
         renameSync(temporary, destination);
       } catch (error) {
         rmSync(temporary, { force: true });
-        throw error;
+        throw new VerificationArtifactPersistenceError("Verification result persistence failed.", { cause: error });
       }
       return {
         id: `verification-result:${durablePath}`,

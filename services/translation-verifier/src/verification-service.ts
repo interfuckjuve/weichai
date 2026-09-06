@@ -3,7 +3,7 @@ import { canonicalJson } from "@forexplore/workflow-core";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { VerificationStrategyFactory } from "./verification-strategy-factory.js";
-import { createVerificationWorkspace } from "./verification-workspace.js";
+import { VerificationArtifactPersistenceError, createVerificationWorkspace } from "./verification-workspace.js";
 import {
   assertVerificationInput,
   assertVerificationReceipt,
@@ -23,10 +23,10 @@ export interface VerificationResultArtifact {
   mediaType: "application/json";
 }
 
-export interface VerificationReceipt {
-  result: VerificationResult;
-  resultArtifact: VerificationResultArtifact;
-}
+export type VerificationReceipt =
+  | { result: VerificationResult; resultArtifact: VerificationResultArtifact }
+  | { result: VerificationResult; resultArtifact?: undefined };
+
 
 export interface VerificationServiceOptions {
   factory: VerificationStrategyFactory;
@@ -82,23 +82,34 @@ export class VerificationService {
         artifactRoot: this.#artifactRoot,
         keepWorkspace: options.keepWorkspace,
       });
-      if (signal?.aborted) throw signal.reason ?? new Error("Caller aborted verification");
       const timeoutSignal = AbortSignal.timeout(this.#timeoutMs);
       const combinedSignal = signal === undefined ? timeoutSignal : AbortSignal.any([signal, timeoutSignal]);
       workspace.context.deadlineAt = Date.now() + this.#timeoutMs;
-      const result = await waitForStrategy(strategy.verify(input, workspace.context, combinedSignal), combinedSignal);
-      assertVerificationResult(result, input, descriptor);
-      assertArtifactsMatch(result.artifacts, workspace.writtenArtifacts());
+      let result: VerificationResult;
+      if (signal?.aborted && !isAbortError(signal.reason)) {
+        result = this.#unverified(input, descriptor, signal.reason, [], false);
+      } else {
+        if (signal?.aborted) throw signal.reason ?? new Error("Caller aborted verification");
+        try {
+          result = await waitForStrategy(strategy.verify(input, workspace.context, combinedSignal), combinedSignal);
+          assertVerificationResult(result, input, descriptor);
+          assertArtifactsMatch(result.artifacts, workspace.writtenArtifacts());
+        } catch (error) {
+          if (signal?.aborted && error === signal.reason && isAbortError(error)) throw error;
+          const artifactFailure = error instanceof VerificationArtifactPersistenceError;
+          result = this.#unverified(input, descriptor, error, artifactFailure ? [] : workspace.writtenArtifacts(), artifactFailure);
+        }
+      }
       const receiptBytes = Buffer.from(canonicalJson(result), "utf8");
-      const resultArtifact = workspace.writeFrameworkResult(receiptBytes);
-      return assertVerificationReceipt({ result, resultArtifact }, input, descriptor);
-    } catch (error) {
-      if (signal?.aborted && error === signal.reason && isAbortError(error)) throw error;
-      const result = this.#unverified(input, descriptor, error, workspace?.writtenArtifacts() ?? []);
-      if (workspace === undefined) throw error;
-      const receiptBytes = Buffer.from(canonicalJson(result), "utf8");
-      const resultArtifact = workspace.writeFrameworkResult(receiptBytes);
-      return { result, resultArtifact };
+      try {
+        const resultArtifact = workspace.writeFrameworkResult(receiptBytes);
+        return assertVerificationReceipt({ result, resultArtifact }, input, descriptor);
+      } catch (error) {
+        if (!(error instanceof VerificationArtifactPersistenceError)) throw error;
+        // The canonical failed result is returned without a second persistence attempt.
+        const failedResult = this.#unverified(input, descriptor, error, [], true);
+        return assertVerificationReceipt({ result: failedResult }, input, descriptor);
+      }
     } finally {
       workspace?.cleanup();
     }
@@ -122,15 +133,18 @@ export class VerificationService {
     descriptor: VerificationStrategyDescriptor,
     error: unknown,
     artifacts: VerificationResult["artifacts"],
+    artifactFailure = false,
   ): VerificationResult {
     const message = errorMessage(error);
     const timeout = isNamedError(error, "TimeoutError");
+    const persistence = artifactFailure || error instanceof VerificationArtifactPersistenceError;
+
     return createVerificationResult(input, descriptor, {
       status: "unverified",
       summary: `Verification framework could not complete: ${message}`,
       issues: [{
-        id: timeout ? "strategy-timeout" : "framework-error",
-        kind: timeout ? "strategy-timeout" : "framework-error",
+        id: persistence ? "artifact-persistence-failed" : timeout ? "strategy-timeout" : "framework-error",
+        kind: persistence ? "artifact-persistence-failed" : timeout ? "strategy-timeout" : "framework-error",
         message,
         evidenceArtifactIds: [],
       }],

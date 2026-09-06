@@ -378,7 +378,7 @@ export class AdaptationAdapterV2 implements CodeAdaptationPortV2 {
           issues,
           validationRecordIds: failed.map((record) => record.id).sort(),
           ...(attempt.verification ? { verificationResultHash: attempt.verification.result.contentHash } : {}),
-          ...(attempt.verification ? { verificationArtifactPath: attempt.verification.resultArtifact.path } : {}),
+          ...(attempt.verification?.resultArtifact ? { verificationArtifactPath: attempt.verification.resultArtifact.path } : {}),
         }, signal,
       ));
       const candidateFiles = [buildProtectedPatch(request.target.entity.path, targetFile.content, repaired.generatedContent, located.value)];
@@ -398,7 +398,7 @@ export class AdaptationAdapterV2 implements CodeAdaptationPortV2 {
         issues,
           ...(attempt.verification ? { verificationResultHash: attempt.verification.result.contentHash } : {}),
           verifierArtifacts: attempt.verification ? [
-            artifactRef(attempt.verification.resultArtifact),
+            ...(attempt.verification?.resultArtifact ? [artifactRef(attempt.verification.resultArtifact)] : []),
             ...attempt.verification.result.artifacts.map(artifactRef),
           ] : [],
         provider: providerRef(this.#translator),

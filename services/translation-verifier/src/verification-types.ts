@@ -16,10 +16,9 @@ export interface VerificationResultArtifact {
   mediaType: "application/json";
 }
 
-export interface VerificationReceipt {
-  result: VerificationResult;
-  resultArtifact: VerificationResultArtifact;
-}
+export type VerificationReceipt =
+  | { result: VerificationResult; resultArtifact: VerificationResultArtifact }
+  | { result: VerificationResult; resultArtifact?: undefined };
 
 export interface VerificationStrategyDescriptor {
   id: string;
@@ -229,16 +228,22 @@ export function assertVerificationReceipt(
   input: VerificationInput,
   descriptor: VerificationStrategyDescriptor,
 ): VerificationReceipt {
+  if (!isRecord(receipt)) {
+    throw new Error("Verification receipt must be an object.");
+  }
+  if (!isRecord(receipt.result)) {
+    throw new Error("Verification receipt result must be an object.");
+  }
+  assertVerificationResult(receipt.result, input, descriptor);
   if (receipt.resultArtifact === undefined) {
     if (receipt.result.status !== "unverified" || !receipt.result.issues.some((issue) => issue.id === "artifact-persistence-failed" && issue.kind === "artifact-persistence-failed")) {
       throw new Error("Verification receipt may omit its result artifact only for artifact-persistence-failed.");
     }
     return receipt;
   }
-  if (!isRecord(receipt) || receipt.resultArtifact === undefined) {
-    throw new Error("Verification receipt must contain a result artifact.");
+  if (!isRecord(receipt.resultArtifact)) {
+    throw new Error("Verification receipt result artifact metadata is invalid.");
   }
-  assertVerificationResult(receipt.result, input, descriptor);
   const artifact = receipt.resultArtifact;
   if (!isRecord(artifact) || artifact.kind !== "verification-result" || artifact.mediaType !== "application/json") {
     throw new Error("Verification receipt result artifact metadata is invalid.");

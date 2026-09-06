@@ -47,12 +47,13 @@ describe("VerificationService", () => {
 
   it("persists an exact identified receipt result artifact", async () => {
     const receipt = await serviceWith([provider("first")], "first").verifyWithReceipt(input());
-    const bytes = readFileSync(join(artifactRoot, receipt.resultArtifact.path));
+    const artifact = receipt.resultArtifact!;
+    const bytes = readFileSync(join(artifactRoot, artifact.path));
     expect(JSON.parse(bytes.toString("utf8"))).toEqual(receipt.result);
-    expect(receipt.resultArtifact.id).toContain(receipt.resultArtifact.path);
-    expect(receipt.resultArtifact.contentHash).toBe(createHash("sha256").update(bytes).digest("hex"));
-    expect(receipt.resultArtifact.size).toBe(bytes.byteLength);
-    expect(receipt.resultArtifact.kind).toBe("verification-result");
+    expect(artifact.id).toContain(artifact.path);
+    expect(artifact.contentHash).toBe(createHash("sha256").update(bytes).digest("hex"));
+    expect(artifact.size).toBe(bytes.byteLength);
+    expect(artifact.kind).toBe("verification-result");
   });
   it("normalizes a strategy exception but preserves caller cancellation", async () => {
     const failingService = serviceWith([provider("failing", async () => { throw new Error("boom"); })], "failing");
