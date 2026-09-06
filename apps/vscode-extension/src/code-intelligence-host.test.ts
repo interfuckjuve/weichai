@@ -270,6 +270,16 @@ function javaCompilerProbeAnalysis(sha256 = 'sha-1'): RepositoryStaticAnalysis {
 }
 
 describe('CodeIntelligenceHost', () => {
+  it('retries initialization after a failed index migration on the next refresh', async () => {
+    const runtime = createRuntime();
+    const runtimeFactory = vi.fn().mockRejectedValueOnce(new Error('index migration failed')).mockResolvedValue(runtime);
+    const host = new CodeIntelligenceHost({ runtimeFactory });
+    await expect(host.synchronize({ repositories: [] })).resolves.toMatchObject({ presentation: { status: 'error' } });
+    const refreshed = await host.synchronize({ repositories: [] });
+    expect(refreshed.presentation.status).not.toBe('error');
+    expect(runtimeFactory).toHaveBeenCalledTimes(2);
+  });
+
   it('initializes configured history without scanning the surrounding target workspace', async () => {
     const target = await temporaryRepository('parent-workspace');
     const history = path.join(target, 'account-stream-rs');

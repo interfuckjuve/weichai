@@ -687,13 +687,6 @@ export class SeekDbIndexStore implements IndexStore {
           WITH (DISTANCE=cosine, TYPE=hnsw, LIB=vsag${supportsAsyncIndex ? ', SYNC_MODE=immediate' : ''})
       ) ORGANIZATION = HEAP
     `);
-    if (supportsAsyncIndex) {
-      const [definitions] = await this.pool.query<RowDataPacket[]>(`SHOW CREATE TABLE ${this.#tables.searchDocuments}`);
-      const definition = String(definitions[0]?.['Create Table'] ?? '');
-      if (!/sync_mode\s*=\s*'?immediate'?/i.test(definition)) {
-        throw new Error('Search requires an immediate vector index before publishing ready revisions. Use a separate database and rebuild the existing asynchronous projection.');
-      }
-    }
     await this.pool.query(`CREATE TABLE IF NOT EXISTS ${this.#tables.embeddingConfiguration} (
       slot INT PRIMARY KEY, config_hash CHAR(64) NOT NULL
     ) ORGANIZATION = HEAP`);
@@ -706,6 +699,12 @@ export class SeekDbIndexStore implements IndexStore {
     const [identity] = await this.pool.query<RowDataPacket[]>(`SELECT config_hash FROM ${this.#tables.embeddingConfiguration} WHERE slot = 1`);
     if (String(identity[0]?.config_hash) !== this.#embeddingIdentity) {
       throw new Error('Embedding model/configuration does not match stored vectors. Use a separate database and rebuild projections.');
+    }
+    if (supportsAsyncIndex) {
+      const [definitions] = await this.pool.query<RowDataPacket[]>(`SHOW CREATE TABLE ${this.#tables.searchDocuments}`);
+      if (!/sync_mode\s*=\s*'?immediate'?/i.test(String(definitions[0]?.['Create Table'] ?? ''))) {
+        throw new Error('Existing asynchronous search index requires a data-preserving migration. Run scripts/migrate-seekdb-vector-index.ts after reviewing its temporary write fence. Existing analysis data is retained.');
+      }
     }
     if (this.#persistEmbeddings) await this.pool.query(`CREATE TABLE IF NOT EXISTS ${this.#tables.embeddingCache} (
       content_hash CHAR(64) PRIMARY KEY, embedding JSON NOT NULL

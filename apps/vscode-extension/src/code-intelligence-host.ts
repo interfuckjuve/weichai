@@ -870,7 +870,11 @@ export class CodeIntelligenceHost {
 
   private async runtime(): Promise<CodeIntelligenceRuntime> {
     if (!this.#runtimePromise) {
-      this.#runtimePromise = this.#runtimeFactory(this.#runtimeOptions);
+      const pending = this.#runtimeFactory(this.#runtimeOptions);
+      this.#runtimePromise = pending;
+      void pending.catch(() => {
+        if (this.#runtimePromise === pending) this.#runtimePromise = undefined;
+      });
     }
     return this.#runtimePromise;
   }
