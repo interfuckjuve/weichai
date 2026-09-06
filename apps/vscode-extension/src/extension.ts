@@ -1884,7 +1884,7 @@ async function restoreLastCheckpoint(host: ExtensionHost): Promise<void> {
         checkpointRef,
         'completed',
       ),
-      artifactPaths: previousManifest.artifactPaths,
+      artifactPaths: mergeValidationArtifactPaths(previousManifest.artifactPaths, result),
       createdAt: previousManifest.createdAt,
       updatedAt: restoredAt,
     }, executionContext);

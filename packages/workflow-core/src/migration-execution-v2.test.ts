@@ -620,6 +620,64 @@ function oneRoundRepairFixture() {
 }
 
 describe('V2 migration execution contracts', () => {
+  it.each(['/tmp/result.json', 'C:/result.json', 'C:\\result.json', 'reports\\result.json', '..\\result.json', '../result.json', 'reports/../result.json', './result.json', 'reports/./result.json'])('rejects unsafe legacy artifact path %s without a structured artifact', (artifactPath) => {
+    const fixture = executionFixture();
+    expect(() => materializeAdaptationResultV2({
+      request: fixture.adaptationRequest,
+      ...fixture.adaptationResult,
+      validation: fixture.adaptationResult.validation.map((record) => ({ ...record, artifactPath })),
+    }, fixture.validationContext)).toThrow(/artifact path.*repository-relative/i);
+  });
+
+  it('preserves safe legacy paths and requires structured paths to match them exactly', () => {
+    const fixture = executionFixture();
+    const artifactPath = 'attempt-first/result.json';
+    const build = (path: string, legacyPath = artifactPath) => materializeAdaptationResultV2({
+      request: fixture.adaptationRequest,
+      ...fixture.adaptationResult,
+      validation: fixture.adaptationResult.validation.map((record) => ({
+        ...record, artifactPath: legacyPath,
+        artifact: { id: 'receipt', kind: 'verification-result', path, contentHash: 'a'.repeat(64), mediaType: 'application/json' },
+      })),
+    }, fixture.validationContext);
+    const legacy = materializeAdaptationResultV2({
+      request: fixture.adaptationRequest, ...fixture.adaptationResult,
+      validation: fixture.adaptationResult.validation.map((record) => ({ ...record, artifactPath })),
+    }, fixture.validationContext);
+    expect(legacy.validation[0]?.artifactPath).toBe(artifactPath);
+    expect(build(artifactPath).validation[0]?.artifact?.path).toBe(artifactPath);
+    expect(() => build('another/result.json')).toThrow(/does not match/i);
+    expect(() => build('reports\\result.json', 'reports\\result.json')).toThrow(/repository-relative/i);
+  });
+
+  it.each([{}, { 'repair-verifier-artifact-1': 'wrong.json' }, { other: 'artifacts/repair-1.json' }])('rejects missing or mismatched repair artifact paths in manifests: %j', (artifactPaths) => {
+    const { fixture, result } = oneRoundRepairFixture();
+    expect(() => materializeMigrationRunManifestV2({
+      status: 'planned', request: fixture.adaptationRequest, result,
+      providers: fixture.providers, validators: fixture.validators,
+      artifactPaths: { manifest: '.forexplore/run-v2.json', ...artifactPaths },
+      createdAt: NOW, updatedAt: NOW,
+    }, fixture.validationContext)).toThrow(/artifact.*(match|missing)/i);
+  });
+
+  it.each(['path', 'contentHash'] as const)('rejects conflicting repair artifact %s identities across rounds', (field) => {
+    const { fixture, repairRounds } = oneRoundRepairFixture();
+    const first = repairRounds[0]!;
+    const intermediateHash = sha256Hex('intermediate');
+    const second = repairRound(2, intermediateHash, fixture.adaptationResult.patchHash, [failingValidationRecord(intermediateHash)]);
+    second.verifierArtifacts.push({ ...first.verifierArtifacts[0]!, [field]: field === 'path' ? 'other.json' : 'b'.repeat(64) });
+    const result = materializeAdaptationResultV2({
+      request: fixture.adaptationRequest, ...fixture.adaptationResult,
+      repairRounds: [{ ...first, outputPatchHash: intermediateHash }, second],
+    }, fixture.validationContext);
+    expect(() => materializeMigrationRunManifestV2({
+      status: 'planned', request: fixture.adaptationRequest, result,
+      providers: fixture.providers, validators: fixture.validators,
+      artifactPaths: { first: 'manifest.json', 'repair-verifier-artifact-1': 'artifacts/repair-1.json', 'repair-verifier-artifact-2': 'artifacts/repair-2.json' },
+      createdAt: NOW, updatedAt: NOW,
+    }, fixture.validationContext)).toThrow(/artifact.*(match|conflict)/i);
+  });
+
 
   it('validates composed runtime ownership, stage overrides, and deterministic availability', () => {
     const serviceRoute: MigrationRouteDescriptor = {
@@ -903,7 +961,7 @@ describe('V2 migration execution contracts', () => {
         providers: fixture.providers,
         validators: fixture.validators,
         ...(status === 'planned' || status === 'approved' ? {} : { checkpoint, recovery }),
-        artifactPaths: { manifest: '.forexplore/run-v2.json' },
+        artifactPaths: { manifest: '.forexplore/run-v2.json', 'repair-verifier-artifact-1': 'artifacts/repair-1.json' },
         createdAt: NOW,
         updatedAt: NOW,
       }, fixture.validationContext);

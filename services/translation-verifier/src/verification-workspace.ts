@@ -24,7 +24,7 @@ export interface VerificationWorkspaceHandle {
   writtenArtifacts(): VerificationArtifact[];
   keptDir?: string;
   writeFrameworkResult(content: Uint8Array): VerificationResultArtifact;
-  cleanup(): void;
+  cleanup(options?: { discardArtifacts?: boolean }): void;
 }
 
 export function createVerificationWorkspace(
@@ -46,6 +46,13 @@ export function createVerificationWorkspace(
   const writtenIds = new Set<string>();
   const writtenPaths = new Set<string>();
   let writtenBytes = 0;
+  let durableRootRealPath: string | undefined;
+
+  function assertByteBudget(size: number): void {
+    if (size > MAX_ARTIFACT_BYTES || writtenBytes + size > MAX_ARTIFACT_BYTES) {
+      throw new VerificationArtifactPersistenceError("Verification artifact size budget exceeded.");
+    }
+  }
 
   try {
     for (const directory of [sourceRoot, targetRoot, agentRoot, resolve(sourceSideRoot, ".forexplore-tests"), resolve(targetSideRoot, ".forexplore-tests")]) {
@@ -89,25 +96,25 @@ export function createVerificationWorkspace(
     deadlineAt: Number.POSITIVE_INFINITY,
     writeArtifact(artifact) {
       if (closed) throw new Error("Verification workspace is closed.");
-      const sourcePath = safeRelativePath(artifact.path, "Verification artifact path");
-      const durablePath = `${durablePrefix}/${sourcePath}`;
-      const source = safeExistingFile(agentRoot, sourcePath, "Verification artifact source");
-      const sourceSize = statSync(source).size;
-      if (sourceSize > MAX_ARTIFACT_BYTES || writtenBytes + sourceSize > MAX_ARTIFACT_BYTES) {
-        throw new VerificationArtifactPersistenceError("Verification artifact size budget exceeded.");
-      }
-      if (writtenIds.has(artifact.id) || writtenPaths.has(durablePath)) {
-        throw new VerificationArtifactPersistenceError("Verification artifact ID or path was already written.");
-      }
-      const content = readFileSync(source);
-      const stored: VerificationArtifact = {
-        ...artifact,
-        path: durablePath,
-        contentHash: createHash("sha256").update(content).digest("hex"),
-      };
       let temporary: string | undefined;
       try {
+        const sourcePath = safeRelativePath(artifact.path, "Verification artifact path");
+        const durablePath = `${durablePrefix}/${sourcePath}`;
+        const source = safeExistingFile(agentRoot, sourcePath, "Verification artifact source");
+        assertByteBudget(statSync(source).size);
+        if (writtenIds.has(artifact.id) || writtenPaths.has(durablePath)) {
+          throw new VerificationArtifactPersistenceError("Verification artifact ID or path was already written.");
+        }
+        const content = readFileSync(source);
+        assertByteBudget(content.byteLength);
+        const stored: VerificationArtifact = {
+          ...artifact,
+          id: `${durablePrefix}:${artifact.id}`,
+          path: durablePath,
+          contentHash: createHash("sha256").update(content).digest("hex"),
+        };
         const { destination, parent, rootRealPath } = safeArtifactDestination(artifactRoot, durablePath);
+        durableRootRealPath = rootRealPath;
         temporary = resolve(parent, `.tmp-${process.pid}-${Date.now()}-${randomBytes(4).toString("hex")}`);
         const destinationStat = lstatIfExists(destination);
         if (destinationStat !== undefined) throw new Error("Verification artifact destination already exists.");
@@ -117,15 +124,13 @@ export function createVerificationWorkspace(
         assertRealPathContained(parent, rootRealPath, "Verification artifact parent");
         renameSync(temporary, destination);
         written.push({ ...stored });
-        writtenIds.add(stored.id);
+        writtenIds.add(artifact.id);
         writtenPaths.add(stored.path);
         writtenBytes += content.byteLength;
+        return { ...stored };
       } catch (error) {
-        if (temporary !== undefined) rmSync(temporary, { force: true });
-        throw new VerificationArtifactPersistenceError(`Verification artifact persistence failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+        throw persistenceError(error, temporary);
       }
-
-      return { ...stored };
     },
   };
 
@@ -137,18 +142,21 @@ export function createVerificationWorkspace(
     },
     writeFrameworkResult(content) {
       if (closed) throw new Error("Verification workspace is closed.");
+      assertByteBudget(content.byteLength);
       const durablePath = `${durablePrefix}/verification-result-${createHash("sha256").update(content).digest("hex")}.json`;
-      const temporary = resolve(resolve(artifactRoot), `.tmp-${process.pid}-${Date.now()}-${randomBytes(4).toString("hex")}`);
+      let temporary: string | undefined;
       try {
         const { destination, parent, rootRealPath } = safeArtifactDestination(artifactRoot, durablePath);
+        durableRootRealPath = rootRealPath;
+        temporary = resolve(parent, `.tmp-${process.pid}-${Date.now()}-${randomBytes(4).toString("hex")}`);
         assertRealPathContained(parent, rootRealPath, "Verification result parent");
         writeFileSync(temporary, content);
         assertRealPathContained(temporary, rootRealPath, "Verification result temporary file");
         if (lstatIfExists(destination) !== undefined) throw new Error("Verification result destination already exists.");
         renameSync(temporary, destination);
+        writtenBytes += content.byteLength;
       } catch (error) {
-        rmSync(temporary, { force: true });
-        throw new VerificationArtifactPersistenceError("Verification result persistence failed.", { cause: error });
+        throw persistenceError(error, temporary);
       }
       return {
         id: `verification-result:${durablePath}`,
@@ -159,11 +167,36 @@ export function createVerificationWorkspace(
         mediaType: "application/json",
       };
     },
-    cleanup() {
+    cleanup(cleanupOptions = {}) {
       closed = true;
-      if (!options.keepWorkspace) rmSync(root, { recursive: true, force: true });
+      try {
+        if (cleanupOptions.discardArtifacts && durableRootRealPath !== undefined) {
+          // Delete only this attempt, and never follow a replaced artifact-root symlink.
+          const rootStat = lstatIfExists(artifactRoot);
+          if (!rootStat?.isDirectory() || realpathSync(artifactRoot) !== durableRootRealPath) return;
+          rmSync(resolve(artifactRoot, durablePrefix), { recursive: true, force: true });
+          written.length = 0;
+          writtenIds.clear();
+          writtenPaths.clear();
+        }
+      } finally {
+        if (!options.keepWorkspace) rmSync(root, { recursive: true, force: true });
+      }
     },
   };
+}
+
+function persistenceError(error: unknown, temporary?: string): VerificationArtifactPersistenceError {
+  let cause = error;
+  try {
+    if (temporary !== undefined) rmSync(temporary, { force: true });
+  } catch (cleanupError) {
+    cause = new AggregateError([error, cleanupError], "Artifact persistence and temporary cleanup failed.");
+  }
+  return new VerificationArtifactPersistenceError(
+    `Verification artifact persistence failed: ${error instanceof Error ? error.message : String(error)}`,
+    { cause },
+  );
 }
 
 function writeStagedFile(root: string, path: string, content: string, label: string): void {

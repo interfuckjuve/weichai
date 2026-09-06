@@ -3,10 +3,16 @@ import { calculatePatchHashV2 } from "@forexplore/workflow-core";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, basename } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import * as fs from "node:fs";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AdaptationRequestV2, FilePatch, ModifiedFilePatch } from "@forexplore/contracts";
 import type { VerificationArtifact, VerificationInput } from "./verification-types.js";
-import { createVerificationWorkspace } from "./verification-workspace.js";
+import { createVerificationWorkspace, VerificationArtifactPersistenceError } from "./verification-workspace.js";
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof fs>();
+  return { ...actual, readFileSync: vi.fn(actual.readFileSync), statSync: vi.fn(actual.statSync), renameSync: vi.fn(actual.renameSync) };
+});
 
 const sourceContent = "export function source() {\n  return 1;\n}\n";
 const originalTargetContent = "def target():\n    raise NotImplementedError()\n";
@@ -25,10 +31,79 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
+  vi.mocked(fs.readFileSync).mockReset().mockImplementation(fsReadFile);
+  vi.mocked(fs.statSync).mockReset().mockImplementation(fsStat);
+  vi.mocked(fs.renameSync).mockReset().mockImplementation(fsRename);
   rmSync(root, { recursive: true, force: true });
 });
+const fsReadFile = vi.mocked(fs.readFileSync).getMockImplementation()!;
+const fsStat = vi.mocked(fs.statSync).getMockImplementation()!;
+const fsRename = vi.mocked(fs.renameSync).getMockImplementation()!;
 
 describe("createVerificationWorkspace", () => {
+  const artifact = { id: "report", kind: "report", path: "report.json", contentHash: "0".repeat(64), mediaType: "application/json" };
+
+  it.each(["missing", "symlink", "dangling", "directory", "ENOTDIR", "stat", "read", "destination", "rename"])("classifies %s failures without returning artifacts or leaking temp files", (failure) => {
+    const workspace = createVerificationWorkspace(input(), { workspaceRoot, artifactRoot });
+    const source = join(workspace.context.workspace.evidenceRoot, artifact.path);
+    writeFileSync(source, "{}\n");
+    if (failure === "missing") unlinkSync(source);
+    if (failure === "symlink" || failure === "dangling") {
+      unlinkSync(source);
+      symlinkSync(failure === "symlink" ? join(workspace.context.workspace.sourceRoot, "src/source.ts") : join(root, "missing"), source);
+    }
+    if (failure === "directory") { unlinkSync(source); mkdirSync(source); }
+    if (failure === "stat") vi.mocked(fs.statSync).mockImplementationOnce(() => { throw Object.assign(new Error("stat denied"), { code: "EACCES" }); });
+    if (failure === "read") vi.mocked(fs.readFileSync).mockImplementationOnce(() => { throw Object.assign(new Error("read denied"), { code: "EACCES" }); });
+    if (failure === "destination") writeFileSync(artifactRoot, "not a directory");
+    if (failure === "rename") vi.mocked(fs.renameSync).mockImplementationOnce(() => { throw Object.assign(new Error("rename denied"), { code: "EACCES" }); });
+    expect(() => workspace.context.writeArtifact({ ...artifact, path: failure === "ENOTDIR" ? "report.json/child" : artifact.path }))
+      .toThrow(VerificationArtifactPersistenceError);
+    expect(workspace.writtenArtifacts()).toEqual([]);
+    if (existsSync(artifactRoot) && failure !== "destination") {
+      expect(readdirSync(artifactRoot, { recursive: true }).filter((path) => String(path).includes(".tmp-"))).toEqual([]);
+    }
+    workspace.cleanup();
+  });
+
+  it("rejects duplicate strategy IDs even when the second path is different", () => {
+    const workspace = createVerificationWorkspace(input(), { workspaceRoot, artifactRoot });
+    writeFileSync(join(workspace.context.workspace.evidenceRoot, artifact.path), "{}");
+    writeFileSync(join(workspace.context.workspace.evidenceRoot, "other.json"), "{}");
+    const stored = workspace.context.writeArtifact(artifact);
+    expect(() => workspace.context.writeArtifact({ ...artifact, path: "other.json" })).toThrow(VerificationArtifactPersistenceError);
+    expect(workspace.writtenArtifacts()).toEqual([stored]);
+    workspace.cleanup();
+  });
+
+  it("checks actual bytes after reading instead of trusting the earlier stat", () => {
+    const workspace = createVerificationWorkspace(input(), { workspaceRoot, artifactRoot });
+    const source = join(workspace.context.workspace.evidenceRoot, artifact.path);
+    writeFileSync(source, Buffer.alloc(10 * 1024 * 1024 + 1));
+    vi.mocked(fs.statSync).mockReturnValueOnce({ size: 1 } as ReturnType<typeof fs.statSync>);
+    expect(() => workspace.context.writeArtifact(artifact)).toThrow(VerificationArtifactPersistenceError);
+    expect(workspace.writtenArtifacts()).toEqual([]);
+    workspace.cleanup();
+  });
+
+  it("shares the attempt byte budget between strategy artifacts and framework results", () => {
+    const workspace = createVerificationWorkspace(input(), { workspaceRoot, artifactRoot });
+    writeFileSync(join(workspace.context.workspace.evidenceRoot, artifact.path), Buffer.alloc(10 * 1024 * 1024 - 2));
+    workspace.context.writeArtifact(artifact);
+    const result = workspace.writeFrameworkResult(Buffer.from("{}"));
+    expect(result.size).toBe(2);
+    expect(() => workspace.writeFrameworkResult(Buffer.from("x"))).toThrow(VerificationArtifactPersistenceError);
+    workspace.cleanup();
+  });
+
+  it("rejects an oversized framework result before persisting it", () => {
+    const workspace = createVerificationWorkspace(input(), { workspaceRoot, artifactRoot });
+    expect(() => workspace.writeFrameworkResult(Buffer.alloc(10 * 1024 * 1024 + 1))).toThrow(VerificationArtifactPersistenceError);
+    expect(existsSync(artifactRoot)).toBe(false);
+    workspace.cleanup();
+  });
+
   it("stages source and target artifacts and applies the patch only to the target copy", () => {
     const originalTargetPath = join(root, "original-target", "src", "target.py");
     mkdirSync(dirname(originalTargetPath), { recursive: true });
@@ -75,13 +150,14 @@ describe("createVerificationWorkspace", () => {
       mediaType: "application/json",
     });
     const secondArtifact = await secondWorkspace.context.writeArtifact({
-      id: "artifact-2",
+      id: "artifact-1",
       kind: "report",
       path: "reports/result.json",
       contentHash: "0".repeat(64),
       mediaType: "application/json",
     });
 
+    expect(secondArtifact.id).not.toBe(firstArtifact.id);
     const firstAttemptDir = firstArtifact.path.split("/")[0];
     const secondAttemptDir = secondArtifact.path.split("/")[0];
     expect(firstAttemptDir).toMatch(/^attempt-[A-Za-z0-9-]+$/);

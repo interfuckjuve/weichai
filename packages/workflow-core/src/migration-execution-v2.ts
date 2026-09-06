@@ -114,7 +114,7 @@ function canonicalPath(value: string, label: string): string {
 
 function canonicalArtifactPath(value: string, label: string): string {
   const path = requiredText(value, label);
-  if (path.includes('\\\\')) throw new Error(`${label} must be a safe repository-relative path.`);
+  if (path.includes('\\')) throw new Error(`${label} must be a safe repository-relative path.`);
   if (path.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(path) || path.split('/').some((segment) => segment === '.' || segment === '..' || segment === '')) {
     throw new Error(`${label} must be a safe repository-relative path.`);
   }
@@ -1574,10 +1574,13 @@ function canonicalValidationRecords(
           contentHash: requireSha256(record.artifact.contentHash, `Validation record ${id} artifact hash`),
           mediaType: requiredText(record.artifact.mediaType, `Validation record ${id} artifact media type`),
         };
-    if (artifact && record.artifactPath !== undefined && canonicalArtifactPath(record.artifactPath, `Validation record ${id} artifact path`) !== artifact.path) {
+    const artifactPath = record.artifactPath === undefined
+      ? undefined
+      : canonicalArtifactPath(record.artifactPath, `Validation record ${id} artifact path`);
+    if (artifact && artifactPath !== undefined && artifactPath !== artifact.path) {
       throw new Error(`Validation record ${id} legacy artifact path does not match its artifact.`);
     }
-    return { ...record, ...(artifact === undefined ? {} : { artifact }) };
+    return { ...record, ...(artifactPath === undefined ? {} : { artifactPath }), ...(artifact === undefined ? {} : { artifact }) };
   }).sort((left, right) => left.id.localeCompare(right.id));
   const missing = policy.checks.filter((check) => check.required && !covered.has(check.id));
   if (missing.length > 0) {
@@ -2042,10 +2045,20 @@ export function materializeMigrationRunManifestV2(
       throw new Error('Migration manifest repair history must match its adaptation result.');
     }
   }
-  for (const record of input.result.validation) {
-    if (record.artifact !== undefined && input.artifactPaths[record.artifact.id] !== record.artifact.path) {
-      throw new Error(`Manifest artifact path ${record.artifact.id} does not match its validation artifact.`);
+  const referencedArtifacts = [
+    ...input.result.validation.flatMap((record) => record.artifact === undefined ? [] : [record.artifact]),
+    ...resultRepairRounds.flatMap((round) => round.verifierArtifacts),
+  ];
+  const artifactHashes = new Map<string, string>();
+  for (const artifact of referencedArtifacts) {
+    if (!Object.hasOwn(input.artifactPaths, artifact.id) || input.artifactPaths[artifact.id] !== artifact.path) {
+      throw new Error(`Manifest artifact path ${artifact.id} does not match its validation or repair artifact.`);
     }
+    const previousHash = artifactHashes.get(artifact.id);
+    if (previousHash !== undefined && previousHash !== artifact.contentHash) {
+      throw new Error(`Manifest artifact ${artifact.id} has conflicting content hashes.`);
+    }
+    artifactHashes.set(artifact.id, artifact.contentHash);
   }
   const artifactPaths = Object.fromEntries(
     Object.entries(input.artifactPaths)

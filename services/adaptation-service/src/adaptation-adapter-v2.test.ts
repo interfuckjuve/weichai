@@ -1,10 +1,16 @@
 import { createHash } from "node:crypto";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import type { RepositoryIngestionJsonValue } from "@forexplore/contracts";
 import {
   createVerificationResult,
+  VerificationService,
+  VerificationStrategyFactory,
+  DIFFERENTIAL_SMOKE_STRATEGY,
   type VerificationReceipt,
   type VerificationResult,
   type VerificationStrategyDescriptor,
@@ -13,6 +19,8 @@ import {
   evaluateValidationPolicyGate,
   canonicalJson,
   materializeMigrationRuntimeCapabilitySnapshot,
+  materializeMigrationRunManifestV2,
+  validateMigrationRunManifestV2,
   validateAdaptationResultV2,
 } from "@forexplore/workflow-core";
 import {
@@ -26,6 +34,7 @@ import {
   type MigrationTranslatorV2,
   type MigrationTranslationV2,
 } from "./adaptation-adapter-v2";
+import { TranslationVerifierV2Adapter } from "./translation-verifier-v2-adapter";
 import { createAdaptationRuntimeCapabilitySnapshot } from "./runtime-capability-snapshot";
 import {
   adaptationV2GeneratedContent,
@@ -181,6 +190,100 @@ function validVerificationResult(
 type VerificationResultMutation = (input: MigrationBehaviorVerificationInputV2) => VerificationResult;
 
 describe("AdaptationAdapterV2", () => {
+  it.each(["source", "oversized-result", "abort"])("preserves real verification-service %s failure semantics through the adaptation gate", async (failure) => {
+    const root = mkdtempSync(join(tmpdir(), "adaptation-receipt-failure-"));
+    const fixture = createAdaptationV2TestFixture();
+    const providers = deterministicProviders();
+    const abort = new DOMException("cancelled", "AbortError");
+    const artifactRoot = join(root, "artifacts");
+    const service = new VerificationService({
+      workspaceRoot: join(root, "workspaces"), artifactRoot,
+      defaultStrategyId: DIFFERENTIAL_SMOKE_STRATEGY.id,
+      factory: new VerificationStrategyFactory([{
+        descriptor: DIFFERENTIAL_SMOKE_STRATEGY,
+        create: () => ({ async verify(input, context) {
+          writeFileSync(join(context.workspace.evidenceRoot, "report.json"), "{}");
+          const artifact = await context.writeArtifact({ id: "report", kind: "report", path: "report.json", contentHash: "0".repeat(64), mediaType: "application/json" });
+          if (failure === "source") await context.writeArtifact({ ...artifact, id: "missing", path: "missing.json" });
+          if (failure === "abort") throw abort;
+          return createVerificationResult(input, DIFFERENTIAL_SMOKE_STRATEGY, {
+            status: "pass", summary: "verified", issues: [], artifacts: [artifact],
+            strategyReport: { output: "x".repeat(10 * 1024 * 1024) },
+          });
+        } }),
+      }]),
+    });
+    try {
+      const adapter = new AdaptationAdapterV2({ runtimeCapabilities: fixture.serviceRuntime, ...providers, verifier: new TranslationVerifierV2Adapter(service) });
+      if (failure === "abort") {
+        await expect(adapter.adapt(fixture.request, fixture.validationContext)).rejects.toBe(abort);
+      } else {
+        const result = await adapter.adapt(fixture.request, fixture.validationContext);
+        const behavior = result.validation.find((record) => record.policyCheckId === "behavior-differential")!;
+        expect(behavior).toMatchObject({ status: "unverified", failureReason: "artifact-persistence-failed" });
+        expect(behavior.artifact).toBeUndefined();
+        expect(behavior.artifactPath).toBeUndefined();
+        expect(result.repairRounds).toEqual([]);
+        expect(evaluateValidationPolicyGate(result.validationPolicy, result.validation, { subjectHash: result.patchHash }).allowed).toBe(false);
+      }
+      expect(providers.translator.repair).not.toHaveBeenCalled();
+      expect(readdirSync(artifactRoot)).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("binds real artifacts from two repair rounds into a canonical manifest without ID collisions", async () => {
+    const root = mkdtempSync(join(tmpdir(), "adaptation-repair-artifacts-"));
+    const fixture = createAdaptationV2TestFixture();
+    const providers = deterministicProviders();
+    providers.translator.repair = vi.fn(async (_i, _a, _p, previous) => ({ ...previous, generatedContent: previous.generatedContent + "\n# repair" }));
+    const artifactRoot = join(root, "artifacts");
+    const service = new VerificationService({
+      workspaceRoot: join(root, "workspaces"), artifactRoot,
+      defaultStrategyId: DIFFERENTIAL_SMOKE_STRATEGY.id,
+      factory: new VerificationStrategyFactory([{
+        descriptor: DIFFERENTIAL_SMOKE_STRATEGY,
+        create: () => ({ async verify(input, context) {
+          writeFileSync(join(context.workspace.evidenceRoot, "report.json"), JSON.stringify({ round: input.translation.round }));
+          const artifact = await context.writeArtifact({ id: "report", kind: "report", path: "report.json", contentHash: "0".repeat(64), mediaType: "application/json" });
+          return createVerificationResult(input, DIFFERENTIAL_SMOKE_STRATEGY, {
+            status: "fail", summary: "Mismatch", issues: [{ id: "mismatch", kind: "behavioral-divergence", message: "Mismatch", evidenceArtifactIds: [artifact.id] }],
+            artifacts: [artifact], strategyReport: {},
+          });
+        } }),
+      }]),
+    });
+    try {
+      const result = await new AdaptationAdapterV2({ runtimeCapabilities: fixture.serviceRuntime, ...providers, verifier: new TranslationVerifierV2Adapter(service) }).adapt(fixture.request, fixture.validationContext);
+      expect(result.repairRounds).toHaveLength(2);
+      const artifacts = [
+        ...result.validation.flatMap((record) => record.artifact ? [record.artifact] : []),
+        ...result.repairRounds.flatMap((round) => round.verifierArtifacts),
+      ];
+      expect(new Set(artifacts.map((artifact) => artifact.id)).size).toBe(5);
+      for (const artifact of artifacts) {
+        expect(createHash("sha256").update(readFileSync(join(artifactRoot, artifact.path))).digest("hex")).toBe(artifact.contentHash);
+      }
+      const route = fixture.validationContext.runtimeCapabilities.routes.find((route) => route.id === result.route.routeId)!;
+      const manifest = materializeMigrationRunManifestV2({
+        status: "planned", request: fixture.request, result,
+        providers: route.stages.map((stage) => ({ stage: stage.stage, providerId: stage.providerId, providerVersion: stage.providerVersion, status: "completed", startedAt: adaptationV2TestNow, artifactRefs: [] })),
+        validators: result.validation.map((record) => ({
+          providerId: record.verifierId!, providerVersion: record.verifierVersion!, policyCheckId: record.policyCheckId!,
+          validationRecordId: record.id, subjectHash: result.patchHash, status: record.status,
+          artifactRefs: record.artifact ? [{ id: record.artifact.id, contentHash: record.artifact.contentHash }] : [],
+        })),
+        artifactPaths: Object.fromEntries(artifacts.map((artifact) => [artifact.id, artifact.path])),
+        createdAt: adaptationV2TestNow, updatedAt: adaptationV2TestNow,
+      }, fixture.validationContext);
+      expect(validateMigrationRunManifestV2(manifest, fixture.request, result, fixture.validationContext)).toBe(manifest);
+      expect(readdirSync(artifactRoot)).toHaveLength(3);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("sends structured repair feedback without strategy reports", async () => {
     const fixture = createAdaptationV2TestFixture();
     const request = vi.fn(async (_url: URL | RequestInfo, _init?: RequestInit) => new Response(JSON.stringify({

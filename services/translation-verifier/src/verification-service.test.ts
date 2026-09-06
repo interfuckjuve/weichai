@@ -4,7 +4,8 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import * as fs from "node:fs";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { VerificationService } from "./verification-service.js";
 import { VerificationStrategyFactory } from "./verification-strategy-factory.js";
 import {
@@ -16,6 +17,12 @@ import {
   type VerificationStrategyDescriptor,
   type VerificationStrategyProvider,
 } from "./verification-types.js";
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof fs>();
+  return { ...actual, renameSync: vi.fn(actual.renameSync) };
+});
+const fsRename = vi.mocked(fs.renameSync).getMockImplementation()!;
 
 const sourceContent = "export function source() {\n  return 1;\n}\n";
 const originalTargetContent = "def target():\n    raise NotImplementedError()\n";
@@ -33,10 +40,119 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.mocked(fs.renameSync).mockReset().mockImplementation(fsRename);
   rmSync(root, { recursive: true, force: true });
 });
 
 describe("VerificationService", () => {
+  async function evidence(context: VerificationStrategyContext, bytes = 3) {
+    writeFileSync(join(context.workspace.evidenceRoot, "report.json"), Buffer.alloc(bytes, "x"));
+    return context.writeArtifact({ id: "report", kind: "report", path: "report.json", contentHash: "0".repeat(64), mediaType: "application/json" });
+  }
+
+  it.each(["source", "oversized-artifact", "oversized-result", "cumulative-budget", "destination"])("fails closed on %s persistence failure and removes only this attempt's durable artifacts", async (failure) => {
+    const previous = await serviceWith([provider("first")], "first").verifyWithReceipt(input());
+    const previousBytes = readFileSync(join(artifactRoot, previous.resultArtifact!.path));
+    const service = serviceWith([provider("first", async (inputValue, context) => {
+      const artifact = await evidence(context, failure === "cumulative-budget" ? 10 * 1024 * 1024 : 3);
+      if (failure === "source") await context.writeArtifact({ ...artifact, id: "missing", path: "missing.json" });
+      if (failure === "oversized-artifact") {
+        writeFileSync(join(context.workspace.evidenceRoot, "big.json"), Buffer.alloc(10 * 1024 * 1024 + 1));
+        await context.writeArtifact({ ...artifact, id: "big", path: "big.json" });
+      }
+      if (failure === "destination") {
+        // A non-directory artifact-root parent is a real ENOTDIR persistence failure.
+        rmSync(join(artifactRoot, artifact.path.split("/")[0]!), { recursive: true });
+        writeFileSync(join(artifactRoot, artifact.path.split("/")[0]!), "blocked");
+      }
+      return createVerificationResult(inputValue, descriptor("first"), {
+        status: "pass", summary: "verified", issues: [], artifacts: [artifact],
+        strategyReport: failure === "oversized-result" ? { output: "x".repeat(10 * 1024 * 1024) } : {},
+      }, () => now);
+    })], "first");
+    const receipt = await service.verifyWithReceipt(input());
+    expect(receipt.resultArtifact).toBeUndefined();
+    expect(receipt.result).toMatchObject({ status: "unverified", artifacts: [], issues: [{ kind: "artifact-persistence-failed" }] });
+    expect(readFileSync(join(artifactRoot, previous.resultArtifact!.path))).toEqual(previousBytes);
+    expect(readdirSync(artifactRoot)).toEqual([previous.resultArtifact!.path.split("/")[0]]);
+  });
+
+  it.each(["strategy", "provider", "caller"])("propagates the identical %s AbortError and discards abandoned attempt artifacts", async (origin) => {
+    const error = new DOMException("cancelled", "AbortError");
+    const controller = new AbortController();
+    const p = provider("first", async (_inputValue, context) => {
+      await evidence(context);
+      if (origin === "caller") controller.abort(error);
+      throw error;
+    });
+    if (origin === "provider") p.create = () => { throw error; };
+    await expect(serviceWith([p], "first").verifyWithReceipt(input(), {}, controller.signal)).rejects.toBe(error);
+    expect(existsSync(artifactRoot) ? readdirSync(artifactRoot) : []).toEqual([]);
+  });
+
+  it.each(["missing", "file", "symlink"])("preserves AbortError when the durable root becomes %s during cleanup", async (replacement) => {
+    const abort = new DOMException("cancelled", "AbortError");
+    const outside = join(root, "outside");
+    mkdirSync(outside);
+    writeFileSync(join(outside, "sentinel"), "untouched");
+    const service = serviceWith([provider("first", async (_inputValue, context) => {
+      await evidence(context);
+      rmSync(artifactRoot, { recursive: true });
+      if (replacement === "file") writeFileSync(artifactRoot, "blocked");
+      if (replacement === "symlink") fs.symlinkSync(outside, artifactRoot, "dir");
+      throw abort;
+    })], "first");
+    await expect(service.verifyWithReceipt(input())).rejects.toBe(abort);
+    expect(readFileSync(join(outside, "sentinel"), "utf8")).toBe("untouched");
+    expect(readdirSync(workspaceRoot)).toEqual([]);
+  });
+
+  it("does not retry a transient final-result persistence failure", async () => {
+    const service = serviceWith([provider("first", async (inputValue, context) => {
+      const artifact = await evidence(context);
+      vi.mocked(fs.renameSync).mockClear().mockImplementationOnce(() => { throw new Error("transient result rename failure"); });
+      return createVerificationResult(inputValue, descriptor("first"), {
+        status: "pass", summary: "verified", issues: [], artifacts: [artifact], strategyReport: {},
+      }, () => now);
+    })], "first");
+    const receipt = await service.verifyWithReceipt(input());
+    expect(receipt.resultArtifact).toBeUndefined();
+    expect(receipt.result).toMatchObject({ status: "unverified", artifacts: [], issues: [{ kind: "artifact-persistence-failed" }] });
+    expect(fs.renameSync).toHaveBeenCalledTimes(1);
+    expect(readdirSync(artifactRoot)).toEqual([]);
+  });
+
+  it("does not delete another attempt through a replaced attempt symlink", async () => {
+    const previous = await serviceWith([provider("first")], "first").verifyWithReceipt(input());
+    const bytes = readFileSync(join(artifactRoot, previous.resultArtifact!.path));
+    const abort = new DOMException("cancelled", "AbortError");
+    const service = serviceWith([provider("first", async (_inputValue, context) => {
+      const artifact = await evidence(context);
+      const attempt = join(artifactRoot, artifact.path.split("/")[0]!);
+      rmSync(attempt, { recursive: true });
+      fs.symlinkSync(join(artifactRoot, previous.resultArtifact!.path.split("/")[0]!), attempt, "dir");
+      throw abort;
+    })], "first");
+    await expect(service.verifyWithReceipt(input())).rejects.toBe(abort);
+    expect(readFileSync(join(artifactRoot, previous.resultArtifact!.path))).toEqual(bytes);
+    expect(readdirSync(artifactRoot)).toEqual([previous.resultArtifact!.path.split("/")[0]]);
+  });
+
+  it.each(["strategy", "provider"])("normalizes a %s-thrown TimeoutError without caller cancellation", async (origin) => {
+    const p = provider("first", async () => { throw new DOMException("timeout", "TimeoutError"); });
+    if (origin === "provider") p.create = () => { throw new DOMException("timeout", "TimeoutError"); };
+    const result = await serviceWith([p], "first").verifyWithReceipt(input());
+    expect(result.result).toMatchObject({ status: "unverified", issues: [{ kind: "strategy-timeout" }] });
+    expect(result.resultArtifact).toBeDefined();
+  });
+
+  it("preserves workspace creation errors instead of manufacturing receipts", async () => {
+    mkdirSync(root, { recursive: true });
+    writeFileSync(workspaceRoot, "blocked");
+    await expect(serviceWith([provider("first")], "first").verifyWithReceipt(input())).rejects.toThrow();
+    expect(existsSync(artifactRoot)).toBe(false);
+  });
+
   it("uses the default strategy and permits an explicit registered strategy", async () => {
     const service = serviceWith([provider("first"), provider("second")], "first");
 

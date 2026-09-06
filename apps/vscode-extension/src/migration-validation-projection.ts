@@ -1,4 +1,4 @@
-import type { AdaptationResultV2, MigrationRunManifestV2, MigrationValidatorExecutionV2 } from '@forexplore/contracts';
+import type { AdaptationResultV2, MigrationValidatorExecutionV2 } from '@forexplore/contracts';
 
 export function manifestValidatorExecutions(result: AdaptationResultV2): MigrationValidatorExecutionV2[] {
   return result.validation.map((record) => {
@@ -25,14 +25,19 @@ export function mergeValidationArtifactPaths(
   result: AdaptationResultV2,
 ): Record<string, string> {
   const merged = { ...artifactPaths };
-  for (const record of result.validation) {
-    const artifact = record.artifact;
-    if (artifact === undefined) continue;
-    const previous = merged[artifact.id];
-    if (previous !== undefined && previous !== artifact.path) {
-      throw new Error(`Validation artifact ${artifact.id} has conflicting paths.`);
+  const artifacts = [
+    ...result.validation.flatMap((record) => record.artifact === undefined ? [] : [record.artifact]),
+    ...result.repairRounds.flatMap((round) => round.verifierArtifacts),
+  ];
+  const hashes = new Map<string, string>();
+  for (const artifact of artifacts) {
+    const previous = Object.hasOwn(merged, artifact.id) ? merged[artifact.id] : undefined;
+    const previousHash = hashes.get(artifact.id);
+    if ((previous !== undefined && previous !== artifact.path) || (previousHash !== undefined && previousHash !== artifact.contentHash)) {
+      throw new Error(`Validation artifact ${artifact.id} has conflicting paths or content hashes.`);
     }
-    merged[artifact.id] = artifact.path;
+    Object.defineProperty(merged, artifact.id, { value: artifact.path, enumerable: true, writable: true, configurable: true });
+    hashes.set(artifact.id, artifact.contentHash);
   }
   return merged;
 }

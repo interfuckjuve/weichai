@@ -75,8 +75,8 @@ export class VerificationService {
     const descriptor = this.#descriptor(strategyId);
 
     let workspace: ReturnType<typeof createVerificationWorkspace> | undefined;
+    let receiptPersisted = false;
     try {
-      const strategy = this.#factory.create(strategyId);
       workspace = createVerificationWorkspace(input, {
         workspaceRoot: this.#workspaceRoot,
         artifactRoot: this.#artifactRoot,
@@ -91,19 +91,23 @@ export class VerificationService {
       } else {
         if (signal?.aborted) throw signal.reason ?? new Error("Caller aborted verification");
         try {
+          const strategy = this.#factory.create(strategyId);
           result = await waitForStrategy(strategy.verify(input, workspace.context, combinedSignal), combinedSignal);
           assertVerificationResult(result, input, descriptor);
           assertArtifactsMatch(result.artifacts, workspace.writtenArtifacts());
         } catch (error) {
-          if (signal?.aborted && error === signal.reason && isAbortError(error)) throw error;
+          if (isAbortError(error)) throw error;
           const artifactFailure = error instanceof VerificationArtifactPersistenceError;
           result = this.#unverified(input, descriptor, error, artifactFailure ? [] : workspace.writtenArtifacts(), artifactFailure);
+          if (artifactFailure) return assertVerificationReceipt({ result }, input, descriptor);
         }
       }
       const receiptBytes = Buffer.from(canonicalJson(result), "utf8");
       try {
         const resultArtifact = workspace.writeFrameworkResult(receiptBytes);
-        return assertVerificationReceipt({ result, resultArtifact }, input, descriptor);
+        const receipt = assertVerificationReceipt({ result, resultArtifact }, input, descriptor);
+        receiptPersisted = true;
+        return receipt;
       } catch (error) {
         if (!(error instanceof VerificationArtifactPersistenceError)) throw error;
         // The canonical failed result is returned without a second persistence attempt.
@@ -111,7 +115,7 @@ export class VerificationService {
         return assertVerificationReceipt({ result: failedResult }, input, descriptor);
       }
     } finally {
-      workspace?.cleanup();
+      workspace?.cleanup({ discardArtifacts: !receiptPersisted });
     }
   }
 

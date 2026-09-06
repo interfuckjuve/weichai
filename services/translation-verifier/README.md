@@ -1,138 +1,107 @@
-# translation-verifier(smoke 差分翻译验证)
+# translation-verifier
 
-单次 **claude 自主会话** 的跨语言代码翻译差分验证:claude 会话读源/目标项目、设计冒烟用例、
-写双侧 runner、**只经受控命令代理**(`verifier-command`——基线复查/工具白名单/最小化环境/
-命令证据)真实编译运行、做机械差分 + LLM 语义裁决,最终把 `report.json`(SmokeReport)写入
-agent 工作目录;宿主复查基线、读有界命令证据并做深度校验,产出 `pass/fail/unverified`。
+A strategy-based verification framework with a differential smoke implementation. The smoke strategy uses one autonomous Claude session to inspect staged source and target projects, design cases, write runners, execute them through the controlled `verifier-command` proxy, and report behavioral differences.
 
-核心定位:差分验证是**差异探测器而非绝对正确性证明**。默认模式为 **verify-only**:
-- 源/目标项目快照只读,**绝不修改目标实现**(`rounds===0`、`targetFiles` 为空);
-- smoke 只负责报告 `translation-bug` case,目标修复由外部工作流负责;
-- 宿主验证命令执行、退出状态、工作区基线和报告结构;case 的语义 `decision` 仍由 Agent 给出;
-- `AbortError`(运行中取消)原样上抛,不是可验证失败。
+Differential verification detects discrepancies; it is not proof of business correctness. Host checks cover execution evidence, workspace baselines, and report structure. Semantic case decisions still come from the agent.
 
-旧实验修复行为需要显式 `mode:"diagnostic-repair"`(仅供诊断 E2E)。
+## V2 Integration
 
-> 当前集成状态:本包提供独立 `runSmoke` API 与通用 verification framework
-> entry/result 边界(`VerificationInput` → `VerificationResult`),并已注册上游 V2
-> `MigrationBehaviorVerifierV2` provider。adaptation runtime 默认使用静态
-> `differential-smoke@1.0.0` verifier；receipt artifacts 由 verifier workspace 持久化并校验。
-> 适配运行时在本机 local process 执行，未提供安全隔离 sandbox；生产部署需要由外部
-> runtime/container 边界承担隔离职责。
+The V2 `MigrationBehaviorVerifierV2` provider is registered and enabled in the adaptation runtime. `TranslationVerifierV2Adapter` delegates to the default `VerificationService`, whose only statically registered strategy is `differential-smoke@1.0.0`. Strategy selection belongs to the server, not HTTP clients or the UI. Unknown strategy IDs fail explicitly without fallback.
 
-## 模块数据流
+`AdaptationAdapterV2` owns the migration repair loop, with at most two repair rounds. Each round produces a new patch and fresh validation. A required `unverified` check stops repair and blocks write-back; compilation success alone is not behavioral evidence.
 
-```text
-runSmoke(job, { mode:"verify-only", ... }, signal)
-  1. 准备或接收 caller-owned 的 source/target 快照、runner 根、agent 目录与 baseline
-  2. claude cwd = agent 目录;Bash 只允许精确的 verifier-command 形态
-  3. claude 写双侧 runner → 经代理编译/运行 → 写 report.json
-  4. 宿主复查 baseline → assertSmokeReport 深校验 → 读取 commands.jsonl
-     → evaluateSmokeReport → pass/fail/unverified
-  5. 内部工作区按 keepGeneratedTests 策略清理;caller-owned 工作区由调用方管理
-```
+Execution is `local-process` on the adaptation-service host, not a security sandbox. Production isolation must be supplied by an external runtime or container boundary.
 
-非生产小 fixture/单测输入(无 caller 工作区集)由 `runSmoke` 内部暂存到
-`<workspaceRoot>/smoke-*`(同样布局 + 基线),仍只经命令代理,不保留旧的直连 Bash 路径。
-
-## 模块清单
-
-| 模块 | 职责 |
-| --- | --- |
-| `verification-cli.ts` | 通用 verification CLI(`--list-strategies` / `--input` / `--output` / `--strategy`) |
-| `default-verification-service.ts` | 静态注册默认 service:当前只注册 `differential-smoke@1.0.0` |
-| `verification-service.ts` + `verification-strategy-factory.ts` | Strategy factory、默认/显式 strategy 选择、未知 strategy 显式失败 |
-| `verification-types.ts` | `VerificationInput` / `VerificationResult` / strategy descriptor/result envelope 合约 |
-| `strategies/smoke-runner.ts` | `runSmoke` verify-only 编排(布局/命令代理 env/深校验/证据评估/AbortError) |
-| `strategies/prompts/smoke-task.ts` | `buildSmokeTaskPrompt(input, mode)`:verify-only 与 diagnostic 模式简报 |
-| `strategies/helpers.ts` | `VERIFIER_COMMAND_ENTRY`、默认目录与工具约束常量 |
-| `strategies/workspace.ts` | 内部暂存工作目录(cleanup 幂等) |
-| `strategies/report.ts` + `report-schema.ts` | report.json 读取 + SmokeReport 深校验(含 verify-only 约束) |
-| `workspace-baseline.ts` | 请求级工作区文件基线(create/write/assert,runner 根与产物区白名单) |
-| `verifier-command.ts` | 受控命令代理 CLI(cwd/基线/白名单/最小化 env/证据 JSONL/进程树回收) |
-| `process-tree.ts` | `runManagedProcess` + `terminateProcessTree` + `sanitizedBuildEnvironment` |
-| `smoke-evaluation.ts` | `evaluateSmokeReport` 纯判定策略(pass/fail/unverified) |
-| `claude-client.ts` | claude 子进程封装(print 模式 + signal/deadline + hooks 步骤日志) |
-| `logger.ts` | 零依赖日志(文件默认 INFO、content 通道默认关闭、脱敏、轮转保留 maxFiles) |
-
-## 快速开始
-
-```bash
-# 单元测试(src 下全部 *.test.ts,含 fake-spawn 注入,不触网)
-npm run test --workspace @forexplore/translation-verifier
-
-# 类型检查/构建
-npm run build --workspace @forexplore/translation-verifier
-
-# 离线依赖 fixture 本地构建(验证命令代理能跑真实项目依赖)
-mvn -q -f services/translation-verifier/e2e/fixtures/dependencies/maven/pom.xml test
-dotnet build services/translation-verifier/e2e/fixtures/dependencies/dotnet/DependencyFixture.sln --nologo -v q
-
-# 列出静态注册策略(默认包含 differential-smoke 1.0.0)
-npm run verify --workspace @forexplore/translation-verifier -- --list-strategies
-
-# 通用 verification entry:读取 VerificationInput JSON,写 VerificationResult JSON
-npm run verify --workspace @forexplore/translation-verifier -- \
-  --input /path/to/verification-input.json \
-  --output /path/to/verification-result.json
-
-# 显式选择 strategy;未知 strategy 由 VerificationService/Factory 显式失败
-npm run verify --workspace @forexplore/translation-verifier -- \
-  --strategy differential-smoke \
-  --input /path/to/verification-input.json \
-  --output /path/to/verification-result.json
-
-# smoke E2E:离线路径(自主模式无离线回放,仅打印说明退出 0)
-npm run e2e --workspace @forexplore/translation-verifier -- --offline-only
-
-# smoke E2E:真实 claude 自主会话(diagnostic-repair,需 DEEPSEEK_API_KEY 或 --api-key)
-DEEPSEEK_API_KEY=sk-xxx npm run e2e --workspace @forexplore/translation-verifier -- --timeout-ms 600000
-
-# smoke E2E:生产 verify-only(完整本地依赖 fixture 根,校验 rounds/targetFiles/runnerFiles/executions)
-DEEPSEEK_API_KEY=sk-xxx npm run e2e --workspace @forexplore/translation-verifier -- --verify-only --timeout-ms 600000
-```
-
-详见 `e2e/README.md`。
-
-## API
+## Verification and Artifact Lifecycle
 
 ```ts
 createDefaultVerificationService(options?).verify(input, { strategyId?, keepWorkspace? }, signal)
+createDefaultVerificationService(options?).verifyWithReceipt(input, { strategyId?, keepWorkspace? }, signal)
 ```
 
-- `VerificationInput`:通用 verification entry,携带 `AdaptationRequestV2`、analysis report、migration plan 与 translation patch envelope。
-- `VerificationResult`:通用 result boundary,携带 `strategyId`、`strategyVersion`、`subjectHash`、`status`、issues、artifacts、strategy report 与 content hash。
-- Strategy registration 是静态的:当前 default service 只注册 `differential-smoke@1.0.0`;不做 dynamic loading。
-- 未知 strategy 不由 CLI 静默回退或改写,由 `VerificationService` / `VerificationStrategyFactory` 报错。
+- `VerificationInput` carries the `AdaptationRequestV2`, analysis report, migration plan, and translation patch envelope.
+- `VerificationResult` binds strategy ID/version, patch subject hash, round, status, issues, artifacts, strategy report, and content hash.
+- `verifyWithReceipt` persists the canonical result bytes once and returns their exact ID, durable relative path, SHA-256, byte size, and media type. The framework does not retry failed persistence or emit synthetic artifact metadata.
+- Source lookup, stat/read, symlink, permission, destination, and artifact budget failures become `VerificationArtifactPersistenceError`. The service returns `unverified` with `artifact-persistence-failed`, no result artifact, and no strategy artifact references.
+- Strategy artifacts and the framework result share a cumulative **10 MiB per-attempt** budget. Both the preliminary file size and actual bytes read are checked; result bytes consume the same budget.
+- The workspace assigns attempt-specific durable paths and strategy artifact IDs. Strategies must use the returned references, including IDs, when constructing issues and results.
+- Abandoned attempts discard their durable artifacts without deleting other attempts. Successfully receipted `fail` and `unverified` results retain real evidence for audit and repair. `keepWorkspace` preserves staged files for diagnosis, not abandoned durable evidence.
+- Final validation artifacts and all repair artifact references are merged into manifest `artifactPaths`. Canonical validation requires exact ID/path bindings and rejects conflicting hashes. The VS Code host references verifier-owned artifacts; it does not invent local copies.
+- Invalid inputs, unknown strategies, and workspace creation errors throw. Any strategy/provider/caller `AbortError` propagates unchanged; `TimeoutError` becomes an `unverified` timeout result.
+
+## Smoke Execution
+
+Default mode is `verify-only`:
+
+- Source and target snapshots remain unchanged; `rounds === 0` and `targetFiles` is empty.
+- Smoke reports translation bugs; the external migration workflow owns target repairs.
+- Runners compile and execute only through `verifier-command`, with command allowlists, baseline checks, a minimized environment, evidence logging, and process-tree termination.
+- The host validates `report.json`, checks the baseline again, reads bounded command evidence, and evaluates `pass`, `fail`, or `unverified`.
+
+Legacy repair experiments require explicit `mode: "diagnostic-repair"` and are intended only for diagnostic E2E runs.
 
 ```ts
 runSmoke(job: SmokeTaskInput, options?: SmokeRunOptions, signal?: AbortSignal): Promise<SmokeResult>
 ```
 
-- `SmokeTaskInput`: `{ requirement, analysisReport?, source:{language, root?, candidatePath?, files?}, target:{language, className, method, isStatic, root?, file?} }`。
-- `SmokeRunOptions`: `mode?`(默认 `"verify-only"`)/ 生产工作区集 `workspaceDir`+`executionRoot`+
-  `baselinePath`+`commandEvidencePath`+`runnerRoots`(一套齐备,提供后本模块不创建/清理)/ 兼容 `workspaceRoot?`/`keepGeneratedTests?`/`maxTurns?`(50)/`apiKey?`/`model?`/`timeoutMs?`(300s)/`spawnClaude?`(测试注入)。
-- `SmokeResult`: `{ status:"pass"|"fail"|"error", passRate?, summary, durationMs, report, evaluation?, errorReason? }`。
-- 归一化:evaluation pass/fail → status 同值;evaluation unverified → `status:"error"` 且保留
-  `evaluation`(advisory 语义);报告/证据硬失败带 `errorReason`(`invalid-report`/`invalid-evidence`/`timeout`/`toolchain`/`internal`);`AbortError` 原样上抛。
+`SmokeTaskInput` includes the requirement, optional analysis report, source language/project/files, and target language/project/file/symbol. `SmokeRunOptions` accepts a complete caller-owned workspace set (`workspaceDir`, `executionRoot`, `baselinePath`, `commandEvidencePath`, `runnerRoots`), or an internal fixture workspace. It also supports `mode`, `keepGeneratedTests`, model/API settings, timeout, `maxTurns` (default 50), and test-only `spawnClaude` injection.
 
-## 日志与失败产物
+`SmokeResult` uses `pass | fail | error`. An unverified evaluation maps to `error`, retaining its evaluation or an `errorReason` such as `invalid-report`, `invalid-evidence`, `timeout`, `toolchain`, or `internal`. Caller-owned workspaces remain the caller's responsibility; internal smoke workspaces follow `keepGeneratedTests`.
 
-- 日志:文件默认 INFO(不落 prompt/源码/原始输出);`content()` 通道默认关闭,开启方式
-  `VERIFIER_LOG_CONTENT=1`;写前脱敏(`redactSecrets`);超过 `maxFileBytes`(默认 10 MiB)
-  轮转并只保留 `maxFiles`(默认 3)份。
-- `runSmoke` 内部创建的工作区由 `keepGeneratedTests` 控制是否保留;caller-owned 工作区
-  始终由调用方负责生命周期。
+## Modules
 
-## 已知限制
+| Module | Responsibility |
+| --- | --- |
+| `verification-cli.ts` | Generic input/output CLI and strategy listing |
+| `default-verification-service.ts` | Static default strategy registration |
+| `verification-service.ts`, `verification-strategy-factory.ts` | Strategy orchestration, timeout/cancellation, receipts |
+| `verification-workspace.ts` | Staging, patch application, durable artifact persistence and cleanup |
+| `verification-types.ts` | Input, result, descriptor, and receipt validation |
+| `strategies/differential-smoke-strategy.ts` | Framework-to-smoke mapping and context preflight |
+| `strategies/smoke-runner.ts` | Verify-only execution and evidence evaluation |
+| `strategies/prompts/smoke-task.ts` | Verify-only and diagnostic task prompts |
+| `strategies/helpers.ts`, `strategies/workspace.ts` | Tool constraints and internal workspace lifecycle |
+| `strategies/report.ts`, `report-schema.ts` | Bounded report reading and deep schema validation |
+| `workspace-baseline.ts` | Request-level protected-file baseline |
+| `verifier-command.ts`, `process-tree.ts` | Controlled execution, environment, evidence, process cleanup |
+| `smoke-evaluation.ts` | Pure smoke outcome policy |
+| `claude-client.ts`, `logger.ts` | Claude process integration and bounded, redacted logging |
 
-- **可信代码本机执行**:本机执行边界不是安全沙箱;若输入信任边界改变,必须升级容器/远程隔离。
-- **同命令“改-恢复”残余**:命令代理在 spawn 前/后各做一次基线复查,运行期间改动受保护
-  文件的命令会被留下 `baselineValid:false` 证据并使 CLI 以非零失败——但**同一命令内先改受
-  保护文件、退出前再恢复原内容**的情形无法被哈希复查发现(命令与宿主同 OS 用户运行,无
-  内核级写入拦截)。
-- **构建工具可访问外部依赖仓库**:结果受网络与缓存影响;失败归 unverified 并保留证据。
-- **Agent 语义裁决**:宿主确认命令真实成功并校验报告/基线,但目前不会从 stdout
-  独立重算每个 case 的机械差分;`decision` 仍由 Agent 产生,不能作为绝对正确性证明。
-- **runner 质量依赖 LLM**:编译失败/caseId 不一致由 claude 在会话内自查修复(仅 runner)。
-- 单次自主会话耗时分钟级,`timeoutMs` 请按需放大(默认 300s)。
+## Commands
+
+Run from the repository root:
+
+```bash
+npm run test --workspace @forexplore/translation-verifier
+npm run build --workspace @forexplore/translation-verifier
+npm run verify --workspace @forexplore/translation-verifier -- --list-strategies
+npm run verify --workspace @forexplore/translation-verifier -- \
+  --strategy differential-smoke --input /path/to/input.json --output /path/to/result.json
+
+# Offline entry-point check only; no autonomous-session replay is available.
+npm run e2e --workspace @forexplore/translation-verifier -- --offline-only
+
+# Real Claude diagnostic session; requires credentials and local toolchains.
+DEEPSEEK_API_KEY=sk-xxx npm run e2e --workspace @forexplore/translation-verifier -- --timeout-ms 600000
+
+# Verify-only session with complete local dependency fixtures.
+DEEPSEEK_API_KEY=sk-xxx npm run e2e --workspace @forexplore/translation-verifier -- --verify-only --timeout-ms 600000
+
+# Local dependency fixture builds, subject to installed tools and dependency caches.
+mvn -q -f services/translation-verifier/e2e/fixtures/dependencies/maven/pom.xml test
+dotnet build services/translation-verifier/e2e/fixtures/dependencies/dotnet/DependencyFixture.sln --nologo -v q
+```
+
+See [e2e/README.md](e2e/README.md) for fixtures and exit codes. `--offline-only` exits successfully after checking the entry point; it does not execute real model verification.
+
+## Logging and Limits
+
+File logging defaults to INFO, without prompts, source, or raw output. Enable the content channel explicitly with `VERIFIER_LOG_CONTENT=1`. Entries are redacted before writing. Log rotation defaults to 10 MiB per file and three retained files; this is separate from the verification artifact budget.
+
+Known boundaries:
+
+- Same-user local execution is not isolation. Baseline checks cannot detect a protected file changed and restored within one command.
+- Build tools may access external dependency repositories; network and cache state affect results. Toolchain failures remain unverified.
+- The host does not independently recompute every semantic case decision from stdout. Runner coverage and semantic adjudication depend on the agent.
+- File-system checks do not provide kernel-level protection against concurrent malicious mutation, process crashes, or storage failure. Durable artifacts require operational storage permissions and retention management.
+- Autonomous sessions can take minutes. The default timeout is 300 seconds; increase it for larger projects.
