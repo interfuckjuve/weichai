@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("@forexplore/translation-verifier", async (importOriginal) => {
@@ -5,7 +6,8 @@ vi.mock("@forexplore/translation-verifier", async (importOriginal) => {
   return { ...actual, createDefaultVerificationService: vi.fn(actual.createDefaultVerificationService) };
 });
 
-import { createVerificationResult, type VerificationService } from "@forexplore/translation-verifier";
+import { createVerificationResult, DIFFERENTIAL_SMOKE_STRATEGY, type VerificationService } from "@forexplore/translation-verifier";
+import { canonicalJson } from "@forexplore/workflow-core";
 import { createAdaptationV2Runtime } from "./adaptation-v2-runtime";
 import {
   adaptationV2GeneratedContent,
@@ -62,13 +64,18 @@ describe("createAdaptationV2Runtime", () => {
   });
   it("executes V2 verification through the server-owned local verifier", async () => {
     const fixture = createAdaptationV2TestFixture();
-    const verify = vi.fn<VerificationService["verifyWithReceipt"]>(async (input) => ({ result: createVerificationResult(input, {
-        id: "forexplore.translation-verifier.differential",
-        version: "1.0.0",
-        displayName: "Fixture differential verifier",
-      }, {
+    const verify = vi.fn<VerificationService["verifyWithReceipt"]>(async (input) => {
+      const result = createVerificationResult(input, DIFFERENTIAL_SMOKE_STRATEGY, {
         status: "pass", summary: "verified", issues: [], artifacts: [], strategyReport: {},
-      }, () => adaptationV2TestNow), resultArtifact: { id: "verification-result:runtime", kind: "verification-result", path: "verification-result.json", contentHash: "c".repeat(64), size: 2, mediaType: "application/json" } }));
+      }, () => adaptationV2TestNow);
+      const path = "verification-result.json";
+      const bytes = Buffer.from(canonicalJson(result), "utf8");
+      return { result, resultArtifact: {
+        id: `verification-result:${path}`, kind: "verification-result", path,
+        contentHash: createHash("sha256").update(bytes).digest("hex"), size: bytes.byteLength,
+        mediaType: "application/json",
+      } };
+    });
     const runtime = createAdaptationV2Runtime({
       apiKey: "test-key",
       verificationWorkspaceRoot: "/tmp/workspaces",

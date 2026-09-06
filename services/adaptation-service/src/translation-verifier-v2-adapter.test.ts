@@ -1,6 +1,10 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import type { RepositoryIngestionJsonValue } from "@forexplore/contracts";
-import { calculatePatchHashV2 } from "@forexplore/workflow-core";
+import {
+  calculatePatchHashV2,
+  canonicalJson,
+} from "@forexplore/workflow-core";
 import {
   createVerificationResult,
   DIFFERENTIAL_SMOKE_STRATEGY,
@@ -81,7 +85,16 @@ describe("TranslationVerifierV2Adapter", () => {
       artifacts: [],
       strategyReport: { cases: 1 },
     }, () => "2026-09-05T00:00:00.000Z");
-    const receipt = { result, resultArtifact: { id: "verification-result:test", kind: "verification-result" as const, path: "verification-result.json", contentHash: "c".repeat(64), size: 2, mediaType: "application/json" as const } };
+    const path = "verification-result.json";
+    const bytes = Buffer.from(canonicalJson(result), "utf8");
+    const receipt = { result, resultArtifact: {
+      id: `verification-result:${path}`,
+      kind: "verification-result" as const,
+      path,
+      contentHash: createHash("sha256").update(bytes).digest("hex"),
+      size: bytes.byteLength,
+      mediaType: "application/json" as const,
+    } };
     const service = {
       verifyWithReceipt: vi.fn(async () => receipt),
     } satisfies Pick<VerificationService, "verifyWithReceipt">;
