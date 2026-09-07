@@ -13,8 +13,11 @@ export interface VerificationServiceOptions {
   artifactRoot?: string;
   timeoutMs?: number;
   now?: () => string;
+  /** Reserved, currently ignored; no production diagnostic run-root is implemented. */
   runRoot?: string;
+  /** Reserved, currently ignored; use VERIFIER_LOG_CONTENT for opt-in content logging. */
   debug?: boolean;
+  /** Reserved, currently not called; retained for source compatibility. */
   onRunRecorded?: (location: { runId: string; runDirectory?: string }) => void;
 }
 

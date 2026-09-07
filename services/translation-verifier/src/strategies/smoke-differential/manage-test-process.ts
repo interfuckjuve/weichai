@@ -245,6 +245,8 @@ export function runManagedProcess(
     env: NodeJS.ProcessEnv;
     deadlineAt: number;
     maxOutputBytes?: number;
+    /** Best-effort live observer, independent of retained stdout limits. */
+    onStdoutChunk?: (chunk: Buffer) => void;
     /** 终止升级与管道排空宽限(ms);缺省 DEFAULT_CLEANUP_GRACE_MS。 */
     cleanupGraceMs?: number;
   },
@@ -264,7 +266,10 @@ export function runManagedProcess(
     });
     const stdout = boundedOutput(maxBytes);
     const stderr = boundedOutput(maxBytes);
-    child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk));
+    child.stdout?.on("data", (chunk: Buffer) => {
+      stdout.push(chunk);
+      try { input.onStdoutChunk?.(chunk); } catch { /* Observers never own process lifecycle. */ }
+    });
     child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
 
     let exitCode: number | null = null;

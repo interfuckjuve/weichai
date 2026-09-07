@@ -229,17 +229,19 @@ describe("createDefaultVerificationService", () => {
       expect(sessions[1]).toHaveProperty("durationMs");
       expect(sessions[1].parentId).toBe(sessions[0].id);
       expect(during.stages.find((step: { name: string }) => step.name === "evaluate-evidence")?.state).toBe("completed");
-      expect(during.diagnostics).toEqual([]);
+      expect(during.diagnostics).toEqual([{ code: "agent-telemetry-missing", message: "No live Agent task markers were observed; task timing is unavailable." }]);
       const run = assertVerificationRun(recorder.mock.results[0]!.value.snapshot());
       expect(run.stages.find((step) => step.name === "execute-strategy")?.state).toBe(outcome === "cancelled" ? "cancelled" : "completed");
       expect(run.stages.find((step) => step.id === sessions[1].id)?.state).toBe("completed");
       if (outcome === "cancelled") {
         // The non-cooperative wrapper has not returned: never synthesize its end or duration.
         expect(run.stages.find((step) => step.id === sessions[0].id)).not.toHaveProperty("durationMs");
-        expect(run.diagnostics.every((item) => item.code === "stage-missing-end")).toBe(true);
+        expect(run.diagnostics.filter((item) => item.code !== "agent-telemetry-missing").every((item) => item.code === "stage-missing-end")).toBe(true);
+        expect(run.diagnostics.some((item) => item.code === "stage-missing-end")).toBe(true);
+        expect(run.diagnostics.filter((item) => item.code === "agent-telemetry-missing")).toEqual(during.diagnostics);
       } else {
         expect(run.stages.every((step) => step.state === "completed")).toBe(true);
-        expect(run.diagnostics).toEqual([]);
+        expect(run.diagnostics).toEqual(during.diagnostics);
       }
       release();
       await wrapperFinished;
@@ -282,7 +284,7 @@ describe("createDefaultVerificationService", () => {
     expect(run.stages.find((step) => step.name === "run-agent-session")!.durationMs).toBeGreaterThan(0);
     expect(run.stages.find((step) => step.name === "run-smoke")!.durationMs).toBeGreaterThanOrEqual(run.stages.find((step) => step.name === "run-agent-session")!.durationMs!);
     expect((receipt.result.strategyReport as unknown as SmokeResult["report"]).executions?.map((entry) => entry.durationMs)).toEqual(kind === "missing-report" ? undefined : [10, 10, 10, 10]);
-    expect(run.diagnostics).toEqual([]);
+    expect(run.diagnostics).toEqual([{ code: "agent-telemetry-missing", message: "No live Agent task markers were observed; task timing is unavailable." }]);
     expect(receipt.resultArtifact).toBeDefined();
   });
 

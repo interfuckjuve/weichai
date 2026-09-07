@@ -25,9 +25,9 @@ import type { SmokeMode, SmokeReport } from "./differential-test-types.js";
 import type { SmokeTaskInput } from "./build-differential-test-prompt.js";
 import { errorSummary } from "./read-test-report.js";
 import { prepareAgentTask } from "./build-test-task.js";
-import { prepareSmokeProjects } from "./prepare-projects.js";
+import { prepareSmokeProjects, type RunLayout } from "./prepare-projects.js";
 import { runAgentTests } from "./run-agent-session.js";
-import { evaluateEvidence } from "./evaluate-evidence.js";
+import { evaluateEvidence, observeCommandTimings } from "./evaluate-evidence.js";
 export { readCommandEvidence } from "./evaluate-evidence.js";
 
 export type SmokeStatus = "pass" | "fail" | "error";
@@ -57,7 +57,7 @@ export interface SmokeRunOptions {
   commandEvidencePath?: string;
   /** 双侧专用 runner 根(相对 executionRoot)。 */
   runnerRoots?: readonly [string, string];
-  /** 兼容:内部暂存路径下保留工作目录(含 report/claude-steps/runner 源码)。 */
+  /** 兼容:内部暂存路径下保留工作目录(含 report/命令证据/runner 源码)。 */
   keepGeneratedTests?: boolean;
   /** 兼容:内部暂存工作区的父根;默认 <packageRoot>/test-results。 */
   workspaceRoot?: string;
@@ -128,6 +128,7 @@ export async function runSmoke(
   const keep = options.keepGeneratedTests ?? false;
   const logger = createLogger("smoke-runner");
   let ws: WorkspaceHandle | null = null;
+  let layout: RunLayout | undefined;
 
   const finish = (
     partial: Pick<SmokeResult, "status" | "summary" | "report"> &
@@ -146,11 +147,12 @@ export async function runSmoke(
   };
 
   try {
-    const layout = await measureStep("prepare-smoke-layout", () => {
+    layout = await measureStep("prepare-smoke-layout", () => {
       if (options.workspaceDir === undefined) ws = createWorkspace(options.workspaceRoot ?? defaultWorkspaceRoot());
       return prepareSmokeProjects(job, options, ws);
     });
-    const prepared = await measureStep("build-test-task", () => prepareAgentTask(job, options, layout, signal));
+    const preparedLayout = layout;
+    const prepared = await measureStep("build-test-task", () => prepareAgentTask(job, options, preparedLayout, signal));
     await runAgentTests(prepared);
     return finish(await evaluateEvidence(prepared.layout, mode));
   } catch (error) {
@@ -162,6 +164,7 @@ export async function runSmoke(
       errorReason: classifyRunError(error),
     });
   } finally {
+    if (layout) observeCommandTimings(layout.evidencePath);
     // 内部暂存工作区按 keep 策略清理;caller-owned(workspaceDir)永不清理。
     await measureStep("cleanup-smoke-workspace", () => {
       if (ws !== null && !keep) ws.cleanup();

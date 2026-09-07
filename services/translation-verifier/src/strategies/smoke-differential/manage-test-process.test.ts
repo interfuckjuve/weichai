@@ -9,20 +9,22 @@ import { runManagedProcess, terminateProcessTree } from "./manage-test-process.j
 /** 父子都忽略 SIGTERM 的 fixture(验证 TERM→SIGKILL 升级;60s 看门狗自愈)。 */
 const SIGTERM_IGNORING_FIXTURE = `
 const { spawn } = require("node:child_process");
-const { writeFileSync } = require("node:fs");
+const { writeFileSync, renameSync } = require("node:fs");
 process.on("SIGTERM", () => {});
 const child = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000); setTimeout(() => process.exit(0), 60000);"], { stdio: "ignore" });
-writeFileSync(process.env.FIXTURE_PID_FILE, JSON.stringify({ parent: process.pid, child: child.pid }));
+writeFileSync(process.env.FIXTURE_PID_FILE + ".tmp", JSON.stringify({ parent: process.pid, child: child.pid }));
+renameSync(process.env.FIXTURE_PID_FILE + ".tmp", process.env.FIXTURE_PID_FILE);
 setInterval(() => {}, 1000);
 `;
 
 /** 父进程写标记后退出,但子进程(unref,不等待)以 inherit 方式共享 stdout/stderr 管道并继续驻留(60s 自愈)。 */
 const PIPE_HOLDING_FIXTURE = `
 const { spawn } = require("node:child_process");
-const { writeFileSync, writeSync } = require("node:fs");
+const { writeFileSync, writeSync, renameSync } = require("node:fs");
 const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000); setTimeout(() => process.exit(0), 60000);"], { stdio: "inherit" });
 child.unref();
-writeFileSync(process.env.FIXTURE_PID_FILE, JSON.stringify({ parent: process.pid, child: child.pid }));
+writeFileSync(process.env.FIXTURE_PID_FILE + ".tmp", JSON.stringify({ parent: process.pid, child: child.pid }));
+renameSync(process.env.FIXTURE_PID_FILE + ".tmp", process.env.FIXTURE_PID_FILE);
 writeSync(1, "PARENT-DONE\\n");
 process.exit(0);
 `;
@@ -58,6 +60,19 @@ describe("terminateProcessTree", () => {
 });
 
 describe("runManagedProcess", () => {
+  it("observes stdout live beyond the retained-output cap and isolates callback faults", async () => {
+    workDir = makeDir();
+    const observed: Buffer[] = [];
+    const result = await runManagedProcess({
+      command: process.execPath,
+      args: ["-e", "process.stdout.write('first'); setTimeout(() => process.stdout.write('second'), 30);"],
+      cwd: workDir, env: process.env, deadlineAt: Date.now() + 5000, maxOutputBytes: 2,
+      onStdoutChunk(chunk) { observed.push(Buffer.from(chunk)); throw new Error("observer failed"); },
+    });
+    expect(Buffer.concat(observed).toString()).toBe("firstsecond");
+    expect(result.stdout).toContain("truncated");
+    expect(result.exitCode).toBe(0);
+  });
   it("abort 信号终止进程树并以 AbortError 拒绝", async () => {
     workDir = makeDir();
     const pidFile = pidFilePath();

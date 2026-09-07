@@ -1,6 +1,4 @@
-import { rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { createLogger, type Logger } from "../../run-output/verification-logger.js";
 import { runManagedProcess } from "./manage-test-process.js";
 
@@ -17,6 +15,8 @@ export type EffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
  * 第四参数 options 携带自主会话选项(cwd/沙箱/轮次/hooks settings)。
  */
 export interface SpawnClaudeOptions {
+  /** Optional live stdout observer; exceptions cannot alter session outcome. */
+  onStdoutChunk?: (chunk: Buffer) => void;
   /** 子进程工作目录(默认继承父进程)。 */
   cwd?: string;
   /** --settings 临时 settings 文件路径(hooks 配置)。 */
@@ -51,6 +51,8 @@ export type SpawnClaude = (
 ) => Promise<{ stdout: string; exitCode: number }>;
 
 export interface ClaudeClientOptions {
+  /** Selects partial stream-json output only when present. Buffered output is never replayed. */
+  onStdoutChunk?: (chunk: Buffer) => void;
   /** DeepSeek API Key;默认 process.env.DEEPSEEK_API_KEY。 */
   apiKey?: string;
   /** 模型;默认 process.env.DEEPSEEK_MODEL ?? "deepseek-v4-flash"。 */
@@ -77,7 +79,7 @@ export interface ClaudeClientOptions {
   maxTurns?: number;
   /** --effort <level> 会话思考投入(默认 CLI/模型决定)。 */
   effort?: EffortLevel;
-  /** 生成临时 settings 文件,PostToolUse hook 把每次工具调用 JSON 行追加到该路径。 */
+  /** @deprecated Reserved compatibility option; raw tool hooks are no longer installed. */
   hooksLogPath?: string;
   /** 附加到子进程 env 的自定义变量(置于 ANTHROPIC_* 覆盖之后,如 JAVA_HOME)。 */
   env?: Record<string, string>;
@@ -133,34 +135,28 @@ export async function runClaude(prompt: string, options: ClaudeClientOptions = {
   if (options.disallowedTools) spawnOptions.disallowedTools = options.disallowedTools;
   if (options.signal) spawnOptions.signal = options.signal;
   if (options.deadlineAt !== undefined) spawnOptions.deadlineAt = options.deadlineAt;
-  let settingsFile: string | undefined;
-  if (options.hooksLogPath) {
-    // 临时 settings 文件:PostToolUse hook 把每次工具调用 JSON 行追加到 hooksLogPath。
-    settingsFile = join(tmpdir(), `fx-hooks-${process.pid}-${Date.now()}.json`);
-    buildHooksSettings(settingsFile, options.hooksLogPath);
-    spawnOptions.settingsFile = settingsFile;
+  if (options.onStdoutChunk) {
+    spawnOptions.onStdoutChunk = (chunk) => {
+      try { options.onStdoutChunk!(chunk); } catch { /* Best-effort metadata only. */ }
+    };
   }
   const hasAutonomous = Object.keys(spawnOptions).length > 0;
-  const args = ["-p", prompt, "--output-format", "text"];
-  try {
-    const result = hasAutonomous
-      ? await spawnClaude(args, env, timeoutMs, spawnOptions)
-      : await spawnClaude(args, env, timeoutMs);
-    // 完整 stdout 走 content 通道(默认关闭;长度/状态保持 debug 级度量)。
-    logger.debug(`stdout ${result.stdout.length} chars, exitCode=${result.exitCode}`);
-    logger.content(`stdout:\n${result.stdout}`);
-    if (result.exitCode !== 0) {
-      // SpawnClaude 契约仅要求 { stdout, exitCode };注入的 fake 可额外携带
-      // stderr 字段,使错误信息包含子进程诊断输出(生产实现同样在内部抛错含 stderr)。
-      const stderr = (result as { stderr?: string }).stderr ?? "";
-      logger.error(`claude subprocess exited with code ${result.exitCode}: ${stderr}`);
-      throw new Error(`claude subprocess exited with code ${result.exitCode}: ${stderr}`);
-    }
-    return result.stdout;
-  } finally {
-    // 临时 settings 用完即删(无论成败)。
-    if (settingsFile) rmSync(settingsFile, { force: true });
+  const args = options.onStdoutChunk
+    ? ["-p", prompt, "--output-format", "stream-json", "--verbose", "--include-partial-messages"]
+    : ["-p", prompt, "--output-format", "text"];
+  const result = hasAutonomous
+    ? await spawnClaude(args, env, timeoutMs, spawnOptions)
+    : await spawnClaude(args, env, timeoutMs);
+  // 完整 stdout 走 content 通道(默认关闭;长度/状态保持 debug 级度量)。
+  logger.debug(`stdout ${result.stdout.length} chars, exitCode=${result.exitCode}`);
+  logger.content(`stdout:\n${result.stdout}`);
+  if (result.exitCode !== 0) {
+    // Injected clients may also supply stderr; preserve the existing error contract.
+    const stderr = (result as { stderr?: string }).stderr ?? "";
+    logger.error(`claude subprocess exited with code ${result.exitCode}: ${stderr}`);
+    throw new Error(`claude subprocess exited with code ${result.exitCode}: ${stderr}`);
   }
+  return result.stdout;
 }
 
 /**
@@ -199,7 +195,7 @@ export async function spawnClaudeProcess(
   if (options.settingsFile) fullArgs.push("--settings", options.settingsFile);
   // 注入的 spawn 实现(测试断言用):直接委托,透传 cwd。
   if (options.spawn) {
-    return options.spawn(fullArgs, env, timeoutMs, { cwd: options.cwd });
+    return options.spawn(fullArgs, env, timeoutMs, { cwd: options.cwd, ...(options.onStdoutChunk ? { onStdoutChunk: options.onStdoutChunk } : {}) });
   }
   const deadlineRemainingMs =
     options.deadlineAt === undefined ? Number.POSITIVE_INFINITY : Math.max(1, options.deadlineAt - Date.now());
@@ -211,6 +207,7 @@ export async function spawnClaudeProcess(
       cwd: options.cwd ?? process.cwd(),
       env,
       deadlineAt: Date.now() + effectiveTimeoutMs,
+      onStdoutChunk: options.onStdoutChunk,
     },
     options.signal,
   );
@@ -221,29 +218,4 @@ export async function spawnClaudeProcess(
     throw new Error(`claude subprocess exited with code ${result.exitCode}: ${result.stderr}`);
   }
   return { stdout: result.stdout, exitCode: result.exitCode ?? 0 };
-}
-
-/**
- * 写临时 hooks settings 文件:PostToolUse hook(matcher "*")用 command
- * `cat >> <logPath>` 把每次工具调用的 JSON 行追加到 logPath,返回 settings 文件路径。
- * logPath 用 JSON.stringify 包裹,防路径含空格时被 shell 拆词。
- */
-export function buildHooksSettings(settingsPath: string, logPath: string): string {
-  const settings = {
-    hooks: {
-      PostToolUse: [
-        {
-          matcher: "*",
-          hooks: [
-            {
-              type: "command",
-              command: `cat >> ${JSON.stringify(logPath)}`,
-            },
-          ],
-        },
-      ],
-    },
-  };
-  writeFileSync(settingsPath, JSON.stringify(settings, null, 2), "utf-8");
-  return settingsPath;
 }

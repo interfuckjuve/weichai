@@ -1,85 +1,80 @@
-# translation-verifier E2E 验收脚本
+# Smoke E2E
 
-本目录唯一验收入口:`run-smoke-e2e.ts`(**smoke 差分管线**)——单次 claude 自主会话黑盒。
-旧 schema 管线/变体轨道脚本与对应夹具已随无关模块清理移除。
+`run-smoke-e2e.ts` executes one real autonomous Claude session through the private smoke strategy. The wrapper currently accepts only `differential-smoke`; it is not a generic benchmark runner. Other experiments in this directory have their own entry points and are not executed by `npm run e2e`.
 
-## 模式
+## Modes and Fixtures
 
-脚本有两种显式模式,避免把诊断修复行为误用于生产:
-
-| 模式 | 标志 | 语义 |
+| Mode | Flag | Fixture and policy |
 | --- | --- | --- |
-| `diagnostic-repair` | (默认) | 样本 fixture(MimeUtility C#→Java);允许报告目标修复轮(`rounds>0`)供诊断实验 |
-| `verify-only` | `--verify-only` | **生产语义**:完整本地依赖 fixture 根(source=C# 项目,target=Java 项目);宿主强制 `rounds===0`、`targetFiles` 为空、双侧 runnerFiles 与编译/运行执行证据齐全,否则退出码 1 |
+| `diagnostic-repair` | Default | MimeUtility C# source and Java translation under `fixtures/samples`; allows reporting proposed target repairs for diagnosis |
+| `verify-only` | `--verify-only` | Complete .NET solution and Maven reactor under `fixtures/dependencies`; read-only project snapshots, no target repairs |
 
-## 生产 verify-only 校验不变量
+The service and direct `runSmoke()` default to verify-only. Only this historical E2E wrapper defaults to diagnostic-repair. In both modes the actual project roots remain read-only; proposed diagnostic repairs are not an authorization to modify user projects.
 
-- `rounds === 0`(目标实现从未被修改);
-- `targetFiles.length === 0`;
-- `cases` 非空;
-- `runnerFiles` 同时包含 `source` 与 `target`;
-- `executions` 非空(每条 `commandId` 都必须在 `commands.jsonl` 中可查到真实代理执行)。
+Verify-only requires `rounds === 0`, empty `targetFiles`, nonempty cases, runners for both sides and mandatory compile/run evidence. Command IDs must match the actual controlled-proxy evidence. A generated report is not enough to bypass these checks. Insufficient semantic evidence remains `unclear`/`unverified`.
 
-## fixtures
+Fixtures:
 
-| 文件 | 内容 |
-| --- | --- |
-| `fixtures/smoke-mime-util/requirement.txt` | 诊断样例需求原文 |
-| `fixtures/samples/mime-util-source.cs` | C# 源侧样本 |
-| `fixtures/samples/mime-util-target.java` | Java 目标侧样本 |
-| `fixtures/dependencies/maven/**` | Maven reactor fixture(父 POM + `library`/`app` sibling 模块;app 依赖 `fixture:library`) |
-| `fixtures/dependencies/dotnet/**` | .NET solution + `Library`/`App`(App 通过 `ProjectReference` 引用 Library) |
+- `fixtures/smoke-mime-util/requirement.txt`: diagnostic task requirement.
+- `fixtures/samples/mime-util-source.cs`, `mime-util-target.java`: diagnostic source/target samples.
+- `fixtures/dependencies/dotnet/`: solution with `Library` and `App`, using `ProjectReference`.
+- `fixtures/dependencies/maven/`: reactor with `library` and `app`, using a sibling module dependency.
 
-离线本地构建(验证命令代理能跑真实项目依赖,无需公网):
+Local fixture builds use installed tools and available dependency caches; they are not guaranteed network-free:
 
 ```bash
 mvn -q -f services/translation-verifier/e2e/fixtures/dependencies/maven/pom.xml test
 dotnet build services/translation-verifier/e2e/fixtures/dependencies/dotnet/DependencyFixture.sln --nologo -v q
 ```
 
-## 用法(仅真实 claude 黑盒路径)
+## Configuration
+
+Run from the repository root. Real runs require `claude`, `npx`/`tsx`, the relevant toolchains and a configured `DEEPSEEK_API_KEY`. The CLI connects through the existing DeepSeek Anthropic-compatible environment configuration; `DEEPSEEK_MODEL` defaults to `deepseek-v4-flash`. `JAVA_HOME` is forwarded when set. The wrapper uses at most 40 turns.
 
 ```bash
-# 默认样例:diagnostic-repair(MimeUtility.DecodeText C# → Java),默认 strategy=differential-smoke
-DEEPSEEK_API_KEY=sk-xxx npx tsx services/translation-verifier/e2e/run-smoke-e2e.ts
+# Entry-point check only: skips the model, does not replay verification.
+npm run e2e --workspace @forexplore/translation-verifier -- --offline-only
 
-# 显式选择当前 E2E suite 支持的静态 strategy
-npx tsx services/translation-verifier/e2e/run-smoke-e2e.ts --offline-only --strategy differential-smoke
+# One real verify-only run; ensure credentials and local tools are configured first.
+npm run e2e --workspace @forexplore/translation-verifier -- --verify-only --timeout-ms 600000
 
-# 显式指定 fixture 目录 / 加大超时
-npx tsx services/translation-verifier/e2e/run-smoke-e2e.ts \
-  --fixture-dir services/translation-verifier/e2e/fixtures/smoke-mime-util --timeout-ms 600000
+# Machine-readable result stdout; timing directory information is on stderr.
+npx tsx services/translation-verifier/e2e/run-smoke-e2e.ts --verify-only --json --timeout-ms 600000
 
-# 生产 verify-only(完整依赖 fixture 根)
-npx tsx services/translation-verifier/e2e/run-smoke-e2e.ts --verify-only --timeout-ms 600000
-
-# 跳过真实 claude(自主模式无离线回放,仅打印说明后退出码 0)
-npx tsx services/translation-verifier/e2e/run-smoke-e2e.ts --offline-only
+# Explicit local unit tests for the wrapper/timing helper; no model calls.
+npx vitest run services/translation-verifier/e2e/smoke-e2e-timing.test.ts
 ```
 
-## 参数表(smoke)
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--fixture-dir <path>` | `e2e/fixtures/smoke-mime-util` | Diagnostic requirement directory; sibling `samples` supplies source/target. Ignored by verify-only, which uses `fixtures/dependencies`. |
+| `--api-key <key>` | `DEEPSEEK_API_KEY` | Optional credential override; prefer environment configuration to avoid shell-history exposure. |
+| `--timeout-ms <ms>` | `300000` | Single Claude session timeout. |
+| `--strategy <id>` | `differential-smoke` | Only this E2E strategy is supported; unknown IDs fail explicitly. |
+| `--verify-only` | Off | Use complete dependency fixtures and enforce no target repairs. |
+| `--offline-only` | Off | Skip the real session and exit zero; not behavioral verification. |
+| `--json` | Off | Print the original complete `SmokeResult` JSON, without prose or timing fields in stdout. |
 
-| 参数 | 必填 | 默认 | 说明 |
-| --- | --- | --- | --- |
-| `--fixture-dir <path>` | 否 | `e2e/fixtures/smoke-mime-util` | 任务输入目录(requirement.txt;经 `..` 定位 samples) |
-| `--api-key <key>` | 否 | `DEEPSEEK_API_KEY` | claude 自主会话 API Key |
-| `--timeout-ms <ms>` | 否 | `300000` | 单次 claude 自主会话超时 |
-| `--strategy <id>` | 否 | `differential-smoke` | 选择静态 E2E strategy suite;当前仅支持 `differential-smoke` |
-| `--offline-only` | 否 | - | 跳过真实 claude(仅打印说明退出 0) |
-| `--verify-only` | 否 | - | 生产 verify-only 模式(依赖 fixture 根 + 不变量校验) |
-| `--json` | 否 | - | 输出完整 SmokeResult JSON(含 SmokeReport) |
+## Outputs and Exit Codes
 
-## 退出码
+The wrapper keeps the existing workspace at `services/translation-verifier/test-results/smoke-*/` and displays its path. Available content includes `source/project/`, `target/project/`, both `.forexplore-tests/` runner areas, `baseline.json`, `agent/report.json` and `agent/commands.jsonl`. Failures may leave only some of these files.
 
-| 退出码 | 含义 |
+A small `timing.json` and `timing.md` are written in that same `smoke-*` directory, best-effort. They contain strategy/version, model, mode, fixture ID, total duration, dynamic Host spans, approximate Agent task occurrences, authoritative controlled-command durations and omission diagnostics. They never include raw source, prompts, tool payloads or command stdout/stderr. Timing output failure cannot change the result or exit code. The helper is not a production run storage system; `runRoot`, `debug`, `onRunRecorded` are reserved, ignored service options.
+
+| Exit | Meaning |
 | --- | --- |
-| `0` | 策略报告生成成功(status 非 error;verify-only 模式下不变量满足) |
-| `1` | status=error,或 verify-only 报告违反生产不变量 |
-| `2` | 参数错误 / 缺 API key / runner 运行异常 |
+| `0` | A non-error report was produced and verify-only invariants hold. A `fail` finding still returns zero: the detector successfully reported a discrepancy. Also used for explicit offline skip. |
+| `1` | Smoke status is `error`, or verify-only report invariants fail. |
+| `2` | Invalid arguments, missing key or an uncaught runner exception. |
 
-## 已知限制
+## Timing Caveats
 
-- 生产 smoke 始终把编译/运行经 `verifier-command` 代理执行并记录命令证据;代理之外不直接放行任意 Bash。
-- 自主模式无离线回放路径(runner 由 claude 会话现写);`--offline-only` 仅用于 CI/无 key 环境确认入口可用。
-- 诊断 fixture 的 runner 修复实验产物随 `report.json` 落盘,本管线不直接修改用户项目文件。
-- 单次会话分钟级,default timeout 300s,复杂用例建议 `--timeout-ms` 放大。
+The Agent emits `[VERIFIER_STEP]` start/end markers as standalone assistant text for tasks it actually performs, including repeated work and `finalize-report`. The final end marker is allowed after writing `report.json`, before stopping. The parser ignores thinking/tool output/fenced snippets, deduplicates partial text against assistant snapshots by message/block identity and never replays buffered stdout as live timestamps.
+
+Agent intervals are approximate Host receipt times (`agent-step-approximate`, `host-performance`), not model clocks. Missing starts/ends have no invented duration; absent telemetry remains unavailable. The parser drains overflow with explicit omission diagnostics: 1 MiB stream lines, 4 KiB text lines, 10,000 events and bounded message/block state. Transport buffering can collapse intervals to zero.
+
+Controlled-command process durations use their own `Date.now()` interval; proxy subspans use its child `performance.now()` clock. Host, Agent and command intervals can overlap or include each other. **Do not sum them.** Markers are not evidence of command execution. Available command timing can be retained after missing reports/session failures without satisfying mandatory evidence checks.
+
+Default logging under repository `logs/` excludes full content. `VERIFIER_LOG_CONTENT=1` separately enables bounded, redacted content logging. No automatic raw `PostToolUse` hook or `claude-steps.jsonl` telemetry subprocess is installed.
+
+This is local-process execution, not a sandbox. Dependency/network/cache state affects results. A single run is not a performance ranking, independent acceptance test or proof of business correctness. Compare alternative registered strategies through the generic service with identical inputs and explicit configuration, not by forcing their private steps to match smoke.

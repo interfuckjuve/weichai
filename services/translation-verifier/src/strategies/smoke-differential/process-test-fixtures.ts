@@ -4,9 +4,10 @@ import { join } from "node:path";
 
 export const LONG_RUNNING_FIXTURE = `
 const { spawn } = require("node:child_process");
-const { writeFileSync } = require("node:fs");
+const { writeFileSync, renameSync } = require("node:fs");
 const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000); setTimeout(() => process.exit(0), 60000);"], { stdio: "ignore" });
-writeFileSync(process.env.FIXTURE_PID_FILE, JSON.stringify({ parent: process.pid, child: child.pid }));
+writeFileSync(process.env.FIXTURE_PID_FILE + ".tmp", JSON.stringify({ parent: process.pid, child: child.pid }));
+renameSync(process.env.FIXTURE_PID_FILE + ".tmp", process.env.FIXTURE_PID_FILE);
 setInterval(() => {}, 1000);
 `;
 

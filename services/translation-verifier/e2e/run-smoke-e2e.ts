@@ -15,9 +15,12 @@
  * 退出码:0=策略报告生成成功(status 非 error);1=status=error 或 verify-only
  * 不变量不满足;2=参数错误/缺 key。
  */
+import { randomUUID } from "node:crypto";
 import { readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
+import { createRunRecorder, withRunRecorder } from "../src/run-output/record-run.js";
+import { writeSmokeTiming } from "./write-smoke-timing.js";
 import { runSmoke, type SmokeResult } from "../src/strategies/smoke-differential/run-smoke-verification.js";
 import type { SmokeTaskInput } from "../src/strategies/smoke-differential/build-differential-test-prompt.js";
 import type { SmokeReport } from "../src/strategies/smoke-differential/differential-test-types.js";
@@ -224,23 +227,38 @@ export async function runSmokeE2E(argv: string[]): Promise<number> {
 
   // 单次 claude 自主会话(keep 产物供验收与调试)。
   let result: SmokeResult;
+  const recorder = createRunRecorder({ runId: randomUUID() });
+  const model = process.env.DEEPSEEK_MODEL ?? "deepseek-v4-flash";
   try {
     logger.info(
       `run smoke ${parsed.strategyId} ${mode} session (fixture=${fixtureDir}, timeoutMs=${parsed.timeoutMs})`,
     );
-    result = await runSmoke(job, {
+    result = await withRunRecorder(recorder, () => runSmoke(job, {
       mode,
+      model,
       apiKey,
       timeoutMs: parsed.timeoutMs,
       keepGeneratedTests: true,
       maxTurns: 40,
-    });
+    }));
   } catch (error) {
     logger.error(`smoke strategy run failed: ${errorMessage(error)}`);
     console.error(`error: smoke strategy run failed: ${errorMessage(error)}`);
     return 2;
   }
 
+  const timingRun = recorder.finish();
+  if (result.keptDir) {
+    const timingDirectory = writeSmokeTiming(result.keptDir, {
+      strategy: parsed.strategyId, strategyVersion: DIFFERENTIAL_SMOKE_STRATEGY.version,
+      model, mode, fixture: parsed.verifyOnly ? "dependencies" : basename(fixtureDir),
+    }, timingRun, recorder.events(), !parsed.json);
+    if (timingDirectory) {
+      const message = `Smoke workspace and timing: ${timingDirectory}`;
+      if (parsed.json) console.error(message);
+      else console.log(message);
+    } else console.error("Smoke timing output unavailable; verification result is unchanged.");
+  }
   if (parsed.json) console.log(JSON.stringify(result, null, 2));
 
   // 验收:报告生成成功即 status 非 error;converged=false 或检出 translation-bug
@@ -253,7 +271,7 @@ export async function runSmokeE2E(argv: string[]): Promise<number> {
     return 1;
   }
   const report = result.report;
-  console.log(summarizeReport(report));
+  if (!parsed.json) console.log(summarizeReport(report));
   if (parsed.verifyOnly) {
     const violations = verifyOnlyViolations(report);
     if (violations.length > 0) {
@@ -265,7 +283,7 @@ export async function runSmokeE2E(argv: string[]): Promise<number> {
       );
       return 1;
     }
-    console.log(
+    if (!parsed.json) console.log(
       `Smoke E2E VERIFY-ONLY OK:cases=${report.cases.length}, executions=${report.executions?.length}。`,
     );
     return 0;
@@ -275,7 +293,7 @@ export async function runSmokeE2E(argv: string[]): Promise<number> {
     report.converged &&
     report.cases.every((c) => c.mechanical === "pass" && c.decision === "pass");
   if (allPass) {
-    console.log(
+    if (!parsed.json) console.log(
       `Smoke E2E PASS:converged=true,${report.cases.length} 个 case 全 pass。`,
     );
     return 0;

@@ -1,4 +1,3 @@
-import { join } from "node:path";
 import { markVerificationPhase } from "../../run-output/measure-legacy-run.js";
 import { DEFAULT_DISALLOWED_TOOLS, VERIFIER_COMMAND_ENTRY } from "./test-execution-config.js";
 import { buildSmokeTaskPrompt, type SmokeTaskInput } from "./build-differential-test-prompt.js";
@@ -51,7 +50,6 @@ export function prepareAgentTask(
     permissionMode: "acceptEdits" as const,
     maxTurns: options.maxTurns ?? 50,
     ...(options.effort ? { effort: options.effort } : {}),
-    hooksLogPath: join(layout.agentDir, "claude-steps.jsonl"),
     allowedTools,
     disallowedTools: [...DEFAULT_DISALLOWED_TOOLS],
     env,

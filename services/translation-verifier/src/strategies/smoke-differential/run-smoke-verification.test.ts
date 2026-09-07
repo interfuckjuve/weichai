@@ -125,6 +125,45 @@ afterEach(() => {
 });
 
 describe("runSmoke verify-only 内部暂存(files 输入)", () => {
+  it.each([true, false])("retains a null-exit command observation without inventing its exit code (timedOut=%s)", async (timedOut) => {
+    const root = makeTmpRoot();
+    const recorder = createRunRecorder({ runId: `null-exit-${timedOut}` });
+    try {
+      const evidence = validEvidence();
+      evidence[0] = { ...evidence[0], exitCode: null, timedOut };
+      const fake = writingFake(validReport(), evidence);
+      const result = await withRunRecorder(recorder, () => runSmoke(fileBasedJob(), { workspaceRoot: root, apiKey: "k", spawnClaude: fake.fake as unknown as SpawnClaude }));
+      expect(result.status).toBe("error");
+      const commands = recorder.events().filter((event) => event.kind === "command");
+      expect(commands).toHaveLength(4);
+      expect(commands[0]).toMatchObject({ commandId: "source-compile", durationMs: 10, timedOut });
+      expect(commands[0]).not.toHaveProperty("exitCode");
+      expect(recorder.snapshot().diagnostics.some((entry) => entry.code === "invalid-event")).toBe(false);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+  it.each(["missing-report", "session-failure", "cancel"])("retains command timing metadata after %s without changing failure semantics", async (failure) => {
+    const root = makeTmpRoot();
+    const recorder = createRunRecorder({ runId: failure });
+    const abort = new DOMException("cancelled", "AbortError");
+    try {
+      const spawnClaude: SpawnClaude = async (_args, _env, _timeout, options) => {
+        writeFileSync(join(options!.cwd!, "commands.jsonl"), validEvidence().map((entry) => JSON.stringify({ ...entry, stdout: "PRIVATE-SOURCE", timing: { processMs: 12, beforeEvidenceAppendMs: 20 } })).join("\n"));
+        if (failure === "cancel") throw abort;
+        if (failure === "session-failure") throw new Error("claude subprocess failed");
+        return { stdout: "buffered only", exitCode: 0 };
+      };
+      const pending = withRunRecorder(recorder, () => runSmoke(fileBasedJob(), { workspaceRoot: root, apiKey: "k", spawnClaude }));
+      if (failure === "cancel") await expect(pending).rejects.toBe(abort);
+      else expect(await pending).toMatchObject({ status: "error", errorReason: failure === "missing-report" ? "invalid-report" : "toolchain" });
+      const commands = recorder.events().filter((event) => event.kind === "command");
+      expect(commands).toHaveLength(4);
+      expect(commands[0]).toMatchObject({ commandId: "source-compile", source: "command-proxy:process-date-now", durationMs: 10 });
+      expect(commands[0]).not.toHaveProperty("offsetMs");
+      expect(recorder.events().filter((event) => event.kind === "command-timing")).toHaveLength(8);
+      expect(JSON.stringify(recorder.events())).not.toContain("PRIVATE-SOURCE");
+      expect(recorder.events().filter((event) => event.kind === "agent-step-approximate")).toEqual([]);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
   it.each(["pass", "error"])("preserves a standalone caller's same-named occurrence during %s execution", async (kind) => {
     const root = makeTmpRoot();
     const recorder = createRunRecorder({ runId: "legacy-host" });
@@ -138,7 +177,7 @@ describe("runSmoke verify-only 内部暂存(files 输入)", () => {
       expect(sessions.map((step) => step.state)).toEqual(["running", kind === "pass" ? "completed" : "failed"]);
       expect(sessions[0].id).not.toBe(sessions[1].id);
       recorder.endStep(handle, "completed");
-      expect(recorder.finish().diagnostics).toEqual([]);
+      expect(recorder.finish().diagnostics.map((d) => d.code)).toEqual(["agent-telemetry-missing"]);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 

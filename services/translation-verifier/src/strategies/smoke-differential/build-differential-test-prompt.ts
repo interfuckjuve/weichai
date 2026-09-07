@@ -101,10 +101,10 @@ converged=true means every executed difference received a decisive verdict (pass
 - Combine steps: run multiple shell commands in a single Bash call, and write a side's files in the fewest possible Write calls.
 - Do not use task-planning or bookkeeping tools (TaskCreate/TaskUpdate); do the work directly.
 - Do not repeatedly re-read runner output files to diagnose a difference: after one mechanical diff, judge every case and finish.`;
-  const decision = `DECISION DISCIPLINE (decide fast)
-- Decide fast: after the first successful mechanical diff, judge every case immediately with your best reasoning. Do not re-derive or second-guess a verdict; only re-open a case when a fix actually changed the observed behavior.
-- Never re-read runner outputs just to be sure — a second look is not needed unless a repair rerun happened after your last verdict.
-- Prefer decisive verdicts (pass / translation-bug / accepted-diff) over unclear; pick the closest defensible decision and state it.
+  const decision = `DECISION DISCIPLINE (evidence first)
+- Base each decision on observed evidence; re-open a case when a repair or new evidence changes the observed behavior.
+- Do not repeat a comparison without a concrete reason.
+- If evidence is insufficient, record unclear with the missing evidence and converged=false; never guess a decisive verdict for speed.
 - Stop at the earliest valid completion: once report.json exists and is valid, do not run further verification steps.`;
 
   const reportContract = repairMode
@@ -166,6 +166,17 @@ ${efficiency}
 
 ${decision}
 
+TASK TIMING MARKERS (optional observations, never execution evidence)
+Before and after each actual task, emit a standalone assistant text line, outside code fences:
+[VERIFIER_STEP] {"name":"explore","event":"start"}
+[VERIFIER_STEP] {"name":"explore","event":"end"}
+Use short lowercase hyphenated names for the work actually performed, such as explore,
+design-cases, write-runners, execute-tests, compare, judge, and finalize-report.
+Repeat start/end for every repeated task; do not invent missing tasks or timestamps.
+Do not write these markers into files or tool output. For finalize-report, emit start before
+writing report.json and end immediately after writing it, then STOP. This final end marker
+is permitted by TERMINATION and does not request another tool call.
+
 SANDBOX CONSTRAINTS
 - The project roots listed above are READ-ONLY: you may read them but must never edit, rename or delete anything inside them.
 - You may only write runner files under the two dedicated runner directories given in EXECUTION CONTEXT, plus report.json/steps/evidence files in your working directory.
@@ -204,5 +215,5 @@ Example (compact):
  "summary": "5/5 用例行为一致"}
 
 TERMINATION
-Your task is complete once report.json exists in your working directory and is valid JSON matching the schema above. Do not continue working after that. If you cannot complete the verification, still write a report.json with converged=false and an explanatory summary.`;
+Your task is complete once report.json exists in your working directory and is valid JSON matching the schema above. Emit the finalize-report end marker, then stop; do not perform further work. If you cannot complete the verification, still write a report.json with converged=false and an explanatory summary.`;
 }

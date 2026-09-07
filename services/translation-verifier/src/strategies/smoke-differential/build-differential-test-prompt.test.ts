@@ -152,12 +152,14 @@ describe("buildSmokeTaskPrompt 公共内容", () => {
     expect(p).toMatch(/single Bash call/);
   });
 
-  it("含快速决策纪律:首次差分后立即判案,不反复重读/二次怀疑", () => {
+  it("keeps evidence-insufficient decisions unclear and final timing compatible with termination", () => {
     const p = buildSmokeTaskPrompt(baseInput);
-    expect(p).toContain("DECISION DISCIPLINE");
-    expect(p).toMatch(/decide fast/i);
-    expect(p).toMatch(/judge every case/i);
-    expect(p).toMatch(/(Do not|Never) re-read/i);
+    expect(p).toContain("If evidence is insufficient, record unclear");
+    expect(p).not.toContain("pick the closest defensible decision");
+    expect(p).toContain('[VERIFIER_STEP] {"name":"explore","event":"start"}');
+    expect(p).toContain("Repeat start/end for every repeated task");
+    expect(p).toContain("do not invent missing tasks or timestamps");
+    expect(p.split("TERMINATION\n")[1]).toContain("Emit the finalize-report end marker, then stop");
   });
 
   it("root/files 缺省时仍可构建,使用降级文案(不抛错)", () => {

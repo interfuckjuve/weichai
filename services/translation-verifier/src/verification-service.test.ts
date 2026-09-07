@@ -291,11 +291,20 @@ describe("VerificationService", () => {
     expect(existsSync(artifactRoot)).toBe(false);
   });
 
-  it("uses the default strategy and permits an explicit registered strategy", async () => {
-    const service = serviceWith([provider("first"), provider("second")], "first");
-
-    expect((await service.verify(input())).strategyId).toBe("first");
-    expect((await service.verify(input(), { strategyId: "second" })).strategyId).toBe("second");
+  it("compares registered no-Agent strategies on identical input without imposing common private steps", async () => {
+    const sameInput = input();
+    const before = structuredClone(sameInput);
+    const service = serviceWith([provider("first"), provider("second", async (value, context) => {
+      await context.measureStep!("custom-probe", async () => {});
+      await context.measureStep!("custom-probe", async () => {});
+      return okResult(value, descriptor("second"));
+    })], "first");
+    const first = await service.verify(sameInput);
+    const second = await service.verify(sameInput, { strategyId: "second" });
+    expect([first.strategyId, second.strategyId]).toEqual(["first", "second"]);
+    expect([first.subjectHash, second.subjectHash]).toEqual([sameInput.translation.patchHash, sameInput.translation.patchHash]);
+    expect([first.status, second.status]).toEqual(["pass", "pass"]);
+    expect(sameInput).toEqual(before);
     expect(service.listStrategies().map((descriptor) => descriptor.id)).toEqual(["first", "second"]);
   });
 

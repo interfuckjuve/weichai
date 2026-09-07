@@ -1,8 +1,5 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { buildHooksSettings, runClaude, spawnClaudeProcess, type SpawnClaude } from "./claude-session.js";
+import { runClaude, spawnClaudeProcess, type SpawnClaude } from "./claude-session.js";
 
 // ---- 测试辅助 ----
 
@@ -30,6 +27,16 @@ beforeEach(() => {
 // ---- 测试 ----
 
 describe("runClaude", () => {
+  it("enables partial stream-json only for observed calls without replaying buffered stdout", async () => {
+    const observer = vi.fn(() => { throw new Error("observer failed"); });
+    const fake: SpawnClaude = async (args, _env, _timeout, options) => {
+      expect(args).toEqual(["-p", "p", "--output-format", "stream-json", "--verbose", "--include-partial-messages"]);
+      options?.onStdoutChunk?.(Buffer.from("live"));
+      return { stdout: "buffered", exitCode: 0 };
+    };
+    expect(await runClaude("p", { apiKey: "k", spawnClaude: fake, onStdoutChunk: observer })).toBe("buffered");
+    expect(observer).toHaveBeenCalledExactlyOnceWith(Buffer.from("live"));
+  });
   it("① 返回 claude 子进程的 stdout 原样", async () => {
     const spawnClaude = fakeSpawn('{"schemaVersion":"1.0"}');
 
@@ -148,6 +155,15 @@ decode MIME text`;
 // ---- 自主会话参数(参考 rev.2+ 契约) ----
 
 describe("spawnClaudeProcess 自主会话参数组装", () => {
+  it("forwards the live observer to the existing injected process boundary", async () => {
+    const onStdoutChunk = vi.fn();
+    const injected: SpawnClaude = async (_args, _env, _timeout, options) => {
+      options?.onStdoutChunk?.(Buffer.from("chunk"));
+      return { stdout: "buffered", exitCode: 0 };
+    };
+    await spawnClaudeProcess(["-p", "p"], {}, 1000, { spawn: injected, onStdoutChunk });
+    expect(onStdoutChunk).toHaveBeenCalledExactlyOnceWith(Buffer.from("chunk"));
+  });
   it("组装 add-dir/disallowedTools/permission-mode/max-turns/allowedTools/settings 并透传 cwd 与注入 spawn", async () => {
     const captured: { args: string[]; opts: { cwd?: string } }[] = [];
     const injected: SpawnClaude = async (args, _env, _timeout, options) => {
@@ -277,41 +293,10 @@ describe("runClaude 透传自主会话选项", () => {
     expect(call).toHaveLength(3);
   });
 
-  it("hooksLogPath:生成含日志路径的临时 settings,spawn 返回后删除临时文件", async () => {
-    let settingsPath: string | undefined;
-    let settingsContent: string | undefined;
-    const fake: SpawnClaude = async (_args, _env, _t, options) => {
-      if (options?.settingsFile) {
-        settingsPath = options.settingsFile;
-        // runClaude 在调用后删除临时文件,须在调用内先读内容。
-        settingsContent = readFileSync(options.settingsFile, "utf-8");
-      }
-      return { stdout: "ok", exitCode: 0 };
-    };
-    const logPath = join(tmpdir(), `tv-hooks-${Date.now()}.jsonl`);
-
-    await runClaude("p", { apiKey: "k", spawnClaude: fake, hooksLogPath: logPath });
-
-    expect(settingsPath).toBeTruthy();
-    expect(settingsContent).toContain("PostToolUse");
-    // hook 命令把每次工具调用 JSON 行追加到 hooks 日志路径(JSON 内引号被转义,断言裸路径文本)。
-    expect(settingsContent).toContain(logPath);
-    expect(existsSync(settingsPath!)).toBe(false);
-    rmSync(logPath, { force: true });
-  });
-
-  it("spawn 抛错时临时 settings 文件仍被清理", async () => {
-    let settingsPath: string | undefined;
-    const fake: SpawnClaude = async (_args, _env, _t, options) => {
-      settingsPath = options?.settingsFile;
-      throw new Error("boom");
-    };
-
-    await expect(runClaude("p", { apiKey: "k", spawnClaude: fake, hooksLogPath: "/tmp/tv-cleanup.jsonl" })).rejects.toThrow(
-      /boom/,
-    );
-    expect(settingsPath).toBeTruthy();
-    expect(existsSync(settingsPath!)).toBe(false);
+  it("does not install raw tool hooks even for the legacy hooksLogPath option", async () => {
+    const fake = fakeSpawn("ok");
+    await runClaude("p", { apiKey: "k", spawnClaude: fake, hooksLogPath: "/tmp/unused-hooks.jsonl" });
+    expect(fake.mock.calls[0]).toHaveLength(3);
   });
 });
 
@@ -349,25 +334,5 @@ describe("runClaude signal/deadlineAt 透传", () => {
     expect(captured[0].call).toHaveLength(4);
     const options = captured[0].call[3] as { signal?: AbortSignal };
     expect(options.signal).toBe(controller.signal);
-  });
-});
-
-describe("buildHooksSettings", () => {
-  it("写 settings 文件:PostToolUse hook matcher '*' 用 cat >> 把工具调用 JSON 行追加到日志路径", () => {
-    const settingsPath = join(tmpdir(), `fx-hooks-test-${process.pid}-${Date.now()}.json`);
-    const logPath = "/tmp/with space/claude-steps.jsonl";
-    try {
-      buildHooksSettings(settingsPath, logPath);
-      const parsed = JSON.parse(readFileSync(settingsPath, "utf-8")) as {
-        hooks: { PostToolUse: { matcher: string; hooks: { type: string; command: string }[] }[] };
-      };
-      const hook = parsed.hooks.PostToolUse[0];
-      expect(hook.matcher).toBe("*");
-      expect(hook.hooks[0].type).toBe("command");
-      // JSON.stringify 包裹日志路径,防含空格被 shell 拆词。
-      expect(hook.hooks[0].command).toBe(`cat >> ${JSON.stringify(logPath)}`);
-    } finally {
-      rmSync(settingsPath, { force: true });
-    }
   });
 });
