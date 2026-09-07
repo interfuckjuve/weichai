@@ -139,8 +139,12 @@ export function createRunRecorder(options: {
           runId: run.runId,
           sequence: retained.length,
           receivedAt: now(),
-          offsetMs: event.offsetMs ?? Math.max(0, monotonicNow() - started),
         };
+        const offsetMs = event.offsetMs;
+        if (offsetMs !== undefined) normalized.offsetMs = offsetMs;
+        else if (normalized.source === "host-performance") {
+          normalized.offsetMs = Math.max(0, monotonicNow() - started);
+        }
         for (const key of ["operationId", "parentOperationId", "name", "event", "commandId"] as const) {
           const value = event[key];
           if (value !== undefined) normalized[key] = safeText(value, IDENTIFIER_LIMIT);

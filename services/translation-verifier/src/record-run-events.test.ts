@@ -34,6 +34,26 @@ describe("run recorder", () => {
     expect(recorder.events()[0]).toMatchObject({ source: observation.source, offsetMs: 3, durationMs: 8 });
     expect(recorder.finish().totalDurationMs).toBe(0);
   });
+  it("omits missing non-Host offsets while preserving child offsets and Host receipt times", () => {
+    let clock = 1000;
+    const receivedAt = "2026-09-07T12:00:00.000Z";
+    const recorder = createRunRecorder({ runId: "clock-origins", monotonicNow: () => clock, now: () => receivedAt });
+    clock = 1012;
+    recorder.observe({ ...observation, offsetMs: 12 });
+    recorder.observe(observation);
+    recorder.observe({ ...observation, source: "buffered-provider" });
+    recorder.observe({ ...observation, source: "host-performance" });
+    recorder.observe({ ...observation, offsetMs: 0 });
+    const events = recorder.events();
+    expect(events[0]).toMatchObject({ source: observation.source, offsetMs: 12, receivedAt });
+    expect(events[1]).toMatchObject({ source: observation.source, durationMs: 8, receivedAt });
+    expect(events[1]).not.toHaveProperty("offsetMs");
+    expect(events[2]).not.toHaveProperty("offsetMs");
+    expect(events[3]).toMatchObject({ source: "host-performance", offsetMs: 12, receivedAt });
+    expect(events[4]).toMatchObject({ source: observation.source, offsetMs: 0 });
+    expect(events.every((event) => validateRunEventSchema(event))).toBe(true);
+  });
+
   it("measures only started stages with a monotonic clock", () => {
     let clock = 0;
     const recorder = createRunRecorder({ runId: "run-test", monotonicNow: () => clock });
@@ -144,7 +164,8 @@ describe("run recorder", () => {
     for (let index = 0; index < 10_001; index++) recorder.observe(observation);
     const events = recorder.events();
     expect(events).toHaveLength(10_000);
-    expect(events[0]).toMatchObject({ ...observation, runId: "bounded", sequence: 0, offsetMs: 12 });
+    expect(events[0]).toMatchObject({ ...observation, runId: "bounded", sequence: 0 });
+    expect(events.every((event) => !("offsetMs" in event))).toBe(true);
     expect(events.at(-1)!.sequence).toBe(9999);
     expect(events.every((event) => validateRunEventSchema(event))).toBe(true);
     expect(recorder.snapshot().hostEvents.completeness).toBe("truncated");
