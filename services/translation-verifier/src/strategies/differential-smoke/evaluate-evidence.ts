@@ -46,7 +46,8 @@ export async function evaluateEvidence(
   mode: SmokeMode,
 ): Promise<SmokeOutcome> {
   const recorder = currentRunRecorder();
-  const observed = recorder?.snapshot().stages[3].state === "completed";
+  const stages = recorder?.snapshot().stages;
+  const observed = stages?.[3].state === "completed" && stages[4].state === "not-started";
   if (observed) recorder!.startStage("evaluate-evidence");
   let report: SmokeReport;
   try {

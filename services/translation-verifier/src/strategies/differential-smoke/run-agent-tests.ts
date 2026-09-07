@@ -7,9 +7,16 @@ export async function runAgentTests(
   task: ReturnType<typeof prepareAgentTask>,
 ): Promise<void> {
   const recorder = currentRunRecorder();
-  const observed = recorder?.snapshot().stages[2].state === "completed";
+  const stages = recorder?.snapshot().stages;
+  const observed = stages?.[2].state === "completed" && stages[3].state === "not-started";
   if (observed) recorder!.startStage("run-agent-tests");
-  markVerificationPhase("agent-session");
-  await runClaude(task.prompt, task.llm);
-  if (observed) recorder!.endStage("run-agent-tests", "completed");
+  try {
+    markVerificationPhase("agent-session");
+    await runClaude(task.prompt, task.llm);
+    if (observed) recorder!.endStage("run-agent-tests", "completed");
+  } catch (error) {
+    const cancelled = typeof error === "object" && error !== null && "name" in error && error.name === "AbortError";
+    if (observed) recorder!.endStage("run-agent-tests", cancelled ? "cancelled" : "failed", error);
+    throw error;
+  }
 }

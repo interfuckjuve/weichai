@@ -156,7 +156,7 @@ export async function runSmoke(
     return finish(await evaluateEvidence(prepared.layout, mode));
   } catch (error) {
     for (const stage of observed ? recorder!.snapshot().stages.slice(2, 5) : []) {
-      if (stage.state === "running") recorder!.endStage(stage.id, isAbortError(error) ? "cancelled" : "failed", error);
+      if (stage.id === "prepare-agent-task" && stage.state === "running") recorder!.endStage(stage.id, isAbortError(error) ? "cancelled" : "failed", error);
       else if (stage.state === "not-started") recorder!.skipStage(stage.id, "Smoke execution stopped before this stage.");
     }
     if (isAbortError(error)) throw error;

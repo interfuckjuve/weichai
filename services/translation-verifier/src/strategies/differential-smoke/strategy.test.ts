@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { validCommandEvidence, validSmokeCase, validSmokeReport } from "./test-fixtures.js";
 import * as recording from "../../record-run-events.js";
 import { assertVerificationRun } from "../../verification-types.js";
-import type { SmokeResult } from "./runner.js";
+import { runSmoke, type SmokeResult } from "./runner.js";
 import { createDefaultVerificationService } from "../../default-verification-service.js";
 import {
   DIFFERENTIAL_SMOKE_STRATEGY,
@@ -190,6 +190,58 @@ describe("DifferentialSmokeStrategy", () => {
 });
 
 describe("createDefaultVerificationService", () => {
+  it.each(["success", "cancelled"])("keeps delegated real smoke stages owned by its wrapper through %s postprocessing", async (outcome) => {
+    const recorder = vi.spyOn(recording, "createRunRecorder");
+    let enterPostprocessing!: () => void;
+    let release!: () => void;
+    let finishWrapper!: () => void;
+    const postprocessing = new Promise<void>((resolve) => { enterPostprocessing = resolve; });
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    const wrapperFinished = new Promise<void>((resolve) => { finishWrapper = resolve; });
+    const controller = new AbortController();
+    const cancellation = new DOMException("cancelled during wrapper postprocessing", "AbortError");
+    const service = createDefaultVerificationService({
+      workspaceRoot: join(root, "workspaces"), artifactRoot: join(root, "artifacts"), apiKey: "test",
+      spawnClaude: async (_args, _env, _timeout, options) => {
+        writeFileSync(join(options!.cwd!, "report.json"), JSON.stringify(validSmokeReport()));
+        writeFileSync(join(options!.cwd!, "commands.jsonl"), validCommandEvidence().map((item) => JSON.stringify(item)).join("\n"));
+        return { stdout: "done", exitCode: 0 };
+      },
+      runSmokeImpl: async (...args) => {
+        try {
+          const result = await runSmoke(...args);
+          enterPostprocessing();
+          await released;
+          args[2]?.throwIfAborted();
+          return result;
+        } finally { finishWrapper(); }
+      },
+    });
+    const pending = service.verifyWithReceipt(input(), {}, controller.signal);
+    try {
+      await postprocessing;
+      const during = recorder.mock.results[0]!.value.snapshot();
+      if (outcome === "cancelled") {
+        controller.abort(cancellation);
+        await expect(pending).rejects.toBe(cancellation);
+      } else {
+        release();
+        expect((await pending).result.status).toBe("pass");
+      }
+      expect(during.stages.map((stage: { state: string }) => stage.state)).toEqual(["completed", "completed", "completed", "running", "not-started", "not-started"]);
+      expect(during.stages[3]).not.toHaveProperty("endedAt");
+      expect(during.stages[4]).not.toHaveProperty("startedAt");
+      expect(during.diagnostics).toEqual([]);
+      const run = assertVerificationRun(recorder.mock.results[0]!.value.snapshot());
+      expect(run.stages.map((stage) => stage.state)).toEqual(["completed", "completed", "completed", outcome === "cancelled" ? "cancelled" : "completed", outcome === "cancelled" ? "skipped" : "completed", "completed"]);
+      expect(run.diagnostics).toEqual([]);
+    } finally {
+      release();
+      await wrapperFinished;
+      await pending.catch(() => {});
+    }
+  });
+
   it.each(["valid", "missing-report", "changed-baseline"])("records actual default smoke boundaries for %s evidence", async (kind) => {
     const recorder = vi.spyOn(recording, "createRunRecorder");
     const spawnClaude: NonNullable<ConstructorParameters<typeof DifferentialSmokeStrategy>[0]>["spawnClaude"] = async (_args, env, _timeout, options) => {
