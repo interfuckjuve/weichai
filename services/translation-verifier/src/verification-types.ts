@@ -13,72 +13,50 @@ import {
   validateStrategyOutputSchema,
   validateDescriptorSchema,
   validateReceiptSchema,
+  validateRunSchema,
 } from "./verification-schemas.js";
 
-export interface VerificationResultArtifact {
-  id: string;
-  kind: "verification-result";
-  path: string;
-  contentHash: string;
-  size: number;
-  mediaType: "application/json";
-}
+import type * as Schema from "./generated/verification-schema-types.js";
+export type {
+  VerificationRun, VerificationStage, VerificationStageId, VerificationStageState,
+  VerificationRunEvent, AgentTaskName, VerificationRunFileReference,
+  VerificationRunEventFileReference, VerificationRunDiagnostic,
+  VerificationRunStrategySelection,
+} from "./generated/verification-schema-types.js";
+
+// Runtime schemas allow upstream extension fields; public TS interfaces never had index signatures.
+type DeclaredFields<T> = {
+  [K in keyof T as string extends K ? never : number extends K ? never : K]: T[K];
+};
+
+export interface VerificationResultArtifact extends DeclaredFields<Schema.VerificationResultArtifact> {}
 
 export type VerificationReceipt =
-  | { result: VerificationResult; resultArtifact: VerificationResultArtifact }
-  | { result: VerificationResult; resultArtifact?: undefined };
+  Omit<DeclaredFields<Schema.VerificationReceipt>, "result" | "resultArtifact"> &
+  { result: VerificationResult } &
+  ({ resultArtifact: VerificationResultArtifact } | { resultArtifact?: undefined });
 
-export interface VerificationStrategyDescriptor {
-  id: string;
-  version: string;
-  displayName: string;
-}
+export interface VerificationStrategyDescriptor extends DeclaredFields<Schema.VerificationStrategyDescriptor> {}
+export interface VerificationArtifact extends DeclaredFields<Schema.VerificationArtifact> {}
 
-export interface VerificationArtifact {
-  id: string;
-  kind: string;
-  path: string;
-  contentHash: string;
-  mediaType: string;
-}
-
-export interface VerificationIssue {
-  id: string;
-  kind: string;
-  message: string;
-  caseId?: string;
+export interface VerificationIssue extends Omit<DeclaredFields<Schema.VerificationIssue>, "sourceObservation" | "targetObservation"> {
   sourceObservation?: RepositoryIngestionJsonValue;
   targetObservation?: RepositoryIngestionJsonValue;
-  evidenceArtifactIds: string[];
 }
 
-export interface VerificationInput {
-  schemaVersion: "1.0";
+// The verifier schema intentionally checks only upstream subsets, not full contract lineage.
+export interface VerificationInput extends Omit<DeclaredFields<Schema.VerificationInput>, "request" | "analysisReport" | "migrationPlan" | "translation"> {
   request: AdaptationRequestV2;
   analysisReport: RepositoryIngestionJsonValue;
   migrationPlan: RepositoryIngestionJsonValue;
-  translation: {
-    round: number;
-    generatedContent: string;
+  translation: Omit<DeclaredFields<Schema.VerificationInput["translation"]>, "files"> & {
     files: FilePatch[];
-    patchHash: string;
   };
 }
 
-export interface VerificationResult {
-  schemaVersion: "1.0";
-  strategyId: string;
-  strategyVersion: string;
-  subjectHash: string;
-  round: number;
-  status: "pass" | "warn" | "fail" | "unverified";
-  summary: string;
-  issues: VerificationIssue[];
-  artifacts: VerificationArtifact[];
-  strategyReport: RepositoryIngestionJsonValue;
-  createdAt: string;
-  contentHash: string;
-}
+export interface VerificationResult extends
+  Omit<DeclaredFields<Schema.VerificationResult>, "issues" | "artifacts" | "strategyReport">,
+  Pick<VerificationStrategyOutput, "issues" | "artifacts" | "strategyReport"> {}
 
 export interface VerificationStrategyContext {
   workspace: {
@@ -107,12 +85,22 @@ export interface VerificationStrategyProvider {
   create(): VerificationStrategy;
 }
 
-export interface VerificationStrategyOutput {
-  status: "pass" | "warn" | "fail" | "unverified";
-  summary: string;
+export interface VerificationStrategyOutput extends Omit<DeclaredFields<Schema.VerificationStrategyOutput>, "issues" | "artifacts" | "strategyReport"> {
   issues: VerificationIssue[];
   artifacts: VerificationArtifact[];
   strategyReport: RepositoryIngestionJsonValue;
+}
+
+export function assertVerificationRun(value: unknown): Schema.VerificationRun {
+  assertSchema(validateRunSchema, value, "Verification run");
+  const references = [value.input, value.report, value.agentTimeline, value.hostEvents,
+    ...value.stages.flatMap((stage) => stage.artifacts ?? [])];
+  for (const reference of references) {
+    if (reference.availability === "available") {
+      normalizeRepositoryRelativePath(reference.path, "Verification run file path");
+    }
+  }
+  return value;
 }
 
 export function createVerificationResult(

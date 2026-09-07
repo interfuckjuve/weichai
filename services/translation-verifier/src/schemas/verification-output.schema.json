@@ -1,13 +1,15 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "urn:forexplore:verification-output:1.0",
-  "title": "VerificationResult",
+  "title": "VerificationOutputSchema",
   "description": "Public verify()/CLI result. verifyWithReceipt() uses #/definitions/receipt. SHA-256 bindings, unique IDs, evidence references and canonical receipt metadata require host validation in addition to this schema.",
-  "$ref": "#/definitions/result",
+  "$comment": "The singleton allOf preserves the root result reference while allowing local schema type generation.",
+  "allOf": [{ "$ref": "#/definitions/result" }],
   "definitions": {
     "nonEmptyString": { "type": "string", "pattern": "\\S" },
     "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "issue": {
+      "title": "VerificationIssue",
       "type": "object",
       "required": ["id", "kind", "message", "evidenceArtifactIds"],
       "properties": {
@@ -22,6 +24,7 @@
       "additionalProperties": true
     },
     "artifact": {
+      "title": "VerificationArtifact",
       "type": "object",
       "required": ["id", "kind", "path", "contentHash", "mediaType"],
       "properties": {
@@ -34,6 +37,7 @@
       "additionalProperties": true
     },
     "strategyOutput": {
+      "title": "VerificationStrategyOutput",
       "type": "object",
       "required": ["status", "summary", "issues", "artifacts", "strategyReport"],
       "properties": {
@@ -48,6 +52,7 @@
       "additionalProperties": true
     },
     "result": {
+      "title": "VerificationResult",
       "type": "object",
       "allOf": [{ "$ref": "#/definitions/strategyOutput" }],
       "required": ["schemaVersion", "strategyId", "strategyVersion", "subjectHash", "round", "createdAt", "contentHash"],
@@ -68,6 +73,7 @@
       "additionalProperties": false
     },
     "strategyDescriptor": {
+      "title": "VerificationStrategyDescriptor",
       "type": "object",
       "required": ["id", "version", "displayName"],
       "properties": {
@@ -78,6 +84,7 @@
       "additionalProperties": true
     },
     "resultArtifact": {
+      "title": "VerificationResultArtifact",
       "type": "object",
       "required": ["id", "kind", "path", "contentHash", "size", "mediaType"],
       "properties": {
@@ -91,6 +98,7 @@
       "additionalProperties": true
     },
     "receipt": {
+      "title": "VerificationReceipt",
       "type": "object",
       "required": ["result"],
       "properties": {

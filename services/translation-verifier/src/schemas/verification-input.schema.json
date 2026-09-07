@@ -50,6 +50,7 @@
     "nonEmptyString": { "type": "string", "pattern": "\\S" },
     "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "stagedFile": {
+      "title": "StagedFileSchemaSubset",
       "type": "object",
       "required": ["path", "content", "contentHash"],
       "properties": {
@@ -60,6 +61,7 @@
       "additionalProperties": true
     },
     "filePatch": {
+      "title": "FilePatchSchemaSubset",
       "type": "object",
       "required": ["path", "status", "additions", "deletions", "hunks"],
       "properties": {

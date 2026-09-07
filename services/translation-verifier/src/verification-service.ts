@@ -14,22 +14,12 @@ import {
   assertVerificationResult,
   createVerificationResult,
   type VerificationInput,
+  type VerificationReceipt,
   type VerificationResult,
   type VerificationStrategyDescriptor,
 } from "./verification-types.js";
 
-export interface VerificationResultArtifact {
-  id: string;
-  kind: "verification-result";
-  path: string;
-  contentHash: string;
-  size: number;
-  mediaType: "application/json";
-}
-
-export type VerificationReceipt =
-  | { result: VerificationResult; resultArtifact: VerificationResultArtifact }
-  | { result: VerificationResult; resultArtifact?: undefined };
+export type { VerificationResultArtifact, VerificationReceipt } from "./verification-types.js";
 
 export interface VerificationServiceOptions {
   factory: VerificationStrategyFactory;

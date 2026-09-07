@@ -1,7 +1,10 @@
-import type { AdaptationRequestV2, FilePatch } from "@forexplore/contracts";
+import type { AdaptationRequestV2, FilePatch, RepositoryIngestionJsonValue } from "@forexplore/contracts";
 import { calculatePatchHashV2 } from "@forexplore/workflow-core";
+import { Ajv } from "ajv";
+import runSchema from "./schemas/verification-run.schema.json" with { type: "json" };
 import { createHash } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
+import type { VerificationReceipt as ServiceReceipt, VerificationResultArtifact as ServiceArtifact } from "./verification-service.js";
 import inputSchema from "./schemas/verification-input.schema.json" with {
   type: "json",
 };
@@ -19,6 +22,13 @@ import {
   createVerificationResult,
   type VerificationInput,
   type VerificationStrategyDescriptor,
+  type VerificationResult,
+  type VerificationReceipt,
+  type VerificationResultArtifact,
+  type VerificationIssue,
+  type VerificationArtifact,
+  type VerificationStrategyOutput,
+  type VerificationRun,
 } from "./verification-types.js";
 
 const descriptor: VerificationStrategyDescriptor = {
@@ -87,10 +97,90 @@ function input(): VerificationInput {
 }
 
 describe("verification-types", () => {
+  it("preserves the exact pre-refactor adapter-facing types and upstream ownership", () => {
+    type LegacyInput = {
+      schemaVersion: "1.0";
+      request: AdaptationRequestV2;
+      analysisReport: RepositoryIngestionJsonValue;
+      migrationPlan: RepositoryIngestionJsonValue;
+      translation: { round: number; generatedContent: string; files: FilePatch[]; patchHash: string };
+    };
+    type LegacyIssue = {
+      id: string; kind: string; message: string; caseId?: string;
+      sourceObservation?: RepositoryIngestionJsonValue;
+      targetObservation?: RepositoryIngestionJsonValue;
+      evidenceArtifactIds: string[];
+    };
+    type LegacyArtifact = { id: string; kind: string; path: string; contentHash: string; mediaType: string };
+    type LegacyOutput = {
+      status: "pass" | "warn" | "fail" | "unverified"; summary: string;
+      issues: LegacyIssue[]; artifacts: LegacyArtifact[]; strategyReport: RepositoryIngestionJsonValue;
+    };
+    type LegacyResult = LegacyOutput & {
+      schemaVersion: "1.0"; strategyId: string; strategyVersion: string;
+      subjectHash: string; round: number; createdAt: string; contentHash: string;
+    };
+    type LegacyResultArtifact = {
+      id: string; kind: "verification-result"; path: string; contentHash: string;
+      size: number; mediaType: "application/json";
+    };
+    type LegacyReceipt =
+      | { result: LegacyResult; resultArtifact: LegacyResultArtifact }
+      | { result: LegacyResult; resultArtifact?: undefined };
+    type Shape<T> = { [K in keyof T]: T[K] };
+    expectTypeOf<VerificationInput>().toMatchTypeOf<LegacyInput>();
+    expectTypeOf<LegacyInput>().toMatchTypeOf<VerificationInput>();
+    expectTypeOf<keyof VerificationInput>().toEqualTypeOf<keyof LegacyInput>();
+    expectTypeOf<keyof VerificationInput["translation"]>().toEqualTypeOf<keyof LegacyInput["translation"]>();
+    expectTypeOf<Shape<VerificationIssue>>().toEqualTypeOf<LegacyIssue>();
+    expectTypeOf<Shape<VerificationArtifact>>().toEqualTypeOf<LegacyArtifact>();
+    expectTypeOf<Shape<VerificationStrategyOutput>>().toEqualTypeOf<LegacyOutput>();
+    expectTypeOf<Shape<VerificationResult>>().toEqualTypeOf<Shape<LegacyResult>>();
+    expectTypeOf<VerificationReceipt>().toMatchTypeOf<LegacyReceipt>();
+    expectTypeOf<LegacyReceipt>().toMatchTypeOf<VerificationReceipt>();
+    expectTypeOf<keyof VerificationReceipt>().toEqualTypeOf<keyof LegacyReceipt>();
+    expectTypeOf<VerificationResultArtifact>().toEqualTypeOf<LegacyResultArtifact>();
+    expectTypeOf<ServiceReceipt>().toEqualTypeOf<VerificationReceipt>();
+    expectTypeOf<ServiceArtifact>().toEqualTypeOf<VerificationResultArtifact>();
+    expectTypeOf<VerificationInput["request"]>().toEqualTypeOf<AdaptationRequestV2>();
+    expectTypeOf<VerificationInput["translation"]["files"]>().toEqualTypeOf<FilePatch[]>();
+    expectTypeOf<VerificationStrategyDescriptor>().toMatchTypeOf<NonNullable<VerificationRun["strategy"]["selected"]>>();
+    const adapterInput: LegacyInput = input();
+    const publicInput: VerificationInput = adapterInput;
+    expect(publicInput).toBe(adapterInput);
+  });
+
+  it.each([inputSchema, outputSchema])("compiles public $title with ordinary strict Ajv", (schema) => {
+    expect(() => new Ajv({ strict: true }).compile(schema)).not.toThrow();
+  });
+
+  it("compiles the public run schema with local references and no custom keywords", () => {
+    const ajv = new Ajv({ strict: true });
+    ajv.addSchema(inputSchema, new URL("verification-input.schema.json", runSchema.$id).href);
+    ajv.addSchema(outputSchema, new URL("verification-output.schema.json", runSchema.$id).href);
+    expect(() => ajv.compile(runSchema)).not.toThrow();
+    expect(() => ajv.compile({ $ref: `${runSchema.$id}#/definitions/event` })).not.toThrow();
+  });
+
   it("compiles the external schema files used by runtime validation", () => {
     expect(validateInputSchema.schema).toStrictEqual(inputSchema);
     expect(validateResultSchema.schema).toStrictEqual(outputSchema);
     expect(validateInputSchema(input())).toBe(true);
+  });
+
+  it("preserves open upstream JSON slots and existing envelope extension acceptance", () => {
+    const value = input();
+    value.analysisReport = null;
+    value.migrationPlan = [true, "plan", 1];
+    Object.assign(value, { upstreamExtension: true });
+    Object.assign(value.translation, { upstreamExtension: true });
+    expect(validateInputSchema(value)).toBe(true);
+    expect(assertVerificationInput(value)).toBe(value);
+    const result = createVerificationResult(value, descriptor, {
+      status: "pass", summary: "checked", issues: [], artifacts: [], strategyReport: false,
+    });
+    expect(validateResultSchema(result)).toBe(true);
+    expect(validateResultSchema({ ...result, upstreamExtension: true })).toBe(false);
   });
 
   it("rejects malformed input fields without coercing or mutating data", () => {

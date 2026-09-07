@@ -4,15 +4,18 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "test": "vitest run src",
+    "build": "npm run check:schema-types && tsc -p tsconfig.json",
+    "test": "npm run check:schema-types && vitest run src",
+    "generate:schema-types": "tsx scripts/generate-schema-types.ts",
+    "check:schema-types": "tsx scripts/generate-schema-types.ts --check",
     "verify": "tsx src/verification-cli.ts",
     "e2e": "tsx e2e/run-smoke-e2e.ts"
   },
   "exports": {
     ".": "./src/index.ts",
     "./schemas/verification-input.schema.json": "./src/schemas/verification-input.schema.json",
-    "./schemas/verification-output.schema.json": "./src/schemas/verification-output.schema.json"
+    "./schemas/verification-output.schema.json": "./src/schemas/verification-output.schema.json",
+    "./schemas/verification-run.schema.json": "./src/schemas/verification-run.schema.json"
   },
   "types": "./src/index.ts",
   "dependencies": {
@@ -22,6 +25,7 @@
   },
   "devDependencies": {
     "@types/node": "^26.1.1",
+    "json-schema-to-typescript": "^16.0.0",
     "tsx": "^4.21.0",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10"

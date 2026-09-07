@@ -2,7 +2,10 @@ import { createRequire } from "node:module";
 import { Ajv, type ValidateFunction } from "ajv";
 import type InputSchema from "./schemas/verification-input.schema.json";
 import type OutputSchema from "./schemas/verification-output.schema.json";
+import type RunSchema from "./schemas/verification-run.schema.json";
 import type {
+  VerificationRun,
+  VerificationRunEvent,
   VerificationInput,
   VerificationReceipt,
   VerificationResult,
@@ -15,10 +18,21 @@ const require = createRequire(import.meta.url);
 const inputSchema: typeof InputSchema = require("./schemas/verification-input.schema.json");
 const outputSchema: typeof OutputSchema = require("./schemas/verification-output.schema.json");
 
-// Compile trusted local schemas once. Validation never coerces or removes input fields.
-const ajv = new Ajv({ strict: true, ownProperties: true });
-ajv.addSchema(outputSchema);
-export const validateInputSchema = ajv.compile<VerificationInput>(inputSchema);
+const runSchema: typeof RunSchema = require("./schemas/verification-run.schema.json");
+
+// Compile trusted local schemas once without custom validation keywords.
+const ajv = new Ajv({
+  strict: true, ownProperties: true,
+  coerceTypes: false, useDefaults: false, removeAdditional: false,
+});
+ajv.addSchema(inputSchema, new URL("verification-input.schema.json", runSchema.$id).href);
+ajv.addSchema(outputSchema, new URL("verification-output.schema.json", runSchema.$id).href);
+ajv.addSchema(runSchema);
+export const validateRunSchema = ajv.getSchema<VerificationRun>(runSchema.$id)!;
+export const validateRunEventSchema = ajv.compile<VerificationRunEvent>({
+  $ref: `${runSchema.$id}#/definitions/event`,
+});
+export const validateInputSchema = ajv.getSchema<VerificationInput>(inputSchema.$id)!;
 export const validateResultSchema = ajv.getSchema<VerificationResult>(
   outputSchema.$id,
 )!;

@@ -9,6 +9,13 @@ const {
 } = verifier;
 
 describe("translation-verifier entry", () => {
+  it("exports run validation without exposing a mutable Ajv instance", () => {
+    expect(typeof verifier.validateRunSchema).toBe("function");
+    expect(typeof verifier.validateRunEventSchema).toBe("function");
+    expect(typeof verifier.assertVerificationRun).toBe("function");
+    expect(verifier).not.toHaveProperty("ajv");
+  });
+
   it("exposes the schema version constant", () => {
     expect(translationVerifierSchemaVersion).toBe("1.0");
   });

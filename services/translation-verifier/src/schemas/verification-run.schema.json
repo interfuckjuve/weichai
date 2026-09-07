@@ -1,0 +1,109 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://forexplore.local/schemas/verification-run.schema.json",
+  "title": "VerificationRun",
+  "description": "Bounded Host diagnostics, not canonical verification evidence. References name actual files only when available. Host validates normalized relative paths and the persistence layer must enforce existence and containment. Durations are inclusive monotonic measurements; absent measurements are omitted, never invented.",
+  "type": "object",
+  "required": ["schemaVersion", "runId", "startedAt", "input", "strategy", "stages", "agentTimeline", "hostEvents", "report", "diagnostics"],
+  "properties": {
+    "schemaVersion": { "const": "1.0" },
+    "runId": { "$ref": "#/definitions/identifier" },
+    "startedAt": { "$ref": "#/definitions/timestamp" },
+    "endedAt": { "$ref": "#/definitions/timestamp" },
+    "totalDurationMs": { "$ref": "#/definitions/duration", "description": "Through failure handling, cleanup and response preparation, excluding the final run-record write and caller transport." },
+    "input": { "$ref": "#/definitions/fileReference" },
+    "strategy": { "$ref": "#/definitions/strategySelection" },
+    "stages": {
+      "type": "array", "minItems": 6, "maxItems": 6, "additionalItems": false,
+      "items": [
+        { "allOf": [{ "$ref": "#/definitions/stage" }, { "type": "object", "properties": { "id": { "const": "validate-input" } } }] },
+        { "allOf": [{ "$ref": "#/definitions/stage" }, { "type": "object", "properties": { "id": { "const": "prepare-workspace" } } }] },
+        { "allOf": [{ "$ref": "#/definitions/stage" }, { "type": "object", "properties": { "id": { "const": "prepare-agent-task" } } }] },
+        { "allOf": [{ "$ref": "#/definitions/stage" }, { "type": "object", "properties": { "id": { "const": "run-agent-tests" } } }] },
+        { "allOf": [{ "$ref": "#/definitions/stage" }, { "type": "object", "properties": { "id": { "const": "evaluate-evidence" } } }] },
+        { "allOf": [{ "$ref": "#/definitions/stage" }, { "type": "object", "properties": { "id": { "const": "save-report" } } }] }
+      ]
+    },
+    "agentTimeline": { "$ref": "#/definitions/eventFileReference" },
+    "hostEvents": { "$ref": "#/definitions/eventFileReference" },
+    "report": { "$ref": "#/definitions/fileReference" },
+    "diagnostics": { "type": "array", "maxItems": 256, "items": { "$ref": "#/definitions/diagnostic" } }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "identifier": { "type": "string", "pattern": "\\S", "maxLength": 256 },
+    "message": { "type": "string", "pattern": "\\S", "maxLength": 4096 },
+    "timestamp": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$", "maxLength": 64 },
+    "duration": { "type": "number", "minimum": 0 },
+    "relativePath": { "type": "string", "pattern": "\\S", "maxLength": 4096, "description": "Safe normalized relative POSIX file path, checked by Host; no filesystem access in schema validation." },
+    "fileReference": {
+      "title": "VerificationRunFileReference",
+      "oneOf": [
+        { "type": "object", "required": ["availability", "path"], "properties": { "availability": { "const": "available" }, "path": { "$ref": "#/definitions/relativePath" } }, "additionalProperties": false },
+        { "type": "object", "required": ["availability", "reason"], "properties": { "availability": { "enum": ["unavailable", "omitted"] }, "reason": { "$ref": "#/definitions/message" } }, "additionalProperties": false }
+      ]
+    },
+    "eventFileReference": {
+      "title": "VerificationRunEventFileReference",
+      "type": "object",
+      "required": ["source", "completeness"],
+      "properties": {
+        "availability": {}, "path": {}, "reason": {},
+        "source": { "$ref": "#/definitions/identifier" },
+        "completeness": { "enum": ["complete", "partial", "buffered", "unavailable", "truncated"] }
+      },
+      "oneOf": [
+        { "required": ["availability", "path"], "properties": { "availability": { "const": "available" }, "path": { "$ref": "#/definitions/relativePath" } }, "not": { "properties": { "reason": {} }, "required": ["reason"] } },
+        { "required": ["availability", "reason"], "properties": { "availability": { "enum": ["unavailable", "omitted"] }, "reason": { "$ref": "#/definitions/message" } }, "not": { "properties": { "path": {} }, "required": ["path"] } }
+      ],
+      "additionalProperties": false
+    },
+    "stageId": { "title": "VerificationStageId", "enum": ["validate-input", "prepare-workspace", "prepare-agent-task", "run-agent-tests", "evaluate-evidence", "save-report"] },
+    "stageState": { "title": "VerificationStageState", "enum": ["not-started", "running", "completed", "failed", "cancelled", "skipped"] },
+    "stage": {
+      "title": "VerificationStage", "type": "object", "required": ["id", "state"],
+      "properties": {
+        "id": { "$ref": "#/definitions/stageId" }, "state": { "$ref": "#/definitions/stageState" },
+        "startedAt": { "$ref": "#/definitions/timestamp" }, "endedAt": { "$ref": "#/definitions/timestamp" },
+        "durationMs": { "$ref": "#/definitions/duration" },
+        "error": { "$ref": "#/definitions/message" }, "reason": { "$ref": "#/definitions/message" },
+        "artifacts": { "type": "array", "maxItems": 256, "items": { "$ref": "#/definitions/fileReference" } }
+      }, "additionalProperties": false
+    },
+    "strategySelection": {
+      "title": "VerificationRunStrategySelection", "type": "object", "required": ["selection", "applicability"],
+      "properties": {
+        "requestedId": { "$ref": "#/definitions/identifier" },
+        "selected": { "$ref": "verification-output.schema.json#/definitions/strategyDescriptor" },
+        "selection": { "enum": ["explicit", "default"] },
+        "applicability": { "enum": ["not-checked", "supported", "unsupported", "failed"] },
+        "reason": { "$ref": "#/definitions/message" }
+      }, "additionalProperties": false
+    },
+    "agentTaskName": { "title": "AgentTaskName", "enum": ["explore", "design-tests", "write-tests", "verify", "analyze-failure", "finalize-report"] },
+    "event": {
+      "title": "VerificationRunEvent", "type": "object", "required": ["kind", "source", "runId", "sequence", "receivedAt"],
+      "description": "Allowlisted metadata only. Source identifies actual observation provenance; kind/event do not imply exact process boundaries. Task occurrence IDs are assigned by Host, and task names may repeat.",
+      "properties": {
+        "kind": { "$ref": "#/definitions/identifier" }, "source": { "$ref": "#/definitions/identifier" },
+        "runId": { "$ref": "#/definitions/identifier" }, "sequence": { "type": "integer", "minimum": 0 },
+        "receivedAt": { "$ref": "#/definitions/timestamp" }, "offsetMs": { "$ref": "#/definitions/duration" },
+        "operationId": { "$ref": "#/definitions/identifier" }, "parentOperationId": { "$ref": "#/definitions/identifier" },
+        "name": { "$ref": "#/definitions/identifier" }, "event": { "$ref": "#/definitions/identifier" },
+        "durationMs": { "$ref": "#/definitions/duration" }, "exitCode": { "type": "integer" },
+        "timedOut": { "type": "boolean" }, "commandId": { "$ref": "#/definitions/identifier" }
+      },
+      "if": { "properties": { "kind": { "const": "agent-task" } }, "required": ["kind"] },
+      "then": { "properties": { "name": { "$ref": "#/definitions/agentTaskName" } } },
+      "additionalProperties": false
+    },
+    "diagnostic": {
+      "title": "VerificationRunDiagnostic", "type": "object", "required": ["code", "message"],
+      "properties": { "code": { "$ref": "#/definitions/identifier" }, "message": { "$ref": "#/definitions/message" }, "stageId": { "$ref": "#/definitions/stageId" } },
+      "additionalProperties": false
+    },
+    "inputSnapshot": { "$ref": "verification-input.schema.json" },
+    "resultSnapshot": { "$ref": "verification-output.schema.json" },
+    "receipt": { "$ref": "verification-output.schema.json#/definitions/receipt" }
+  }
+}
