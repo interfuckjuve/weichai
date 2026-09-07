@@ -1,3 +1,4 @@
+import { createHash, type Hash } from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
 import type { RunRecorder } from "../../run-output/record-run.js";
 
@@ -8,13 +9,17 @@ const MAX_MESSAGES = 1024;
 const MAX_BLOCKS = 4096;
 
 type JsonObject = Record<string, unknown>;
+interface MessageObservation {
+  partials: Map<number, Hash>;
+  snapshot?: string;
+}
 const object = (value: unknown): JsonObject | undefined =>
   typeof value === "object" && value !== null && !Array.isArray(value) ? value as JsonObject : undefined;
 
 /** Smoke-only protocol reader. Raw text is transient; only receipt-time metadata reaches the recorder. */
 export function observeAgentSteps(recorder: RunRecorder) {
   const decoder = new StringDecoder("utf8");
-  const messages = new Map<string, Set<number>>();
+  const messages = new Map<string, MessageObservation>();
   const open = new Map<string, string[]>();
   let currentMessage: string | undefined;
   let currentBlock: number | undefined;
@@ -25,6 +30,7 @@ export function observeAgentSteps(recorder: RunRecorder) {
   let droppingText = false;
   let droppingStream = false;
   let fence: string | undefined;
+  let uncertainFence = false;
   let events = 0;
   let occurrences = 0;
   let blocks = 0;
@@ -39,6 +45,7 @@ export function observeAgentSteps(recorder: RunRecorder) {
   }
 
   function mark(line: string) {
+    if (uncertainFence) return;
     const trimmed = line.trim();
     const delimiter = /^(\`{3,}|~{3,})/.exec(trimmed)?.[1];
     if (delimiter) {
@@ -76,9 +83,11 @@ export function observeAgentSteps(recorder: RunRecorder) {
       const newline = segment.endsWith("\n");
       textBytes += Buffer.byteLength(segment);
       if (!droppingText && textBytes > MAX_TEXT_LINE) {
-        // Preserve an opening fence even when its info string exceeds the text-line budget.
-        const delimiter = /^(\`{3,}|~{3,})/.exec((textLine || segment).trimStart())?.[1];
+        // Join only a bounded prefix: the delimiter itself may span text deltas.
+        const prefix = (textLine + segment.slice(0, MAX_TEXT_LINE - textLine.length)).trimStart();
+        const delimiter = /^(\`{3,}|~{3,})/.exec(prefix)?.[1];
         if (!fence && delimiter) fence = delimiter;
+        if (/^(\`*|~*)$/.test(prefix)) uncertainFence = true;
         textLine = "";
         droppingText = true;
         omit();
@@ -97,24 +106,23 @@ export function observeAgentSteps(recorder: RunRecorder) {
       textBytes = 0;
       droppingText = false;
       fence = undefined;
+      uncertainFence = false;
     }
   }
 
-  function identity(id: unknown): Set<number> | undefined {
+  function identity(id: unknown): MessageObservation | undefined {
     if (typeof id !== "string" || !id || id.length > 256) return;
     let seen = messages.get(id);
     if (!seen) {
       if (messages.size >= MAX_MESSAGES) { disabled = true; omit(); return; }
-      seen = new Set();
+      seen = { partials: new Map() };
       messages.set(id, seen);
     }
     return seen;
   }
 
-  function remember(seen: Set<number> | undefined, index: number): boolean {
-    if (seen?.has(index)) return true;
+  function reserveBlock(): boolean {
     if (++blocks > MAX_BLOCKS) { disabled = true; omit(); return false; }
-    seen?.add(index);
     return true;
   }
 
@@ -128,11 +136,29 @@ export function observeAgentSteps(recorder: RunRecorder) {
       if (!message || !Array.isArray(message.content)) return;
       const seen = identity(message.id);
       if (disabled) return;
-      if (anonymousPartial) { omit(); return; }
-      for (const [index, raw] of message.content.entries()) {
-        const block = object(raw);
-        if (block?.type !== "text" || typeof block.text !== "string" || seen?.has(index)) continue;
-        if (!remember(seen, index)) return;
+      if (anonymousPartial || !seen) { omit(); return; }
+      const textBlocks = message.content.map((raw, index) => ({ block: object(raw), index }))
+        .filter((entry): entry is { block: JsonObject & { text: string }; index: number } => entry.block?.type === "text" && typeof entry.block.text === "string");
+      if (!textBlocks.length) return;
+      if (seen.partials.size) {
+        // Single-block assistant records use local index 0, not the original stream index.
+        // Match bounded text digests within this message; never replay an ambiguous block.
+        const digests = new Set([...seen.partials.values()].map((hash) => hash.copy().digest("hex")));
+        for (const { block } of textBlocks) {
+          if (!digests.has(createHash("sha256").update(block.text, "utf16le").digest("hex"))) omit();
+        }
+        return;
+      }
+      const signature = createHash("sha256");
+      for (const { block, index } of textBlocks) signature.update(JSON.stringify([index, block.text]), "utf16le");
+      const digest = signature.digest("hex");
+      if (seen.snapshot !== undefined) {
+        if (seen.snapshot !== digest) omit();
+        return;
+      }
+      seen.snapshot = digest;
+      for (const { block } of textBlocks) {
+        if (!reserveBlock()) return;
         text(block.text, true);
       }
       return;
@@ -162,8 +188,21 @@ export function observeAgentSteps(recorder: RunRecorder) {
 
   function partial(value: string) {
     if (disabled || currentBlock === undefined) return;
-    if (!currentMessage) anonymousPartial = true;
-    if (remember(currentMessage ? messages.get(currentMessage) : undefined, currentBlock)) text(value);
+    if (!currentMessage) {
+      anonymousPartial = true;
+    } else {
+      const seen = messages.get(currentMessage)!;
+      if (seen.snapshot !== undefined) { omit(); return; }
+      let hash = seen.partials.get(currentBlock);
+      if (!hash) {
+        if (!reserveBlock()) return;
+        hash = createHash("sha256");
+        seen.partials.set(currentBlock, hash);
+      }
+      // UTF-16 code units keep the digest stable even when JSON text deltas split a surrogate pair.
+      hash.update(value, "utf16le");
+    }
+    text(value);
   }
 
   function consume(value: string) {
