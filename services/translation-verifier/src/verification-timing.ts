@@ -8,18 +8,31 @@ export interface TimingMark {
 }
 
 /** Legacy scopes carry identity and clock origin, never a second collection of observations. */
-const timing = new AsyncLocalStorage<{ start: number; operationId: string; recorder: RunRecorder }>();
+const timing = new AsyncLocalStorage<{ start: number; operationId: string; recorder: RunRecorder; measurementRecorder?: RunRecorder }>();
+
+/** Only the service entry bridges legacy marks; request stages always remain isolated. */
+export function withVerificationTimingRecorder<T>(recorder: RunRecorder, run: () => Promise<T>): Promise<T> {
+  const scope = timing.getStore();
+  return withRunRecorder(recorder, () => scope
+    ? timing.run({ ...scope, recorder, measurementRecorder: scope.measurementRecorder ?? scope.recorder }, run)
+    : run());
+}
 
 export function markVerificationPhase(phase: string): void {
   const scope = timing.getStore();
   const recorder = currentRunRecorder() ?? scope?.recorder;
   const current = scope?.recorder === recorder ? scope : undefined;
-  recorder?.observe({
+  const event = {
     kind: "legacy-phase",
     source: current ? "legacy-measurement:host-performance" : "host-performance",
     name: phase,
     ...(current ? { operationId: current.operationId, offsetMs: performance.now() - current.start } : {}),
-  });
+  };
+  recorder?.observe(event);
+  // Both existing bounded recorders retain observations, never each other's stage state.
+  if (current?.measurementRecorder && current.measurementRecorder !== recorder && current.recorder.snapshot().endedAt === undefined) {
+    current.measurementRecorder.observe(event);
+  }
 }
 
 /**

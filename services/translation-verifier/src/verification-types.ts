@@ -73,6 +73,10 @@ export interface VerificationStrategyContext {
 }
 
 export interface VerificationStrategy {
+  /** Built-in strategies record their own task, execution and evaluation boundaries. */
+  readonly recordsExecutionStages?: true;
+  preflight?(input: VerificationInput): VerificationStrategyOutput | undefined;
+  prepareWorkspace?(input: VerificationInput, context: VerificationStrategyContext): void;
   verify(
     input: VerificationInput,
     context: VerificationStrategyContext,

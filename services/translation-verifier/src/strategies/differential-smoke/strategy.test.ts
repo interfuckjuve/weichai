@@ -1,11 +1,13 @@
 import type { AdaptationRequestV2, FilePatch } from "@forexplore/contracts";
 import { calculatePatchHashV2 } from "@forexplore/workflow-core";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { validSmokeCase, validSmokeReport } from "./test-fixtures.js";
+import { validCommandEvidence, validSmokeCase, validSmokeReport } from "./test-fixtures.js";
+import * as recording from "../../record-run-events.js";
+import { assertVerificationRun } from "../../verification-types.js";
 import type { SmokeResult } from "./runner.js";
 import { createDefaultVerificationService } from "../../default-verification-service.js";
 import {
@@ -22,10 +24,26 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   rmSync(root, { recursive: true, force: true });
 });
 
 describe("DifferentialSmokeStrategy", () => {
+  it("keeps injected smoke execution under a legacy caller's Host-owned stage", async () => {
+    const recorder = recording.createRunRecorder({ runId: "legacy-strategy-caller" });
+    recorder.startStage("validate-input");
+    recorder.endStage("validate-input", "completed");
+    recorder.startStage("prepare-workspace");
+    recorder.endStage("prepare-workspace", "completed");
+    recorder.skipStage("prepare-agent-task", "Legacy provider.");
+    recorder.startStage("run-agent-tests");
+    const strategy = new DifferentialSmokeStrategy({ runSmokeImpl: async () => ({ status: "pass", summary: "same", durationMs: 0, generatedTestsKept: false, report: validSmokeReport() }) });
+    const output = await recording.withRunRecorder(recorder, () => strategy.verify(input(), context()));
+    expect(output.status).toBe("pass");
+    expect(recorder.snapshot().stages.map((stage) => stage.state)).toEqual(["completed", "completed", "skipped", "running", "not-started", "not-started"]);
+    expect(recorder.snapshot().diagnostics).toEqual([]);
+  });
+
   it("maps the existing smoke result into strategy output", async () => {
     const report = validSmokeReport({ cases: [validSmokeCase("translation-bug")] });
     const fakeRunSmoke = vi.fn(async () => ({
@@ -172,6 +190,37 @@ describe("DifferentialSmokeStrategy", () => {
 });
 
 describe("createDefaultVerificationService", () => {
+  it.each(["valid", "missing-report", "changed-baseline"])("records actual default smoke boundaries for %s evidence", async (kind) => {
+    const recorder = vi.spyOn(recording, "createRunRecorder");
+    const spawnClaude: NonNullable<ConstructorParameters<typeof DifferentialSmokeStrategy>[0]>["spawnClaude"] = async (_args, env, _timeout, options) => {
+      const run = recording.currentRunRecorder()!.snapshot();
+      expect(run.stages.map((stage) => stage.state)).toEqual(["completed", "completed", "completed", "running", "not-started", "not-started"]);
+      expect(existsSync(env.VERIFIER_BASELINE_PATH!)).toBe(true);
+      if (kind !== "missing-report") writeFileSync(join(options!.cwd!, "report.json"), JSON.stringify(validSmokeReport()));
+      writeFileSync(join(options!.cwd!, "commands.jsonl"), validCommandEvidence().map((item) => JSON.stringify(item)).join("\n"));
+      if (kind === "changed-baseline") writeFileSync(join(env.VERIFIER_WORKSPACE_ROOT!, "target/project/src/Target.cs"), "changed");
+      return { stdout: "done", exitCode: 0 };
+    };
+    const service = createDefaultVerificationService({ workspaceRoot: join(root, "workspaces"), artifactRoot: join(root, "artifacts"), apiKey: "test", spawnClaude });
+    const receipt = await service.verifyWithReceipt(input());
+    expect(receipt.result.status).toBe(kind === "valid" ? "pass" : "unverified");
+    const run = assertVerificationRun(recorder.mock.results[0]!.value.snapshot());
+    expect(run.stages.map((stage) => stage.state)).toEqual(["completed", "completed", "completed", "completed", kind === "valid" ? "completed" : "failed", "completed"]);
+    expect(run.diagnostics).toEqual([]);
+    expect(receipt.resultArtifact).toBeDefined();
+  });
+
+  it("preflights unsupported routes without a workspace or an agent session", async () => {
+    const fakeRunSmoke = vi.fn() as RunSmokeImpl;
+    const workspaceRoot = join(root, "blocked");
+    writeFileSync(workspaceRoot, "blocked");
+    const receipt = await createDefaultVerificationService({ workspaceRoot, artifactRoot: join(root, "artifacts"), runSmokeImpl: fakeRunSmoke })
+      .verifyWithReceipt(input({ sourceLanguageId: "go" }));
+    expect(receipt.result.issues[0]?.kind).toBe("unsupported-language");
+    expect(receipt.resultArtifact).toBeDefined();
+    expect(fakeRunSmoke).not.toHaveBeenCalled();
+  });
+
   it("registers differential-smoke as the default strategy", () => {
     const service = createDefaultVerificationService({ runSmokeImpl: vi.fn() as RunSmokeImpl });
 

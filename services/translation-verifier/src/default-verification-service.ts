@@ -4,7 +4,7 @@ import { VerificationStrategyFactory } from "./verification-strategy-factory.js"
 
 export type VerificationServiceRuntimeOptions = Pick<
   VerificationServiceOptions,
-  "workspaceRoot" | "artifactRoot" | "timeoutMs" | "now"
+  "workspaceRoot" | "artifactRoot" | "timeoutMs" | "now" | "runRoot" | "debug" | "onRunRecorded"
 >;
 
 export function createDefaultVerificationService(
@@ -25,6 +25,9 @@ function runtimeOptions(options: VerificationServiceRuntimeOptions): Verificatio
     ...(options.workspaceRoot !== undefined ? { workspaceRoot: options.workspaceRoot } : {}),
     ...(options.artifactRoot !== undefined ? { artifactRoot: options.artifactRoot } : {}),
     ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+    ...(options.runRoot !== undefined ? { runRoot: options.runRoot } : {}),
+    ...(options.debug !== undefined ? { debug: options.debug } : {}),
+    ...(options.onRunRecorded !== undefined ? { onRunRecorded: options.onRunRecorded } : {}),
     ...(options.now !== undefined ? { now: options.now } : {}),
   };
 }

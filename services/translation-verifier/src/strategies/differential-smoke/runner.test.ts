@@ -14,6 +14,7 @@ import { validCommandEvidence, validSmokeReport } from "./test-fixtures.js";
 import type { CommandEvidence, SmokeReport } from "./types.js";
 import { createWorkspaceBaseline, writeWorkspaceBaseline } from "./workspace-baseline.js";
 import { VERIFIER_COMMAND_ENTRY } from "./helpers.js";
+import { createRunRecorder, withRunRecorder } from "../../record-run-events.js";
 import { runSmoke } from "./runner.js";
 import type { SmokeTaskInput } from "./prompts/task.js";
 
@@ -124,6 +125,25 @@ afterEach(() => {
 });
 
 describe("runSmoke verify-only 内部暂存(files 输入)", () => {
+  it.each(["pass", "error"])("does not claim legacy Host stages during standalone %s execution", async (kind) => {
+    const root = makeTmpRoot();
+    const recorder = createRunRecorder({ runId: "legacy-host" });
+    recorder.startStage("validate-input");
+    recorder.endStage("validate-input", "completed");
+    recorder.startStage("prepare-workspace");
+    recorder.endStage("prepare-workspace", "completed");
+    recorder.skipStage("prepare-agent-task", "Legacy preparation is not observable.");
+    recorder.startStage("run-agent-tests");
+    try {
+      const h = writingFake(validReport(), validEvidence());
+      const spawnClaude = kind === "pass" ? h.fake as unknown as SpawnClaude : async () => { throw new Error("spawn failed"); };
+      const result = await withRunRecorder(recorder, () => runSmoke(fileBasedJob(), { workspaceRoot: root, apiKey: "test", spawnClaude }));
+      expect(result.status).toBe(kind);
+      expect(recorder.snapshot().stages.map((stage) => stage.state)).toEqual(["completed", "completed", "skipped", "running", "not-started", "not-started"]);
+      expect(recorder.snapshot().diagnostics).toEqual([]);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
   it("默认 verify-only:深校验报告+命令证据后归一 pass,evaluation 存在", async () => {
     const root = makeTmpRoot();
     try {

@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import * as fs from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { markVerificationPhase, measureVerification } from "./verification-timing.js";
+import * as recording from "./record-run-events.js";
 import { VerificationService } from "./verification-service.js";
 import { VerificationStrategyFactory } from "./verification-strategy-factory.js";
 import {
@@ -40,11 +42,135 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.mocked(fs.renameSync).mockReset().mockImplementation(fsRename);
   rmSync(root, { recursive: true, force: true });
 });
 
 describe("VerificationService", () => {
+  it("short-circuits synchronous preflight without materializing a workspace but persists the receipt", async () => {
+    const recorder = vi.spyOn(recording, "createRunRecorder");
+    const verify = vi.fn();
+    const prepareWorkspace = vi.fn();
+    const p = provider("first", verify);
+    p.create = () => ({ verify, prepareWorkspace, preflight: () => ({
+      status: "unverified", summary: "unsupported context", issues: [], artifacts: [], strategyReport: {},
+    }) });
+    writeFileSync(workspaceRoot, "expensive workspace must not be touched");
+    const receipt = await serviceWith([p], "first").verifyWithReceipt(input());
+    expect(receipt.result.summary).toBe("unsupported context");
+    expect(receipt.resultArtifact).toBeDefined();
+    expect(verify).not.toHaveBeenCalled();
+    expect(prepareWorkspace).not.toHaveBeenCalled();
+    expect(recorder.mock.results[0]!.value.snapshot().stages.map((stage: { state: string }) => stage.state))
+      .toEqual(["completed", "skipped", "skipped", "skipped", "skipped", "completed"]);
+  });
+
+  it.each(["ordinary", "timeout", "abort"])("preserves %s preflight error semantics before workspace preparation", async (kind) => {
+    const recorder = vi.spyOn(recording, "createRunRecorder");
+    const error = kind === "ordinary" ? new Error("preflight failed") : new DOMException(kind, kind === "abort" ? "AbortError" : "TimeoutError");
+    const verify = vi.fn();
+    const p = provider("first", verify);
+    p.create = () => ({ verify, preflight: () => { throw error; } });
+    writeFileSync(workspaceRoot, "must not materialize");
+    const pending = serviceWith([p], "first").verifyWithReceipt(input());
+    if (kind === "abort") await expect(pending).rejects.toBe(error);
+    else {
+      const receipt = await pending;
+      expect(receipt.result.issues[0]?.kind).toBe(kind === "timeout" ? "strategy-timeout" : "framework-error");
+      expect(receipt.resultArtifact).toBeDefined();
+    }
+    expect(verify).not.toHaveBeenCalled();
+    const stages = recorder.mock.results[0]!.value.snapshot().stages;
+    expect(stages[0].state).toBe(kind === "abort" ? "cancelled" : "failed");
+    expect(stages.slice(1, 5).map((stage: { state: string }) => stage.state)).toEqual(["skipped", "skipped", "skipped", "skipped"]);
+  });
+
+  it("propagates caller cancellation raised during a synchronous preflight before accepting its early output", async () => {
+    const controller = new AbortController();
+    const error = new DOMException("cancelled in preflight", "AbortError");
+    const p = provider("first");
+    p.create = () => ({ verify: vi.fn(), preflight: () => {
+      controller.abort(error);
+      return { status: "unverified", summary: "early", issues: [], artifacts: [], strategyReport: {} };
+    } });
+    await expect(serviceWith([p], "first").verifyWithReceipt(input(), {}, controller.signal)).rejects.toBe(error);
+    expect(existsSync(artifactRoot)).toBe(false);
+  });
+
+  it("records legacy providers under stage 4 and completes preparation only after its synchronous hook", async () => {
+    const recorder = vi.spyOn(recording, "createRunRecorder");
+    const order: string[] = [];
+    const p = provider("first", async (value, context) => {
+      order.push("verify");
+      expect(readFileSync(join(context.workspace.targetRoot, "src/target.py"), "utf8")).toBe(translatedTargetContent);
+      expect(recording.currentRunRecorder()!.snapshot().stages.map((stage) => stage.state))
+        .toEqual(["completed", "completed", "skipped", "running", "not-started", "not-started"]);
+      return okResult(value, descriptor("first"));
+    });
+    const legacy = p.create();
+    p.create = () => ({ ...legacy,
+      preflight: () => { order.push("preflight"); return undefined; },
+      prepareWorkspace: (_input, context) => {
+        order.push("prepare");
+        expect(Number.isFinite(context.deadlineAt)).toBe(true);
+        expect(recording.currentRunRecorder()!.snapshot().stages[1].state).toBe("running");
+      },
+    });
+    expect((await serviceWith([p], "first").verify(input())).status).toBe("pass");
+    expect(order).toEqual(["preflight", "prepare", "verify"]);
+    const run = recorder.mock.results[0]!.value.snapshot();
+    expect(run.stages.map((stage: { state: string }) => stage.state)).toEqual(["completed", "completed", "skipped", "completed", "skipped", "completed"]);
+    expect(run.diagnostics).toEqual([]);
+    expect(run.totalDurationMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it("isolates concurrent requests inside legacy timing while preserving both phase streams", async () => {
+    const requests: recording.RunRecorder[] = [];
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => { release = resolve; });
+    const service = serviceWith([provider("first", async (value) => {
+      requests.push(recording.currentRunRecorder()!);
+      if (requests.length === 2) release();
+      await barrier;
+      return okResult(value, descriptor("first"));
+    })], "first");
+    const outer = recording.createRunRecorder({ runId: "outer-measurement" });
+    const measured = await recording.withRunRecorder(outer, () => measureVerification(() => Promise.all([service.verifyWithReceipt(input()), service.verifyWithReceipt(input())])));
+    expect(measured.value.map((receipt) => receipt.result.status)).toEqual(["pass", "pass"]);
+    expect(new Set(requests.map((recorder) => recorder.runId)).size).toBe(2);
+    expect(requests.every((recorder) => recorder !== outer)).toBe(true);
+    for (const recorder of requests) {
+      expect(recorder.snapshot().stages.map((stage) => stage.state)).toEqual(["completed", "completed", "skipped", "completed", "skipped", "completed"]);
+      expect(recorder.snapshot().diagnostics).toEqual([]);
+      expect(recorder.events().every((event) => event.runId === recorder.runId)).toBe(true);
+    }
+    expect(outer.snapshot().stages.every((stage) => stage.state === "not-started")).toBe(true);
+    expect(measured.timing.phases.filter((phase) => phase.phase === "request-validation-and-strategy-selection")).toHaveLength(2);
+    expect(measured.timing.phases.filter((phase) => phase.phase === "response-ready")).toHaveLength(2);
+  });
+
+  it("does not forward late request phases into an enclosing measurement after timeout", async () => {
+    let resume!: () => void;
+    let wrote!: () => void;
+    const wait = new Promise<void>((resolve) => { resume = resolve; });
+    const observed = new Promise<void>((resolve) => { wrote = resolve; });
+    const service = serviceWith([provider("first", async (value) => {
+      await wait;
+      markVerificationPhase("late-provider-phase");
+      wrote();
+      return okResult(value, descriptor("first"));
+    })], "first", { timeoutMs: 10 });
+    const measured = await measureVerification(async () => {
+      const result = await service.verify(input());
+      resume();
+      await observed;
+      return result;
+    });
+    expect(measured.value.status).toBe("unverified");
+    expect(measured.timing.phases.some((phase) => phase.phase === "late-provider-phase")).toBe(false);
+  });
+
   async function evidence(context: VerificationStrategyContext, bytes = 3) {
     writeFileSync(join(context.workspace.evidenceRoot, "report.json"), Buffer.alloc(bytes, "x"));
     return context.writeArtifact({ id: "report", kind: "report", path: "report.json", contentHash: "0".repeat(64), mediaType: "application/json" });

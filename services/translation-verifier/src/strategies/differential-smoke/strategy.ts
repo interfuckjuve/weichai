@@ -1,3 +1,4 @@
+import { currentRunRecorder } from "../../record-run-events.js";
 import { markVerificationPhase } from "../../verification-timing.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -58,17 +59,15 @@ const mutableFiles = [
 ] as const;
 
 export class DifferentialSmokeStrategy implements VerificationStrategy {
+  readonly recordsExecutionStages = true;
+  readonly #prepared = new WeakSet<VerificationStrategyContext>();
   readonly #options: DifferentialSmokeStrategyOptions;
 
   constructor(options: DifferentialSmokeStrategyOptions = {}) {
     this.#options = options;
   }
 
-  async verify(
-    input: VerificationInput,
-    context: VerificationStrategyContext,
-    signal?: AbortSignal,
-  ): Promise<VerificationStrategyOutput> {
+  preflight(input: VerificationInput): VerificationStrategyOutput | undefined {
     markVerificationPhase("strategy-capability-and-context-preflight");
     const sourceLanguageId =
       input.request.route?.sourceLanguageId ??
@@ -116,22 +115,46 @@ export class DifferentialSmokeStrategy implements VerificationStrategy {
       };
     }
 
+    return undefined;
+  }
+
+  prepareWorkspace(_input: VerificationInput, context: VerificationStrategyContext): void {
     markVerificationPhase("workspace-baseline-creation");
     prepareCallerOwnedWorkspace(context);
-    const smoke = await (
-      this.#options.runSmokeImpl ??
-      this.#options.runSmoke ??
-      runSmoke
-    )(
-      smokeInput(input, context, sourceLanguage, targetLanguage),
-      smokeOptions(context, this.#options),
-      signal,
-    );
+    this.#prepared.add(context);
+  }
+
+  async verify(input: VerificationInput, context: VerificationStrategyContext, signal?: AbortSignal): Promise<VerificationStrategyOutput> {
+    // Direct strategy callers retain preflight/baseline behavior. Host-prepared contexts must not be re-baselined.
+    if (!this.#prepared.has(context)) {
+      const early = this.preflight(input);
+      if (early !== undefined) return early;
+      this.prepareWorkspace(input, context);
+    }
+    this.#prepared.delete(context);
+    const sourceLanguage = languageFor(input.request.route?.sourceLanguageId ?? input.request.candidate.entity.languageId)!;
+    const targetLanguage = languageFor(input.request.route?.targetLanguageId ?? input.request.target.entity.languageId)!;
+    const run = this.#options.runSmokeImpl ?? this.#options.runSmoke ?? runSmoke;
+    const recorder = currentRunRecorder();
+    const stages = recorder?.snapshot().stages;
+    const injected = run !== runSmoke && stages?.[1].state === "completed" && stages[2].state === "not-started";
+    if (injected) recorder!.startStage("prepare-agent-task");
+    const job = smokeInput(input, context, sourceLanguage, targetLanguage);
+    const options = smokeOptions(context, this.#options);
+    if (injected) {
+      recorder!.endStage("prepare-agent-task", "completed");
+      recorder!.startStage("run-agent-tests");
+    }
+    const smoke = await run(job, options, signal);
+    if (injected) {
+      recorder!.endStage("run-agent-tests", "completed");
+      recorder!.startStage("evaluate-evidence");
+    }
     markVerificationPhase("strategy-report-persistence");
     const artifact = await writeSmokeReportArtifact(context, smoke);
     markVerificationPhase("strategy-result-mapping");
 
-    return {
+    const output: VerificationStrategyOutput = {
       status: smokeStatus(smoke),
       summary: smoke.summary,
       issues: smokeIssues(smoke, artifact.id),
@@ -139,6 +162,8 @@ export class DifferentialSmokeStrategy implements VerificationStrategy {
       // SAFETY: SmokeReport contains JSON data; createVerificationResult validates it before persistence.
       strategyReport: smoke.report as unknown as RepositoryIngestionJsonValue,
     };
+    if (injected) recorder!.endStage("evaluate-evidence", "completed");
+    return output;
   }
 }
 

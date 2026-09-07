@@ -7,6 +7,7 @@ import * as fs from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AdaptationRequestV2, FilePatch, ModifiedFilePatch } from "@forexplore/contracts";
 import type { VerificationArtifact, VerificationInput } from "./verification-types.js";
+import { createVerificationArtifactStore } from "./save-report.js";
 import { createVerificationWorkspace, VerificationArtifactPersistenceError } from "./verification-workspace.js";
 
 vi.mock("node:fs", async (importOriginal) => {
@@ -42,6 +43,20 @@ const fsStat = vi.mocked(fs.statSync).getMockImplementation()!;
 const fsRename = vi.mocked(fs.renameSync).getMockImplementation()!;
 
 describe("createVerificationWorkspace", () => {
+  it("persists early canonical bytes without source materialization and retains attempt cleanup and closed guards", () => {
+    const store = createVerificationArtifactStore({ artifactRoot, durablePrefix: "attempt-preflight" });
+    const bytes = Buffer.from('{"early":true}');
+    const stored = store.writeFrameworkResult(bytes);
+    expect(existsSync(workspaceRoot)).toBe(false);
+    expect(readFileSync(join(artifactRoot, stored.path))).toEqual(bytes);
+    expect(stored.contentHash).toBe(createHash("sha256").update(bytes).digest("hex"));
+    expect(stored.path).toContain(stored.contentHash);
+    expect(() => store.writeArtifact({ id: "report", kind: "report", path: "report.json", contentHash: "0".repeat(64), mediaType: "application/json" })).toThrow(/not prepared/);
+    store.cleanup({ discardArtifacts: true });
+    expect(readdirSync(artifactRoot)).toEqual([]);
+    expect(() => store.writeFrameworkResult(bytes)).toThrow(/closed/);
+  });
+
   const artifact = { id: "report", kind: "report", path: "report.json", contentHash: "0".repeat(64), mediaType: "application/json" };
 
   it.each(["missing", "symlink", "dangling", "directory", "ENOTDIR", "stat", "read", "destination", "rename"])("classifies %s failures without returning artifacts or leaking temp files", (failure) => {
