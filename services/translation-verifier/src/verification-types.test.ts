@@ -2,6 +2,16 @@ import type { AdaptationRequestV2, FilePatch } from "@forexplore/contracts";
 import { calculatePatchHashV2 } from "@forexplore/workflow-core";
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import inputSchema from "./schemas/verification-input.schema.json" with {
+  type: "json",
+};
+import outputSchema from "./schemas/verification-output.schema.json" with {
+  type: "json",
+};
+import {
+  validateInputSchema,
+  validateResultSchema,
+} from "./verification-schemas.js";
 import {
   assertVerificationInput,
   assertVerificationReceipt,
@@ -31,7 +41,9 @@ function input(): VerificationInput {
       hunks: [
         {
           header: "@@ -0,0 +1,1 @@",
-          lines: [{ type: "add" as const, content: "export const fixture = 1;" }],
+          lines: [
+            { type: "add" as const, content: "export const fixture = 1;" },
+          ],
         },
       ],
     },
@@ -41,10 +53,22 @@ function input(): VerificationInput {
     schemaVersion: "2.0",
     id: "request-fixture",
     sourceBundle: {
-      files: [{ path: "src/source.ts", content: sourceContent, contentHash: sha256(sourceContent) }],
+      files: [
+        {
+          path: "src/source.ts",
+          content: sourceContent,
+          contentHash: sha256(sourceContent),
+        },
+      ],
     },
     targetContext: {
-      sourceFiles: [{ path: "src/existing.ts", content: targetContent, contentHash: sha256(targetContent) }],
+      sourceFiles: [
+        {
+          path: "src/existing.ts",
+          content: targetContent,
+          contentHash: sha256(targetContent),
+        },
+      ],
     },
   } as AdaptationRequestV2;
 
@@ -63,31 +87,198 @@ function input(): VerificationInput {
 }
 
 describe("verification-types", () => {
-  it("rejects a receipt whose result artifact metadata is tampered", () => {
-    const result = createVerificationResult(input(), descriptor, {
-      status: "pass", summary: "verified", issues: [], artifacts: [], strategyReport: { cases: 1 },
-    }, () => "2026-09-05T00:00:00.000Z");
-    const bytes = Buffer.from(JSON.stringify(result), "utf8");
-    const receipt = { result, resultArtifact: {
-      id: "verification-result:attempt-1/verification-result.json",
-      kind: "verification-result" as const,
-      path: "attempt-1/verification-result.json",
-      contentHash: createHash("sha256").update(bytes).digest("hex"),
-      size: bytes.byteLength,
-      mediaType: "application/json" as const,
-    }};
-    expect(() => assertVerificationReceipt(receipt, input(), descriptor)).toThrow();
-    expect(() => assertVerificationReceipt({ ...receipt, resultArtifact: { ...receipt.resultArtifact, size: bytes.byteLength + 1 } }, input(), descriptor)).toThrow();
+  it("compiles the external schema files used by runtime validation", () => {
+    expect(validateInputSchema.schema).toStrictEqual(inputSchema);
+    expect(validateResultSchema.schema).toStrictEqual(outputSchema);
+    expect(validateInputSchema(input())).toBe(true);
   });
 
-  it("binds a result to the strategy, round, and exact patch hash", () => {
+  it("rejects malformed input fields without coercing or mutating data", () => {
+    const value = input();
+    value.translation.round = "0" as never;
+    const before = structuredClone(value);
+    expect(validateInputSchema(value)).toBe(false);
+    expect(() => assertVerificationInput(value)).toThrow(
+      /translation\.round.*integer/i,
+    );
+    expect(value).toEqual(before);
+  });
+
+  it.each([
+    ["missing created-file precondition", { expectedAbsent: undefined }],
+    ["false created-file precondition", { expectedAbsent: false }],
+    ["unknown patch status", { status: "deleted" }],
+    [
+      "missing modified-file hash",
+      { status: "modified", expectedAbsent: undefined },
+    ],
+    ["negative additions", { additions: -1 }],
+    [
+      "invalid hunk lines",
+      {
+        hunks: [
+          {
+            header: "@@ -0,0 +1,1 @@",
+            lines: [{ type: "invalid", content: "x" }],
+          },
+        ],
+      },
+    ],
+  ])("rejects %s through the input schema", (_name, overrides) => {
+    const value = input();
+    // JSON roundtrip models missing optional properties at the wire boundary.
+    value.translation.files[0] = JSON.parse(
+      JSON.stringify({ ...value.translation.files[0], ...overrides }),
+    );
+    value.translation.patchHash = calculatePatchHashV2(value.translation.files);
+    expect(validateInputSchema(value)).toBe(false);
+    expect(() => assertVerificationInput(value)).toThrow(
+      /Verification input\.translation\.files/,
+    );
+  });
+
+  it.each(["pass", "warn", "fail", "unverified"] as const)(
+    "materializes schema-valid %s results",
+    (status) => {
+      const result = createVerificationResult(input(), descriptor, {
+        status,
+        summary: "checked",
+        artifacts: [],
+        issues:
+          status === "fail"
+            ? [
+                {
+                  id: "finding",
+                  kind: "behavior",
+                  message: "different",
+                  evidenceArtifactIds: [],
+                },
+              ]
+            : [],
+        strategyReport: {
+          languageId: "custom-language",
+          details: [null, true, 2, "value"],
+        },
+      });
+      expect(validateResultSchema(result)).toBe(true);
+      expect(assertVerificationResult(result, input(), descriptor)).toBe(
+        result,
+      );
+    },
+  );
+
+  it("rejects malformed output shape and fail-without-issues using the output schema", () => {
     const result = createVerificationResult(input(), descriptor, {
       status: "pass",
       summary: "verified",
       issues: [],
       artifacts: [],
-      strategyReport: { cases: 1 },
-    }, () => "2026-09-05T00:00:00.000Z");
+      strategyReport: null,
+    });
+    for (const invalid of [
+      { ...result, schemaVersion: "2.0" },
+      { ...result, status: "error" },
+      { ...result, summary: " " },
+      { ...result, issues: null },
+      { ...result, status: "fail" },
+      { ...result, unexpected: true },
+    ]) {
+      expect(validateResultSchema(invalid)).toBe(false);
+      expect(() =>
+        assertVerificationResult(invalid as never, input(), descriptor),
+      ).toThrow();
+    }
+  });
+
+  it("still enforces hash and evidence relationships beyond structural schemas", () => {
+    const value = input();
+    value.translation.patchHash = "f".repeat(64);
+    expect(validateInputSchema(value)).toBe(true);
+    expect(() => assertVerificationInput(value)).toThrow(/patch hash.*files/i);
+    const output = {
+      status: "fail" as const,
+      summary: "different",
+      artifacts: [],
+      strategyReport: {},
+      issues: [
+        {
+          id: "finding",
+          kind: "behavior",
+          message: "different",
+          evidenceArtifactIds: ["missing"],
+        },
+      ],
+    };
+    expect(() => createVerificationResult(input(), descriptor, output)).toThrow(
+      /evidence artifact reference/,
+    );
+    expect(() =>
+      createVerificationResult(input(), descriptor, {
+        ...output,
+        issues: [
+          { ...output.issues[0], evidenceArtifactIds: [] },
+          { ...output.issues[0], evidenceArtifactIds: [] },
+        ],
+      }),
+    ).toThrow(/IDs must be unique/);
+  });
+
+  it("rejects a receipt whose result artifact metadata is tampered", () => {
+    const result = createVerificationResult(
+      input(),
+      descriptor,
+      {
+        status: "pass",
+        summary: "verified",
+        issues: [],
+        artifacts: [],
+        strategyReport: { cases: 1 },
+      },
+      () => "2026-09-05T00:00:00.000Z",
+    );
+    const bytes = Buffer.from(JSON.stringify(result), "utf8");
+    const receipt = {
+      result,
+      resultArtifact: {
+        id: "verification-result:attempt-1/verification-result.json",
+        kind: "verification-result" as const,
+        path: "attempt-1/verification-result.json",
+        contentHash: createHash("sha256").update(bytes).digest("hex"),
+        size: bytes.byteLength,
+        mediaType: "application/json" as const,
+      },
+    };
+    expect(() =>
+      assertVerificationReceipt(receipt, input(), descriptor),
+    ).toThrow();
+    expect(() =>
+      assertVerificationReceipt(
+        {
+          ...receipt,
+          resultArtifact: {
+            ...receipt.resultArtifact,
+            size: bytes.byteLength + 1,
+          },
+        },
+        input(),
+        descriptor,
+      ),
+    ).toThrow();
+  });
+
+  it("binds a result to the strategy, round, and exact patch hash", () => {
+    const result = createVerificationResult(
+      input(),
+      descriptor,
+      {
+        status: "pass",
+        summary: "verified",
+        issues: [],
+        artifacts: [],
+        strategyReport: { cases: 1 },
+      },
+      () => "2026-09-05T00:00:00.000Z",
+    );
 
     expect(result.strategyId).toBe("fixture");
     expect(result.subjectHash).toBe(input().translation.patchHash);
@@ -98,52 +289,78 @@ describe("verification-types", () => {
   it("rejects missing or malformed staged file arrays", () => {
     const request = requestRecord();
 
-    expect(() => assertVerificationInput(inputWithRequest({
-      ...request,
-      sourceBundle: {},
-    }))).toThrow(/sourceBundle\.files.*array/i);
+    expect(() =>
+      assertVerificationInput(
+        inputWithRequest({
+          ...request,
+          sourceBundle: {},
+        }),
+      ),
+    ).toThrow(/sourceBundle\.files.*required/i);
 
-    expect(() => assertVerificationInput(inputWithRequest({
-      ...request,
-      targetContext: { sourceFiles: {} },
-    }))).toThrow(/targetContext\.sourceFiles.*array/i);
+    expect(() =>
+      assertVerificationInput(
+        inputWithRequest({
+          ...request,
+          targetContext: { sourceFiles: {} },
+        }),
+      ),
+    ).toThrow(/targetContext\.sourceFiles.*array/i);
   });
 
   it("rejects source and target content hash mismatches", () => {
-    expect(() => assertVerificationInput(inputWithSourceFile({
-      path: "src/source.ts",
-      content: sourceContent,
-      contentHash: "f".repeat(64),
-    }))).toThrow(/sourceBundle\.files\[0\].*contentHash.*sha256/i);
+    expect(() =>
+      assertVerificationInput(
+        inputWithSourceFile({
+          path: "src/source.ts",
+          content: sourceContent,
+          contentHash: "f".repeat(64),
+        }),
+      ),
+    ).toThrow(/sourceBundle\.files\[0\].*contentHash.*sha256/i);
 
-    expect(() => assertVerificationInput(inputWithTargetSourceFile({
-      path: "src/existing.ts",
-      content: targetContent,
-      contentHash: "f".repeat(64),
-    }))).toThrow(/targetContext\.sourceFiles\[0\].*contentHash.*sha256/i);
+    expect(() =>
+      assertVerificationInput(
+        inputWithTargetSourceFile({
+          path: "src/existing.ts",
+          content: targetContent,
+          contentHash: "f".repeat(64),
+        }),
+      ),
+    ).toThrow(/targetContext\.sourceFiles\[0\].*contentHash.*sha256/i);
   });
 
   it("rejects traversal paths in staged files and translation patches", () => {
-    expect(() => assertVerificationInput(inputWithSourceFile({
-      path: "../escape.ts",
-      content: sourceContent,
-      contentHash: sha256(sourceContent),
-    }))).toThrow(/sourceBundle\.files\[0\].*repository-relative/i);
+    expect(() =>
+      assertVerificationInput(
+        inputWithSourceFile({
+          path: "../escape.ts",
+          content: sourceContent,
+          contentHash: sha256(sourceContent),
+        }),
+      ),
+    ).toThrow(/sourceBundle\.files\[0\].*repository-relative/i);
 
-    expect(() => assertVerificationInput(inputWithTargetSourceFile({
-      path: "src/../escape.py",
-      content: targetContent,
-      contentHash: sha256(targetContent),
-    }))).toThrow(/targetContext\.sourceFiles\[0\].*repository-relative/i);
+    expect(() =>
+      assertVerificationInput(
+        inputWithTargetSourceFile({
+          path: "src/../escape.py",
+          content: targetContent,
+          contentHash: sha256(targetContent),
+        }),
+      ),
+    ).toThrow(/targetContext\.sourceFiles\[0\].*repository-relative/i);
 
     const patch = { ...input().translation.files[0]!, path: "../escape.ts" };
-    expect(() => assertVerificationInput(inputWithTranslationFiles([patch])))
-      .toThrow(/translation\.files\[0\].*repository-relative/i);
+    expect(() =>
+      assertVerificationInput(inputWithTranslationFiles([patch])),
+    ).toThrow(/translation\.files\[0\].*repository-relative/i);
   });
 
   it("rejects empty translation files even with the matching empty patch hash", () => {
-    expect(() => assertVerificationInput(inputWithTranslationFiles([])))
-      .toThrow(/at least one patch/i);
+    expect(() =>
+      assertVerificationInput(inputWithTranslationFiles([])),
+    ).toThrow(/translation\.files.*fewer than 1 items/i);
   });
 
   it("rejects non-JSON generic payload values before cloning or hashing", () => {
@@ -155,53 +372,80 @@ describe("verification-types", () => {
       },
       () => {
         const request = requestRecord();
-        Object.defineProperty(request, Symbol("hidden"), { value: true, enumerable: true });
+        Object.defineProperty(request, Symbol("hidden"), {
+          value: true,
+          enumerable: true,
+        });
         assertVerificationInput(inputWithRequest(request));
       },
-      () => assertVerificationInput({ ...input(), analysisReport: { missing: undefined } as never }),
-      () => assertVerificationInput({ ...input(), analysisReport: { bad: BigInt(1) } as never }),
-      () => assertVerificationInput({ ...input(), migrationPlan: [() => undefined] as never }),
-      () => assertVerificationInput({ ...input(), migrationPlan: { bad: Symbol("bad") } as never }),
-      () => createVerificationResult(input(), descriptor, {
-        status: "pass",
-        summary: "verified",
-        issues: [],
-        artifacts: [],
-        strategyReport: { score: Number.POSITIVE_INFINITY },
-      }),
-      () => createVerificationResult(input(), descriptor, {
-        status: "pass",
-        summary: "verified",
-        issues: [],
-        artifacts: [],
-        strategyReport: new Map() as never,
-      }),
-      () => createVerificationResult(input(), descriptor, {
-        status: "fail",
-        summary: "different",
-        issues: [{
-          id: "issue-1",
-          kind: "custom",
-          message: "different",
-          sourceObservation: cyclicValue() as never,
-          evidenceArtifactIds: [],
-        }],
-        artifacts: [],
-        strategyReport: {},
-      }),
-      () => createVerificationResult(input(), descriptor, {
-        status: "fail",
-        summary: "different",
-        issues: [{
-          id: "issue-1",
-          kind: "custom",
-          message: "different",
-          targetObservation: [undefined] as never,
-          evidenceArtifactIds: [],
-        }],
-        artifacts: [],
-        strategyReport: {},
-      }),
+      () =>
+        assertVerificationInput({
+          ...input(),
+          analysisReport: { missing: undefined } as never,
+        }),
+      () =>
+        assertVerificationInput({
+          ...input(),
+          analysisReport: { bad: BigInt(1) } as never,
+        }),
+      () =>
+        assertVerificationInput({
+          ...input(),
+          migrationPlan: [() => undefined] as never,
+        }),
+      () =>
+        assertVerificationInput({
+          ...input(),
+          migrationPlan: { bad: Symbol("bad") } as never,
+        }),
+      () =>
+        createVerificationResult(input(), descriptor, {
+          status: "pass",
+          summary: "verified",
+          issues: [],
+          artifacts: [],
+          strategyReport: { score: Number.POSITIVE_INFINITY },
+        }),
+      () =>
+        createVerificationResult(input(), descriptor, {
+          status: "pass",
+          summary: "verified",
+          issues: [],
+          artifacts: [],
+          strategyReport: new Map() as never,
+        }),
+      () =>
+        createVerificationResult(input(), descriptor, {
+          status: "fail",
+          summary: "different",
+          issues: [
+            {
+              id: "issue-1",
+              kind: "custom",
+              message: "different",
+              sourceObservation: cyclicValue() as never,
+              evidenceArtifactIds: [],
+            },
+          ],
+          artifacts: [],
+          strategyReport: {},
+        }),
+      () =>
+        createVerificationResult(input(), descriptor, {
+          status: "fail",
+          summary: "different",
+          issues: [
+            {
+              id: "issue-1",
+              kind: "custom",
+              message: "different",
+              targetObservation: [undefined] as never,
+              evidenceArtifactIds: [],
+            },
+          ],
+          artifacts: [],
+          strategyReport: {},
+        }),
     ];
 
     for (const testCase of cases) {
@@ -218,48 +462,62 @@ describe("verification-types", () => {
       strategyReport: { cases: 1 },
     });
 
-    expect(() => assertVerificationResult(
-      { ...result, subjectHash: "f".repeat(64) }, input(), descriptor,
-    )).toThrow(/subject hash/i);
+    expect(() =>
+      assertVerificationResult(
+        { ...result, subjectHash: "f".repeat(64) },
+        input(),
+        descriptor,
+      ),
+    ).toThrow(/subject hash/i);
   });
 
   it("rejects non-array issue lists and artifact lists", () => {
-    expect(() => createVerificationResult(input(), descriptor, {
-      status: "pass",
-      summary: "verified",
-      issues: {} as never,
-      artifacts: [],
-      strategyReport: {},
-    })).toThrow(/issues.*array/i);
+    expect(() =>
+      createVerificationResult(input(), descriptor, {
+        status: "pass",
+        summary: "verified",
+        issues: {} as never,
+        artifacts: [],
+        strategyReport: {},
+      }),
+    ).toThrow(/issues.*array/i);
 
-    expect(() => createVerificationResult(input(), descriptor, {
-      status: "pass",
-      summary: "verified",
-      issues: [],
-      artifacts: {} as never,
-      strategyReport: {},
-    })).toThrow(/artifacts.*array/i);
+    expect(() =>
+      createVerificationResult(input(), descriptor, {
+        status: "pass",
+        summary: "verified",
+        issues: [],
+        artifacts: {} as never,
+        strategyReport: {},
+      }),
+    ).toThrow(/artifacts.*array/i);
   });
 
   it("rejects non-array evidence artifact ids", () => {
-    expect(() => createVerificationResult(input(), descriptor, {
-      status: "fail",
-      summary: "different",
-      issues: [{
-        id: "issue-1",
-        kind: "custom",
-        message: "different",
-        evidenceArtifactIds: {} as never,
-      }],
-      artifacts: [{
-        id: "artifact-1",
-        kind: "report",
-        path: "reports/result.json",
-        contentHash: "a".repeat(64),
-        mediaType: "application/json",
-      }],
-      strategyReport: {},
-    })).toThrow(/evidence artifact ids.*array/i);
+    expect(() =>
+      createVerificationResult(input(), descriptor, {
+        status: "fail",
+        summary: "different",
+        issues: [
+          {
+            id: "issue-1",
+            kind: "custom",
+            message: "different",
+            evidenceArtifactIds: {} as never,
+          },
+        ],
+        artifacts: [
+          {
+            id: "artifact-1",
+            kind: "report",
+            path: "reports/result.json",
+            contentHash: "a".repeat(64),
+            mediaType: "application/json",
+          },
+        ],
+        strategyReport: {},
+      }),
+    ).toThrow(/evidenceArtifactIds.*array/i);
   });
 });
 
@@ -277,7 +535,9 @@ function inputWithSourceFile(file: Record<string, unknown>): VerificationInput {
   return inputWithRequest(request);
 }
 
-function inputWithTargetSourceFile(file: Record<string, unknown>): VerificationInput {
+function inputWithTargetSourceFile(
+  file: Record<string, unknown>,
+): VerificationInput {
   const request = requestRecord();
   request.targetContext = { sourceFiles: [file] };
   return inputWithRequest(request);

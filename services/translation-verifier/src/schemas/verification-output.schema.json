@@ -1,0 +1,104 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "urn:forexplore:verification-output:1.0",
+  "title": "VerificationResult",
+  "description": "Public verify()/CLI result. verifyWithReceipt() uses #/definitions/receipt. SHA-256 bindings, unique IDs, evidence references and canonical receipt metadata require host validation in addition to this schema.",
+  "$ref": "#/definitions/result",
+  "definitions": {
+    "nonEmptyString": { "type": "string", "pattern": "\\S" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "issue": {
+      "type": "object",
+      "required": ["id", "kind", "message", "evidenceArtifactIds"],
+      "properties": {
+        "id": { "$ref": "#/definitions/nonEmptyString" },
+        "kind": { "$ref": "#/definitions/nonEmptyString" },
+        "message": { "$ref": "#/definitions/nonEmptyString" },
+        "caseId": { "$ref": "#/definitions/nonEmptyString" },
+        "sourceObservation": { "description": "Strategy-owned JSON source observation." },
+        "targetObservation": { "description": "Strategy-owned JSON target observation." },
+        "evidenceArtifactIds": { "type": "array", "items": { "$ref": "#/definitions/nonEmptyString" } }
+      },
+      "additionalProperties": true
+    },
+    "artifact": {
+      "type": "object",
+      "required": ["id", "kind", "path", "contentHash", "mediaType"],
+      "properties": {
+        "id": { "$ref": "#/definitions/nonEmptyString" },
+        "kind": { "$ref": "#/definitions/nonEmptyString" },
+        "path": { "$ref": "#/definitions/nonEmptyString", "description": "Safe normalized relative path within the artifact store; checked by the host." },
+        "contentHash": { "$ref": "#/definitions/sha256" },
+        "mediaType": { "$ref": "#/definitions/nonEmptyString" }
+      },
+      "additionalProperties": true
+    },
+    "strategyOutput": {
+      "type": "object",
+      "required": ["status", "summary", "issues", "artifacts", "strategyReport"],
+      "properties": {
+        "status": { "enum": ["pass", "warn", "fail", "unverified"] },
+        "summary": { "$ref": "#/definitions/nonEmptyString" },
+        "issues": { "type": "array", "items": { "$ref": "#/definitions/issue" } },
+        "artifacts": { "type": "array", "items": { "$ref": "#/definitions/artifact" } },
+        "strategyReport": { "description": "Strategy-owned JSON report. The selected strategy validates its internal format." }
+      },
+      "if": { "properties": { "status": { "const": "fail" } }, "required": ["status"] },
+      "then": { "properties": { "issues": { "type": "array", "minItems": 1 } } },
+      "additionalProperties": true
+    },
+    "result": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/definitions/strategyOutput" }],
+      "required": ["schemaVersion", "strategyId", "strategyVersion", "subjectHash", "round", "createdAt", "contentHash"],
+      "properties": {
+        "schemaVersion": { "const": "1.0" },
+        "strategyId": { "$ref": "#/definitions/nonEmptyString" },
+        "strategyVersion": { "$ref": "#/definitions/nonEmptyString" },
+        "subjectHash": { "$ref": "#/definitions/sha256" },
+        "round": { "type": "integer", "minimum": 0 },
+        "status": {},
+        "summary": {},
+        "issues": {},
+        "artifacts": {},
+        "strategyReport": {},
+        "createdAt": { "$ref": "#/definitions/nonEmptyString" },
+        "contentHash": { "$ref": "#/definitions/sha256" }
+      },
+      "additionalProperties": false
+    },
+    "strategyDescriptor": {
+      "type": "object",
+      "required": ["id", "version", "displayName"],
+      "properties": {
+        "id": { "$ref": "#/definitions/nonEmptyString" },
+        "version": { "$ref": "#/definitions/nonEmptyString" },
+        "displayName": { "$ref": "#/definitions/nonEmptyString" }
+      },
+      "additionalProperties": true
+    },
+    "resultArtifact": {
+      "type": "object",
+      "required": ["id", "kind", "path", "contentHash", "size", "mediaType"],
+      "properties": {
+        "id": { "$ref": "#/definitions/nonEmptyString" },
+        "kind": { "const": "verification-result" },
+        "path": { "$ref": "#/definitions/nonEmptyString" },
+        "contentHash": { "$ref": "#/definitions/sha256" },
+        "size": { "type": "integer", "minimum": 0 },
+        "mediaType": { "const": "application/json" }
+      },
+      "additionalProperties": true
+    },
+    "receipt": {
+      "type": "object",
+      "required": ["result"],
+      "properties": {
+        "result": { "$ref": "#/definitions/result" },
+        "resultArtifact": { "$ref": "#/definitions/resultArtifact" }
+      },
+      "description": "resultArtifact may be absent only for an unverified artifact-persistence-failed result; the host enforces this cross-field rule and canonical-byte metadata.",
+      "additionalProperties": true
+    }
+  }
+}

@@ -29,6 +29,20 @@ createDefaultVerificationService(options?).verifyWithReceipt(input, { strategyId
 - Final validation artifacts and all repair artifact references are merged into manifest `artifactPaths`. Canonical validation requires exact ID/path bindings and rejects conflicting hashes. The VS Code host references verifier-owned artifacts; it does not invent local copies.
 - Invalid inputs, unknown strategies, and workspace creation errors throw. Any strategy/provider/caller `AbortError` propagates unchanged; `TimeoutError` becomes an `unverified` timeout result.
 
+## Input and Output Schemas
+
+The public wire formats are defined in two JSON Schema draft-07 files:
+
+- [`src/schemas/verification-input.schema.json`](src/schemas/verification-input.schema.json): `VerificationInput` accepted by the service and CLI.
+- [`src/schemas/verification-output.schema.json`](src/schemas/verification-output.schema.json): `VerificationResult` returned by `verify()` and written by the CLI. `#/definitions/receipt` describes the `verifyWithReceipt()` wrapper. Strategy output, issue, artifact, and descriptor definitions are reused internally.
+
+Both files are exported as `@forexplore/translation-verifier/schemas/<filename>`.
+`verification-schemas.ts` imports these files and compiles them once with Ajv in strict mode, without type coercion, defaults, or removal of fields. TypeScript copies the imported JSON files into `dist/schemas` during the normal build, so loading does not depend on the process working directory. Restart/rebuild after changing a schema; there is no schema hot reload.
+
+`verification-types.ts` retains the public TypeScript interfaces for downstream source compatibility; these interfaces are not generated from JSON Schema. Runtime field/enum/array validation comes from the JSON files. Hash equality, canonical result/receipt bindings, unique IDs, evidence references, and normalized safe paths remain host checks. A separate JSON-compatibility guard rejects cyclic values, non-finite numbers, functions, and non-plain objects received through the in-process API.
+
+The input schema deliberately validates the verifier-owned envelope and the required staged-file subset of `AdaptationRequestV2`, not the entire upstream workflow approval/lineage contract. Additional request metadata is preserved. The selected strategy remains responsible for its source/target context requirements and its `analysisReport`, `migrationPlan`, and `strategyReport` formats; these schemas do not hard-code a language pair or the smoke report format. Patch structure includes created-file absence and modified-file original-hash preconditions, which are now rejected at input validation rather than being left to downstream patch application.
+
 ## Smoke Execution
 
 Default mode is `verify-only`:
@@ -56,7 +70,8 @@ runSmoke(job: SmokeTaskInput, options?: SmokeRunOptions, signal?: AbortSignal): 
 | `default-verification-service.ts` | Static default strategy registration |
 | `verification-service.ts`, `verification-strategy-factory.ts` | Strategy orchestration, timeout/cancellation, receipts |
 | `verification-workspace.ts` | Staging, patch application, durable artifact persistence and cleanup |
-| `verification-types.ts` | Input, result, descriptor, and receipt validation |
+| `verification-types.ts` | Public TypeScript types, canonical materialization, and semantic integrity checks |
+| `verification-schemas.ts`, `schemas/*.schema.json` | Cached JSON Schema validators and public input/output formats |
 | `strategies/differential-smoke/strategy.ts` | Framework-to-smoke mapping and context preflight |
 | `strategies/differential-smoke/runner.ts` | Verify-only execution and evidence evaluation |
 | `strategies/differential-smoke/prompts/task.ts` | Verify-only and diagnostic task prompts |

@@ -1,0 +1,103 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "urn:forexplore:verification-input:1.0",
+  "title": "VerificationInput",
+  "description": "Public translation-verifier input. This schema validates the framework-owned envelope and staged artifacts; strategy-specific context and upstream AdaptationRequestV2 lineage are validated by their owners. Content hashes, patch hashes and safe normalized paths are additionally checked by the host.",
+  "type": "object",
+  "required": ["schemaVersion", "request", "analysisReport", "migrationPlan", "translation"],
+  "properties": {
+    "schemaVersion": { "const": "1.0" },
+    "request": {
+      "type": "object",
+      "description": "AdaptationRequestV2. Only the framework-required subset is mandatory here, preserving standalone strategies. Additional upstream fields are preserved as JSON.",
+      "required": ["sourceBundle", "targetContext"],
+      "properties": {
+        "requirement": { "type": "string", "description": "User requirements consumed by the selected strategy." },
+        "route": { "description": "Upstream language-open migration route." },
+        "candidate": { "description": "Upstream source implementation identity." },
+        "target": { "description": "Upstream target symbol identity." },
+        "sourceBundle": {
+          "type": "object",
+          "required": ["files"],
+          "properties": { "files": { "type": "array", "items": { "$ref": "#/definitions/stagedFile" } } },
+          "additionalProperties": true
+        },
+        "targetContext": {
+          "type": "object",
+          "required": ["sourceFiles"],
+          "properties": { "sourceFiles": { "type": "array", "items": { "$ref": "#/definitions/stagedFile" } } },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "analysisReport": { "description": "Strategy-owned JSON analysis; not necessarily a differential-smoke report." },
+    "migrationPlan": { "description": "Strategy-owned JSON migration plan." },
+    "translation": {
+      "type": "object",
+      "required": ["round", "generatedContent", "files", "patchHash"],
+      "properties": {
+        "round": { "type": "integer", "minimum": 0 },
+        "generatedContent": { "$ref": "#/definitions/nonEmptyString" },
+        "files": { "type": "array", "minItems": 1, "items": { "$ref": "#/definitions/filePatch" } },
+        "patchHash": { "$ref": "#/definitions/sha256" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true,
+  "definitions": {
+    "nonEmptyString": { "type": "string", "pattern": "\\S" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "stagedFile": {
+      "type": "object",
+      "required": ["path", "content", "contentHash"],
+      "properties": {
+        "path": { "$ref": "#/definitions/nonEmptyString", "description": "Normalized, safe repository-relative POSIX path; checked by the host." },
+        "content": { "$ref": "#/definitions/nonEmptyString" },
+        "contentHash": { "$ref": "#/definitions/sha256" }
+      },
+      "additionalProperties": true
+    },
+    "filePatch": {
+      "type": "object",
+      "required": ["path", "status", "additions", "deletions", "hunks"],
+      "properties": {
+        "path": { "$ref": "#/definitions/nonEmptyString" },
+        "status": { "enum": ["created", "modified"] },
+        "additions": { "type": "integer", "minimum": 0 },
+        "deletions": { "type": "integer", "minimum": 0 },
+        "expectedAbsent": { "const": true },
+        "expectedOriginalSha256": { "$ref": "#/definitions/sha256" },
+        "hunks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["header", "lines"],
+            "properties": {
+              "header": { "type": "string" },
+              "lines": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["type", "content"],
+                  "properties": {
+                    "type": { "enum": ["context", "add", "remove"] },
+                    "content": { "type": "string" }
+                  },
+                  "additionalProperties": true
+                }
+              }
+            },
+            "additionalProperties": true
+          }
+        }
+      },
+      "allOf": [
+        { "if": { "properties": { "status": { "const": "created" } }, "required": ["status"] }, "then": { "properties": { "expectedAbsent": {} }, "required": ["expectedAbsent"] } },
+        { "if": { "properties": { "status": { "const": "modified" } }, "required": ["status"] }, "then": { "properties": { "expectedOriginalSha256": {} }, "required": ["expectedOriginalSha256"] } }
+      ],
+      "additionalProperties": true
+    }
+  }
+}

@@ -1,9 +1,25 @@
 import { randomUUID } from "node:crypto";
-import { closeSync, mkdirSync, openSync, readSync, realpathSync, renameSync, fstatSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  mkdirSync,
+  openSync,
+  readSync,
+  realpathSync,
+  renameSync,
+  fstatSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDefaultVerificationService } from "./default-verification-service.js";
-import type { VerificationInput, VerificationResult, VerificationStrategyDescriptor } from "./verification-types.js";
+import {
+  assertVerificationInput,
+  type VerificationInput,
+  type VerificationResult,
+  type VerificationStrategyDescriptor,
+} from "./verification-types.js";
+import { assertSchema, validateResultSchema } from "./verification-schemas.js";
 
 const MAX_INPUT_BYTES = 10 * 1024 * 1024;
 
@@ -31,14 +47,19 @@ type ParsedArgs = {
   keepWorkspace: boolean;
 };
 
-type ParseResult = { ok: true; args: ParsedArgs } | { ok: false; message: string };
+type ParseResult =
+  | { ok: true; args: ParsedArgs }
+  | { ok: false; message: string };
 
 export async function runVerificationCli(
   argv: string[],
   dependencies: VerificationCliDependencies = {},
 ): Promise<number> {
-  const stdout = dependencies.stdout ?? ((line) => process.stdout.write(`${line}\n`));
-  const stderr = dependencies.stderr ?? ((line) => process.stderr.write(`verification-cli: ${line}\n`));
+  const stdout =
+    dependencies.stdout ?? ((line) => process.stdout.write(`${line}\n`));
+  const stderr =
+    dependencies.stderr ??
+    ((line) => process.stderr.write(`verification-cli: ${line}\n`));
   const service = dependencies.service ?? createDefaultVerificationService();
   const parsed = parseArgs(argv);
   if (!parsed.ok) {
@@ -63,12 +84,18 @@ export async function runVerificationCli(
   }
 
   try {
-    const input = readVerificationInput(parsed.args.inputPath);
+    const input = assertVerificationInput(
+      readVerificationInput(parsed.args.inputPath),
+    );
     const result = await service.verify(
       input,
-      { strategyId: parsed.args.strategyId, keepWorkspace: parsed.args.keepWorkspace },
+      {
+        strategyId: parsed.args.strategyId,
+        keepWorkspace: parsed.args.keepWorkspace,
+      },
       dependencies.signal,
     );
+    assertSchema(validateResultSchema, result, "Verification result");
     writeJsonAtomic(parsed.args.outputPath, result);
     return 0;
   } catch (error) {
@@ -85,9 +112,14 @@ function parseArgs(argv: string[]): ParseResult {
       args.listStrategies = true;
     } else if (flag === "--keep-workspace") {
       args.keepWorkspace = true;
-    } else if (flag === "--input" || flag === "--output" || flag === "--strategy") {
+    } else if (
+      flag === "--input" ||
+      flag === "--output" ||
+      flag === "--strategy"
+    ) {
       const value = argv[i + 1];
-      if (value === undefined || value.startsWith("--")) return { ok: false, message: `Missing value for ${flag}.` };
+      if (value === undefined || value.startsWith("--"))
+        return { ok: false, message: `Missing value for ${flag}.` };
       if (flag === "--input") args.inputPath = value;
       else if (flag === "--output") args.outputPath = value;
       else args.strategyId = value;
@@ -109,17 +141,27 @@ function readVerificationInput(path: string): VerificationInput {
     const buffer = Buffer.alloc(MAX_INPUT_BYTES + 1);
     let total = 0;
     while (total <= MAX_INPUT_BYTES) {
-      const bytesRead = readSync(fd, buffer, total, buffer.length - total, null);
+      const bytesRead = readSync(
+        fd,
+        buffer,
+        total,
+        buffer.length - total,
+        null,
+      );
       if (bytesRead === 0) break;
       total += bytesRead;
     }
     if (total > MAX_INPUT_BYTES) {
-      throw new Error(`Verification input file exceeds ${MAX_INPUT_BYTES} bytes.`);
+      throw new Error(
+        `Verification input file exceeds ${MAX_INPUT_BYTES} bytes.`,
+      );
     }
     try {
       return JSON.parse(buffer.toString("utf8", 0, total)) as VerificationInput;
     } catch (error) {
-      throw new Error(`Invalid verification input JSON: ${errorMessage(error)}`);
+      throw new Error(
+        `Invalid verification input JSON: ${errorMessage(error)}`,
+      );
     }
   } finally {
     closeSync(fd);
@@ -138,7 +180,9 @@ function writeJsonAtomic(path: string, value: unknown): void {
     } catch {
       // Best-effort cleanup; preserve the original write/rename failure.
     }
-    throw new Error(`Failed to write verification result: ${errorMessage(error)}`);
+    throw new Error(
+      `Failed to write verification result: ${errorMessage(error)}`,
+    );
   }
 }
 
