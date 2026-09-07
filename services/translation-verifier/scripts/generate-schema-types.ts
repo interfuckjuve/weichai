@@ -7,7 +7,7 @@ const schemaPath = fileURLToPath(
   new URL("../src/schemas/verification-run.schema.json", import.meta.url),
 );
 const outputPath = fileURLToPath(
-  new URL("../src/generated/verification-schema-types.d.ts", import.meta.url),
+  new URL("../src/schemas/verification-schema-types.d.ts", import.meta.url),
 );
 const declaration = await compileFromFile(schemaPath, {
   bannerComment: "/* Generated from verifier JSON Schemas. Do not edit. */",

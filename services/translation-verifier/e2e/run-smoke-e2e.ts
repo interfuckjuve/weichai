@@ -18,14 +18,11 @@
 import { readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, resolve } from "node:path";
-import {
-  runSmoke,
-  type SmokeResult,
-} from "../src/strategies/differential-smoke/runner.js";
-import type { SmokeTaskInput } from "../src/strategies/differential-smoke/prompts/task.js";
-import type { SmokeReport } from "../src/strategies/differential-smoke/types.js";
-import { DIFFERENTIAL_SMOKE_STRATEGY } from "../src/strategies/differential-smoke/strategy.js";
-import { createLogger, DEFAULT_LOG_DIR } from "../src/logger.js";
+import { runSmoke, type SmokeResult } from "../src/strategies/run-smoke-verification.js";
+import type { SmokeTaskInput } from "../src/strategies/build-differential-test-prompt.js";
+import type { SmokeReport } from "../src/strategies/differential-test-types.js";
+import { DIFFERENTIAL_SMOKE_STRATEGY } from "../src/strategies/differential-smoke.js";
+import { createLogger, DEFAULT_LOG_DIR } from "../src/run-output/verification-logger.js";
 
 export interface SmokeE2EOptions {
   /** 任务输入目录(requirement.txt + 经 .. 定位 samples)。 */

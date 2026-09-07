@@ -6,19 +6,12 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import * as fs from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { markVerificationPhase, measureVerification } from "./verification-timing.js";
-import * as recording from "./record-run-events.js";
+import { markVerificationPhase, measureVerification } from "./run-output/measure-legacy-run.js";
+import * as recording from "./run-output/record-run.js";
 import { VerificationService } from "./verification-service.js";
-import { VerificationStrategyFactory } from "./verification-strategy-factory.js";
-import {
-  createVerificationResult,
-  type VerificationInput,
-  type VerificationResult,
-  type VerificationStrategy,
-  type VerificationStrategyContext,
-  type VerificationStrategyDescriptor,
-  type VerificationStrategyProvider,
-} from "./verification-types.js";
+import { VerificationStrategyFactory } from "./strategies/strategy-registry.js";
+import { createVerificationResult } from "./run-output/create-verification-result.js";
+import { type VerificationInput, type VerificationResult, type VerificationStrategy, type VerificationStrategyContext, type VerificationStrategyDescriptor, type VerificationStrategyProvider } from "./schemas/verification-types.js";
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof fs>();

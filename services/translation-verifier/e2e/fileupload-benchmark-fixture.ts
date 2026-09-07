@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AdaptationRequestV2, FilePatch } from "@forexplore/contracts";
 import { calculatePatchHashV2 } from "@forexplore/workflow-core";
-import type { VerificationInput } from "../src/verification-types.js";
+import type { VerificationInput } from "../src/schemas/verification-types.js";
 
 export const repositoryRoot = fileURLToPath(
   new URL("../../../", import.meta.url),

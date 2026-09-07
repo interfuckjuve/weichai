@@ -12,14 +12,10 @@ import {
 } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createDefaultVerificationService } from "./default-verification-service.js";
-import {
-  assertVerificationInput,
-  type VerificationInput,
-  type VerificationResult,
-  type VerificationStrategyDescriptor,
-} from "./verification-types.js";
-import { assertSchema, validateResultSchema } from "./verification-schemas.js";
+import { createDefaultVerificationService } from "./create-default-verifier.js";
+import { assertVerificationInput } from "./schemas/validate-verification-input.js";
+import { type VerificationInput, type VerificationResult, type VerificationStrategyDescriptor } from "./schemas/verification-types.js";
+import { assertSchema, validateResultSchema } from "./schemas/compile-schema-validators.js";
 
 const MAX_INPUT_BYTES = 10 * 1024 * 1024;
 
