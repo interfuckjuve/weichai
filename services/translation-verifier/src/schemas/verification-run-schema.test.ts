@@ -4,14 +4,7 @@ import { validateRunSchema, validateRunEventSchema } from "./compile-schema-vali
 import { assertVerificationRun } from "./validate-verification-run.js";
 import { type VerificationRun, type VerificationRunEvent, type VerificationStage, type VerificationStageId, type AgentTaskName } from "./verification-types.js";
 
-const ids = [
-  "validate-input",
-  "prepare-workspace",
-  "prepare-agent-task",
-  "run-agent-tests",
-  "evaluate-evidence",
-  "save-report",
-] as const satisfies readonly VerificationStageId[];
+const ids = ["custom-1", "custom-2", "custom-3"] as const satisfies readonly VerificationStageId[];
 const timestamp = "2026-09-07T00:00:00.000Z";
 
 function run(): VerificationRun {
@@ -30,6 +23,8 @@ function run(): VerificationRun {
     },
     stages: ids.map((id) => ({
       id,
+      name: "repeat-custom",
+      scope: "strategy",
       state: "completed",
       durationMs: 0,
     })) as VerificationRun["stages"],
@@ -65,7 +60,16 @@ function event(operationId = "task-1"): VerificationRunEvent {
 }
 
 describe("verification run schema", () => {
-  it("exports typed validators and accepts six ordered completed stages with zero measured duration", () => {
+  it("accepts variable strategy steps and arbitrary Agent task names", () => {
+    const value = run();
+    value.stages = [{ id: "step-1", name: "custom-comparison", scope: "strategy", state: "completed", durationMs: 1 }];
+    expect(validateRunSchema(value)).toBe(true);
+    value.stages = [];
+    expect(validateRunSchema(value)).toBe(true);
+    expect(validateRunEventSchema({ ...event(), name: "custom-agent-task" })).toBe(true);
+  });
+
+  it("exports typed validators and accepts variable completed steps with zero measured duration", () => {
     const validator: ValidateFunction<VerificationRun> = validateRunSchema;
     expect(validator).toBe(validateRunSchema);
     expectTypeOf(validateRunEventSchema).toEqualTypeOf<
@@ -84,8 +88,8 @@ describe("verification run schema", () => {
     };
     value.stages = ids.map((id, index): VerificationStage =>
       index === 0
-        ? { id, state: "failed", error: "Invalid input" }
-        : { id, state: "skipped", reason: "Input validation failed" },
+        ? { id, name: "input", scope: "framework", state: "failed", error: "Invalid input" }
+        : { id, name: "custom", scope: "strategy", state: "skipped", reason: "Input validation failed" },
     ) as VerificationRun["stages"];
     delete value.totalDurationMs;
     expect(validateRunSchema(value)).toBe(true);
@@ -113,15 +117,27 @@ describe("verification run schema", () => {
       },
     ],
     [
-      "missing stage",
+      "malformed occurrence ID",
       (v: VerificationRun) => {
-        v.stages.pop();
+        v.stages[0].id = "space in id";
       },
     ],
     [
-      "wrong stage order",
+      "missing step scope",
       (v: VerificationRun) => {
-        v.stages.reverse();
+        delete (v.stages[0] as Partial<VerificationStage>).scope;
+      },
+    ],
+    [
+      "unbounded step list",
+      (v: VerificationRun) => {
+        v.stages = Array.from({ length: 1025 }, () => ({ ...v.stages[0] }));
+      },
+    ],
+    [
+      "raw step payload",
+      (v: VerificationRun) => {
+        Object.assign(v.stages[0], { raw: "private" });
       },
     ],
     [
@@ -240,7 +256,8 @@ describe("verification run event schema", () => {
     { offsetMs: -1 },
     { sequence: -1 },
     { sequence: 0.5 },
-    { name: "unknown-task" },
+    { name: "x".repeat(257) },
+    { name: " " },
     { payload: { raw: "secret" } },
     { timedOut: "false" },
     { source: "x".repeat(257) },

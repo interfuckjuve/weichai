@@ -10,7 +10,7 @@ export interface TimingMark {
 /** Legacy scopes carry identity and clock origin, never a second collection of observations. */
 const timing = new AsyncLocalStorage<{ start: number; operationId: string; recorder: RunRecorder; measurementRecorder?: RunRecorder }>();
 
-/** Only the service entry bridges legacy marks; request stages always remain isolated. */
+/** Only the service entry bridges legacy marks; request step occurrences always remain isolated. */
 export function withVerificationTimingRecorder<T>(recorder: RunRecorder, run: () => Promise<T>): Promise<T> {
   const scope = timing.getStore();
   return withRunRecorder(recorder, () => scope
@@ -29,7 +29,7 @@ export function markVerificationPhase(phase: string): void {
     ...(current ? { operationId: current.operationId, offsetMs: performance.now() - current.start } : {}),
   };
   recorder?.observe(event);
-  // Both existing bounded recorders retain observations, never each other's stage state.
+  // Both existing bounded recorders retain observations, never each other's step handles or lifecycle.
   if (current?.measurementRecorder && current.measurementRecorder !== recorder && current.recorder.snapshot().endedAt === undefined) {
     current.measurementRecorder.observe(event);
   }

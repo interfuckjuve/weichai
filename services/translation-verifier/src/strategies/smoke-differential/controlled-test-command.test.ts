@@ -22,7 +22,7 @@ describe("controlled command executable entry", () => {
   it("executes the new sole entry and rejects arbitrary commands before evidence is written", () => {
     const ws = makeWorkspace();
     try {
-      const entry = join(packageRoot, "src/strategies/controlled-test-command.ts");
+      const entry = join(packageRoot, "src/strategies/smoke-differential/controlled-test-command.ts");
       expect(VERIFIER_COMMAND_ENTRY).toBe(entry);
       const env = { ...process.env, VERIFIER_WORKSPACE_ROOT: ws.root, VERIFIER_BASELINE_PATH: ws.baselinePath, VERIFIER_COMMAND_EVIDENCE_PATH: ws.evidencePath, VERIFIER_DEADLINE_AT: String(Date.now() + 30_000) };
       const prefix = ["tsx", entry, "--side", "source", "--phase", "run", "--cwd", "source/project", "--"];
@@ -504,10 +504,10 @@ const dotnetAvailable = toolAvailable(DOTNET, ["--version"]);
 
 describe("真实依赖 fixture(离线本地构建)", () => {
   const mavenFixture = fileURLToPath(
-    new URL("../../e2e/fixtures/dependencies/maven", import.meta.url),
+    new URL("../../../e2e/fixtures/dependencies/maven", import.meta.url),
   );
   const dotnetFixture = fileURLToPath(
-    new URL("../../e2e/fixtures/dependencies/dotnet", import.meta.url),
+    new URL("../../../e2e/fixtures/dependencies/dotnet", import.meta.url),
   );
 
   it.runIf(mavenAvailable)(

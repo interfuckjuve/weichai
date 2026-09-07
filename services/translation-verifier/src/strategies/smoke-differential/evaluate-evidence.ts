@@ -1,13 +1,13 @@
 import { readFileSync, statSync } from "node:fs";
-import { markVerificationPhase } from "../run-output/measure-legacy-run.js";
-import { currentRunRecorder } from "../run-output/record-run.js";
-import { evaluateSmokeReport } from "../strategies/decide-test-verdict.js";
-import { assertWorkspaceBaseline } from "../strategies/protect-project-files.js";
-import { readReport, errorSummary } from "../strategies/read-test-report.js";
-import { assertSmokeReport } from "../strategies/validate-test-report.js";
-import type { CommandEvidence, SmokeMode, SmokeReport } from "../strategies/differential-test-types.js";
-import type { SmokeResult, SmokeStatus } from "../strategies/run-smoke-verification.js";
-import type { RunLayout } from "../strategies/prepare-smoke-projects.js";
+import { markVerificationPhase } from "../../run-output/measure-legacy-run.js";
+import { currentRunRecorder } from "../../run-output/record-run.js";
+import { evaluateSmokeReport } from "./decide-test-verdict.js";
+import { assertWorkspaceBaseline } from "./protect-project-files.js";
+import { readReport, errorSummary } from "./read-test-report.js";
+import { assertSmokeReport } from "./validate-test-report.js";
+import type { CommandEvidence, SmokeMode, SmokeReport } from "./differential-test-types.js";
+import type { SmokeResult, SmokeStatus } from "./run-smoke-verification.js";
+import type { RunLayout } from "./prepare-projects.js";
 
 const MAX_EVIDENCE_LINES = 400;
 const MAX_EVIDENCE_BYTES = 64 * 1024 * 1024;
@@ -46,9 +46,7 @@ export async function evaluateEvidence(
   mode: SmokeMode,
 ): Promise<SmokeOutcome> {
   const recorder = currentRunRecorder();
-  const stages = recorder?.snapshot().stages;
-  const observed = stages?.[3].state === "completed" && stages[4].state === "not-started";
-  if (observed) recorder!.startStage("evaluate-evidence");
+  const handle = recorder?.startStep("evaluate-evidence", { scope: "strategy" });
   let report: SmokeReport;
   try {
     markVerificationPhase("report-read-and-schema-validation");
@@ -56,7 +54,7 @@ export async function evaluateEvidence(
       assertSmokeReport(raw, mode),
     );
   } catch (error) {
-    if (observed) recorder!.endStage("evaluate-evidence", "failed", error);
+    recorder?.endStep(handle, "failed", error);
     return {
       status: "error",
       summary: errorSummary(error),
@@ -83,7 +81,7 @@ export async function evaluateEvidence(
         ? undefined
         : report.cases.filter((item) => item.mechanical === "pass").length /
           report.cases.length;
-    if (observed) recorder!.endStage("evaluate-evidence", "completed");
+    recorder?.endStep(handle, "completed");
     return {
       status,
       passRate,
@@ -92,7 +90,7 @@ export async function evaluateEvidence(
       evaluation,
     };
   } catch (error) {
-    if (observed) recorder!.endStage("evaluate-evidence", "failed", error);
+    recorder?.endStep(handle, "failed", error);
     // 基线/证据失败(含 evaluateSmokeReport 内部不变量)归 invalid-evidence。
     return {
       status: "error",

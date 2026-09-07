@@ -14,9 +14,9 @@
  * 兼容路径(无 workspaceDir):把旧 root/files 双侧输入内部暂存为 source/project +
  * target/project + 双侧 runner 根 + agent 目录并创建基线,同样只经命令代理。
  */
-import { markVerificationPhase } from "../run-output/measure-legacy-run.js";
-import { currentRunRecorder } from "../run-output/record-run.js";
-import { createLogger } from "../run-output/verification-logger.js";
+import { markVerificationPhase } from "../../run-output/measure-legacy-run.js";
+import { measureStep } from "../../run-output/record-run.js";
+import { createLogger } from "../../run-output/verification-logger.js";
 import { defaultWorkspaceRoot } from "./test-execution-config.js";
 import { createWorkspace, type WorkspaceHandle } from "./create-smoke-workspace.js";
 import type { EffortLevel, SpawnClaude } from "./claude-session.js";
@@ -24,11 +24,11 @@ import type { SmokeEvaluation } from "./decide-test-verdict.js";
 import type { SmokeMode, SmokeReport } from "./differential-test-types.js";
 import type { SmokeTaskInput } from "./build-differential-test-prompt.js";
 import { errorSummary } from "./read-test-report.js";
-import { prepareAgentTask } from "../workflow/build-test-task.js";
-import { prepareSmokeProjects } from "./prepare-smoke-projects.js";
-import { runAgentTests } from "../workflow/run-tests.js";
-import { evaluateEvidence } from "../workflow/evaluate-evidence.js";
-export { readCommandEvidence } from "../workflow/evaluate-evidence.js";
+import { prepareAgentTask } from "./build-test-task.js";
+import { prepareSmokeProjects } from "./prepare-projects.js";
+import { runAgentTests } from "./run-agent-session.js";
+import { evaluateEvidence } from "./evaluate-evidence.js";
+export { readCommandEvidence } from "./evaluate-evidence.js";
 
 export type SmokeStatus = "pass" | "fail" | "error";
 
@@ -145,22 +145,15 @@ export async function runSmoke(
     return result;
   };
 
-  const recorder = currentRunRecorder();
-  const stages = recorder?.snapshot().stages;
-  const observed = stages?.[1].state === "completed" && stages[2].state === "not-started";
   try {
-    if (options.workspaceDir === undefined) ws = createWorkspace(options.workspaceRoot ?? defaultWorkspaceRoot());
-    const layout = prepareSmokeProjects(job, options, ws);
-    if (observed) recorder!.startStage("prepare-agent-task");
-    const prepared = prepareAgentTask(job, options, layout, signal);
-    if (observed) recorder!.endStage("prepare-agent-task", "completed");
+    const layout = await measureStep("prepare-smoke-layout", () => {
+      if (options.workspaceDir === undefined) ws = createWorkspace(options.workspaceRoot ?? defaultWorkspaceRoot());
+      return prepareSmokeProjects(job, options, ws);
+    });
+    const prepared = await measureStep("build-test-task", () => prepareAgentTask(job, options, layout, signal));
     await runAgentTests(prepared);
     return finish(await evaluateEvidence(prepared.layout, mode));
   } catch (error) {
-    for (const stage of observed ? recorder!.snapshot().stages.slice(2, 5) : []) {
-      if (stage.id === "prepare-agent-task" && stage.state === "running") recorder!.endStage(stage.id, isAbortError(error) ? "cancelled" : "failed", error);
-      else if (stage.state === "not-started") recorder!.skipStage(stage.id, "Smoke execution stopped before this stage.");
-    }
     if (isAbortError(error)) throw error;
     return finish({
       status: "error",
@@ -170,7 +163,9 @@ export async function runSmoke(
     });
   } finally {
     // 内部暂存工作区按 keep 策略清理;caller-owned(workspaceDir)永不清理。
-    if (ws !== null && !keep) ws.cleanup();
+    await measureStep("cleanup-smoke-workspace", () => {
+      if (ws !== null && !keep) ws.cleanup();
+    });
   }
 }
 

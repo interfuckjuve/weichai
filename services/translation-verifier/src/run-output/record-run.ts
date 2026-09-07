@@ -4,22 +4,28 @@ import { performance } from "node:perf_hooks";
 import { redactSecrets } from "./verification-logger.js";
 import { validateRunEventSchema } from "../schemas/compile-schema-validators.js";
 import type RunSchema from "../schemas/verification-run.schema.json";
-import type { VerificationRun, VerificationRunEvent, VerificationStage, VerificationStageId } from "../schemas/verification-types.js";
+import type { VerificationRun, VerificationRunEvent, VerificationStage } from "../schemas/verification-types.js";
 
 const require = createRequire(import.meta.url);
 const schema: typeof RunSchema = require("../schemas/verification-run.schema.json");
-const stageIds = schema.definitions.stageId.enum as VerificationStageId[];
+const MAX_STEPS = schema.properties.stages.maxItems;
 const MAX_EVENTS = 10_000;
 const MAX_DIAGNOSTICS = schema.properties.diagnostics.maxItems;
 const IDENTIFIER_LIMIT = schema.definitions.identifier.maxLength;
 const MESSAGE_LIMIT = schema.definitions.message.maxLength;
 const context = new AsyncLocalStorage<RunRecorder>();
+const stepContext = new AsyncLocalStorage<{ recorder: RunRecorder; handle: StepHandle }>();
+
+/** Identity is checked by the owning recorder, not by the caller-visible ID. */
+export interface StepHandle { readonly id: string }
+export interface StepOptions { scope: VerificationStage["scope"]; parentId?: string }
 
 export interface RunRecorder {
   readonly runId: string;
-  startStage(id: VerificationStageId): void;
-  endStage(id: VerificationStageId, state: "completed" | "failed" | "cancelled", error?: unknown): void;
-  skipStage(id: VerificationStageId, reason: string): void;
+  startStep(name: string, options: StepOptions): StepHandle | undefined;
+  endStep(handle: StepHandle | undefined, state: "completed" | "failed" | "cancelled", error?: unknown): void;
+  skipStep(name: string, options: StepOptions, reason: string): void;
+  measureStep<T>(name: string, options: StepOptions, work: () => T | Promise<T>): Promise<T>;
   observe(event: Omit<VerificationRunEvent, "runId" | "sequence" | "receivedAt">): void;
   anomaly(code: string, message: string): void;
   finish(): VerificationRun;
@@ -34,6 +40,20 @@ export function withRunRecorder<T>(recorder: RunRecorder, work: () => Promise<T>
 
 export function currentRunRecorder(): RunRecorder | undefined {
   return context.getStore();
+}
+
+/** Optional instrumentation for standalone strategy callers; never dispatches work. */
+export async function measureStep<T>(name: string, work: () => T | Promise<T>): Promise<T> {
+  const recorder = currentRunRecorder();
+  return recorder ? recorder.measureStep(name, { scope: "strategy" }, work) : work();
+}
+
+export function stepFailureState(error: unknown): "cancelled" | "failed" {
+  try {
+    return typeof error === "object" && error !== null && "name" in error && error.name === "AbortError" ? "cancelled" : "failed";
+  } catch {
+    return "failed";
+  }
 }
 
 function safeText(value: string, limit: number): string {
@@ -60,7 +80,9 @@ export function createRunRecorder(options: {
   const monotonicNow = options.monotonicNow ?? (() => performance.now());
   const started = monotonicNow();
   const retained: VerificationRunEvent[] = [];
-  const starts = new Map<VerificationStageId, number>();
+  const starts = new Map<StepHandle, { stage: VerificationStage; at: number }>();
+  const stagesById = new Map<string, VerificationStage>();
+  let stepsTruncated = false;
   let finished = false;
   let truncated = false;
   const run: VerificationRun = {
@@ -69,7 +91,7 @@ export function createRunRecorder(options: {
     startedAt: now(),
     input: { availability: "unavailable", reason: "Input snapshot not recorded." },
     strategy: { selection: "default", applicability: "not-checked" },
-    stages: stageIds.map((id) => ({ id, state: "not-started" })) as VerificationRun["stages"],
+    stages: [],
     agentTimeline: { availability: "unavailable", reason: "Agent observations not persisted.", source: "host-observed", completeness: "unavailable" },
     hostEvents: { availability: "unavailable", reason: "Host observations not persisted.", source: "host-observed", completeness: "unavailable" },
     report: { availability: "unavailable", reason: "Canonical report not recorded." },
@@ -85,42 +107,76 @@ export function createRunRecorder(options: {
     run.diagnostics.push({ code: safeText(code, IDENTIFIER_LIMIT), message: safeText(message, MESSAGE_LIMIT) });
   }
 
-  function stageFor(id: VerificationStageId, expected: VerificationStage["state"]): VerificationStage | undefined {
-    const index = stageIds.indexOf(id);
-    const stage = run.stages[index];
-    if (!stage || stage.state !== expected || (expected === "not-started" && run.stages.slice(0, index).some((prior) => prior.state === "not-started" || prior.state === "running"))) {
-      anomaly("stage-order", "Stage observation does not match the ordered lifecycle.");
-      return undefined;
+  function newStep(name: string, options: StepOptions, state: "running" | "skipped"): VerificationStage | undefined {
+    if (finished) return;
+    if (run.stages.length >= MAX_STEPS) {
+      if (!stepsTruncated) anomaly("steps-truncated", `The ${MAX_STEPS} step limit was reached; further steps were omitted.`);
+      stepsTruncated = true;
+      return;
     }
-    return stage;
+    try {
+      const active = stepContext.getStore();
+      const parentId = options.parentId ?? (active?.recorder === recorder ? active.handle.id : undefined);
+      if (typeof name !== "string" || !name.trim() || name.length > IDENTIFIER_LIMIT ||
+          !["framework", "strategy"].includes(options.scope) ||
+          (parentId !== undefined && !stagesById.has(parentId))) {
+        anomaly("invalid-step", "Step name, scope or parent was invalid.");
+        return;
+      }
+      const stage: VerificationStage = {
+        id: `step-${run.stages.length + 1}`, name: safeText(name, IDENTIFIER_LIMIT), scope: options.scope, state,
+        ...(parentId === undefined ? {} : { parentId }),
+      };
+      run.stages.push(stage);
+      stagesById.set(stage.id, stage);
+      return stage;
+    } catch {
+      anomaly("invalid-step", "Step metadata could not be read.");
+      return;
+    }
   }
 
-  return {
+  const recorder: RunRecorder = {
     runId: run.runId,
-    startStage(id) {
-      if (finished) return;
-      const stage = stageFor(id, "not-started");
+    startStep(name, options) {
+      const stage = newStep(name, options, "running");
       if (!stage) return;
-      starts.set(id, monotonicNow());
-      stage.state = "running";
+      const handle = Object.freeze({ id: stage.id });
+      starts.set(handle, { stage, at: monotonicNow() });
       stage.startedAt = now();
+      return handle;
     },
-    endStage(id, state, error) {
-      if (finished) return;
-      const stage = stageFor(id, "running");
-      if (!stage) return;
+    endStep(handle, state, error) {
+      if (finished || handle === undefined) return;
+      const entry = starts.get(handle);
+      if (!entry || !["completed", "failed", "cancelled"].includes(state)) {
+        anomaly("step-lifecycle", "End observation did not match an active occurrence handle.");
+        return;
+      }
+      const { stage, at } = entry;
       stage.state = state;
       stage.endedAt = now();
-      stage.durationMs = Math.max(0, monotonicNow() - starts.get(id)!);
-      starts.delete(id);
+      stage.durationMs = Math.max(0, monotonicNow() - at);
+      starts.delete(handle);
       if (error !== undefined) stage.error = errorText(error);
     },
-    skipStage(id, reason) {
-      if (finished) return;
-      const stage = stageFor(id, "not-started");
-      if (!stage) return;
-      stage.state = "skipped";
-      stage.reason = safeText(reason, MESSAGE_LIMIT);
+    skipStep(name, options, reason) {
+      const stage = newStep(name, options, "skipped");
+      if (stage) stage.reason = safeText(reason, MESSAGE_LIMIT);
+    },
+    async measureStep(name, options, work) {
+      const handle = recorder.startStep(name, options);
+      const runWork = async () => {
+        try {
+          const value = await work();
+          recorder.endStep(handle, "completed");
+          return value;
+        } catch (error) {
+          recorder.endStep(handle, stepFailureState(error), error);
+          throw error;
+        }
+      };
+      return handle ? stepContext.run({ recorder, handle }, runWork) : runWork();
     },
     observe(event) {
       if (finished || truncated) return;
@@ -181,4 +237,5 @@ export function createRunRecorder(options: {
     snapshot: () => structuredClone(run),
     events: () => structuredClone(retained),
   };
+  return recorder;
 }

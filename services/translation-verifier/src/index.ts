@@ -7,7 +7,7 @@ export { assertVerificationReceipt } from "./schemas/validate-verification-recei
 export { assertVerificationRun } from "./schemas/validate-verification-run.js";
 export { createVerificationResult } from "./run-output/create-verification-result.js";
 export { validateRunSchema, validateRunEventSchema } from "./schemas/compile-schema-validators.js";
-export { VerificationStrategyFactory } from "./strategies/strategy-registry.js";
+export { VerificationStrategyFactory } from "./workflow/select-strategy.js";
 export { VerificationService } from "./verification-service.js";
 export { createDefaultVerificationService } from "./create-default-verifier.js";
-export { DIFFERENTIAL_SMOKE_STRATEGY } from "./strategies/differential-smoke.js";
+export { DIFFERENTIAL_SMOKE_STRATEGY } from "./strategies/smoke-differential/strategy.js";

@@ -11,19 +11,33 @@ describe("run recorder", () => {
     }
   });
 
-  it("completes ordered stages and skips without inventing measurements", () => {
-    const recorder = createRunRecorder({ runId: "ordered" });
-    for (const stage of recorder.snapshot().stages) {
-      if (stage.id === "prepare-agent-task") {
-        recorder.skipStage(stage.id, "Provider has no preparation hook.");
-      } else {
-        recorder.startStage(stage.id);
-        recorder.endStage(stage.id, "completed");
-      }
-    }
+  it("records repeated and nested arbitrary steps with occurrence handles", async () => {
+    let clock = 0;
+    const recorder = createRunRecorder({ runId: "variable", monotonicNow: () => clock });
+    const result = Object.freeze({ status: "pass" });
+    expect(await recorder.measureStep("compare-custom", { scope: "strategy" }, async () => {
+      clock = 2;
+      await recorder.measureStep("compare-custom", { scope: "strategy" }, async () => { clock = 7; });
+      clock = 9;
+      return result;
+    })).toBe(result);
     const run = recorder.finish();
-    expect(run.stages.map(({ state }) => state)).toEqual(["completed", "completed", "skipped", "completed", "completed", "completed"]);
-    expect(run.stages[2]).not.toHaveProperty("durationMs");
+    expect(run.stages.map((step) => step.name)).toEqual(["compare-custom", "compare-custom"]);
+    expect(new Set(run.stages.map((step) => step.id)).size).toBe(2);
+    expect(run.stages[1].parentId).toBe(run.stages[0].id);
+    expect(run.stages.map((step) => step.durationMs)).toEqual([9, 5]);
+    expect(run.diagnostics).toEqual([]);
+    expect(validateRunSchema(run)).toBe(true);
+  });
+
+  it("records skipped observations without inventing measurements", () => {
+    const recorder = createRunRecorder({ runId: "skipped" });
+    const handle = recorder.startStep("custom", { scope: "strategy" });
+    recorder.endStep(handle, "completed");
+    recorder.skipStep("optional", { scope: "strategy" }, "Not applicable.");
+    const run = recorder.finish();
+    expect(run.stages.map(({ state }) => state)).toEqual(["completed", "skipped"]);
+    expect(run.stages[1]).not.toHaveProperty("durationMs");
     expect(run.diagnostics).toEqual([]);
     expect(validateRunSchema(run)).toBe(true);
   });
@@ -57,11 +71,11 @@ describe("run recorder", () => {
   it("measures only started stages with a monotonic clock", () => {
     let clock = 0;
     const recorder = createRunRecorder({ runId: "run-test", monotonicNow: () => clock });
-    recorder.startStage("validate-input");
+    const handle1 = recorder.startStep("validate-input", { scope: "framework" });
     clock = 12;
-    recorder.endStage("validate-input", "completed");
-    expect(recorder.snapshot().stages[0]).toMatchObject({ id: "validate-input", state: "completed", durationMs: 12 });
-    expect(recorder.snapshot().stages[1].durationMs).toBeUndefined();
+    recorder.endStep(handle1, "completed");
+    expect(recorder.snapshot().stages[0]).toMatchObject({ name: "validate-input", state: "completed", durationMs: 12 });
+    expect(recorder.snapshot().stages).toHaveLength(1);
     expect(validateRunSchema(recorder.finish())).toBe(true);
   });
 
@@ -69,12 +83,12 @@ describe("run recorder", () => {
     let clock = 0;
     let wall = "2026-09-07T12:00:00.000Z";
     const recorder = createRunRecorder({ runId: "jump", now: () => wall, monotonicNow: () => clock });
-    recorder.startStage("validate-input");
-    recorder.endStage("validate-input", "completed");
-    recorder.startStage("prepare-workspace");
+    const handle2 = recorder.startStep("validate-input", { scope: "framework" });
+    recorder.endStep(handle2, "completed");
+    const handle3 = recorder.startStep("prepare-workspace", { scope: "framework" });
     clock = 15;
     wall = "2026-09-06T12:00:00.000Z";
-    recorder.endStage("prepare-workspace", "completed");
+    recorder.endStep(handle3, "completed");
     const run = recorder.finish();
     expect(run.totalDurationMs).toBe(15);
     expect(run.stages[0].durationMs).toBe(0);
@@ -104,12 +118,12 @@ describe("run recorder", () => {
     let clock = 0;
     const recorder = createRunRecorder({ runId: "once", monotonicNow: () => clock });
     recorder.observe(observation);
-    recorder.skipStage("validate-input", "not needed");
+    recorder.skipStep("validate-input", { scope: "framework" }, "not needed");
     const first = recorder.finish();
     clock = 100;
-    recorder.startStage("prepare-workspace");
-    recorder.endStage("prepare-workspace", "failed", new Error("late"));
-    recorder.skipStage("prepare-agent-task", "late");
+    const handle4 = recorder.startStep("prepare-workspace", { scope: "framework" });
+    recorder.endStep(handle4, "failed", new Error("late"));
+    recorder.skipStep("prepare-agent-task", { scope: "framework" }, "late");
     recorder.observe(observation);
     recorder.anomaly("late", "late");
     expect(recorder.finish()).toEqual(first);
@@ -125,36 +139,65 @@ describe("run recorder", () => {
   it("preserves cancellation identity without taking lifecycle ownership", async () => {
     const recorder = createRunRecorder({ runId: "cancel" });
     const abort = new DOMException("cancel", "AbortError");
-    await expect(withRunRecorder(recorder, async () => {
-      recorder.startStage("validate-input");
-      recorder.endStage("validate-input", "cancelled", abort);
+    let calls = 0;
+    await expect(withRunRecorder(recorder, () => recorder.measureStep("custom-cancellation", { scope: "strategy" }, () => {
+      calls++;
       throw abort;
-    })).rejects.toBe(abort);
+    }))).rejects.toBe(abort);
+    expect(calls).toBe(1);
     expect(currentRunRecorder()).toBeUndefined();
     expect(recorder.snapshot().endedAt).toBeUndefined();
     expect(recorder.finish().stages[0]).toMatchObject({ state: "cancelled", error: "cancel" });
   });
 
-  it("records missing ends and bad ordering only as diagnostics", async () => {
+  it("records missing ends and invalid handles only as diagnostics", async () => {
     const recorder = createRunRecorder({ runId: "incomplete" });
+    const other = createRunRecorder({ runId: "other" });
     const result = Object.freeze({ status: "pass", issues: Object.freeze([]) });
-    expect(await withRunRecorder(recorder, async () => {
-      recorder.startStage("prepare-workspace");
-      recorder.endStage("validate-input", "completed");
-      recorder.startStage("validate-input");
-      recorder.startStage("validate-input");
-      recorder.skipStage("validate-input", "cannot skip running stage");
-      recorder.anomaly("optional-observation", "does not change result");
-      return result;
-    })).toBe(result);
+    const handle = recorder.startStep("unfinished", { scope: "strategy" });
+    recorder.endStep({ id: handle!.id }, "completed");
+    recorder.endStep(other.startStep("foreign", { scope: "strategy" }), "completed");
+    expect(await withRunRecorder(recorder, async () => result)).toBe(result);
     const run = recorder.finish();
     expect(run.stages[0]).toMatchObject({ state: "failed", reason: "Stage ended without a matching end observation." });
-    expect(run.stages[0].durationMs).toBeUndefined();
-    expect(run.stages[1]).toEqual({ id: "prepare-workspace", state: "not-started" });
-    expect(run.stages.some((stage) => stage.state === "running")).toBe(false);
-    expect(run.diagnostics.map((item) => item.code)).toContain("stage-missing-end");
+    expect(run.stages[0]).not.toHaveProperty("durationMs");
+    expect(run.stages[0]).not.toHaveProperty("endedAt");
+    expect(run.diagnostics.map((item) => item.code)).toEqual(["step-lifecycle", "step-lifecycle", "stage-missing-end"]);
     expect(result).toEqual({ status: "pass", issues: [] });
     expect(validateRunSchema(run)).toBe(true);
+    recorder.endStep(handle, "completed");
+    expect(recorder.snapshot()).toEqual(run);
+  });
+
+  it("rejects malformed step observations without changing callback values or errors", async () => {
+    const recorder = createRunRecorder({ runId: "invalid-steps" });
+    const result = Object.freeze({ status: "pass" });
+    const error = new Error("original");
+    let calls = 0;
+    for (const name of ["", " ", "x".repeat(257)]) {
+      expect(await recorder.measureStep(name, { scope: "strategy" }, () => { calls++; return result; })).toBe(result);
+    }
+    await expect(recorder.measureStep("custom", { scope: "strategy", parentId: "missing" }, () => { calls++; throw error; })).rejects.toBe(error);
+    expect(recorder.startStep("custom", { scope: "unknown" as never })).toBeUndefined();
+    expect(recorder.startStep("custom", { get scope(): never { throw error; } })).toBeUndefined();
+    expect(calls).toBe(4);
+    expect(recorder.snapshot().stages).toEqual([]);
+    expect(recorder.snapshot().diagnostics.map((item) => item.code)).toEqual(Array(6).fill("invalid-step"));
+    expect(validateRunSchema(recorder.finish())).toBe(true);
+  });
+
+  it("bounds steps and diagnostics without skipping the measured callback", async () => {
+    const recorder = createRunRecorder({ runId: "step-budget" });
+    for (let index = 0; index < 1025; index++) recorder.skipStep("repeated", { scope: "strategy" }, "No work.");
+    let calls = 0;
+    expect(await recorder.measureStep("overflow", { scope: "strategy" }, () => ++calls)).toBe(1);
+    expect(calls).toBe(1);
+    expect(recorder.snapshot().stages).toHaveLength(1024);
+    expect(recorder.snapshot().diagnostics.map((item) => item.code)).toEqual(["steps-truncated"]);
+    const finished = recorder.finish();
+    expect(await recorder.measureStep("late", { scope: "strategy" }, () => ++calls)).toBe(2);
+    expect(recorder.snapshot()).toEqual(finished);
+    expect(validateRunSchema(finished)).toBe(true);
   });
 
   it("retains at most 10,000 events with trustworthy receipt identity and child clock metadata", () => {
@@ -174,8 +217,8 @@ describe("run recorder", () => {
 
   it("bounds and redacts strings, drops raw payloads and invalid observations", () => {
     const recorder = createRunRecorder({ runId: "sanitized" });
-    recorder.startStage("validate-input");
-    recorder.endStage("validate-input", "failed", new Error(`API_KEY=secret ${"x".repeat(5000)}`));
+    const handle6 = recorder.startStep("validate-input", { scope: "framework" });
+    recorder.endStep(handle6, "failed", new Error(`API_KEY=secret ${"x".repeat(5000)}`));
     recorder.observe({ ...observation, name: `TOKEN=secret ${"x".repeat(1000)}`, rawPayload: "private code", runId: "forged", sequence: 99 } as typeof observation);
     recorder.observe({ ...observation, durationMs: Number.NaN });
     recorder.observe({ ...observation, get name(): string { throw new Error("broken getter"); } });
@@ -196,8 +239,8 @@ describe("run recorder", () => {
     const recorder = createRunRecorder({ runId: "error" });
     const error = new Error("original");
     Object.defineProperty(error, "message", { get() { throw new Error("getter"); } });
-    recorder.startStage("validate-input");
-    expect(() => recorder.endStage("validate-input", "failed", error)).not.toThrow();
+    const handle7 = recorder.startStep("validate-input", { scope: "framework" });
+    expect(() => recorder.endStep(handle7, "failed", error)).not.toThrow();
     expect(recorder.finish().stages[0].error).toBe("Error details unavailable.");
   });
 });

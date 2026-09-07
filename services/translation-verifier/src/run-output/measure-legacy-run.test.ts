@@ -21,7 +21,7 @@ describe("verification timing", () => {
       expect(measured.timing.phases.map(({ durationMs }) => durationMs)).toEqual([5, 5, 10]);
       expect(recorder.events().map(({ name }) => name)).toEqual(["prepare", "agent"]);
       expect(recorder.events().every(({ source, kind }) => source === "legacy-measurement:host-performance" && kind === "legacy-phase")).toBe(true);
-      expect(recorder.snapshot().stages.every(({ state, durationMs }) => state === "not-started" && durationMs === undefined)).toBe(true);
+      expect(recorder.snapshot().stages).toEqual([]);
       expect(recorder.snapshot().endedAt).toBeUndefined();
     } finally {
       spy.mockRestore();

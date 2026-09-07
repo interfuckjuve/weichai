@@ -4,7 +4,7 @@ import { createWorkspaceBaseline, writeWorkspaceBaseline } from "./protect-proje
 import type { SmokeTaskInput } from "./build-differential-test-prompt.js";
 import type { WorkspaceHandle } from "./create-smoke-workspace.js";
 import type { SmokeRunOptions } from "./run-smoke-verification.js";
-import type { VerificationStrategyContext } from "../schemas/verification-types.js";
+import type { VerificationStrategyContext } from "../../schemas/verification-types.js";
 
 /** 内部暂存复制时排除的目录(与验证工作区一致,避免复制重产物/缓存)。 */
 const EXCLUDED_DIRECTORIES = new Set([

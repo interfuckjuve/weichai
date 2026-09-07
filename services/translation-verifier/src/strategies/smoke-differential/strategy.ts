@@ -1,12 +1,12 @@
-import { currentRunRecorder } from "../run-output/record-run.js";
-import { markVerificationPhase } from "../run-output/measure-legacy-run.js";
+import { measureStep } from "../../run-output/record-run.js";
+import { markVerificationPhase } from "../../run-output/measure-legacy-run.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { RepositoryIngestionJsonValue } from "@forexplore/contracts";
 import type { EffortLevel, SpawnClaude } from "./claude-session.js";
 import type { SmokeCaseVerdict, VerifierLanguage } from "./differential-test-types.js";
-import type { VerificationArtifact, VerificationInput, VerificationIssue, VerificationStrategy, VerificationStrategyContext, VerificationStrategyDescriptor, VerificationStrategyOutput, VerificationStrategyProvider } from "../schemas/verification-types.js";
-import { prepareCallerOwnedWorkspace, smokeRunnerRoots as runnerRoots } from "./prepare-smoke-projects.js";
+import type { VerificationArtifact, VerificationInput, VerificationIssue, VerificationStrategy, VerificationStrategyContext, VerificationStrategyDescriptor, VerificationStrategyOutput, VerificationStrategyProvider } from "../../schemas/verification-types.js";
+import { prepareCallerOwnedWorkspace, smokeRunnerRoots as runnerRoots } from "./prepare-projects.js";
 import { runSmoke, type SmokeResult, type SmokeRunOptions } from "./run-smoke-verification.js";
 import type { SmokeTaskInput } from "./build-differential-test-prompt.js";
 
@@ -37,15 +37,13 @@ const verifierLanguage: ReadonlyMap<string, VerifierLanguage> = new Map([
 ]);
 
 export class DifferentialSmokeStrategy implements VerificationStrategy {
-  readonly recordsExecutionStages = true;
-  readonly #prepared = new WeakSet<VerificationStrategyContext>();
   readonly #options: DifferentialSmokeStrategyOptions;
 
   constructor(options: DifferentialSmokeStrategyOptions = {}) {
     this.#options = options;
   }
 
-  preflight(input: VerificationInput): VerificationStrategyOutput | undefined {
+  #checkApplicability(input: VerificationInput): VerificationStrategyOutput | undefined {
     markVerificationPhase("strategy-capability-and-context-preflight");
     const sourceLanguageId =
       input.request.route?.sourceLanguageId ??
@@ -96,52 +94,37 @@ export class DifferentialSmokeStrategy implements VerificationStrategy {
     return undefined;
   }
 
-  prepareWorkspace(_input: VerificationInput, context: VerificationStrategyContext): void {
-    markVerificationPhase("workspace-baseline-creation");
-    prepareCallerOwnedWorkspace(context);
-    this.#prepared.add(context);
-  }
-
   async verify(input: VerificationInput, context: VerificationStrategyContext, signal?: AbortSignal): Promise<VerificationStrategyOutput> {
-    // Direct strategy callers retain preflight/baseline behavior. Host-prepared contexts must not be re-baselined.
-    if (!this.#prepared.has(context)) {
-      const early = this.preflight(input);
-      if (early !== undefined) return early;
-      this.prepareWorkspace(input, context);
-    }
-    this.#prepared.delete(context);
+    const measure = context.measureStep ?? measureStep;
+    const early = await measure("check-applicability", () => this.#checkApplicability(input));
+    if (early !== undefined) return early;
+    await measure("prepare-projects-and-baseline", () => {
+      markVerificationPhase("workspace-baseline-creation");
+      prepareCallerOwnedWorkspace(context);
+    });
     const sourceLanguage = languageFor(input.request.route?.sourceLanguageId ?? input.request.candidate.entity.languageId)!;
     const targetLanguage = languageFor(input.request.route?.targetLanguageId ?? input.request.target.entity.languageId)!;
     const run = this.#options.runSmokeImpl ?? this.#options.runSmoke ?? runSmoke;
-    const recorder = currentRunRecorder();
-    const stages = recorder?.snapshot().stages;
-    const injected = run !== runSmoke && stages?.[1].state === "completed" && stages[2].state === "not-started";
-    if (injected) recorder!.startStage("prepare-agent-task");
-    const job = smokeInput(input, context, sourceLanguage, targetLanguage);
-    const options = smokeOptions(context, this.#options);
-    if (injected) {
-      recorder!.endStage("prepare-agent-task", "completed");
-      recorder!.startStage("run-agent-tests");
-    }
-    const smoke = await run(job, options, signal);
-    if (injected) {
-      recorder!.endStage("run-agent-tests", "completed");
-      recorder!.startStage("evaluate-evidence");
-    }
-    markVerificationPhase("strategy-report-persistence");
-    const artifact = await writeSmokeReportArtifact(context, smoke);
-    markVerificationPhase("strategy-result-mapping");
-
-    const output: VerificationStrategyOutput = {
-      status: smokeStatus(smoke),
-      summary: smoke.summary,
-      issues: smokeIssues(smoke, artifact.id),
-      artifacts: [artifact],
-      // SAFETY: SmokeReport contains JSON data; createVerificationResult validates it before persistence.
-      strategyReport: smoke.report as unknown as RepositoryIngestionJsonValue,
-    };
-    if (injected) recorder!.endStage("evaluate-evidence", "completed");
-    return output;
+    const { job, options } = await measure("build-smoke-input", () => ({
+      job: smokeInput(input, context, sourceLanguage, targetLanguage),
+      options: smokeOptions(context, this.#options),
+    }));
+    const smoke = await measure("run-smoke", () => run(job, options, signal));
+    const artifact = await measure("persist-strategy-report", () => {
+      markVerificationPhase("strategy-report-persistence");
+      return writeSmokeReportArtifact(context, smoke);
+    });
+    return measure("map-strategy-result", (): VerificationStrategyOutput => {
+      markVerificationPhase("strategy-result-mapping");
+      return {
+        status: smokeStatus(smoke),
+        summary: smoke.summary,
+        issues: smokeIssues(smoke, artifact.id),
+        artifacts: [artifact],
+        // SAFETY: SmokeReport contains JSON data; the framework validates it before persistence.
+        strategyReport: smoke.report as unknown as RepositoryIngestionJsonValue,
+      };
+    });
   }
 }
 

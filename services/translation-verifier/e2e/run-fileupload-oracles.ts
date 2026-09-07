@@ -3,8 +3,8 @@ import { copyFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { delimiter, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { createVerificationWorkspace } from "../src/workflow/prepare-projects.js";
-import { runManagedProcess, sanitizedBuildEnvironment, type ManagedProcessResult } from "../src/strategies/manage-test-process.js";
+import { createVerificationWorkspace } from "../src/workflow/prepare-strategy-workspace.js";
+import { runManagedProcess, sanitizedBuildEnvironment, type ManagedProcessResult } from "../src/strategies/smoke-differential/manage-test-process.js";
 import {
   fileUploadInput,
   repositoryRoot,

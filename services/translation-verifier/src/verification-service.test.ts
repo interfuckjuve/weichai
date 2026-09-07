@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { markVerificationPhase, measureVerification } from "./run-output/measure-legacy-run.js";
 import * as recording from "./run-output/record-run.js";
 import { VerificationService } from "./verification-service.js";
-import { VerificationStrategyFactory } from "./strategies/strategy-registry.js";
+import { VerificationStrategyFactory } from "./workflow/select-strategy.js";
 import { createVerificationResult } from "./run-output/create-verification-result.js";
 import { type VerificationInput, type VerificationResult, type VerificationStrategy, type VerificationStrategyContext, type VerificationStrategyDescriptor, type VerificationStrategyProvider } from "./schemas/verification-types.js";
 
@@ -41,104 +41,79 @@ afterEach(() => {
 });
 
 describe("VerificationService", () => {
-  it("short-circuits synchronous preflight without materializing a workspace but persists the receipt", async () => {
-    const recorder = vi.spyOn(recording, "createRunRecorder");
-    const verify = vi.fn();
-    const prepareWorkspace = vi.fn();
-    const p = provider("first", verify);
-    p.create = () => ({ verify, prepareWorkspace, preflight: () => ({
-      status: "unverified", summary: "unsupported context", issues: [], artifacts: [], strategyReport: {},
-    }) });
-    writeFileSync(workspaceRoot, "expensive workspace must not be touched");
-    const receipt = await serviceWith([p], "first").verifyWithReceipt(input());
-    expect(receipt.result.summary).toBe("unsupported context");
+  it("runs a verify-only no-Agent provider with arbitrary repeated steps", async () => {
+    const recorders = vi.spyOn(recording, "createRunRecorder");
+    const service = serviceWith([provider("custom", async (value, context) => {
+      expect(context.measureStep).toBeTypeOf("function");
+      expect(Number.isFinite(context.deadlineAt)).toBe(true);
+      expect(readFileSync(join(context.workspace.targetRoot, "src/target.py"), "utf8")).toBe(translatedTargetContent);
+      expect(existsSync(join(context.workspace.root, "baseline.json"))).toBe(false);
+      expect(existsSync(join(context.workspace.root, "source/.forexplore-tests"))).toBe(false);
+      return context.measureStep!("compare-arbitrary", async () => {
+        await context.measureStep!("compare-arbitrary", async () => {});
+        await context.measureStep!("collect-after-comparison", async () => {});
+        await context.measureStep!("compare-arbitrary", async () => {});
+        return okResult(value, descriptor("custom"));
+      });
+    })], "custom");
+    const receipt = await service.verifyWithReceipt(input());
+    expect(receipt.result.status).toBe("pass");
     expect(receipt.resultArtifact).toBeDefined();
-    expect(verify).not.toHaveBeenCalled();
-    expect(prepareWorkspace).not.toHaveBeenCalled();
-    expect(recorder.mock.results[0]!.value.snapshot().stages.map((stage: { state: string }) => stage.state))
-      .toEqual(["completed", "skipped", "skipped", "skipped", "skipped", "completed"]);
+    const run = recorders.mock.results[0]!.value.snapshot();
+    expect(run.stages.filter((step: { scope: string; parentId?: string }) => step.scope === "framework" && !step.parentId).map((step: { name: string }) => step.name)).toEqual(["validate-input", "execute-strategy", "save-report"]);
+    expect(run.stages.filter((step: { scope: string }) => step.scope === "strategy").map((step: { name: string }) => step.name)).toEqual(["compare-arbitrary", "compare-arbitrary", "collect-after-comparison", "compare-arbitrary"]);
+    expect(new Set(run.stages.map((step: { id: string }) => step.id)).size).toBe(run.stages.length);
+    expect(run.stages.every((step: { state: string; durationMs?: number }) => step.state === "completed" && step.durationMs !== undefined)).toBe(true);
+    expect(run.diagnostics).toEqual([]);
   });
 
-  it.each(["ordinary", "timeout", "abort"])("preserves %s preflight error semantics before workspace preparation", async (kind) => {
-    const recorder = vi.spyOn(recording, "createRunRecorder");
-    const error = kind === "ordinary" ? new Error("preflight failed") : new DOMException(kind, kind === "abort" ? "AbortError" : "TimeoutError");
-    const verify = vi.fn();
-    const p = provider("first", verify);
-    p.create = () => ({ verify, preflight: () => { throw error; } });
-    writeFileSync(workspaceRoot, "must not materialize");
-    const pending = serviceWith([p], "first").verifyWithReceipt(input());
+  it.each(["ordinary", "timeout", "abort"])("preserves %s errors from measured no-Agent strategy steps", async (kind) => {
+    const recorders = vi.spyOn(recording, "createRunRecorder");
+    const error = kind === "ordinary" ? new Error("custom failed") : new DOMException(kind, kind === "abort" ? "AbortError" : "TimeoutError");
+    let calls = 0;
+    const service = serviceWith([provider("custom", async (_value, context) => context.measureStep!("arbitrary-error", () => {
+      calls++;
+      throw error;
+    }))], "custom");
+    const pending = service.verifyWithReceipt(input());
     if (kind === "abort") await expect(pending).rejects.toBe(error);
     else {
       const receipt = await pending;
+      expect(receipt.result.status).toBe("unverified");
       expect(receipt.result.issues[0]?.kind).toBe(kind === "timeout" ? "strategy-timeout" : "framework-error");
       expect(receipt.resultArtifact).toBeDefined();
     }
-    expect(verify).not.toHaveBeenCalled();
-    const stages = recorder.mock.results[0]!.value.snapshot().stages;
-    expect(stages[0].state).toBe(kind === "abort" ? "cancelled" : "failed");
-    expect(stages.slice(1, 5).map((stage: { state: string }) => stage.state)).toEqual(["skipped", "skipped", "skipped", "skipped"]);
-  });
-
-  it("propagates caller cancellation raised during a synchronous preflight before accepting its early output", async () => {
-    const controller = new AbortController();
-    const error = new DOMException("cancelled in preflight", "AbortError");
-    const p = provider("first");
-    p.create = () => ({ verify: vi.fn(), preflight: () => {
-      controller.abort(error);
-      return { status: "unverified", summary: "early", issues: [], artifacts: [], strategyReport: {} };
-    } });
-    await expect(serviceWith([p], "first").verifyWithReceipt(input(), {}, controller.signal)).rejects.toBe(error);
-    expect(existsSync(artifactRoot)).toBe(false);
-  });
-
-  it("records legacy providers under stage 4 and completes preparation only after its synchronous hook", async () => {
-    const recorder = vi.spyOn(recording, "createRunRecorder");
-    const order: string[] = [];
-    const p = provider("first", async (value, context) => {
-      order.push("verify");
-      expect(readFileSync(join(context.workspace.targetRoot, "src/target.py"), "utf8")).toBe(translatedTargetContent);
-      expect(recording.currentRunRecorder()!.snapshot().stages.map((stage) => stage.state))
-        .toEqual(["completed", "completed", "skipped", "running", "not-started", "not-started"]);
-      return okResult(value, descriptor("first"));
-    });
-    const legacy = p.create();
-    p.create = () => ({ ...legacy,
-      preflight: () => { order.push("preflight"); return undefined; },
-      prepareWorkspace: (_input, context) => {
-        order.push("prepare");
-        expect(Number.isFinite(context.deadlineAt)).toBe(true);
-        expect(recording.currentRunRecorder()!.snapshot().stages[1].state).toBe("running");
-      },
-    });
-    expect((await serviceWith([p], "first").verify(input())).status).toBe("pass");
-    expect(order).toEqual(["preflight", "prepare", "verify"]);
-    const run = recorder.mock.results[0]!.value.snapshot();
-    expect(run.stages.map((stage: { state: string }) => stage.state)).toEqual(["completed", "completed", "skipped", "completed", "skipped", "completed"]);
+    expect(calls).toBe(1);
+    const run = recorders.mock.results[0]!.value.snapshot();
+    expect(run.stages.find((step: { name: string }) => step.name === "arbitrary-error")).toMatchObject({ state: kind === "abort" ? "cancelled" : "failed", error: error.message });
     expect(run.diagnostics).toEqual([]);
-    expect(run.totalDurationMs).toBeGreaterThanOrEqual(0);
   });
 
   it("isolates concurrent requests inside legacy timing while preserving both phase streams", async () => {
     const requests: recording.RunRecorder[] = [];
     let release!: () => void;
     const barrier = new Promise<void>((resolve) => { release = resolve; });
-    const service = serviceWith([provider("first", async (value) => {
+    const service = serviceWith([provider("first", async (value, context) => context.measureStep!("custom-parallel", async () => {
       requests.push(recording.currentRunRecorder()!);
       if (requests.length === 2) release();
       await barrier;
+      await context.measureStep!("custom-parallel", async () => {});
       return okResult(value, descriptor("first"));
-    })], "first");
+    }))], "first");
     const outer = recording.createRunRecorder({ runId: "outer-measurement" });
     const measured = await recording.withRunRecorder(outer, () => measureVerification(() => Promise.all([service.verifyWithReceipt(input()), service.verifyWithReceipt(input())])));
     expect(measured.value.map((receipt) => receipt.result.status)).toEqual(["pass", "pass"]);
     expect(new Set(requests.map((recorder) => recorder.runId)).size).toBe(2);
     expect(requests.every((recorder) => recorder !== outer)).toBe(true);
     for (const recorder of requests) {
-      expect(recorder.snapshot().stages.map((stage) => stage.state)).toEqual(["completed", "completed", "skipped", "completed", "skipped", "completed"]);
+      expect(recorder.snapshot().stages.every((step) => step.state === "completed")).toBe(true);
       expect(recorder.snapshot().diagnostics).toEqual([]);
+      const custom = recorder.snapshot().stages.filter((step) => step.scope === "strategy");
+      expect(custom).toHaveLength(2);
+      expect(custom[1].parentId).toBe(custom[0].id);
       expect(recorder.events().every((event) => event.runId === recorder.runId)).toBe(true);
     }
-    expect(outer.snapshot().stages.every((stage) => stage.state === "not-started")).toBe(true);
+    expect(outer.snapshot().stages).toEqual([]);
     expect(measured.timing.phases.filter((phase) => phase.phase === "request-validation-and-strategy-selection")).toHaveLength(2);
     expect(measured.timing.phases.filter((phase) => phase.phase === "response-ready")).toHaveLength(2);
   });
@@ -168,6 +143,18 @@ describe("VerificationService", () => {
     writeFileSync(join(context.workspace.evidenceRoot, "report.json"), Buffer.alloc(bytes, "x"));
     return context.writeArtifact({ id: "report", kind: "report", path: "report.json", contentHash: "0".repeat(64), mediaType: "application/json" });
   }
+
+  it("does not enter verify when provider creation synchronously cancels the caller", async () => {
+    const controller = new AbortController();
+    const abort = new DOMException("cancelled in provider creation", "AbortError");
+    const verify = vi.fn(async (value: VerificationInput) => okResult(value, descriptor("first")));
+    const p = provider("first", verify);
+    p.create = () => { controller.abort(abort); return { verify }; };
+    await expect(serviceWith([p], "first").verifyWithReceipt(input(), {}, controller.signal)).rejects.toBe(abort);
+    expect(verify).not.toHaveBeenCalled();
+    expect(existsSync(artifactRoot)).toBe(false);
+    expect(readdirSync(workspaceRoot)).toEqual([]);
+  });
 
   it.each(["source", "oversized-artifact", "oversized-result", "cumulative-budget", "destination"])("fails closed on %s persistence failure and removes only this attempt's durable artifacts", async (failure) => {
     const previous = await serviceWith([provider("first")], "first").verifyWithReceipt(input());

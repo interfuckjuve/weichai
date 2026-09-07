@@ -278,7 +278,7 @@ function envString(env: NodeJS.ProcessEnv, name: string): string | undefined {
  * CLI 入口:固定边界(工作区/基线/证据路径/deadline)只从环境变量读取,
  * agent 无法通过 argv 覆盖;返回被代理命令的退出码(超时/失败为 1)。
  * 调用形态:
- *   npx tsx <pkgRoot>/src/strategies/controlled-test-command.ts --side source --phase compile --cwd source/project -- mvn -q test
+ *   npx tsx <pkgRoot>/src/strategies/smoke-differential/controlled-test-command.ts --side source --phase compile --cwd source/project -- mvn -q test
  */
 export async function runVerifierCommandCli(
   argv: string[],

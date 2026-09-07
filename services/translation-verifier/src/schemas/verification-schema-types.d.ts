@@ -39,13 +39,7 @@ export type Message = string;
  * This interface was referenced by `VerificationRun`'s JSON-Schema
  * via the `definition` "stageId".
  */
-export type VerificationStageId =
-  | "validate-input"
-  | "prepare-workspace"
-  | "prepare-agent-task"
-  | "run-agent-tests"
-  | "evaluate-evidence"
-  | "save-report";
+export type VerificationStageId = string;
 /**
  * This interface was referenced by `VerificationRun`'s JSON-Schema
  * via the `definition` "stageState".
@@ -76,8 +70,7 @@ export type EventFileReference =
  * This interface was referenced by `VerificationRun`'s JSON-Schema
  * via the `definition` "agentTaskName".
  */
-export type AgentTaskName =
-  "explore" | "design-tests" | "write-tests" | "verify" | "analyze-failure" | "finalize-report";
+export type AgentTaskName = string;
 /**
  * This interface was referenced by `VerificationInput`'s JSON-Schema
  * via the `definition` "filePatch".
@@ -145,35 +138,9 @@ export interface VerificationRun {
   input: VerificationRunFileReference;
   strategy: VerificationRunStrategySelection;
   /**
-   * @minItems 6
-   * @maxItems 6
+   * @maxItems 1024
    */
-  stages: [
-    VerificationStage & {
-      id?: "validate-input";
-      [k: string]: unknown;
-    },
-    VerificationStage & {
-      id?: "prepare-workspace";
-      [k: string]: unknown;
-    },
-    VerificationStage & {
-      id?: "prepare-agent-task";
-      [k: string]: unknown;
-    },
-    VerificationStage & {
-      id?: "run-agent-tests";
-      [k: string]: unknown;
-    },
-    VerificationStage & {
-      id?: "evaluate-evidence";
-      [k: string]: unknown;
-    },
-    VerificationStage & {
-      id?: "save-report";
-      [k: string]: unknown;
-    }
-  ];
+  stages: VerificationStage[];
   agentTimeline: VerificationRunEventFileReference;
   hostEvents: VerificationRunEventFileReference;
   report: VerificationRunFileReference;
@@ -206,6 +173,9 @@ export interface VerificationStrategyDescriptor {
 export interface VerificationStage {
   id: VerificationStageId;
   state: VerificationStageState;
+  name: Identifier;
+  scope: "framework" | "strategy";
+  parentId?: VerificationStageId;
   startedAt?: Timestamp;
   endedAt?: Timestamp;
   durationMs?: Duration;

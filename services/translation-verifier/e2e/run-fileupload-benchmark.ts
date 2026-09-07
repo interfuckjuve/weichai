@@ -3,11 +3,11 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { VerificationService } from "../src/verification-service.js";
-import { VerificationStrategyFactory } from "../src/strategies/strategy-registry.js";
+import { VerificationStrategyFactory } from "../src/workflow/select-strategy.js";
 import { measureVerification } from "../src/run-output/measure-legacy-run.js";
-import { createDifferentialSmokeProvider } from "../src/strategies/differential-smoke.js";
-import { spawnClaudeProcess } from "../src/strategies/claude-session.js";
-import { readCommandEvidence, runSmoke, type SmokeResult } from "../src/strategies/run-smoke-verification.js";
+import { createDifferentialSmokeProvider } from "../src/strategies/smoke-differential/strategy.js";
+import { spawnClaudeProcess } from "../src/strategies/smoke-differential/claude-session.js";
+import { readCommandEvidence, runSmoke, type SmokeResult } from "../src/strategies/smoke-differential/run-smoke-verification.js";
 import {
   fileUploadInput,
   repositoryRoot,

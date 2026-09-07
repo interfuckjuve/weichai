@@ -18,10 +18,10 @@
 import { readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, resolve } from "node:path";
-import { runSmoke, type SmokeResult } from "../src/strategies/run-smoke-verification.js";
-import type { SmokeTaskInput } from "../src/strategies/build-differential-test-prompt.js";
-import type { SmokeReport } from "../src/strategies/differential-test-types.js";
-import { DIFFERENTIAL_SMOKE_STRATEGY } from "../src/strategies/differential-smoke.js";
+import { runSmoke, type SmokeResult } from "../src/strategies/smoke-differential/run-smoke-verification.js";
+import type { SmokeTaskInput } from "../src/strategies/smoke-differential/build-differential-test-prompt.js";
+import type { SmokeReport } from "../src/strategies/smoke-differential/differential-test-types.js";
+import { DIFFERENTIAL_SMOKE_STRATEGY } from "../src/strategies/smoke-differential/strategy.js";
 import { createLogger, DEFAULT_LOG_DIR } from "../src/run-output/verification-logger.js";
 
 export interface SmokeE2EOptions {

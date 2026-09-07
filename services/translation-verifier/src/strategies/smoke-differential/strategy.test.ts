@@ -6,12 +6,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { validCommandEvidence, validSmokeCase, validSmokeReport } from "./differential-test-fixtures.js";
-import * as recording from "../run-output/record-run.js";
-import { assertVerificationRun } from "../schemas/validate-verification-run.js";
+import * as recording from "../../run-output/record-run.js";
+import { assertVerificationRun } from "../../schemas/validate-verification-run.js";
 import { runSmoke, type SmokeResult } from "./run-smoke-verification.js";
-import { createDefaultVerificationService } from "../create-default-verifier.js";
-import { DIFFERENTIAL_SMOKE_STRATEGY, DifferentialSmokeStrategy, type RunSmokeImpl } from "./differential-smoke.js";
-import type { VerificationArtifact, VerificationInput, VerificationStrategyContext } from "../schemas/verification-types.js";
+import { createDefaultVerificationService } from "../../create-default-verifier.js";
+import { DIFFERENTIAL_SMOKE_STRATEGY, DifferentialSmokeStrategy, type RunSmokeImpl } from "./strategy.js";
+import type { VerificationArtifact, VerificationInput, VerificationStrategyContext } from "../../schemas/verification-types.js";
 
 let root: string;
 
@@ -25,19 +25,18 @@ afterEach(() => {
 });
 
 describe("DifferentialSmokeStrategy", () => {
-  it("keeps injected smoke execution under a legacy caller's Host-owned stage", async () => {
+  it("keeps a caller-owned wrapper occurrence running while recording private smoke steps", async () => {
     const recorder = recording.createRunRecorder({ runId: "legacy-strategy-caller" });
-    recorder.startStage("validate-input");
-    recorder.endStage("validate-input", "completed");
-    recorder.startStage("prepare-workspace");
-    recorder.endStage("prepare-workspace", "completed");
-    recorder.skipStage("prepare-agent-task", "Legacy provider.");
-    recorder.startStage("run-agent-tests");
+    const handle = recorder.startStep("run-smoke", { scope: "strategy" });
     const strategy = new DifferentialSmokeStrategy({ runSmokeImpl: async () => ({ status: "pass", summary: "same", durationMs: 0, generatedTestsKept: false, report: validSmokeReport() }) });
     const output = await recording.withRunRecorder(recorder, () => strategy.verify(input(), context()));
     expect(output.status).toBe("pass");
-    expect(recorder.snapshot().stages.map((stage) => stage.state)).toEqual(["completed", "completed", "skipped", "running", "not-started", "not-started"]);
-    expect(recorder.snapshot().diagnostics).toEqual([]);
+    expect(recorder.snapshot().stages.find((step) => step.id === handle!.id)?.state).toBe("running");
+    const smoke = recorder.snapshot().stages.filter((step) => step.name === "run-smoke");
+    expect(smoke.map((step) => step.state)).toEqual(["running", "completed"]);
+    expect(smoke[0].id).not.toBe(smoke[1].id);
+    recorder.endStep(handle, "completed");
+    expect(recorder.finish().diagnostics).toEqual([]);
   });
 
   it("maps the existing smoke result into strategy output", async () => {
@@ -203,7 +202,7 @@ describe("createDefaultVerificationService", () => {
         writeFileSync(join(options!.cwd!, "commands.jsonl"), validCommandEvidence().map((item) => JSON.stringify(item)).join("\n"));
         return { stdout: "done", exitCode: 0 };
       },
-      runSmokeImpl: async (...args) => {
+      runSmokeImpl: async (...args) => recording.measureStep("run-agent-session", async () => {
         try {
           const result = await runSmoke(...args);
           enterPostprocessing();
@@ -211,7 +210,7 @@ describe("createDefaultVerificationService", () => {
           args[2]?.throwIfAborted();
           return result;
         } finally { finishWrapper(); }
-      },
+      }),
     });
     const pending = service.verifyWithReceipt(input(), {}, controller.signal);
     try {
@@ -224,13 +223,28 @@ describe("createDefaultVerificationService", () => {
         release();
         expect((await pending).result.status).toBe("pass");
       }
-      expect(during.stages.map((stage: { state: string }) => stage.state)).toEqual(["completed", "completed", "completed", "running", "not-started", "not-started"]);
-      expect(during.stages[3]).not.toHaveProperty("endedAt");
-      expect(during.stages[4]).not.toHaveProperty("startedAt");
+      const sessions = during.stages.filter((step: { name: string }) => step.name === "run-agent-session");
+      expect(sessions.map((step: { state: string }) => step.state)).toEqual(["running", "completed"]);
+      expect(sessions[0]).not.toHaveProperty("endedAt");
+      expect(sessions[1]).toHaveProperty("durationMs");
+      expect(sessions[1].parentId).toBe(sessions[0].id);
+      expect(during.stages.find((step: { name: string }) => step.name === "evaluate-evidence")?.state).toBe("completed");
       expect(during.diagnostics).toEqual([]);
       const run = assertVerificationRun(recorder.mock.results[0]!.value.snapshot());
-      expect(run.stages.map((stage) => stage.state)).toEqual(["completed", "completed", "completed", outcome === "cancelled" ? "cancelled" : "completed", outcome === "cancelled" ? "skipped" : "completed", "completed"]);
-      expect(run.diagnostics).toEqual([]);
+      expect(run.stages.find((step) => step.name === "execute-strategy")?.state).toBe(outcome === "cancelled" ? "cancelled" : "completed");
+      expect(run.stages.find((step) => step.id === sessions[1].id)?.state).toBe("completed");
+      if (outcome === "cancelled") {
+        // The non-cooperative wrapper has not returned: never synthesize its end or duration.
+        expect(run.stages.find((step) => step.id === sessions[0].id)).not.toHaveProperty("durationMs");
+        expect(run.diagnostics.every((item) => item.code === "stage-missing-end")).toBe(true);
+      } else {
+        expect(run.stages.every((step) => step.state === "completed")).toBe(true);
+        expect(run.diagnostics).toEqual([]);
+      }
+      release();
+      await wrapperFinished;
+      await Promise.resolve();
+      expect(recorder.mock.results[0]!.value.snapshot()).toEqual(run);
     } finally {
       release();
       await wrapperFinished;
@@ -242,7 +256,9 @@ describe("createDefaultVerificationService", () => {
     const recorder = vi.spyOn(recording, "createRunRecorder");
     const spawnClaude: NonNullable<ConstructorParameters<typeof DifferentialSmokeStrategy>[0]>["spawnClaude"] = async (_args, env, _timeout, options) => {
       const run = recording.currentRunRecorder()!.snapshot();
-      expect(run.stages.map((stage) => stage.state)).toEqual(["completed", "completed", "completed", "running", "not-started", "not-started"]);
+      expect(run.stages.find((step) => step.name === "run-agent-session")?.state).toBe("running");
+      expect(run.stages.find((step) => step.name === "build-test-task")?.state).toBe("completed");
+      await new Promise((resolve) => setTimeout(resolve, 3));
       expect(existsSync(env.VERIFIER_BASELINE_PATH!)).toBe(true);
       if (kind !== "missing-report") writeFileSync(join(options!.cwd!, "report.json"), JSON.stringify(validSmokeReport()));
       writeFileSync(join(options!.cwd!, "commands.jsonl"), validCommandEvidence().map((item) => JSON.stringify(item)).join("\n"));
@@ -253,20 +269,35 @@ describe("createDefaultVerificationService", () => {
     const receipt = await service.verifyWithReceipt(input());
     expect(receipt.result.status).toBe(kind === "valid" ? "pass" : "unverified");
     const run = assertVerificationRun(recorder.mock.results[0]!.value.snapshot());
-    expect(run.stages.map((stage) => stage.state)).toEqual(["completed", "completed", "completed", "completed", kind === "valid" ? "completed" : "failed", "completed"]);
+    expect(run.stages.find((step) => step.name === "evaluate-evidence")?.state).toBe(kind === "valid" ? "completed" : "failed");
+    const privateNames = ["check-applicability", "prepare-projects-and-baseline", "build-smoke-input", "run-smoke", "prepare-smoke-layout", "build-test-task", "run-agent-session", "evaluate-evidence", "cleanup-smoke-workspace", "persist-strategy-report", "map-strategy-result"];
+    expect(run.stages.filter((step) => step.scope === "strategy").map((step) => step.name)).toEqual(privateNames);
+    for (const name of privateNames) {
+      const step = run.stages.find((step) => step.name === name)!;
+      expect(step.startedAt).toBeDefined();
+      expect(step.endedAt).toBeDefined();
+      expect(step.durationMs).toBeGreaterThanOrEqual(0);
+      expect(step.parentId).toBeDefined();
+    }
+    expect(run.stages.find((step) => step.name === "run-agent-session")!.durationMs).toBeGreaterThan(0);
+    expect(run.stages.find((step) => step.name === "run-smoke")!.durationMs).toBeGreaterThanOrEqual(run.stages.find((step) => step.name === "run-agent-session")!.durationMs!);
+    expect((receipt.result.strategyReport as unknown as SmokeResult["report"]).executions?.map((entry) => entry.durationMs)).toEqual(kind === "missing-report" ? undefined : [10, 10, 10, 10]);
     expect(run.diagnostics).toEqual([]);
     expect(receipt.resultArtifact).toBeDefined();
   });
 
-  it("preflights unsupported routes without a workspace or an agent session", async () => {
+  it("stops unsupported smoke applicability before baseline, runner or Agent work", async () => {
+    const recorders = vi.spyOn(recording, "createRunRecorder");
     const fakeRunSmoke = vi.fn() as RunSmokeImpl;
-    const workspaceRoot = join(root, "blocked");
-    writeFileSync(workspaceRoot, "blocked");
+    const workspaceRoot = join(root, "workspaces");
     const receipt = await createDefaultVerificationService({ workspaceRoot, artifactRoot: join(root, "artifacts"), runSmokeImpl: fakeRunSmoke })
       .verifyWithReceipt(input({ sourceLanguageId: "go" }));
     expect(receipt.result.issues[0]?.kind).toBe("unsupported-language");
     expect(receipt.resultArtifact).toBeDefined();
     expect(fakeRunSmoke).not.toHaveBeenCalled();
+    const run = assertVerificationRun(recorders.mock.results[0]!.value.snapshot());
+    expect(run.stages.filter((step) => step.scope === "strategy").map((step) => step.name)).toEqual(["check-applicability"]);
+    expect(run.diagnostics).toEqual([]);
   });
 
   it("registers differential-smoke as the default strategy", () => {

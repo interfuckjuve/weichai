@@ -3,10 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { prepareAgentTask } from "./build-test-task.js";
-import { prepareSmokeProjects } from "../strategies/prepare-smoke-projects.js";
-import { createWorkspace } from "../strategies/create-smoke-workspace.js";
-import { VERIFIER_COMMAND_ENTRY, packageRoot } from "../strategies/test-execution-config.js";
-import type { SmokeTaskInput } from "../strategies/build-differential-test-prompt.js";
+import { prepareSmokeProjects } from "./prepare-projects.js";
+import { createWorkspace } from "./create-smoke-workspace.js";
+import { VERIFIER_COMMAND_ENTRY, packageRoot } from "./test-execution-config.js";
+import type { SmokeTaskInput } from "./build-differential-test-prompt.js";
 
 function snapshot(root: string) {
   return readdirSync(root, { recursive: true, withFileTypes: true }).map((entry) => {
@@ -38,8 +38,8 @@ describe("prepared smoke task", () => {
       expect(task.prompt).toContain(layout.projectRoots[0]);
       expect(task.llm.cwd).toBe(layout.agentDir);
       expect(task.llm.readOnlyDirs).toEqual(layout.projectRoots);
-      expect(task.llm.allowedTools).toEqual([`Bash(npx tsx ${join(packageRoot, "src/strategies/controlled-test-command.ts")} *)`]);
-      expect(VERIFIER_COMMAND_ENTRY).toBe(join(packageRoot, "src/strategies/controlled-test-command.ts"));
+      expect(task.llm.allowedTools).toEqual([`Bash(npx tsx ${join(packageRoot, "src/strategies/smoke-differential/controlled-test-command.ts")} *)`]);
+      expect(VERIFIER_COMMAND_ENTRY).toBe(join(packageRoot, "src/strategies/smoke-differential/controlled-test-command.ts"));
       expect(task.prompt).not.toContain("differential-smoke/verifier-command.ts");
     } finally { rmSync(root, { recursive: true, force: true }); }
   });

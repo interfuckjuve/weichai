@@ -14,15 +14,8 @@
     "input": { "$ref": "#/definitions/fileReference" },
     "strategy": { "$ref": "#/definitions/strategySelection" },
     "stages": {
-      "type": "array", "minItems": 6, "maxItems": 6, "additionalItems": false,
-      "items": [
-        { "allOf": [{ "$ref": "#/definitions/stage" }, { "type": "object", "properties": { "id": { "const": "validate-input" } } }] },
-        { "allOf": [{ "$ref": "#/definitions/stage" }, { "type": "object", "properties": { "id": { "const": "prepare-workspace" } } }] },
-        { "allOf": [{ "$ref": "#/definitions/stage" }, { "type": "object", "properties": { "id": { "const": "prepare-agent-task" } } }] },
-        { "allOf": [{ "$ref": "#/definitions/stage" }, { "type": "object", "properties": { "id": { "const": "run-agent-tests" } } }] },
-        { "allOf": [{ "$ref": "#/definitions/stage" }, { "type": "object", "properties": { "id": { "const": "evaluate-evidence" } } }] },
-        { "allOf": [{ "$ref": "#/definitions/stage" }, { "type": "object", "properties": { "id": { "const": "save-report" } } }] }
-      ]
+      "type": "array", "maxItems": 1024,
+      "items": { "$ref": "#/definitions/stage" }
     },
     "agentTimeline": { "$ref": "#/definitions/eventFileReference" },
     "hostEvents": { "$ref": "#/definitions/eventFileReference" },
@@ -58,12 +51,15 @@
       ],
       "additionalProperties": false
     },
-    "stageId": { "title": "VerificationStageId", "enum": ["validate-input", "prepare-workspace", "prepare-agent-task", "run-agent-tests", "evaluate-evidence", "save-report"] },
+    "stageId": { "title": "VerificationStageId", "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$", "maxLength": 256 },
     "stageState": { "title": "VerificationStageState", "enum": ["not-started", "running", "completed", "failed", "cancelled", "skipped"] },
     "stage": {
-      "title": "VerificationStage", "type": "object", "required": ["id", "state"],
+      "title": "VerificationStage", "type": "object", "required": ["id", "name", "scope", "state"],
       "properties": {
         "id": { "$ref": "#/definitions/stageId" }, "state": { "$ref": "#/definitions/stageState" },
+        "name": { "$ref": "#/definitions/identifier" },
+        "scope": { "enum": ["framework", "strategy"] },
+        "parentId": { "$ref": "#/definitions/stageId" },
         "startedAt": { "$ref": "#/definitions/timestamp" }, "endedAt": { "$ref": "#/definitions/timestamp" },
         "durationMs": { "$ref": "#/definitions/duration" },
         "error": { "$ref": "#/definitions/message" }, "reason": { "$ref": "#/definitions/message" },
@@ -80,7 +76,7 @@
         "reason": { "$ref": "#/definitions/message" }
       }, "additionalProperties": false
     },
-    "agentTaskName": { "title": "AgentTaskName", "enum": ["explore", "design-tests", "write-tests", "verify", "analyze-failure", "finalize-report"] },
+    "agentTaskName": { "title": "AgentTaskName", "type": "string", "pattern": "\\S", "maxLength": 256 },
     "event": {
       "title": "VerificationRunEvent", "type": "object", "required": ["kind", "source", "runId", "sequence", "receivedAt"],
       "description": "Allowlisted metadata only. Source identifies actual observation provenance; kind/event do not imply exact process boundaries. Task occurrence IDs are assigned by Host, and task names may repeat.",

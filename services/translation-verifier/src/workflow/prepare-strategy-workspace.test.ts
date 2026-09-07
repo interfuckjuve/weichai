@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AdaptationRequestV2, FilePatch, ModifiedFilePatch } from "@forexplore/contracts";
 import type { VerificationArtifact, VerificationInput } from "../schemas/verification-types.js";
 import { createVerificationArtifactStore } from "../run-output/verification-artifact-store.js";
-import { createVerificationWorkspace } from "./prepare-projects.js";
+import { createVerificationWorkspace } from "./prepare-strategy-workspace.js";
 import { VerificationArtifactPersistenceError } from "../run-output/verification-artifact-store.js";
 
 vi.mock("node:fs", async (importOriginal) => {
@@ -133,8 +133,9 @@ describe("createVerificationWorkspace", () => {
       .toBe(translatedTargetContent);
     expect(readFileSync(originalTargetPath, "utf8")).toBe(originalTargetContent);
     expect(workspace.context.workspace.strategyRoot).toBe(workspace.context.workspace.evidenceRoot);
-    expect(existsSync(join(dirname(workspace.context.workspace.sourceRoot), ".forexplore-tests"))).toBe(true);
-    expect(existsSync(join(dirname(workspace.context.workspace.targetRoot), ".forexplore-tests"))).toBe(true);
+    expect(existsSync(join(dirname(workspace.context.workspace.sourceRoot), ".forexplore-tests"))).toBe(false);
+    expect(existsSync(join(dirname(workspace.context.workspace.targetRoot), ".forexplore-tests"))).toBe(false);
+    expect(existsSync(join(workspace.context.workspace.root, "baseline.json"))).toBe(false);
 
     workspace.cleanup();
     expect(existsSync(workspace.context.workspace.root)).toBe(false);

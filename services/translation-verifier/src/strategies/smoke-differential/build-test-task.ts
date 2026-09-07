@@ -1,9 +1,9 @@
 import { join } from "node:path";
-import { markVerificationPhase } from "../run-output/measure-legacy-run.js";
-import { DEFAULT_DISALLOWED_TOOLS, VERIFIER_COMMAND_ENTRY } from "../strategies/test-execution-config.js";
-import { buildSmokeTaskPrompt, type SmokeTaskInput } from "../strategies/build-differential-test-prompt.js";
-import type { RunLayout } from "../strategies/prepare-smoke-projects.js";
-import type { SmokeRunOptions } from "../strategies/run-smoke-verification.js";
+import { markVerificationPhase } from "../../run-output/measure-legacy-run.js";
+import { DEFAULT_DISALLOWED_TOOLS, VERIFIER_COMMAND_ENTRY } from "./test-execution-config.js";
+import { buildSmokeTaskPrompt, type SmokeTaskInput } from "./build-differential-test-prompt.js";
+import type { RunLayout } from "./prepare-projects.js";
+import type { SmokeRunOptions } from "./run-smoke-verification.js";
 
 export function prepareAgentTask(
   job: SmokeTaskInput,

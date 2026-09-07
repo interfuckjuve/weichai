@@ -14,7 +14,7 @@ import { validCommandEvidence, validSmokeReport } from "./differential-test-fixt
 import type { CommandEvidence, SmokeReport } from "./differential-test-types.js";
 import { createWorkspaceBaseline, writeWorkspaceBaseline } from "./protect-project-files.js";
 import { VERIFIER_COMMAND_ENTRY } from "./test-execution-config.js";
-import { createRunRecorder, withRunRecorder } from "../run-output/record-run.js";
+import { createRunRecorder, withRunRecorder } from "../../run-output/record-run.js";
 import { runSmoke } from "./run-smoke-verification.js";
 import type { SmokeTaskInput } from "./build-differential-test-prompt.js";
 
@@ -125,22 +125,20 @@ afterEach(() => {
 });
 
 describe("runSmoke verify-only 内部暂存(files 输入)", () => {
-  it.each(["pass", "error"])("does not claim legacy Host stages during standalone %s execution", async (kind) => {
+  it.each(["pass", "error"])("preserves a standalone caller's same-named occurrence during %s execution", async (kind) => {
     const root = makeTmpRoot();
     const recorder = createRunRecorder({ runId: "legacy-host" });
-    recorder.startStage("validate-input");
-    recorder.endStage("validate-input", "completed");
-    recorder.startStage("prepare-workspace");
-    recorder.endStage("prepare-workspace", "completed");
-    recorder.skipStage("prepare-agent-task", "Legacy preparation is not observable.");
-    recorder.startStage("run-agent-tests");
+    const handle = recorder.startStep("run-agent-session", { scope: "strategy" });
     try {
       const h = writingFake(validReport(), validEvidence());
       const spawnClaude = kind === "pass" ? h.fake as unknown as SpawnClaude : async () => { throw new Error("spawn failed"); };
       const result = await withRunRecorder(recorder, () => runSmoke(fileBasedJob(), { workspaceRoot: root, apiKey: "test", spawnClaude }));
       expect(result.status).toBe(kind);
-      expect(recorder.snapshot().stages.map((stage) => stage.state)).toEqual(["completed", "completed", "skipped", "running", "not-started", "not-started"]);
-      expect(recorder.snapshot().diagnostics).toEqual([]);
+      const sessions = recorder.snapshot().stages.filter((step) => step.name === "run-agent-session");
+      expect(sessions.map((step) => step.state)).toEqual(["running", kind === "pass" ? "completed" : "failed"]);
+      expect(sessions[0].id).not.toBe(sessions[1].id);
+      recorder.endStep(handle, "completed");
+      expect(recorder.finish().diagnostics).toEqual([]);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 

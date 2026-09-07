@@ -51,6 +51,8 @@ export interface VerificationStrategyContext {
     strategyRoot: string;
     evidenceRoot: string;
   };
+  /** Optional Host timing only; executes work once and preserves its value/error. */
+  measureStep?<T>(name: string, work: () => T | Promise<T>): Promise<T>;
   deadlineAt: number;
   writeArtifact: (
     artifact: VerificationArtifact,
@@ -58,10 +60,6 @@ export interface VerificationStrategyContext {
 }
 
 export interface VerificationStrategy {
-  /** Built-in strategies record their own task, execution and evaluation boundaries. */
-  readonly recordsExecutionStages?: true;
-  preflight?(input: VerificationInput): VerificationStrategyOutput | undefined;
-  prepareWorkspace?(input: VerificationInput, context: VerificationStrategyContext): void;
   verify(
     input: VerificationInput,
     context: VerificationStrategyContext,

@@ -46,8 +46,6 @@ export function createVerificationWorkspace(
       sourceRoot,
       targetRoot,
       agentRoot,
-      resolve(sourceSideRoot, ".forexplore-tests"),
-      resolve(targetSideRoot, ".forexplore-tests"),
     ]) {
       mkdirSync(directory, { recursive: true });
     }

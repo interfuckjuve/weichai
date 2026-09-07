@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { VerificationResult, VerificationStrategy, VerificationStrategyDescriptor, VerificationStrategyProvider } from "../schemas/verification-types.js";
-import { VerificationStrategyFactory } from "./strategy-registry.js";
+import { VerificationStrategyFactory } from "./select-strategy.js";
 
 const descriptor: VerificationStrategyDescriptor = {
   id: "fixture",
