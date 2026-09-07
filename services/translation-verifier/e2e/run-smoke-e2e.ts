@@ -21,7 +21,7 @@ import { join, resolve } from "node:path";
 import { runSmoke, type SmokeResult, type SmokeTaskInput } from "../src/strategies/differential-smoke/runner.js";
 import type { SmokeReport } from "../src/strategies/differential-smoke/types.js";
 import { DIFFERENTIAL_SMOKE_STRATEGY } from "../src/strategies/differential-smoke/strategy.js";
-import { createLogger } from "../src/logger.js";
+import { createLogger, DEFAULT_LOG_DIR } from "../src/logger.js";
 
 export interface SmokeE2EOptions {
   /** 任务输入目录(requirement.txt + 经 .. 定位 samples)。 */
@@ -159,7 +159,8 @@ function diagnosticJob(fixtureDir: string): SmokeTaskInput {
 }
 
 export async function runSmokeE2E(argv: string[]): Promise<number> {
-  if (!process.env.VERIFIER_LOG_DIR) process.env.VERIFIER_LOG_DIR = "logs";
+  // 统一使用 logger 根据模块位置解析出的仓库根 logs/,避免相对 cwd 产生多个日志目录。
+  if (!process.env.VERIFIER_LOG_DIR) process.env.VERIFIER_LOG_DIR = DEFAULT_LOG_DIR;
   const parsed = parseArgs(argv);
   if ("error" in parsed) {
     const logger = createLogger("smoke-e2e");
