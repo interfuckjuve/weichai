@@ -47,6 +47,7 @@ for (const variant of variants) {
   };
   try {
     const runner = join(ws.context.workspace.root, "target/.forexplore-tests");
+    mkdirSync(runner, { recursive: true });
     copyFileSync(
       join(oracleRoot, "FileUploadOracle.java.txt"),
       join(runner, "FileUploadOracle.java"),

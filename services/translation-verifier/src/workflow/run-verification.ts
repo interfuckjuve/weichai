@@ -30,35 +30,39 @@ export async function runVerification(
       const strategyId = options.strategyId ?? config.defaultStrategyId;
       const descriptor = await recorder.measureStep("validate-input", { scope: "framework" }, () =>
         validateInput(input, config.factory, strategyId));
-      let result: VerificationResult;
       let artifactFailure = false;
-      try {
-        result = await recorder.measureStep("execute-strategy", { scope: "framework" }, async () => {
-          markVerificationPhase("workspace-creation");
-          const workspace = await recorder.measureStep("prepare-strategy-workspace", { scope: "framework" }, () =>
-            createVerificationWorkspace(input, {
-              workspaceRoot: config.workspaceRoot,
-              artifactRoot: config.artifactRoot,
-              keepWorkspace: options.keepWorkspace,
-            }));
-          store = workspace;
-          markVerificationPhase("deadline-and-strategy-dispatch");
-          const timeoutSignal = AbortSignal.timeout(config.timeoutMs);
-          const combinedSignal = signal === undefined ? timeoutSignal : AbortSignal.any([signal, timeoutSignal]);
-          workspace.context.deadlineAt = Date.now() + config.timeoutMs;
-          workspace.context.measureStep = (name, work) => recorder.measureStep(name, { scope: "strategy" }, work);
+      let normalizedFailure: VerificationResult | undefined;
+      const result = await recorder.measureStep("execute-strategy", { scope: "framework" }, async () => {
+        markVerificationPhase("workspace-creation");
+        const workspace = await recorder.measureStep("prepare-strategy-workspace", { scope: "framework" }, () =>
+          createVerificationWorkspace(input, {
+            workspaceRoot: config.workspaceRoot,
+            artifactRoot: config.artifactRoot,
+            keepWorkspace: options.keepWorkspace,
+          }));
+        store = workspace;
+        markVerificationPhase("deadline-and-strategy-dispatch");
+        const timeoutSignal = AbortSignal.timeout(config.timeoutMs);
+        const combinedSignal = signal === undefined ? timeoutSignal : AbortSignal.any([signal, timeoutSignal]);
+        workspace.context.deadlineAt = Date.now() + config.timeoutMs;
+        workspace.context.measureStep = (name, work) => recorder.measureStep(name, { scope: "strategy" }, work);
+        try {
           const output = await runStrategy(config.factory, strategyId, input, workspace.context, combinedSignal);
           markVerificationPhase("result-normalization-and-artifact-validation");
           const normalized = createVerificationResult(input, descriptor, output, config.now);
           assertArtifactsMatch(normalized.artifacts, workspace.writtenArtifacts());
           return normalized;
-        });
-      } catch (error) {
-        // Invalid input/selection and common workspace failures remain public exceptions.
-        if (store === undefined || stepFailureState(error) === "cancelled") throw error;
-        artifactFailure = error instanceof VerificationArtifactPersistenceError;
-        result = createUnverifiedResult(input, descriptor, error, artifactFailure ? [] : store.writtenArtifacts(), config.now, artifactFailure);
-      }
+        } catch (error) {
+          if (stepFailureState(error) === "cancelled") throw error;
+          artifactFailure = error instanceof VerificationArtifactPersistenceError;
+          normalizedFailure = createUnverifiedResult(input, descriptor, error, artifactFailure ? [] : workspace.writtenArtifacts(), config.now, artifactFailure);
+          throw error;
+        }
+      }).catch((error: unknown) => {
+        // Keep failed execution timing while only consuming strategy-normalized errors.
+        if (normalizedFailure === undefined) throw error;
+        return normalizedFailure;
+      });
       saveHandle = recorder.startStep("save-report", { scope: "framework" });
       if (artifactFailure) {
         saveFailure = "Required artifact persistence failed.";

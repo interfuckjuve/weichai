@@ -252,6 +252,38 @@ describe("VerificationService", () => {
     expect(result.resultArtifact).toBeDefined();
   });
 
+  it.each([0.5, 4294967296])("preserves invalid timeout %s RangeError identity without producing artifacts", async (timeoutMs) => {
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    const p = provider("first");
+    const create = vi.spyOn(p, "create");
+    const service = serviceWith([p], "first", { timeoutMs });
+    for (const method of ["verify", "verifyWithReceipt"] as const) {
+      const error = await service[method](input()).then(() => undefined, (reason: unknown) => reason);
+      expect(error).toBeInstanceOf(RangeError);
+      expect(timeout.mock.results.at(-1)?.type).toBe("throw");
+      expect(timeout.mock.results.at(-1)?.value).toBe(error);
+      expect(timeout).toHaveBeenLastCalledWith(timeoutMs);
+      expect(create).not.toHaveBeenCalled();
+      expect(existsSync(artifactRoot)).toBe(false);
+      expect(readdirSync(workspaceRoot)).toEqual([]);
+    }
+  });
+
+  it.each(["strategy", "provider"])("normalizes a %s-thrown RangeError and cleans the workspace", async (origin) => {
+    const recorders = vi.spyOn(recording, "createRunRecorder");
+    const error = new RangeError("strategy value out of range");
+    const p = provider("first", async () => { throw error; });
+    if (origin === "provider") p.create = () => { throw error; };
+    const receipt = await serviceWith([p], "first").verifyWithReceipt(input());
+    expect(receipt.result).toMatchObject({ status: "unverified", issues: [{ kind: "framework-error", message: error.message }] });
+    expect(receipt.resultArtifact).toBeDefined();
+    expect(JSON.parse(readFileSync(join(artifactRoot, receipt.resultArtifact!.path), "utf8"))).toEqual(receipt.result);
+    expect(readdirSync(workspaceRoot)).toEqual([]);
+    const run = recorders.mock.results[0]!.value.snapshot();
+    expect(run.stages.find((step: { name: string }) => step.name === "execute-strategy")).toMatchObject({ state: "failed", error: error.message });
+    expect(run.diagnostics).toEqual([]);
+  });
+
   it("preserves workspace creation errors instead of manufacturing receipts", async () => {
     mkdirSync(root, { recursive: true });
     writeFileSync(workspaceRoot, "blocked");
