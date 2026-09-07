@@ -1,0 +1,41 @@
+// Host-only oracle for the FileUpload benchmark. Never stage in the agent workspace.
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import org.apache.commons.fileupload.MultipartStream;
+
+public final class FileUploadOracle {
+    private static final class Output extends ByteArrayOutputStream {
+        boolean closed;
+        @Override public void close() { closed = true; }
+    }
+
+    private static void check(String id, byte[] body, boolean discard) throws Exception {
+        ByteArrayOutputStream wire = new ByteArrayOutputStream();
+        wire.write("--b\r\nX: y\r\n\r\n".getBytes(StandardCharsets.US_ASCII));
+        wire.write(body);
+        wire.write("\r\n--b--\r\n".getBytes(StandardCharsets.US_ASCII));
+        MultipartStream stream = new MultipartStream(new ByteArrayInputStream(wire.toByteArray()), new byte[]{98}, 16, null);
+        if (!stream.skipPreamble()) throw new AssertionError("Missing first part");
+        stream.readHeaders();
+        Output output = new Output();
+        int count = stream.readBodyData(discard ? null : output);
+        boolean bytesMatch = discard ? output.size() == 0 : Arrays.equals(body, output.toByteArray());
+        boolean finalBoundary = !stream.readBoundary();
+        boolean passed = count == body.length && bytesMatch && finalBoundary && !output.closed;
+        System.out.println("{\"id\":\"" + id + "\",\"count\":" + count + ",\"expectedCount\":" + body.length
+            + ",\"bytesMatch\":" + bytesMatch + ",\"finalBoundary\":" + finalBoundary
+            + ",\"outputClosed\":" + output.closed + ",\"passed\":" + passed + "}");
+    }
+
+    public static void main(String[] args) throws Exception {
+        check("empty", new byte[0], false);
+        check("text", "hello".getBytes(StandardCharsets.US_ASCII), false);
+        check("binary", new byte[]{0,10,13,127,(byte)128,(byte)255}, false);
+        byte[] large = new byte[8193];
+        Arrays.fill(large, (byte)97);
+        check("large", large, false);
+        check("discard", new byte[]{0,10,13,127,(byte)128,(byte)255}, true);
+    }
+}
