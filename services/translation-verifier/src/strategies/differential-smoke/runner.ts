@@ -14,14 +14,30 @@
  * 兼容路径(无 workspaceDir):把旧 root/files 双侧输入内部暂存为 source/project +
  * target/project + 双侧 runner 根 + agent 目录并创建基线,同样只经命令代理。
  */
-import { cpSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { markVerificationPhase } from "../../verification-timing.js";
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type { EffortLevel, SpawnClaude } from "./claude-client.js";
 import { runClaude } from "./claude-client.js";
 import { evaluateSmokeReport, type SmokeEvaluation } from "./evaluation.js";
 import type { CommandEvidence, SmokeMode, SmokeReport } from "./types.js";
-import { assertWorkspaceBaseline, createWorkspaceBaseline, writeWorkspaceBaseline } from "./workspace-baseline.js";
-import { DEFAULT_DISALLOWED_TOOLS, defaultWorkspaceRoot, VERIFIER_COMMAND_ENTRY } from "./helpers.js";
+import {
+  assertWorkspaceBaseline,
+  createWorkspaceBaseline,
+  writeWorkspaceBaseline,
+} from "./workspace-baseline.js";
+import {
+  DEFAULT_DISALLOWED_TOOLS,
+  defaultWorkspaceRoot,
+  VERIFIER_COMMAND_ENTRY,
+} from "./helpers.js";
 import { buildSmokeTaskPrompt, type SmokeTaskInput } from "./prompts/task.js";
 import { errorSummary, readReport } from "./report.js";
 import { assertSmokeReport } from "./report-schema.js";
@@ -35,7 +51,12 @@ export type SmokeStatus = "pass" | "fail" | "error";
  * 报告读/深校验失败 invalid-report;证据/基线失败 invalid-evidence;
  * 会话 deadline 到期 timeout;claude/进程环境失败 toolchain;其余 internal。
  */
-export type SmokeErrorReason = "invalid-report" | "invalid-evidence" | "timeout" | "toolchain" | "internal";
+export type SmokeErrorReason =
+  | "invalid-report"
+  | "invalid-evidence"
+  | "timeout"
+  | "toolchain"
+  | "internal";
 
 /** 单次自主会话分钟级,默认超时(ms)。 */
 const DEFAULT_TIMEOUT_MS = 300_000;
@@ -121,11 +142,23 @@ function canonicalRunnerRoots(): readonly [string, string] {
   return ["source/.forexplore-tests", "target/.forexplore-tests"] as const;
 }
 
-const MUTABLE_FILES = ["agent/report.json", "agent/claude-steps.jsonl", "agent/commands.jsonl"] as const;
+const MUTABLE_FILES = [
+  "agent/report.json",
+  "agent/claude-steps.jsonl",
+  "agent/commands.jsonl",
+] as const;
 
 /** caller-owned 布局:全部路径已由调用方创建,直接解析。 */
-function callerOwnedLayout(options: SmokeRunOptions, job: SmokeTaskInput): RunLayout {
-  if (!options.executionRoot || !options.baselinePath || !options.commandEvidencePath || !options.runnerRoots) {
+function callerOwnedLayout(
+  options: SmokeRunOptions,
+  job: SmokeTaskInput,
+): RunLayout {
+  if (
+    !options.executionRoot ||
+    !options.baselinePath ||
+    !options.commandEvidencePath ||
+    !options.runnerRoots
+  ) {
     throw new Error(
       "runSmoke: workspaceDir 模式必须同时提供 executionRoot/baselinePath/commandEvidencePath/runnerRoots",
     );
@@ -145,7 +178,9 @@ function callerOwnedLayout(options: SmokeRunOptions, job: SmokeTaskInput): RunLa
 
 function projectRootsOf(job: SmokeTaskInput): string[] {
   return [job.source.root, job.target.root]
-    .filter((root): root is string => typeof root === "string" && root.length > 0)
+    .filter(
+      (root): root is string => typeof root === "string" && root.length > 0,
+    )
     .map((root) => resolve(root));
 }
 
@@ -158,10 +193,16 @@ function copyProject(source: string, destination: string): void {
 }
 
 /** 把 SideFile 列表写入 projectDir(按相对路径,自动建父目录)。 */
-function writeSideFiles(projectDir: string, files: Array<{ relativePath: string; content: string }>): void {
+function writeSideFiles(
+  projectDir: string,
+  files: Array<{ relativePath: string; content: string }>,
+): void {
   for (const file of files) {
     const dest = resolve(projectDir, file.relativePath);
-    if (dest !== projectDir && !dest.startsWith(`${resolve(projectDir)}${"/"}`)) {
+    if (
+      dest !== projectDir &&
+      !dest.startsWith(`${resolve(projectDir)}${"/"}`)
+    ) {
       throw new Error(`runSmoke 暂存路径逃逸: ${file.relativePath}`);
     }
     mkdirSync(dirname(dest), { recursive: true });
@@ -199,7 +240,9 @@ function stagedLayout(job: SmokeTaskInput, ws: WorkspaceHandle): RunLayout {
   } else if (isReadableDirectory(job.source.root ?? "")) {
     copyProject(resolve(job.source.root!), sourceProject);
   } else {
-    throw new Error("runSmoke 暂存源项目失败:缺少 source.files 或可读的 source.root");
+    throw new Error(
+      "runSmoke 暂存源项目失败:缺少 source.files 或可读的 source.root",
+    );
   }
   if (isReadableDirectory(job.target.root ?? "")) {
     copyProject(resolve(job.target.root!), targetProject);
@@ -260,8 +303,10 @@ function classifyRunError(error: unknown): SmokeErrorReason {
   const message = errorSummary(error);
   if (/^runSmoke[\s:：]/.test(message)) return "internal"; // 调用契约/暂存失败
   if (/timed out|deadline|超时/i.test(message)) return "timeout";
-  if (/claude subprocess|DEEPSEEK_API_KEY|spawn/i.test(message)) return "toolchain";
-  if (/报告|report|证据|evidence|baseline|commands\.jsonl/i.test(message)) return "invalid-evidence";
+  if (/claude subprocess|DEEPSEEK_API_KEY|spawn/i.test(message))
+    return "toolchain";
+  if (/报告|report|证据|evidence|baseline|commands\.jsonl/i.test(message))
+    return "invalid-evidence";
   return "internal";
 }
 
@@ -274,6 +319,7 @@ export async function runSmoke(
   options: SmokeRunOptions = {},
   signal?: AbortSignal,
 ): Promise<SmokeResult> {
+  markVerificationPhase("smoke-layout-and-options");
   const started = performance.now();
   const mode = options.mode ?? "verify-only";
   const keep = options.keepGeneratedTests ?? false;
@@ -291,7 +337,9 @@ export async function runSmoke(
       generatedTestsKept: keep,
       keptDir: ws !== null && keep ? ws.dir : undefined,
     };
-    logger.info(`smoke ${mode} finished: status=${result.status} durationMs=${Math.round(result.durationMs)}ms summary=${truncateForLog(result.summary, 200)}`);
+    logger.info(
+      `smoke ${mode} finished: status=${result.status} durationMs=${Math.round(result.durationMs)}ms summary=${truncateForLog(result.summary, 200)}`,
+    );
     return result;
   };
 
@@ -300,7 +348,9 @@ export async function runSmoke(
       options.workspaceDir !== undefined
         ? callerOwnedLayout(options, job)
         : (() => {
-            ws = createWorkspace(options.workspaceRoot ?? defaultWorkspaceRoot());
+            ws = createWorkspace(
+              options.workspaceRoot ?? defaultWorkspaceRoot(),
+            );
             return stagedLayout(job, ws);
           })();
     signal?.throwIfAborted();
@@ -311,8 +361,14 @@ export async function runSmoke(
         ? job
         : {
             ...job,
-            source: { ...job.source, root: layout.projectRoots[0] ?? job.source.root },
-            target: { ...job.target, root: layout.projectRoots[1] ?? job.target.root },
+            source: {
+              ...job.source,
+              root: layout.projectRoots[0] ?? job.source.root,
+            },
+            target: {
+              ...job.target,
+              root: layout.projectRoots[1] ?? job.target.root,
+            },
           };
 
     const deadlineAt = Date.now() + timeoutMs;
@@ -342,38 +398,72 @@ export async function runSmoke(
       ...(signal ? { signal } : {}),
       deadlineAt,
     };
+    markVerificationPhase("prompt-construction");
     const prompt = [
       buildSmokeTaskPrompt(promptJob, mode),
       executionContextSection(promptJob, layout),
     ].join("\n\n");
 
+    markVerificationPhase("agent-session");
     await runClaude(prompt, llm);
 
     let report: SmokeReport;
     try {
-      report = await readReport<SmokeReport>(layout.agentDir, (raw) => assertSmokeReport(raw, mode));
+      markVerificationPhase("report-read-and-schema-validation");
+      report = await readReport<SmokeReport>(layout.agentDir, (raw) =>
+        assertSmokeReport(raw, mode),
+      );
     } catch (error) {
-      return finish({ status: "error", summary: errorSummary(error), report: {} as SmokeReport, errorReason: "invalid-report" });
+      return finish({
+        status: "error",
+        summary: errorSummary(error),
+        report: {} as SmokeReport,
+        errorReason: "invalid-report",
+      });
     }
     try {
       // 会话结束后复查基线:受保护文件被改/影子源码出现在 runner 区外即不可信。
+      markVerificationPhase("final-baseline-validation");
       assertWorkspaceBaseline(layout.executionRoot, layout.baselinePath);
+      markVerificationPhase("command-evidence-read");
       const evidence = readCommandEvidence(layout.evidencePath);
+      markVerificationPhase("evidence-evaluation-and-smoke-result");
       const evaluation = evaluateSmokeReport(report, evidence, mode);
       const status: SmokeStatus =
-        evaluation.status === "pass" ? "pass" : evaluation.status === "fail" ? "fail" : "error";
+        evaluation.status === "pass"
+          ? "pass"
+          : evaluation.status === "fail"
+            ? "fail"
+            : "error";
       const passRate =
         report.cases.length === 0
           ? undefined
-          : report.cases.filter((item) => item.mechanical === "pass").length / report.cases.length;
-      return finish({ status, passRate, summary: evaluation.summary, report, evaluation });
+          : report.cases.filter((item) => item.mechanical === "pass").length /
+            report.cases.length;
+      return finish({
+        status,
+        passRate,
+        summary: evaluation.summary,
+        report,
+        evaluation,
+      });
     } catch (error) {
       // 基线/证据失败(含 evaluateSmokeReport 内部不变量)归 invalid-evidence。
-      return finish({ status: "error", summary: errorSummary(error), report, errorReason: "invalid-evidence" });
+      return finish({
+        status: "error",
+        summary: errorSummary(error),
+        report,
+        errorReason: "invalid-evidence",
+      });
     }
   } catch (error) {
     if (isAbortError(error)) throw error;
-    return finish({ status: "error", summary: errorSummary(error), report: {} as SmokeReport, errorReason: classifyRunError(error) });
+    return finish({
+      status: "error",
+      summary: errorSummary(error),
+      report: {} as SmokeReport,
+      errorReason: classifyRunError(error),
+    });
   } finally {
     // 内部暂存工作区按 keep 策略清理;caller-owned(workspaceDir)永不清理。
     if (ws !== null && !keep) ws.cleanup();
@@ -386,7 +476,10 @@ function truncateForLog(text: string, max: number): string {
 }
 
 /** 运行期执行上下文(注入绝对路径与唯一 Bash 形态),由宿主在 prompt 后附加。 */
-function executionContextSection(job: SmokeTaskInput, layout: RunLayout): string {
+function executionContextSection(
+  job: SmokeTaskInput,
+  layout: RunLayout,
+): string {
   return `EXECUTION CONTEXT (host-injected, authoritative)
 - Execution/workspace root: ${layout.executionRoot}
 - Source project (READ-ONLY): ${layout.projectRoots[0] ?? "(not resolved)"}

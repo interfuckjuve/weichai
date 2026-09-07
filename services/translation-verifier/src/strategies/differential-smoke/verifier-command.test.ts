@@ -1,4 +1,12 @@
-import { existsSync, mkdtempSync, mkdirSync, cpSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  cpSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
@@ -12,10 +20,19 @@ import {
   waitFor,
 } from "../../process-test-helpers.js";
 import { sanitizedBuildEnvironment } from "../../process-tree.js";
-import { runVerifierCommand, runVerifierCommandCli } from "./verifier-command.js";
-import { createWorkspaceBaseline, writeWorkspaceBaseline } from "./workspace-baseline.js";
+import {
+  runVerifierCommand,
+  runVerifierCommandCli,
+} from "./verifier-command.js";
+import {
+  createWorkspaceBaseline,
+  writeWorkspaceBaseline,
+} from "./workspace-baseline.js";
 
-const RUNNER_ROOTS = ["source/.forexplore-tests", "target/.forexplore-tests"] as const;
+const RUNNER_ROOTS = [
+  "source/.forexplore-tests",
+  "target/.forexplore-tests",
+] as const;
 
 interface Ws {
   root: string;
@@ -30,11 +47,22 @@ function makeWorkspace(): Ws {
   const r = mkdtempSync(join(tmpdir(), "fx-verifier-command-"));
   mkdirSync(join(r, "source", "project", "src"), { recursive: true });
   mkdirSync(join(r, "target", "project", "src"), { recursive: true });
-  writeFileSync(join(r, "source", "project", "src", "Source.java"), "class Source {}", "utf8");
-  writeFileSync(join(r, "target", "project", "src", "Target.cs"), "class Target {}", "utf8");
+  writeFileSync(
+    join(r, "source", "project", "src", "Source.java"),
+    "class Source {}",
+    "utf8",
+  );
+  writeFileSync(
+    join(r, "target", "project", "src", "Target.cs"),
+    "class Target {}",
+    "utf8",
+  );
   writeFileSync(join(r, "metadata.json"), '{"role":"unit"}\n', "utf8");
   const baselinePath = join(r, "baseline.json");
-  writeWorkspaceBaseline(baselinePath, createWorkspaceBaseline(r, RUNNER_ROOTS, MUTABLE_FILES));
+  writeWorkspaceBaseline(
+    baselinePath,
+    createWorkspaceBaseline(r, RUNNER_ROOTS, MUTABLE_FILES),
+  );
   return {
     root: r,
     baselinePath,
@@ -120,10 +148,17 @@ describe("runVerifierCommand 边界与基线", () => {
     const evidence = await runVerifierCommand(
       baseInput(ws, {
         command: process.execPath,
-        args: ["-e", "process.stdout.write(String(process.env.DEEPSEEK_API_KEY))"],
+        args: [
+          "-e",
+          "process.stdout.write(String(process.env.DEEPSEEK_API_KEY))",
+        ],
       }),
       undefined,
-      { ...process.env, DEEPSEEK_API_KEY: "secret", ANTHROPIC_AUTH_TOKEN: "secret" },
+      {
+        ...process.env,
+        DEEPSEEK_API_KEY: "secret",
+        ANTHROPIC_AUTH_TOKEN: "secret",
+      },
     );
     expect(evidence.stdout).toBe("undefined");
   });
@@ -143,6 +178,18 @@ describe("runVerifierCommand 边界与基线", () => {
     expect(lines).toHaveLength(1);
     expect(lines[0].commandId).toBe(evidence.commandId);
     expect(lines[0].exitCode).toBe(0);
+    const timing = lines[0].timing as Record<string, number>;
+    expect(
+      Object.values(timing).every(
+        (value) => Number.isFinite(value) && value >= 0,
+      ),
+    ).toBe(true);
+    expect(
+      timing.validationMs +
+        timing.preBaselineMs +
+        timing.processMs +
+        timing.postBaselineMs,
+    ).toBeCloseTo(timing.beforeEvidenceAppendMs, 6);
   });
 
   it("stdout/stderr 各限 1 MiB 并在文本中标明截断", async () => {
@@ -161,10 +208,12 @@ describe("runVerifierCommand 边界与基线", () => {
   it("拒绝工作区外 cwd 和未知命令", async () => {
     const ws = makeWorkspace();
     root = ws.root;
-    await expect(runVerifierCommand(baseInput(ws, { cwd: "/tmp/outside" }))).rejects.toThrow(/cwd/);
-    await expect(runVerifierCommand(baseInput(ws, { command: "curl" }))).rejects.toThrow(
-      /not allowed/,
-    );
+    await expect(
+      runVerifierCommand(baseInput(ws, { cwd: "/tmp/outside" })),
+    ).rejects.toThrow(/cwd/);
+    await expect(
+      runVerifierCommand(baseInput(ws, { command: "curl" })),
+    ).rejects.toThrow(/not allowed/);
   });
 
   it("既有目标源码被修改时拒绝执行", async () => {
@@ -173,7 +222,10 @@ describe("runVerifierCommand 边界与基线", () => {
     writeFileSync(ws.targetFile, "changed", "utf8");
     await expect(
       runVerifierCommand(
-        baseInput(ws, { command: process.execPath, args: ["-e", "process.exit(0)"] }),
+        baseInput(ws, {
+          command: process.execPath,
+          args: ["-e", "process.exit(0)"],
+        }),
       ),
     ).rejects.toThrow(/baseline/);
   });
@@ -181,16 +233,27 @@ describe("runVerifierCommand 边界与基线", () => {
   it("runner 目录外出现新的源码时拒绝执行", async () => {
     const ws = makeWorkspace();
     root = ws.root;
-    writeFileSync(join(ws.root, "target", "project", "Shadow.java"), "class Shadow {}", "utf8");
-    await expect(runVerifierCommand(baseInput(ws))).rejects.toThrow(/new source/);
+    writeFileSync(
+      join(ws.root, "target", "project", "Shadow.java"),
+      "class Shadow {}",
+      "utf8",
+    );
+    await expect(runVerifierCommand(baseInput(ws))).rejects.toThrow(
+      /new source/,
+    );
   });
 
   it("允许的命令在运行期间改动受保护文件 → baselineValid:false 证据且不能通过", async () => {
     const ws = makeWorkspace();
     root = ws.root;
     // 白名单内的 node 命令,但运行时把受保护目标文件改掉(spawn 前基线是干净的)。
-    const mutatingNode = ["-e", `require("node:fs").writeFileSync(${JSON.stringify(ws.targetFile)}, "changed")`];
-    const run = runVerifierCommand(baseInput(ws, { command: process.execPath, args: mutatingNode }));
+    const mutatingNode = [
+      "-e",
+      `require("node:fs").writeFileSync(${JSON.stringify(ws.targetFile)}, "changed")`,
+    ];
+    const run = runVerifierCommand(
+      baseInput(ws, { command: process.execPath, args: mutatingNode }),
+    );
     // 执行后复查失败 → runVerifierCommand 以 baseline 错误拒绝(不可产生有效通过)。
     await expect(run).rejects.toThrow(/baseline/);
     const lines = readEvidenceLines(ws.evidencePath);
@@ -220,7 +283,9 @@ describe("runVerifierCommand 中止与 deadline", () => {
     writeFileSync(ws.targetFile, "changed", "utf8");
     const aborted = new AbortController();
     aborted.abort();
-    await expect(runVerifierCommand(baseInput(ws), aborted.signal)).rejects.toMatchObject({
+    await expect(
+      runVerifierCommand(baseInput(ws), aborted.signal),
+    ).rejects.toMatchObject({
       name: "AbortError",
     });
     expect(existsSync(ws.evidencePath)).toBe(false);
@@ -317,10 +382,23 @@ describe("runVerifierCommandCli", () => {
   it("严格校验 side/phase 枚举", async () => {
     const ws = makeWorkspace();
     root = ws.root;
-    const base = ["--cwd", "source/project", "--", process.execPath, "-e", "process.exit(0)"] as const;
-    const badSide = await runVerifierCommandCli(["--side", "nope", "--phase", "compile", ...base], cliEnv(ws));
+    const base = [
+      "--cwd",
+      "source/project",
+      "--",
+      process.execPath,
+      "-e",
+      "process.exit(0)",
+    ] as const;
+    const badSide = await runVerifierCommandCli(
+      ["--side", "nope", "--phase", "compile", ...base],
+      cliEnv(ws),
+    );
     expect(badSide).toBe(1);
-    const badPhase = await runVerifierCommandCli(["--side", "source", "--phase", "nope", ...base], cliEnv(ws));
+    const badPhase = await runVerifierCommandCli(
+      ["--side", "source", "--phase", "nope", ...base],
+      cliEnv(ws),
+    );
     expect(badPhase).toBe(1);
     expect(existsSync(ws.evidencePath)).toBe(false);
   });
@@ -374,7 +452,6 @@ describe("runVerifierCommandCli", () => {
   });
 });
 
-
 // ---- Task 8: 真实本地依赖 fixture(离线可构建)----
 
 function fixtureProjectWorkspace(fixtureDir: string): Ws {
@@ -385,10 +462,22 @@ function fixtureProjectWorkspace(fixtureDir: string): Ws {
   mkdirSync(join(r, "target", "project"), { recursive: true });
   mkdirSync(join(r, "agent"), { recursive: true });
   cpSync(fixtureDir, join(r, "source", "project"), { recursive: true });
-  writeFileSync(join(r, "target", "project", "Placeholder.cs"), "class Placeholder {}", "utf8");
+  writeFileSync(
+    join(r, "target", "project", "Placeholder.cs"),
+    "class Placeholder {}",
+    "utf8",
+  );
   const baselinePath = join(r, "baseline.json");
-  writeWorkspaceBaseline(baselinePath, createWorkspaceBaseline(r, RUNNER_ROOTS, MUTABLE_FILES));
-  return { root: r, baselinePath, evidencePath: join(r, "agent", "commands.jsonl"), targetFile: join(r, "target", "project", "Placeholder.cs") };
+  writeWorkspaceBaseline(
+    baselinePath,
+    createWorkspaceBaseline(r, RUNNER_ROOTS, MUTABLE_FILES),
+  );
+  return {
+    root: r,
+    baselinePath,
+    evidencePath: join(r, "agent", "commands.jsonl"),
+    targetFile: join(r, "target", "project", "Placeholder.cs"),
+  };
 }
 
 function toolAvailable(command: string, args: string[]): boolean {
@@ -406,42 +495,52 @@ const mavenAvailable = toolAvailable(MAVEN, ["-v"]);
 const dotnetAvailable = toolAvailable(DOTNET, ["--version"]);
 
 describe("真实依赖 fixture(离线本地构建)", () => {
-  const mavenFixture = fileURLToPath(new URL("../../../e2e/fixtures/dependencies/maven", import.meta.url));
-  const dotnetFixture = fileURLToPath(new URL("../../../e2e/fixtures/dependencies/dotnet", import.meta.url));
+  const mavenFixture = fileURLToPath(
+    new URL("../../../e2e/fixtures/dependencies/maven", import.meta.url),
+  );
+  const dotnetFixture = fileURLToPath(
+    new URL("../../../e2e/fixtures/dependencies/dotnet", import.meta.url),
+  );
 
-  it.runIf(mavenAvailable)("Maven reactor runner 解析 sibling module 依赖", async () => {
-    const ws = fixtureProjectWorkspace(mavenFixture);
-    root = ws.root;
-    const evidence = await runVerifierCommand(
-      baseInput(ws, {
-        side: "source",
-        phase: "run",
-        cwd: join(ws.root, "source", "project"),
-        command: MAVEN,
-        args: ["-q", "test"],
-        deadlineAt: Date.now() + 180_000,
-      }),
-    );
-    expect(evidence.exitCode).toBe(0);
-    expect(evidence.baselineValid).toBe(true);
-    expect(evidence.timedOut).toBe(false);
-  });
+  it.runIf(mavenAvailable)(
+    "Maven reactor runner 解析 sibling module 依赖",
+    async () => {
+      const ws = fixtureProjectWorkspace(mavenFixture);
+      root = ws.root;
+      const evidence = await runVerifierCommand(
+        baseInput(ws, {
+          side: "source",
+          phase: "run",
+          cwd: join(ws.root, "source", "project"),
+          command: MAVEN,
+          args: ["-q", "test"],
+          deadlineAt: Date.now() + 180_000,
+        }),
+      );
+      expect(evidence.exitCode).toBe(0);
+      expect(evidence.baselineValid).toBe(true);
+      expect(evidence.timedOut).toBe(false);
+    },
+  );
 
-  it.runIf(dotnetAvailable)("ProjectReference runner 解析 sibling 项目依赖", async () => {
-    const ws = fixtureProjectWorkspace(dotnetFixture);
-    root = ws.root;
-    const evidence = await runVerifierCommand(
-      baseInput(ws, {
-        side: "source",
-        phase: "run",
-        cwd: join(ws.root, "source", "project"),
-        command: DOTNET,
-        args: ["build", "--nologo", "-v", "q"],
-        deadlineAt: Date.now() + 180_000,
-      }),
-    );
-    expect(evidence.exitCode).toBe(0);
-    expect(evidence.baselineValid).toBe(true);
-    expect(evidence.timedOut).toBe(false);
-  });
+  it.runIf(dotnetAvailable)(
+    "ProjectReference runner 解析 sibling 项目依赖",
+    async () => {
+      const ws = fixtureProjectWorkspace(dotnetFixture);
+      root = ws.root;
+      const evidence = await runVerifierCommand(
+        baseInput(ws, {
+          side: "source",
+          phase: "run",
+          cwd: join(ws.root, "source", "project"),
+          command: DOTNET,
+          args: ["build", "--nologo", "-v", "q"],
+          deadlineAt: Date.now() + 180_000,
+        }),
+      );
+      expect(evidence.exitCode).toBe(0);
+      expect(evidence.baselineValid).toBe(true);
+      expect(evidence.timedOut).toBe(false);
+    },
+  );
 });

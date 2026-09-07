@@ -18,7 +18,11 @@
 import { readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, resolve } from "node:path";
-import { runSmoke, type SmokeResult, type SmokeTaskInput } from "../src/strategies/differential-smoke/runner.js";
+import {
+  runSmoke,
+  type SmokeResult,
+} from "../src/strategies/differential-smoke/runner.js";
+import type { SmokeTaskInput } from "../src/strategies/differential-smoke/prompts/task.js";
 import type { SmokeReport } from "../src/strategies/differential-smoke/types.js";
 import { DIFFERENTIAL_SMOKE_STRATEGY } from "../src/strategies/differential-smoke/strategy.js";
 import { createLogger, DEFAULT_LOG_DIR } from "../src/logger.js";
@@ -37,12 +41,19 @@ export interface SmokeE2EOptions {
   json: boolean;
 }
 
-const VALUE_FLAGS = new Set(["--fixture-dir", "--api-key", "--timeout-ms", "--strategy"]);
+const VALUE_FLAGS = new Set([
+  "--fixture-dir",
+  "--api-key",
+  "--timeout-ms",
+  "--strategy",
+]);
 const BOOLEAN_FLAGS = new Set(["--json", "--offline-only", "--verify-only"]);
 
 export function parseArgs(argv: string[]): SmokeE2EOptions | { error: string } {
   const opts: SmokeE2EOptions = {
-    fixtureDir: fileURLToPath(new URL("./fixtures/smoke-mime-util", import.meta.url)),
+    fixtureDir: fileURLToPath(
+      new URL("./fixtures/smoke-mime-util", import.meta.url),
+    ),
     timeoutMs: 300_000,
     offlineOnly: false,
     verifyOnly: false,
@@ -53,12 +64,14 @@ export function parseArgs(argv: string[]): SmokeE2EOptions | { error: string } {
     const flag = argv[i];
     if (VALUE_FLAGS.has(flag)) {
       const value = argv[i + 1];
-      if (value === undefined || value.startsWith("--")) return { error: `Missing value for ${flag}.` };
+      if (value === undefined || value.startsWith("--"))
+        return { error: `Missing value for ${flag}.` };
       if (flag === "--fixture-dir") opts.fixtureDir = value;
       else if (flag === "--api-key") opts.apiKey = value;
       else if (flag === "--strategy") opts.strategyId = value;
       else if (flag === "--timeout-ms") {
-        if (!/^\d+$/.test(value)) return { error: `Invalid --timeout-ms: "${value}".` };
+        if (!/^\d+$/.test(value))
+          return { error: `Invalid --timeout-ms: "${value}".` };
         opts.timeoutMs = Number(value);
       }
       i++;
@@ -89,9 +102,13 @@ function errorMessage(error: unknown): string {
 
 /** 人类可读的 SmokeReport 摘要(逐 case 裁决)。 */
 export function summarizeReport(report: SmokeReport): string {
-  const lines = [`converged=${report.converged} steps=${report.steps} rounds=${report.rounds} cases=${report.cases.length}`];
+  const lines = [
+    `converged=${report.converged} steps=${report.steps} rounds=${report.rounds} cases=${report.cases.length}`,
+  ];
   for (const c of report.cases) {
-    lines.push(`  [${c.caseId}] decision=${c.decision} mechanical=${c.mechanical} intent="${c.intent}"`);
+    lines.push(
+      `  [${c.caseId}] decision=${c.decision} mechanical=${c.mechanical} intent="${c.intent}"`,
+    );
   }
   return lines.join("\n");
 }
@@ -99,9 +116,12 @@ export function summarizeReport(report: SmokeReport): string {
 /** verify-only 生产不变量:无目标修复、双侧 runner、非空 cases 与执行证据。 */
 function verifyOnlyViolations(report: SmokeReport): string[] {
   const violations: string[] = [];
-  if (report.rounds !== 0) violations.push(`rounds 必须为 0,实际 ${report.rounds}`);
+  if (report.rounds !== 0)
+    violations.push(`rounds 必须为 0,实际 ${report.rounds}`);
   if (report.targetFiles.length !== 0) {
-    violations.push(`targetFiles 必须为空,实际 ${report.targetFiles.length} 个`);
+    violations.push(
+      `targetFiles 必须为空,实际 ${report.targetFiles.length} 个`,
+    );
   }
   if (report.cases.length === 0) violations.push("cases 不能为空");
   const sides = report.runnerFiles?.map((group) => group.side) ?? [];
@@ -116,7 +136,9 @@ function verifyOnlyViolations(report: SmokeReport): string[] {
 
 /** 完整本地依赖 fixture 根的 verify-only 任务(C# → Java)。 */
 function verifyOnlyJob(): SmokeTaskInput {
-  const dependencies = fileURLToPath(new URL("./fixtures/dependencies", import.meta.url));
+  const dependencies = fileURLToPath(
+    new URL("./fixtures/dependencies", import.meta.url),
+  );
   return {
     requirement:
       "TargetService.value() 必须返回 MathDependency.doubleValue(21) 的语义结果(21 × 2 = 42)。",
@@ -160,7 +182,8 @@ function diagnosticJob(fixtureDir: string): SmokeTaskInput {
 
 export async function runSmokeE2E(argv: string[]): Promise<number> {
   // 统一使用 logger 根据模块位置解析出的仓库根 logs/,避免相对 cwd 产生多个日志目录。
-  if (!process.env.VERIFIER_LOG_DIR) process.env.VERIFIER_LOG_DIR = DEFAULT_LOG_DIR;
+  if (!process.env.VERIFIER_LOG_DIR)
+    process.env.VERIFIER_LOG_DIR = DEFAULT_LOG_DIR;
   const parsed = parseArgs(argv);
   if ("error" in parsed) {
     const logger = createLogger("smoke-e2e");
@@ -179,13 +202,22 @@ export async function runSmokeE2E(argv: string[]): Promise<number> {
   // 自主模式必须有真实 claude:key 预检(无离线回放路径)。
   const apiKey = parsed.apiKey ?? process.env.DEEPSEEK_API_KEY;
   if (parsed.offlineOnly) {
-    logger.info("skipping smoke E2E: autonomous mode requires a real claude session.");
-    if (!parsed.json) console.log("跳过 smoke E2E:自主模式需要真实 claude(--offline-only 仅跳过)。");
+    logger.info(
+      "skipping smoke E2E: autonomous mode requires a real claude session.",
+    );
+    if (!parsed.json)
+      console.log(
+        "跳过 smoke E2E:自主模式需要真实 claude(--offline-only 仅跳过)。",
+      );
     return 0;
   }
   if (!apiKey) {
-    logger.error("smoke E2E requires DEEPSEEK_API_KEY (or --api-key) for the autonomous strategy.");
-    console.error("error: smoke E2E requires DEEPSEEK_API_KEY (or --api-key) for the autonomous strategy.");
+    logger.error(
+      "smoke E2E requires DEEPSEEK_API_KEY (or --api-key) for the autonomous strategy.",
+    );
+    console.error(
+      "error: smoke E2E requires DEEPSEEK_API_KEY (or --api-key) for the autonomous strategy.",
+    );
     return 2;
   }
 
@@ -199,16 +231,13 @@ export async function runSmokeE2E(argv: string[]): Promise<number> {
     logger.info(
       `run smoke ${parsed.strategyId} ${mode} session (fixture=${fixtureDir}, timeoutMs=${parsed.timeoutMs})`,
     );
-    result = await runSmoke(
-      job,
-      {
-        mode,
-        apiKey,
-        timeoutMs: parsed.timeoutMs,
-        keepGeneratedTests: true,
-        maxTurns: 40,
-      },
-    );
+    result = await runSmoke(job, {
+      mode,
+      apiKey,
+      timeoutMs: parsed.timeoutMs,
+      keepGeneratedTests: true,
+      maxTurns: 40,
+    });
   } catch (error) {
     logger.error(`smoke strategy run failed: ${errorMessage(error)}`);
     console.error(`error: smoke strategy run failed: ${errorMessage(error)}`);
@@ -221,7 +250,9 @@ export async function runSmokeE2E(argv: string[]): Promise<number> {
   // 亦如实呈现(真实翻译产物不应有 bug,检出则警告),不据此判失败。
   if (result.status === "error") {
     logger.error(`smoke strategy returned error status: ${result.summary}`);
-    console.error(`error: smoke strategy returned error status: ${truncate(result.summary, 2000)}`);
+    console.error(
+      `error: smoke strategy returned error status: ${truncate(result.summary, 2000)}`,
+    );
     return 1;
   }
   const report = result.report;
@@ -229,23 +260,37 @@ export async function runSmokeE2E(argv: string[]): Promise<number> {
   if (parsed.verifyOnly) {
     const violations = verifyOnlyViolations(report);
     if (violations.length > 0) {
-      logger.error(`verify-only report violated production invariants:\n${violations.join("\n")}`);
-      console.error(`error: verify-only 生产不变量不满足:\n${violations.join("\n")}`);
+      logger.error(
+        `verify-only report violated production invariants:\n${violations.join("\n")}`,
+      );
+      console.error(
+        `error: verify-only 生产不变量不满足:\n${violations.join("\n")}`,
+      );
       return 1;
     }
-    console.log(`Smoke E2E VERIFY-ONLY OK:cases=${report.cases.length}, executions=${report.executions?.length}。`);
+    console.log(
+      `Smoke E2E VERIFY-ONLY OK:cases=${report.cases.length}, executions=${report.executions?.length}。`,
+    );
     return 0;
   }
   const bugCases = report.cases.filter((c) => c.decision === "translation-bug");
-  const allPass = report.converged && report.cases.every((c) => c.mechanical === "pass" && c.decision === "pass");
+  const allPass =
+    report.converged &&
+    report.cases.every((c) => c.mechanical === "pass" && c.decision === "pass");
   if (allPass) {
-    console.log(`Smoke E2E PASS:converged=true,${report.cases.length} 个 case 全 pass。`);
+    console.log(
+      `Smoke E2E PASS:converged=true,${report.cases.length} 个 case 全 pass。`,
+    );
     return 0;
   }
   if (bugCases.length > 0) {
-    logger.warn(`smoke report found ${bugCases.length} translation-bug case(s): ${bugCases.map((c) => c.caseId).join(", ")}`);
+    logger.warn(
+      `smoke report found ${bugCases.length} translation-bug case(s): ${bugCases.map((c) => c.caseId).join(", ")}`,
+    );
   }
-  logger.info(`smoke E2E finished: status=${result.status} summary=${result.summary}`);
+  logger.info(
+    `smoke E2E finished: status=${result.status} summary=${result.summary}`,
+  );
   return 0;
 }
 
