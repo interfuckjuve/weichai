@@ -1,0 +1,404 @@
+{
+  "schemaVersion": "1.0",
+  "targetProject": "fixtures/target-system/commons-fileupload-java-skeleton",
+  "sourceProject": "fixtures/code-corpus/commons-fileupload-python",
+  "labelVisibility": "host-only; never stage this file, control patches, or hidden oracle in the agent workspace",
+  "scoring": {
+    "truePositive": "Agent identifies the seeded target defect with a concrete executed counterexample; the same generated test exposes the mutant but not the corrected control.",
+    "falseNegative": "Known target defect and adequate execution, but no supported diagnosis of that defect.",
+    "falsePositive": "Correct target is blamed for a requirement-compliant behavior or a source-only defect.",
+    "trueNegative": "Correct target is not blamed and required observations are executed.",
+    "unverified": "Timeout, missing dependencies, invalid report, inaccessible API, or insufficient evidence; never count as true negative.",
+    "separateMetrics": ["target defect detection", "source defect identification", "report validity", "execution-backed findings", "control replay", "first counterexample latency", "final report latency"]
+  },
+  "expectedFindingsContract": {
+    "version": "1.0",
+    "visibility": "host-only",
+    "matching": "Match meaning, requirement, attribution and observed counterexample, not exact wording or case IDs. These annotations are evaluation answers, not additional Agent instructions.",
+    "requiredWhen": "always means required for this scenario; other values identify mutually alternative mutations that must be selected and materialized before scoring. Do not demand findings for mutations that were not injected.",
+    "validationStatus": "oracle-confirmed means the fixed witness was checked by the independent Host oracle, not that an Agent detected it. design-only means the mutation and witness still require control validation before scoring.",
+    "evidenceRequired": [
+      "Bind observations to the selected source snapshot, target patch and executed input or external caller.",
+      "Reference actual command IDs and raw output or diagnostics; source inspection alone is a hypothesis, not execution-confirmed detection.",
+      "For defects, replay the same relevant test against the faulty version and corrected control; the control must satisfy the cited requirement.",
+      "For environment failures or timeouts, preserve failing command/deadline evidence and mark unexecuted behavior unverified rather than successful."
+    ],
+    "limitations": "No automatic finding matcher or replay grader is implemented. SmokeReport may express these facts in cases/reasoning/sourceIssues/summary; expectedFindings is not a new production report field. Design-only requirements must be supplied in the corresponding Agent request before that scenario is activated."
+  },
+  "scenarios": [
+    {
+      "id": "multipart-correct",
+      "readiness": "materializer-implemented",
+      "variant": "correct",
+      "symbol": "MultipartStream.readBodyData(OutputStream)",
+      "prerequisite": "Restore skipPreamble from Apache Commons FileUpload 1.5 in all variants.",
+      "sourceFault": null,
+      "targetFault": null,
+      "inputs": [{"bodyHex":""},{"bodyHex":"68656c6c6f"},{"bodyHex":"000a0d7f80ff"},{"bodyRepeat":8193,"byte":97}],
+      "oracle": "Exact byte count and output bytes, final boundary still readable; output remains open.",
+      "expected": "true-negative",
+      "expectedFindings": [],
+      "expectedNonFindings": [
+        "No target defect in byte count, emitted bytes, boundary progression or output ownership for the executed control inputs.",
+        "Do not report eager Python allocation versus streaming Java allocation as a defect under this task's allowed differences."
+      ],
+      "completionCriteria": "Execute the control inputs and preserve their observations. An empty finding list without successful relevant execution is unverified, not a true negative; passing these inputs does not prove the entire project correct."
+    },
+    {
+      "id": "multipart-count",
+      "readiness": "materializer-implemented",
+      "variant": "count-plus-one",
+      "symbol": "MultipartStream.readBodyData(OutputStream)",
+      "sourceFault": null,
+      "targetFault": "Return copied byte count + 1; preserve output bytes.",
+      "inputs": [{"bodyHex":""},{"bodyHex":"68656c6c6f"},{"bodyHex":"000a0d7f80ff","output":"null"}],
+      "oracle": "The return value equals body byte length, including empty bodies and null output.",
+      "expected": "target-defect",
+      "expectedFindings": [{
+        "id": "multipart-count.return-count",
+        "kind": "requirement-violation",
+        "attribution": "target",
+        "requiredWhen": "always",
+        "validationStatus": "oracle-confirmed",
+        "symbol": "MultipartStream.readBodyData(OutputStream)",
+        "requirement": "Return the exact number of body bytes, excluding delimiters, including when output is null.",
+        "finding": "The Java translation adds 1 to the copied byte count, violating the user's exact-count requirement even though the body is copied correctly.",
+        "witness": {
+          "input": {"bodyHex":"68656c6c6f","output":"byte-buffer"},
+          "expected": {"returnCount":5,"outputHex":"68656c6c6f"},
+          "source": {"returnCount":5},
+          "target": {"returnCount":6,"outputHex":"68656c6c6f"}
+        },
+        "evidenceRequired": ["Observe returnCount, not only output bytes; the corrected control returns 5 for the same body."],
+        "mustNotClaim": ["The source is defective.", "The output bytes are corrupted.", "The extra byte represents an allowed delimiter count."]
+      }]
+    },
+    {
+      "id": "multipart-output",
+      "readiness": "materializer-implemented",
+      "variant": "drop-output",
+      "symbol": "MultipartStream.readBodyData(OutputStream)",
+      "sourceFault": null,
+      "targetFault": "Always pass null to Streams.copy; byte count stays correct but output is discarded.",
+      "inputs": [{"bodyHex":"68656c6c6f"},{"bodyHex":"000a0d7f80ff"}],
+      "oracle": "Observe output bytes as well as return value; count-only tests cannot detect this defect.",
+      "expected": "target-defect",
+      "expectedFindings": [{
+        "id": "multipart-output.missing-write",
+        "kind": "requirement-violation",
+        "attribution": "target",
+        "requiredWhen": "always",
+        "validationStatus": "oracle-confirmed",
+        "symbol": "MultipartStream.readBodyData(OutputStream)",
+        "requirement": "Write exactly the body bytes to a non-null caller-provided output stream.",
+        "finding": "The translation discards data by passing null to Streams.copy even when the caller supplies an output stream. Correct return counts do not satisfy the required write side effect.",
+        "witness": {
+          "input": {"bodyHex":"68656c6c6f","output":"byte-buffer"},
+          "expected": {"returnCount":5,"outputHex":"68656c6c6f"},
+          "source": {"returnCount":5,"outputHex":"68656c6c6f"},
+          "target": {"returnCount":5,"outputHex":""}
+        },
+        "evidenceRequired": ["Inspect the non-null output contents; a count-only comparison or a null-output case is insufficient."],
+        "mustNotClaim": ["The return count is wrong.", "Discarding bytes for null output is a defect."]
+      }]
+    },
+    {
+      "id": "multipart-source-only",
+      "readiness": "designed-not-materialized",
+      "symbol": "MultipartStream.readBodyData(OutputStream)",
+      "sourceFault": "Python read_body_data returns len(body)+1.",
+      "targetFault": null,
+      "inputs": [{"bodyHex":"68656c6c6f"}],
+      "oracle": "Both counts must be checked against body length 5, not against each other alone.",
+      "expected": "source-defect-without-target-blame",
+      "expectedFindings": [{
+        "id": "multipart-source-only.return-count",
+        "kind": "requirement-violation",
+        "attribution": "source",
+        "requiredWhen": "always",
+        "validationStatus": "design-only",
+        "symbol": "MultipartStream.read_body_data",
+        "requirement": "The return count must equal the body byte length; the source implementation is evidence, not the authority over this requirement.",
+        "finding": "The source returns one byte too many; the Java target correctly satisfies the user's requirement and must not be changed to reproduce the source defect.",
+        "witness": {"input":{"bodyHex":"68656c6c6f"},"expected":{"returnCount":5},"source":{"returnCount":6},"target":{"returnCount":5}},
+        "evidenceRequired": ["Assert the count against the independently known 5-byte input and identify the source as the defective side."],
+        "mustNotClaim": ["Java has a translation defect because it differs from Python.", "Repair Java to return 6."]
+      }]
+    },
+    {
+      "id": "multipart-common-mode",
+      "readiness": "designed-not-materialized",
+      "symbol": "MultipartStream.readBodyData(OutputStream)",
+      "sourceFault": "Python returns len(body)+1.",
+      "targetFault": "Java returns copied+1.",
+      "inputs": [{"bodyHex":"68656c6c6f"}],
+      "oracle": "Both return 6 for 5 bytes: differential equality must not override the independent requirement.",
+      "expected": "both-sides-defective",
+      "expectedFindings": [{
+        "id": "multipart-common-mode.requirement-count",
+        "kind": "requirement-violation",
+        "attribution": "both",
+        "requiredWhen": "always",
+        "validationStatus": "design-only",
+        "symbol": "MultipartStream.read_body_data and MultipartStream.readBodyData(OutputStream)",
+        "requirement": "Both sides must return the exact body length, independently of differential equality.",
+        "finding": "Both implementations return 6 for a 5-byte body. Their outputs agree but both violate the user's requirement; the target cannot pass merely because it reproduces the source bug.",
+        "witness": {"input":{"bodyHex":"68656c6c6f"},"expected":{"returnCount":5},"source":{"returnCount":6},"target":{"returnCount":6}},
+        "evidenceRequired": ["Show the independent expected length and both observed counts. Separate source and target findings are also acceptable if both are attributed correctly."],
+        "mustNotClaim": ["Both implementations are correct because differential comparison passes.", "Only one side violates the count requirement."]
+      }]
+    },
+    {
+      "id": "multipart-allowed-difference",
+      "readiness": "designed-not-materialized",
+      "symbol": "MultipartStream.readBodyData(OutputStream)",
+      "sourceFault": null,
+      "targetFault": null,
+      "inputs": [{"wire":"--b\r\nX: y\r\n\r\nunterminated"}],
+      "oracle": "Both reject malformed multipart. Eager Python parsing versus lazy Java parsing and exception class names are allowed to differ; bytes accepted as successful body are not.",
+      "expected": "accepted-difference",
+      "expectedFindings": [{
+        "id": "multipart-allowed-difference.exception-semantics",
+        "kind": "accepted-difference",
+        "attribution": "neither",
+        "requiredWhen": "always",
+        "validationStatus": "design-only",
+        "symbol": "MultipartStream parsing flow",
+        "requirement": "Both sides reject malformed input; exception names, messages and eager/lazy rejection timing may differ.",
+        "finding": "If both sides reject the unterminated body, differing exception representation or rejection stage is an allowed difference, not a translation defect.",
+        "witness": {"input":{"wire":"--b\r\nX: y\r\n\r\nunterminated"},"expected":{"source":"reject malformed input","target":"reject malformed input","exceptionNameEqualityRequired":false}},
+        "evidenceRequired": ["Drive the full parse/read flow and observe both rejections. Validate that the corrected control meets this requirement before activating the scenario."],
+        "mustNotClaim": ["Different exception names alone prove a target defect.", "Successfully accepting a truncated body is an allowed difference."]
+      }]
+    },
+    {
+      "id": "multipart-state",
+      "readiness": "designed-not-materialized",
+      "symbol": "MultipartStream.skipPreamble() and readBodyData(OutputStream)",
+      "sourceFault": null,
+      "targetFault": "Do not restore the CRLF delimiter after skipPreamble.",
+      "inputs": [{"preamble":"ignored\r\n","partsHex":["6161","626262",""]}],
+      "oracle": "Iterate all three parts, exact bytes/counts [2,3,0], final readBoundary=false; no delimiter consumption or state leakage.",
+      "expected": "target-defect",
+      "expectedFindings": [{
+        "id": "multipart-state.delimiter-restoration",
+        "kind": "requirement-violation",
+        "attribution": "target",
+        "requiredWhen": "always",
+        "validationStatus": "design-only",
+        "symbol": "MultipartStream.skipPreamble()",
+        "requirement": "Restore the normal CRLF delimiter after the initial boundary and preserve ordered iteration of all subsequent parts.",
+        "finding": "The translation leaves the initial-boundary delimiter active, damaging subsequent body or boundary handling.",
+        "witness": {"input":{"preamble":"ignored\r\n","partsHex":["6161","626262",""]},"expected":{"counts":[2,3,0],"outputPartsHex":["6161","626262",""],"finalReadBoundary":false},"targetFailurePredicate":"At least one emitted body, count, part transition or final boundary differs from the validated control."},
+        "evidenceRequired": ["Execute more than the first part; preserve the first concrete divergence and tie it to missing delimiter restoration."],
+        "mustNotClaim": ["A successful first skipPreamble proves all later boundaries work.", "A specific corrupted byte sequence was observed without execution evidence."]
+      }]
+    },
+    {
+      "id": "multipart-io-failure",
+      "readiness": "designed-not-materialized",
+      "symbol": "MultipartStream.readBodyData(OutputStream)",
+      "sourceFault": null,
+      "targetFault": "Catch output IOException and return a success count.",
+      "inputs": [{"bodyHex":"6162636465","outputFailsAfterBytes":2}],
+      "oracle": "Propagate output failure; never report a successful full write. Test outputs separately from normal bytes.",
+      "expected": "target-defect",
+      "expectedFindings": [{
+        "id": "multipart-io-failure.swallowed-exception",
+        "kind": "requirement-violation",
+        "attribution": "target",
+        "requiredWhen": "always",
+        "validationStatus": "design-only",
+        "symbol": "MultipartStream.readBodyData(OutputStream)",
+        "requirement": "Propagate output I/O failures instead of reporting a successful completed write.",
+        "finding": "The translation catches the output failure and returns normally, concealing an incomplete write from its caller.",
+        "witness": {"input":{"bodyHex":"6162636465","outputFailsAfterBytes":2},"expected":{"outcome":"exception","fullWriteSucceeded":false},"targetFailurePredicate":"The throwing output is exercised but the target returns a success count."},
+        "evidenceRequired": ["Use a deterministic throwing output on both sides and confirm the control propagates the exception; record any partial bytes without assuming rollback."],
+        "mustNotClaim": ["Different exception class names alone are the defect.", "The API guarantees transactional rollback of bytes already written."]
+      }]
+    },
+    {
+      "id": "disk-threshold",
+      "readiness": "designed-not-materialized",
+      "symbol": "DiskFileItem.getOutputStream()",
+      "prerequisite": "Restore getInputStream/get/getOutputStream/write as a fixed control closure before mutating one method.",
+      "sourceFault": null,
+      "targetFault": "Wrong threshold comparison or recreate the deferred stream on every getOutputStream call.",
+      "inputs": [{"threshold":8,"sizes":[0,7,8,9],"repeatedGetOutputStream":true}],
+      "oracle": "Repeated access preserves stream/content; threshold+1 spills, threshold stays in memory. Confirm against upstream tests and source behavior before activation.",
+      "expected": "target-defect",
+      "expectedFindings": [
+        {
+          "id": "disk-threshold.spill-boundary",
+          "kind": "requirement-violation",
+          "attribution": "target",
+          "requiredWhen": "wrong-threshold-comparison",
+          "validationStatus": "design-only",
+          "symbol": "DiskFileItem.getOutputStream()",
+          "requirement": "Content stays in memory through the threshold and spills only when its size exceeds that threshold.",
+          "finding": "The target's threshold comparison selects the wrong backing storage at the threshold boundary.",
+          "witness": {"input":{"threshold":8,"sizes":[0,7,8,9]},"expected":{"inMemory":[true,true,true,false]},"targetFailurePredicate":"Backing storage differs at one of the validated boundary sizes."},
+          "evidenceRequired": ["Run fresh items at each size, record storage state and unchanged bytes, and confirm the source/upstream control agrees with the threshold requirement."],
+          "mustNotClaim": ["Every spill to disk is a defect.", "The stream-recreation mutation is present without observing it."]
+        },
+        {
+          "id": "disk-threshold.stream-recreation",
+          "kind": "requirement-violation",
+          "attribution": "target",
+          "requiredWhen": "recreate-output-stream",
+          "validationStatus": "design-only",
+          "symbol": "DiskFileItem.getOutputStream()",
+          "requirement": "Repeated getOutputStream calls preserve the same item's previously written content.",
+          "finding": "The target recreates its deferred output stream and loses earlier writes when the caller requests the stream again.",
+          "witness": {"input":{"threshold":8,"writesHex":["616263","6465"],"getOutputStreamBeforeEachWrite":true},"expected":{"bodyHex":"6162636465","size":5},"targetFailurePredicate":"Earlier bytes disappear after the second stream acquisition."},
+          "evidenceRequired": ["Write through both acquisitions on one item and read back the combined contents; a single acquisition cannot reveal this defect."],
+          "mustNotClaim": ["A threshold comparison bug is present without a boundary counterexample."]
+        }
+      ]
+    },
+    {
+      "id": "disk-fresh-stream",
+      "readiness": "designed-not-materialized",
+      "symbol": "DiskFileItem.getInputStream() and get()",
+      "sourceFault": null,
+      "targetFault": "Return a previously consumed input stream, or corrupt disk-backed binary data through text decoding.",
+      "inputs": [{"threshold":4,"bodyHex":"0080ff0a0d7f","reads":2}],
+      "oracle": "Two independently opened streams both start at byte zero; get returns the same bytes in memory and disk modes.",
+      "expected": "target-defect",
+      "expectedFindings": [
+        {
+          "id": "disk-fresh-stream.reused-cursor",
+          "kind": "requirement-violation",
+          "attribution": "target",
+          "requiredWhen": "reuse-consumed-input-stream",
+          "validationStatus": "design-only",
+          "symbol": "DiskFileItem.getInputStream()",
+          "requirement": "Every newly requested input stream must read the complete item from byte zero independently of earlier reads.",
+          "finding": "The target returns an already consumed stream, so a second reader cannot retrieve the complete content.",
+          "witness": {"input":{"threshold":4,"bodyHex":"0080ff0a0d7f","reads":2},"expected":{"firstReadHex":"0080ff0a0d7f","secondReadHex":"0080ff0a0d7f"},"targetFailurePredicate":"The second newly acquired stream is exhausted, closed or missing the consumed prefix."},
+          "evidenceRequired": ["Consume the first stream, obtain a second stream and record both read results against the corrected control."],
+          "mustNotClaim": ["The binary decoding mutation is present solely because a reused stream returns no bytes."]
+        },
+        {
+          "id": "disk-fresh-stream.binary-corruption",
+          "kind": "requirement-violation",
+          "attribution": "target",
+          "requiredWhen": "decode-binary-as-text",
+          "validationStatus": "design-only",
+          "symbol": "DiskFileItem.get()",
+          "requirement": "Materialize disk-backed content as the original bytes without text encoding conversion.",
+          "finding": "The target treats binary content as text and changes bytes when reading disk-backed data.",
+          "witness": {"input":{"threshold":4,"bodyHex":"0080ff0a0d7f"},"expected":{"bodyHex":"0080ff0a0d7f"},"targetFailurePredicate":"get() returns bytes different from the written binary payload."},
+          "evidenceRequired": ["Verify disk backing and compare raw bytes; display strings or ASCII-only input are insufficient."],
+          "mustNotClaim": ["A particular replacement character or byte sequence exists before the mutation is materialized and executed."]
+        }
+      ]
+    },
+    {
+      "id": "disk-persist-failure",
+      "readiness": "designed-not-materialized",
+      "symbol": "DiskFileItem.write(File)",
+      "sourceFault": null,
+      "targetFault": "Delete original temporary file before a failed move/copy, or swallow destination errors.",
+      "inputs": [{"threshold":4,"size":9,"destination":"existing-directory"}],
+      "oracle": "Exception is visible and failed persistence does not silently claim success or lose original content; use deterministic failing paths, not OS privilege assumptions.",
+      "expected": "target-defect",
+      "expectedFindings": [
+        {
+          "id": "disk-persist-failure.data-loss",
+          "kind": "requirement-violation",
+          "attribution": "target",
+          "requiredWhen": "delete-before-failed-persist",
+          "validationStatus": "design-only",
+          "symbol": "DiskFileItem.write(File)",
+          "requirement": "A failed persistence attempt must not destroy the original uploaded content.",
+          "finding": "The target deletes the original temporary content before persistence succeeds, making the upload unrecoverable after the destination failure.",
+          "witness": {"input":{"threshold":4,"bodyHex":"616263646566676869","destination":"existing-directory"},"expected":{"outcome":"exception","originalContentHex":"616263646566676869"},"targetFailurePredicate":"After the failed write, the original bytes can no longer be read."},
+          "evidenceRequired": ["Check original content before and after a deterministic destination failure; confirm the corrected control preserves it before activating this requirement."],
+          "mustNotClaim": ["All original FileUpload operations are atomic or rollback-safe.", "An ordinary destination error alone proves data loss."]
+        },
+        {
+          "id": "disk-persist-failure.false-success",
+          "kind": "requirement-violation",
+          "attribution": "target",
+          "requiredWhen": "swallow-destination-error",
+          "validationStatus": "design-only",
+          "symbol": "DiskFileItem.write(File)",
+          "requirement": "A destination write failure must be visible to the caller, not reported as successful persistence.",
+          "finding": "The target returns normally despite failing to persist the upload to the requested destination.",
+          "witness": {"input":{"threshold":4,"size":9,"destination":"existing-directory"},"expected":{"outcome":"exception","destinationWriteSucceeded":false},"targetFailurePredicate":"write() returns normally while the intended destination lacks the uploaded bytes."},
+          "evidenceRequired": ["Observe the call outcome and destination state, and reproduce a control exception under the same conditions."],
+          "mustNotClaim": ["Original content was lost without checking it."]
+        }
+      ]
+    },
+    {
+      "id": "multipart-api-inaccessible",
+      "readiness": "designed-not-materialized",
+      "symbol": "MultipartStream.readBodyData(OutputStream)",
+      "sourceFault": null,
+      "targetFault": "Reduce method visibility to private while retaining internal callers.",
+      "inputs": [{"caller":"separate package using the public API"}],
+      "oracle": "External Java caller must compile. Reflection is not a permitted substitute for public API compatibility.",
+      "expected": "api-contract-defect",
+      "expectedFindings": [{
+        "id": "multipart-api-inaccessible.visibility",
+        "kind": "api-contract-violation",
+        "attribution": "target",
+        "requiredWhen": "always",
+        "validationStatus": "design-only",
+        "symbol": "MultipartStream.readBodyData(OutputStream)",
+        "requirement": "Preserve public access for a normal caller outside org.apache.commons.fileupload.",
+        "finding": "The translation makes readBodyData private, breaking the public API even if internal project compilation or reflection-based invocation succeeds.",
+        "witness": {"input":{"caller":"separate package using the public API"},"expected":{"externalCallerCompiles":true},"targetFailurePredicate":"The unchanged external caller fails compilation specifically because readBodyData is private."},
+        "evidenceRequired": ["Record the external caller source and access diagnostic; the same caller must compile against the corrected public control."],
+        "mustNotClaim": ["Reflection demonstrates public API compatibility.", "A missing dependency diagnostic proves a visibility defect."]
+      }]
+    },
+    {
+      "id": "multipart-missing-dependency",
+      "readiness": "designed-not-materialized",
+      "symbol": "MultipartStream.readBodyData(OutputStream)",
+      "sourceFault": null,
+      "targetFault": null,
+      "environmentFault": "Unavailable Commons IO dependency in an isolated offline Maven repository.",
+      "oracle": "Report infrastructure-unverified, not target behavioral defect or pass. Keep setup cost separate.",
+      "expected": "unverified",
+      "expectedFindings": [{
+        "id": "multipart-missing-dependency.build-blocker",
+        "kind": "verification-blocker",
+        "attribution": "environment",
+        "requiredWhen": "always",
+        "validationStatus": "design-only",
+        "symbol": "Maven dependency resolution for the target project",
+        "requirement": "Do not claim behavioral success or a target semantic defect when required dependencies prevent execution.",
+        "finding": "Commons IO is unavailable in the isolated offline Maven repository, so the target cannot be built and its behavior remains unverified.",
+        "witness": {"input":{"dependency":"commons-io:commons-io:2.11.0","repository":"isolated-offline-missing-dependency"},"expected":{"verificationStatus":"unverified","targetBehaviorVerified":false}},
+        "evidenceRequired": ["Preserve the actual dependency-resolution diagnostic, offline command and isolated repository configuration; do not misattribute an unrelated toolchain error."],
+        "mustNotClaim": ["The translation is behaviorally wrong because dependency resolution failed.", "The target passed business tests."]
+      }]
+    },
+    {
+      "id": "multipart-timeout",
+      "readiness": "designed-not-materialized",
+      "symbol": "MultipartStream.readBodyData(OutputStream)",
+      "sourceFault": null,
+      "targetFault": "Injected nonterminating read path.",
+      "oracle": "Host deadline terminates the process tree and preserves timeout evidence. No counterexample completion means unverified for semantic scoring, with timeout-defect evidence tracked separately.",
+      "expected": "timeout-without-false-pass",
+      "expectedFindings": [{
+        "id": "multipart-timeout.execution-incomplete",
+        "kind": "verification-blocker",
+        "attribution": "target-execution",
+        "requiredWhen": "always",
+        "validationStatus": "design-only",
+        "symbol": "MultipartStream.readBodyData(OutputStream)",
+        "requirement": "Bound verification execution by the Host deadline, retain timeout evidence and never mark unfinished behavior as passed.",
+        "finding": "The target invocation did not complete within the execution deadline; its semantic result is unverified. An injected nonterminating path is suspected only when the target actually ran.",
+        "witness": {"input":{"mutation":"nonterminating-read","budget":"host-configured deadline"},"expected":{"verificationStatus":"unverified","targetTimedOut":true,"processTreeTerminated":true}},
+        "evidenceRequired": ["Differentiate target-process timeout from an Agent API timeout; use Host command and process-cleanup evidence. A killed session may have no Agent report, so score Host timeout handling separately."],
+        "mustNotClaim": ["No mismatch before timeout proves correctness.", "A timeout alone proves an infinite loop rather than slow execution.", "An Agent connection failure is evidence that the target loop executed."]
+      }]
+    }
+  ]
+}
