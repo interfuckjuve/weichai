@@ -1,0 +1,137 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "urn:forexplore:translation-verifier-model-allocation:1.0",
+  "title": "Translation Verifier Model Allocation",
+  "description": "Design-time responsibility record, not an executable routing or security policy. Schema validation does not enforce runtime permissions, evidence integrity, graph dependencies or model quality.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schemaVersion", "status", "scope", "references", "evidenceLimits", "modelProfiles", "stages", "executionPolicy", "repairBoundary", "evaluation"],
+  "properties": {
+    "$schema": { "$ref": "#/definitions/text" },
+    "schemaVersion": { "const": "1.0" },
+    "status": { "const": "proposed-not-implemented" },
+    "scope": { "$ref": "#/definitions/text" },
+    "references": { "$ref": "#/definitions/textList" },
+    "evidenceLimits": { "$ref": "#/definitions/textList" },
+    "modelProfiles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["strong-reasoning", "fast-code"],
+      "properties": {
+        "strong-reasoning": { "$ref": "#/definitions/modelProfile" },
+        "fast-code": { "$ref": "#/definitions/modelProfile" }
+      }
+    },
+    "stages": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/definitions/stage" },
+      "description": "Stage IDs must be unique; dependencies must resolve and form an acyclic graph. These cross-item constraints require a separate semantic check."
+    },
+    "executionPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["parallelPreparation", "reuse", "escalation", "budget", "gate", "independence"],
+      "properties": {
+        "parallelPreparation": { "$ref": "#/definitions/textList" },
+        "reuse": { "$ref": "#/definitions/textList" },
+        "escalation": { "$ref": "#/definitions/textList" },
+        "budget": { "$ref": "#/definitions/textList" },
+        "gate": { "$ref": "#/definitions/textList" },
+        "independence": { "$ref": "#/definitions/textList" }
+      }
+    },
+    "repairBoundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["owner", "modelSelection", "triggers", "constraints", "revalidation"],
+      "properties": {
+        "owner": { "const": "external-translator" },
+        "modelSelection": { "$ref": "#/definitions/text" },
+        "triggers": { "$ref": "#/definitions/textList" },
+        "constraints": { "$ref": "#/definitions/textList" },
+        "revalidation": { "$ref": "#/definitions/textList" }
+      }
+    },
+    "evaluation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["initialScenarios", "extendedScenarios", "metrics", "comparisonRules"],
+      "properties": {
+        "initialScenarios": { "$ref": "#/definitions/textList" },
+        "extendedScenarios": { "$ref": "#/definitions/textList" },
+        "metrics": { "$ref": "#/definitions/textList" },
+        "comparisonRules": { "$ref": "#/definitions/textList" }
+      }
+    }
+  },
+  "definitions": {
+    "text": { "type": "string", "pattern": "\\S" },
+    "textList": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/definitions/text" }
+    },
+    "modelProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selectionStatus", "selectedModel", "experimentalCandidate", "effortPolicy", "selectionCriteria"],
+      "properties": {
+        "selectionStatus": { "const": "pending-benchmark" },
+        "selectedModel": { "type": "null" },
+        "experimentalCandidate": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["model", "requestedEffort", "qualification"],
+              "properties": {
+                "model": { "$ref": "#/definitions/text" },
+                "requestedEffort": { "enum": ["low", "medium", "high"] },
+                "qualification": { "$ref": "#/definitions/text" }
+              }
+            }
+          ]
+        },
+        "effortPolicy": { "$ref": "#/definitions/text" },
+        "selectionCriteria": { "$ref": "#/definitions/textList" }
+      }
+    },
+    "stage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "owner", "modelProfile", "dependsOn", "runWhen", "inputs", "outputs", "allowedActions", "forbiddenActions"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+        "owner": { "enum": ["host", "verification-designer", "test-builder", "semantic-reviewer"] },
+        "modelProfile": { "enum": [null, "strong-reasoning", "fast-code"] },
+        "dependsOn": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" }
+        },
+        "runWhen": { "$ref": "#/definitions/text" },
+        "inputs": { "$ref": "#/definitions/textList" },
+        "outputs": { "$ref": "#/definitions/textList" },
+        "allowedActions": { "$ref": "#/definitions/textList" },
+        "forbiddenActions": { "$ref": "#/definitions/textList" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "owner": { "const": "host" } }, "required": ["owner"] },
+          "then": { "properties": { "modelProfile": { "const": null } } }
+        },
+        {
+          "if": { "properties": { "owner": { "const": "test-builder" } }, "required": ["owner"] },
+          "then": { "properties": { "modelProfile": { "const": "fast-code" } } }
+        },
+        {
+          "if": { "properties": { "owner": { "enum": ["verification-designer", "semantic-reviewer"] } }, "required": ["owner"] },
+          "then": { "properties": { "modelProfile": { "const": "strong-reasoning" } } }
+        }
+      ]
+    }
+  }
+}

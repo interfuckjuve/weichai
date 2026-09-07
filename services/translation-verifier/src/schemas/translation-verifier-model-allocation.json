@@ -1,0 +1,231 @@
+{
+  "$schema": "./translation-verifier-model-allocation.schema.json",
+  "schemaVersion": "1.0",
+  "status": "proposed-not-implemented",
+  "scope": "Translation-verifier responsibility allocation: two model profiles, three isolated model roles, and host-owned execution and release gates. This record does not activate routing, grant permissions, or change production verification contracts.",
+  "references": [
+    "docs/superpowers/translation-verifier-latency-analysis.md",
+    "docs/superpowers/translation-verifier-fileupload-baseline.md",
+    "services/translation-verifier/e2e/fileupload-datasets.json"
+  ],
+  "evidenceLimits": [
+    "The small C# to Java low-effort samples completed faster, but case sets and verification effectiveness were not controlled.",
+    "The FileUpload high-effort request ended with a connection failure before business tests executed; it provides neither a successful latency baseline nor a model defect-detection score.",
+    "Agent session time includes network, orchestration, tools and output generation; it is not a measurement of reasoning time alone.",
+    "No specific model profile or latency target in this proposal has been qualified for production."
+  ],
+  "modelProfiles": {
+    "strong-reasoning": {
+      "selectionStatus": "pending-benchmark",
+      "selectedModel": null,
+      "experimentalCandidate": null,
+      "effortPolicy": "Use a qualified strong model for independent verification design and unresolved semantic interpretation. Allocate higher reasoning effort to complex state, failure, security or data-integrity obligations; do not assume provider effort labels have identical behavior.",
+      "selectionCriteria": [
+        "Low required-obligation omission rate",
+        "Correct requirement-grounded oracles, including source-only and common-mode defects",
+        "Evidence-grounded interpretation without weakening approved obligations",
+        "Completion rate, latency and cost on permitted enterprise providers and held-out tasks"
+      ]
+    },
+    "fast-code": {
+      "selectionStatus": "pending-benchmark",
+      "selectedModel": null,
+      "experimentalCandidate": {
+        "model": "deepseek-v4-flash",
+        "requestedEffort": "low",
+        "qualification": "Experimental starting point only. Existing low-effort measurements do not establish FileUpload effectiveness or production reliability; the client setting alone is not provider acknowledgment."
+      },
+      "effortPolicy": "Start with low effort for bounded test implementation using frozen obligations, known build commands and existing drivers. Skip model calls when approved tests and adapters already suffice.",
+      "selectionCriteria": [
+        "First-attempt executable tests using real project APIs",
+        "Faithful implementation of frozen assertions and required observations",
+        "Few harness repair attempts without modifying production code or validation policy",
+        "Independently replay-confirmed defect detection, completion rate, latency and cost"
+      ]
+    }
+  },
+  "stages": [
+    {
+      "id": "preflight",
+      "owner": "host",
+      "modelProfile": null,
+      "dependsOn": [],
+      "runWhen": "Every request, before expensive model or build work.",
+      "inputs": ["Approved candidate and request", "Language route and required validation policy", "Permissions and total request budget"],
+      "outputs": ["Capability and toolchain availability", "Validated scope and permission boundaries", "Deadline or explicit unavailable-capability result"],
+      "allowedActions": ["Check actual runtimes, dependencies and supported commands", "Fail closed when required capabilities are unavailable"],
+      "forbiddenActions": ["Silently fall back to mocks", "Ask a model to invent missing capabilities", "Treat missing infrastructure as a target behavioral defect"]
+    },
+    {
+      "id": "freeze-context",
+      "owner": "host",
+      "modelProfile": null,
+      "dependsOn": ["preflight"],
+      "runWhen": "After candidate selection; before translation-dependent verification.",
+      "inputs": ["Source implementation bundle", "Original target context", "Requirements, approved decisions and trusted existing tests"],
+      "outputs": ["Versioned and hashed evidence snapshots", "Build facts, legal public API invocation and existing test inventory"],
+      "allowedActions": ["Collect facts using existing project and language tooling", "Use optional bounded fast-model assistance to locate relevant context, then verify cited facts"],
+      "forbiddenActions": ["Treat translator conclusions as independent proof", "Stage benchmark labels or hidden oracles in model workspaces", "Modify user source files"]
+    },
+    {
+      "id": "design-obligations",
+      "owner": "verification-designer",
+      "modelProfile": "strong-reasoning",
+      "dependsOn": ["freeze-context"],
+      "runWhen": "Approved reusable obligations do not cover the current requirements and scope; otherwise reuse the unchanged approved artifact.",
+      "inputs": ["Frozen requirements and human decisions", "Source evidence and original target APIs", "Trusted existing tests and verified engineering facts"],
+      "outputs": ["Proposed obligations with IDs, provenance, required flags, inputs, observations and oracle rules", "Coverage mapping to existing tests", "Ambiguities requiring human confirmation"],
+      "allowedActions": ["Design independent requirements-based assertions", "Identify allowed differences already supported by the contract", "Request clarification for unsupported assumptions"],
+      "forbiddenActions": ["Infer correctness solely from source or generated target outputs", "Use final translation code to weaken core obligations", "Approve its own ambiguous requirement interpretations"]
+    },
+    {
+      "id": "freeze-obligations",
+      "owner": "host",
+      "modelProfile": null,
+      "dependsOn": ["design-obligations"],
+      "runWhen": "Before new test implementation or reuse; unresolved requirement ambiguities block the affected obligations.",
+      "inputs": ["Proposed or reusable verification obligations", "Required human approvals and fixed validation policy"],
+      "outputs": ["Frozen, versioned obligations and approved comparison rules", "Executable checks or explicit gaps requiring test implementation"],
+      "allowedActions": ["Validate structure, references, policy coverage and required approvals", "Bind obligation identity to requirements and evidence snapshots"],
+      "forbiddenActions": ["Treat structural schema validity as proof that an oracle is semantically correct", "Automatically approve model-proposed requirement waivers"]
+    },
+    {
+      "id": "implement-tests",
+      "owner": "test-builder",
+      "modelProfile": "fast-code",
+      "dependsOn": ["freeze-obligations"],
+      "runWhen": "Existing trusted tests and approved drivers do not cover frozen obligations. Source drivers and target API adapters may be prepared alongside translation.",
+      "inputs": ["Frozen obligations and trusted tests", "Approved driver templates and writable test paths", "Verified construction, invocation, dependency and build facts"],
+      "outputs": ["Source and target test drivers", "Obligation-to-test and observation mapping", "Test file hashes and unresolved implementation gaps"],
+      "allowedActions": ["Write new tests only within host-authorized isolated paths", "Repair test syntax, imports and invocation mistakes without weakening assertions"],
+      "forbiddenActions": ["Modify production implementations, existing acceptance tests or build verification policy", "Change expected values to match observed failures", "Skip required cases or swallow exceptions to obtain pass", "Use reflection to bypass required public API access"]
+    },
+    {
+      "id": "instantiate-target",
+      "owner": "host",
+      "modelProfile": null,
+      "dependsOn": ["freeze-context"],
+      "runWhen": "The translator supplies a final patch, and again for each approved repair patch.",
+      "inputs": ["Frozen original target context", "Authorized patch and patch hash"],
+      "outputs": ["Isolated patched target workspace", "Final API and dependency facts or detected incompatibilities"],
+      "allowedActions": ["Apply the patch within approved boundaries", "Check final implementation against frozen API and dependency constraints"],
+      "forbiddenActions": ["Modify the real user workspace during verification", "Reuse target execution evidence for a different patch hash"]
+    },
+    {
+      "id": "execute-evidence",
+      "owner": "host",
+      "modelProfile": null,
+      "dependsOn": ["implement-tests", "instantiate-target"],
+      "runWhen": "Required tests or approved reusable equivalents are ready. Source-only build and execution may be prepared earlier when all source-side inputs are fixed.",
+      "inputs": ["Frozen obligations and mapped tests", "Isolated source and final target workspaces", "Host-approved commands, budgets and input generators"],
+      "outputs": ["Build and test outcomes", "Case-linked raw outputs, command IDs and artifact hashes", "Returned values, output bytes, state transitions, resource and exception observations", "Timeouts and infrastructure failures"],
+      "allowedActions": ["Run existing tests and bounded property or generated-input exploration", "Capture evidence and minimize counterexamples", "Validate generated test mappings and observation completeness", "Terminate process trees at deadlines"],
+      "forbiddenActions": ["Trust model-authored execution claims without actual records", "Run untrusted generated tests outside isolation", "Treat zero process exit status as proof that every required assertion ran"]
+    },
+    {
+      "id": "evaluate-mechanically",
+      "owner": "host",
+      "modelProfile": null,
+      "dependsOn": ["execute-evidence"],
+      "runWhen": "Execution finishes or terminates; preserve partial and missing evidence explicitly.",
+      "inputs": ["Case-linked execution evidence", "Frozen independent assertions and approved comparison rules"],
+      "outputs": ["Per-obligation pass, fail or unverified results", "Source, target and common-mode defect evidence", "Unresolved semantic differences with minimal supporting context"],
+      "allowedActions": ["Recompute assertions and compare approved observable behavior", "Distinguish target defects from source defects and infrastructure failures"],
+      "forbiddenActions": ["Accept model-written mechanical verdicts without recomputation", "Equate source-target equality with requirement correctness", "Classify missing required observations as pass"]
+    },
+    {
+      "id": "interpret-unresolved",
+      "owner": "semantic-reviewer",
+      "modelProfile": "strong-reasoning",
+      "dependsOn": ["evaluate-mechanically"],
+      "runWhen": "A material difference remains unresolved by approved rules. Skip this call when mechanical evidence is decisive.",
+      "inputs": ["Frozen contract and approved differences", "Minimal counterexamples and raw evidence references", "Only the source and target context needed to explain unresolved behavior"],
+      "outputs": ["Evidence-grounded interpretation proposal", "Supplemental test requests or human clarification requests", "Explicit unresolved obligations"],
+      "allowedActions": ["Explain differences in a fresh session separate from translator and test-builder sessions", "Recommend bounded supplemental observations with a preserved audit trail"],
+      "forbiddenActions": ["Override a failed required assertion", "Approve a new semantic waiver", "Modify tests, production code, policy or raw evidence", "Issue the final release decision"]
+    },
+    {
+      "id": "finalize-gate",
+      "owner": "host",
+      "modelProfile": null,
+      "dependsOn": ["evaluate-mechanically", "interpret-unresolved"],
+      "runWhen": "All relevant stage outcomes are known, including skipped optional model calls; failures also produce explicit incomplete results.",
+      "inputs": ["All required obligation outcomes", "Raw execution evidence and integrity checks", "Semantic proposals and any independently approved resolutions"],
+      "outputs": ["Verification report and persisted receipt", "Patch-bound gate result and remaining risks", "Timing, model usage, artifact references and cleanup outcome"],
+      "allowedActions": ["Assemble reports directly from captured artifacts", "Preserve failed and unverified obligations", "Persist the receipt and apply cleanup policy"],
+      "forbiddenActions": ["Let a model author authoritative command records or final gate status", "Release while a required check failed or remains unverified", "Treat explanatory prose as substitute execution evidence"]
+    }
+  ],
+  "executionPolicy": {
+    "parallelPreparation": [
+      "After explicit candidate selection, prepare frozen obligations, source builds and reusable drivers alongside translation.",
+      "Target execution must use the final applied patch; invalidate preparation when its source, requirement, dependency or API assumptions change.",
+      "Run source and target commands concurrently only in independently isolated directories without baseline-scan races."
+    ],
+    "reuse": [
+      "Prefer existing trusted tests and versioned driver templates; sufficient reusable coverage permits zero model calls.",
+      "Bind reusable artifacts to relevant source, dependency, toolchain, runtime, environment, input, requirement, policy and driver hashes; target results additionally require the final patch hash.",
+      "Reject unsupported reuse for uncontrolled time, randomness, network or mutable external state; preserve tenant and repository permission boundaries."
+    ],
+    "escalation": [
+      "Use strong reasoning for complex verification obligations; reserve semantic review for differences unresolved by approved rules.",
+      "If bounded fast-code attempts cannot implement a frozen test correctly, stop automatic fast-code retries and explicitly escalate that task to a strong model or human without expanding permissions.",
+      "Missing dependencies, denied commands and connection failures require infrastructure diagnosis or bounded host retry, not more speculative model reasoning.",
+      "Supplemental tests return through implementation, execution and mechanical evaluation; they cannot remove or weaken frozen obligations."
+    ],
+    "budget": [
+      "The host owns the request deadline, model-call and test-repair limits, exploration limits, cancellation and cleanup reserve. Concrete values remain pending measurement, not promised latency targets.",
+      "All retry and supplemental-evidence paths share the total request budget; stage dependencies describe the nominal acyclic flow rather than an unrestricted agent loop.",
+      "Reuse valid completed artifacts after a retry only when their identities and integrity match; deadline exhaustion preserves unverified obligations.",
+      "Measure complete user waiting time separately from verifier request time and parallel preparation cost; never add nested command time twice."
+    ],
+    "gate": [
+      "Host-owned required checks cannot be removed or downgraded by any model. A failed required check blocks release; any required unverified check also blocks release.",
+      "A confirmed target failure may coexist with incomplete checks; retain both, rather than masking the incomplete checks with an overall failure label.",
+      "Allowed differences must already follow approved rules or receive explicit human approval and a versioned contract update before reevaluation.",
+      "Schema validation confirms document structure only. Runtime permission enforcement, obligation coverage, test integrity, evidence linkage and semantic correctness require separate controls."
+    ],
+    "independence": [
+      "Use three isolated logical roles with two model profiles; do not create one permanent agent per stage or language side.",
+      "Core obligation design must not depend on final translation outputs or translator self-assessment. Source behavior is evidence, not an absolute oracle.",
+      "Using a different model does not by itself establish independence; protect approval, test, implementation and evidence boundaries.",
+      "Keep benchmark labels, control patches and hidden oracles outside model workspaces; evaluate generated tests through independent mutant-control replay."
+    ]
+  },
+  "repairBoundary": {
+    "owner": "external-translator",
+    "modelSelection": "Outside the verifier's two profiles. Select according to defect complexity and the registered translation route; no new translator model is selected by this document.",
+    "triggers": ["Host-confirmed required target failures with actionable compile or behavioral evidence"],
+    "constraints": [
+      "The production verifier remains verify-only and never repairs the target implementation.",
+      "Preserve the existing finite repair limit and current required-unverified stop behavior in adaptation-adapter-v2; changing that behavior requires a separate reviewed contract change.",
+      "The translator cannot modify required checks, independent oracles, evidence, approval rules or test policy."
+    ],
+    "revalidation": [
+      "Bind every repair attempt to a new patch hash and preserve the triggering failure evidence.",
+      "Reuse unchanged source evidence only with matching cache identity; rerun required target checks for the new patch, including affected regressions and newly added inputs."
+    ]
+  },
+  "evaluation": {
+    "initialScenarios": ["multipart-correct", "multipart-count", "multipart-output"],
+    "extendedScenarios": [
+      "multipart-source-only", "multipart-common-mode", "multipart-allowed-difference",
+      "multipart-state", "multipart-io-failure", "disk-threshold", "disk-fresh-stream",
+      "disk-persist-failure", "multipart-api-inaccessible", "multipart-missing-dependency", "multipart-timeout"
+    ],
+    "metrics": [
+      "Required-obligation omission and incorrect-oracle rates",
+      "First-attempt executable tests, assertion fidelity and harness repair count",
+      "Independently replay-confirmed defect detection, false release and false alarm rates",
+      "Unverified rate, report validity and request completion rate",
+      "Request p50/p95 with sample counts, first-defect latency, preparation cost and queue time when measured",
+      "Model calls, tool calls, token usage and per-stage duration with explicit unknown time"
+    ],
+    "comparisonRules": [
+      "Qualify models on fixed independently checked obligations and seeded faults; retain held-out tasks not used for tuning.",
+      "Change one experimental factor at a time: model, requested effort, prompt, host orchestration or agent harness.",
+      "Keep infrastructure failures visible in all-request statistics and separately report semantically evaluable samples.",
+      "Do not interpret the initial three materialized variants as full coverage of the designed dataset; extended scenarios require materialization and independent oracle confirmation first."
+    ]
+  }
+}
