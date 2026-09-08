@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type {
   VerificationResult,
   VerificationStrategy,
@@ -47,6 +47,21 @@ function provider(): VerificationStrategyProvider {
 }
 
 describe("VerificationStrategyFactory", () => {
+  it("resolves providers without constructing strategies and isolates descriptors", () => {
+    const current = provider();
+    const create = vi.fn(current.create);
+    const factory = new VerificationStrategyFactory([{ ...current, create }]);
+    const resolved = factory.resolve(" fixture ");
+    expect(resolved.descriptor).toEqual(descriptor);
+    expect(resolved.create).toBe(create);
+    expect(() => factory.resolve("missing")).toThrow(/unknown/i);
+    expect(create).not.toHaveBeenCalled();
+    resolved.descriptor.displayName = "mutated";
+    resolved.create = () => { throw new Error("mutated"); };
+    expect(factory.resolve("fixture").descriptor).toEqual(descriptor);
+    expect(factory.resolve("fixture").create).toBe(create);
+    expect(factory.list()).toEqual([descriptor]);
+  });
   it("creates a fresh strategy for each request", () => {
     let instances = 0;
     const freshProvider: VerificationStrategyProvider = {

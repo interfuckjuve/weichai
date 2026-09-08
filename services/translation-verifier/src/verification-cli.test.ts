@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createVerificationResult } from "./run-output/create-verification-result.js";
+import { createVerificationResult } from "./schemas/materialize-verification-result.js";
 import {
   type VerificationInput,
   type VerificationStrategyDescriptor,

@@ -38,6 +38,14 @@ export function withRunRecorder<T>(recorder: RunRecorder, work: () => Promise<T>
   return context.run(recorder, work);
 }
 
+export function withStepContext<T>(
+  recorder: RunRecorder,
+  handle: StepHandle | undefined,
+  work: () => T,
+): T {
+  return handle ? stepContext.run({ recorder, handle }, work) : work();
+}
+
 export function currentRunRecorder(): RunRecorder | undefined {
   return context.getStore();
 }
@@ -176,7 +184,7 @@ export function createRunRecorder(options: {
           throw error;
         }
       };
-      return handle ? stepContext.run({ recorder, handle }, runWork) : runWork();
+      return withStepContext(recorder, handle, runWork);
     },
     observe(event) {
       if (finished || truncated) return;

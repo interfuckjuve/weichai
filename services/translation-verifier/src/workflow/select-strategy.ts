@@ -16,13 +16,17 @@ export class VerificationStrategyFactory {
     }
   }
 
-  create(strategyId: string): VerificationStrategy {
+  resolve(strategyId: string): VerificationStrategyProvider {
     const id = requireStrategyId(strategyId);
     const provider = this.#providers.get(id);
     if (provider === undefined) {
       throw new Error(`Unknown verification strategy: ${id}`);
     }
-    return provider.create();
+    return { descriptor: { ...provider.descriptor }, create: provider.create };
+  }
+
+  create(strategyId: string): VerificationStrategy {
+    return this.resolve(strategyId).create();
   }
 
   list(): VerificationStrategyDescriptor[] {

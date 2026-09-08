@@ -10,7 +10,7 @@ import {
   validateResultSchema,
 } from "./compile-schema-validators.js";
 import { assertVerificationInput } from "./validate-verification-input.js";
-import { createVerificationResult } from "../run-output/create-verification-result.js";
+import { createVerificationResult } from "./materialize-verification-result.js";
 
 /** Rebuild the status-free envelope to verify exact input and result bindings. */
 export function assertVerificationResult(

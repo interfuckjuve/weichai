@@ -23,7 +23,7 @@ import { VerificationService } from "./verification-service.js";
 import { VerificationStrategyFactory } from "./workflow/select-strategy.js";
 import { resolveVerificationPolicy } from "./schemas/verification-assessment.js";
 import type { VerificationAssessment } from "./schemas/verification-types.js";
-import { createVerificationResult } from "./run-output/create-verification-result.js";
+import { createVerificationResult } from "./schemas/materialize-verification-result.js";
 import {
   type VerificationInput,
   type VerificationResult,
@@ -62,6 +62,89 @@ afterEach(() => {
 });
 
 describe("VerificationService", () => {
+  it("selects without enumeration and constructs exactly one strategy at dispatch", async () => {
+    const p = provider("first");
+    const create = vi.spyOn(p, "create");
+    const list = vi.spyOn(VerificationStrategyFactory.prototype, "list");
+    const receipt = await serviceWith([p], "first").verifyWithReceipt(input());
+    expect(receipt.resultArtifact).toBeDefined();
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(list).not.toHaveBeenCalled();
+  });
+
+  it.each([new DOMException("caller timeout reason", "TimeoutError"), "stop", 42])(
+    "classifies caller cancellation before workspace failure with reason %s",
+    async (reason) => {
+      const controller = new AbortController();
+      controller.abort(reason);
+      writeFileSync(workspaceRoot, "blocked");
+      const p = provider("first");
+      const create = vi.spyOn(p, "create");
+      const receipt = await serviceWith([p], "first").verifyWithReceipt(input(), {}, controller.signal);
+      expect(receipt.result).toMatchObject({
+        executionStatus: "cancelled",
+        problems: [{ code: "cancelled" }],
+      });
+      expect(receipt.resultArtifact).toBeDefined();
+      expect(create).not.toHaveBeenCalled();
+      expect(JSON.parse(readFileSync(join(artifactRoot, receipt.resultArtifact!.path), "utf8"))).toEqual(receipt.result);
+    },
+  );
+  it("includes canonical materialization in the existing execution timing scope", async () => {
+    const recorders = vi.spyOn(recording, "createRunRecorder");
+    const resultNow = vi.fn(() => {
+      expect(recorders.mock.results[0]!.value.snapshot().stages.find(
+        (step: { name: string }) => step.name === "execute-strategy",
+      )).toMatchObject({ state: "running" });
+      return now;
+    });
+    await serviceWith([provider("first")], "first", { now: resultNow }).verifyWithReceipt(input());
+    expect(resultNow).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["no_bug_observed", "no_bug_observed"],
+    ["bug_found", "no_bug_observed"],
+    ["no_bug_observed", "bug_found"],
+    ["bug_found", "bug_found"],
+  ] as const)("preserves source %s and target %s when the caller cancels with TimeoutError", async (sourceAssessment, targetAssessment) => {
+    const value = input();
+    value.verificationPolicy = {
+      referenceDecision: "accepted",
+      reason: "Reviewed reference snapshot",
+      testBasis: "Both implementations return one",
+    };
+    const controller = new AbortController();
+    const resultNow = vi.fn(() => now);
+    const service = serviceWith([provider("first", async (_value, context) => {
+      const artifact = await evidence(context);
+      controller.abort(new DOMException("caller stopped", "TimeoutError"));
+      return {
+        mode: "differential",
+        referenceDecision: "accepted",
+        referenceReason: value.verificationPolicy!.reason,
+        executionStatus: "completed",
+        sourceAssessment,
+        targetAssessment,
+        problems: [],
+        summary: "Independent findings",
+        issues: [{ id: "finding", kind: "behavior", message: "Observed result", evidenceArtifactIds: [artifact.id] }],
+        artifacts: [artifact],
+        strategyReport: { observed: true },
+      };
+    })], "first", { now: resultNow });
+    const receipt = await service.verifyWithReceipt(value, {}, controller.signal);
+    expect(resultNow).toHaveBeenCalledTimes(1);
+    expect(receipt.result).toMatchObject({
+      executionStatus: "cancelled",
+      sourceAssessment,
+      targetAssessment,
+      problems: [{ code: "cancelled", message: "caller stopped" }],
+    });
+    expect(receipt.result.issues[0]!.evidenceArtifactIds).toEqual([receipt.result.artifacts[0]!.id]);
+    expect(JSON.parse(readFileSync(join(artifactRoot, receipt.resultArtifact!.path), "utf8"))).toEqual(receipt.result);
+  });
+
   it("runs a verify-only no-Agent provider with arbitrary repeated steps", async () => {
     const recorders = vi.spyOn(recording, "createRunRecorder");
     const service = serviceWith(
@@ -128,6 +211,12 @@ describe("VerificationService", () => {
       ),
     ).toBe(true);
     expect(run.diagnostics).toEqual([]);
+    const execute = run.stages.find((step: { name: string }) => step.name === "execute-strategy")!;
+    const prepare = run.stages.find((step: { name: string }) => step.name === "prepare-strategy-workspace")!;
+    const strategySteps = run.stages.filter((step: { scope: string }) => step.scope === "strategy");
+    expect(prepare.parentId).toBe(execute.id);
+    expect(strategySteps[0].parentId).toBe(execute.id);
+    expect(strategySteps.slice(1).every((step: { parentId?: string }) => step.parentId === strategySteps[0].id)).toBe(true);
   });
 
   it.each(["ordinary", "timeout", "abort"])(
@@ -843,6 +932,7 @@ describe("VerificationService", () => {
     "keeps cooperative findings after %s without passing an interrupted run",
     async (origin) => {
       const controller = new AbortController();
+      const resultNow = vi.fn(() => now);
       const timeoutController = new AbortController();
       vi.spyOn(AbortSignal, "timeout").mockReturnValue(
         timeoutController.signal,
@@ -876,12 +966,14 @@ describe("VerificationService", () => {
           }),
         ],
         "first",
+        { now: resultNow },
       );
       const receipt = await service.verifyWithReceipt(
         input(),
         {},
         controller.signal,
       );
+      expect(resultNow).toHaveBeenCalledTimes(1);
       expect(receipt.result).toMatchObject({
         executionStatus: origin === "timeout" ? "partial" : "cancelled",
         targetAssessment: "no_bug_observed",
@@ -1058,7 +1150,7 @@ describe("VerificationService", () => {
 function serviceWith(
   providers: VerificationStrategyProvider[],
   defaultStrategyId: string,
-  options: { timeoutMs?: number } = {},
+  options: { timeoutMs?: number; now?: () => string } = {},
 ): VerificationService {
   return new VerificationService({
     factory: new VerificationStrategyFactory(providers),

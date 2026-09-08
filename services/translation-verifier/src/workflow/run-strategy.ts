@@ -1,21 +1,77 @@
-import type { VerificationStrategyFactory } from "./select-strategy.js";
+import { markVerificationPhase } from "../run-output/measure-legacy-run.js";
+import { VerificationArtifactPersistenceError } from "../run-output/verification-artifact-store.js";
+import { normalizeVerificationStrategyOutput } from "../schemas/materialize-verification-result.js";
+import { assertArtifactsMatch } from "../schemas/validate-verification-artifacts.js";
+import { assertSchema, validateStrategyOutputSchema } from "../schemas/compile-schema-validators.js";
+import { assertVerificationAssessment } from "../schemas/verification-assessment.js";
 import type {
   VerificationInput,
   VerificationStrategyContext,
   VerificationStrategyOutput,
+  VerificationStrategyProvider,
+  VerificationArtifact,
 } from "../schemas/verification-types.js";
 
+export type StrategyExecutionOutcome =
+  | { kind: "output"; output: VerificationStrategyOutput }
+  | { kind: "failure"; error: unknown; discardArtifacts: boolean };
+
 export async function runStrategy(
-  factory: VerificationStrategyFactory,
-  strategyId: string,
+  provider: VerificationStrategyProvider,
   input: VerificationInput,
   context: VerificationStrategyContext,
   signal: AbortSignal,
-): Promise<VerificationStrategyOutput> {
-  signal.throwIfAborted();
-  const strategy = factory.create(strategyId);
-  signal.throwIfAborted();
-  return waitForStrategy(strategy.verify(input, context, signal), signal);
+  writtenArtifacts: () => VerificationArtifact[],
+  callerSignal?: AbortSignal,
+): Promise<StrategyExecutionOutcome> {
+  try {
+    signal.throwIfAborted();
+    const strategy = provider.create();
+    signal.throwIfAborted();
+    const rawOutput = await waitForStrategy(strategy.verify(input, context, signal), signal);
+    markVerificationPhase("result-normalization-and-artifact-validation");
+    const output = normalizeVerificationStrategyOutput(input, rawOutput);
+    if (signal.aborted || callerSignal?.aborted) {
+      const cancelled = callerSignal?.aborted === true;
+      const code = cancelled ? "cancelled" : "agent_timeout";
+      output.executionStatus = cancelled
+        ? "cancelled"
+        : output.executionStatus === "completed" ? "partial" : output.executionStatus;
+      if (!output.problems.some((problem) => problem.code === code)) {
+        output.problems.push({
+          code,
+          message: cancelled ? callerCancellation(callerSignal).message : "Verification strategy timed out",
+        });
+      }
+      assertSchema(validateStrategyOutputSchema, output, "Verification result");
+      assertVerificationAssessment(output, input);
+    }
+    assertArtifactsMatch(output.artifacts, writtenArtifacts());
+    return { kind: "output", output };
+  } catch (error) {
+    return strategyExecutionFailure(error, callerSignal);
+  }
+}
+
+/** Also used for Host failures before a strategy workspace is available. */
+export function strategyExecutionFailure(
+  error: unknown,
+  callerSignal?: AbortSignal,
+): Extract<StrategyExecutionOutcome, { kind: "failure" }> {
+  return {
+    kind: "failure",
+    error: callerSignal?.aborted ? callerCancellation(callerSignal) : error,
+    discardArtifacts: error instanceof VerificationArtifactPersistenceError,
+  };
+}
+
+function callerCancellation(signal: AbortSignal): DOMException {
+  return new DOMException(
+    signal.reason instanceof Error && signal.reason.message
+      ? signal.reason.message
+      : "Verification cancelled by caller",
+    "AbortError",
+  );
 }
 
 function waitForStrategy<T>(

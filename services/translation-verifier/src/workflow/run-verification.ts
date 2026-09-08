@@ -6,11 +6,12 @@ import {
 import {
   createRunRecorder,
   stepFailureState,
+  withStepContext,
   type StepHandle,
 } from "../run-output/record-run.js";
 import { validateInput } from "./validate-input.js";
 import { createVerificationWorkspace } from "./prepare-strategy-workspace.js";
-import { runStrategy } from "./run-strategy.js";
+import { runStrategy, strategyExecutionFailure } from "./run-strategy.js";
 import {
   createVerificationArtifactStore,
   VerificationArtifactPersistenceError,
@@ -19,11 +20,8 @@ import {
 import { saveReport } from "./save-report.js";
 import type { VerificationServiceConfiguration } from "../verification-service.js";
 import { assertVerificationReceipt } from "../schemas/validate-verification-receipt.js";
-import {
-  createVerificationResult,
-  createUnverifiedResult,
-} from "../run-output/create-verification-result.js";
-import { assertArtifactsMatch } from "../schemas/validate-verification-artifacts.js";
+import { createVerificationResult } from "../schemas/materialize-verification-result.js";
+import { createFailureResult } from "../run-output/create-failure-result.js";
 import type {
   VerificationInput,
   VerificationReceipt,
@@ -40,10 +38,7 @@ export async function runVerification(
   const recorder = createRunRecorder({ runId: randomUUID() });
   return withVerificationTimingRecorder(recorder, async () => {
     let store:
-      | Pick<
-          VerificationArtifactStore,
-          "writtenArtifacts" | "writeFrameworkResult" | "cleanup"
-        >
+      | Pick<VerificationArtifactStore, "writtenArtifacts" | "writeFrameworkResult" | "cleanup">
       | undefined;
     let receiptPersisted = false;
     let failure: unknown;
@@ -51,156 +46,87 @@ export async function runVerification(
     let saveFailure: unknown;
     try {
       const strategyId = options.strategyId ?? config.defaultStrategyId;
-      const descriptor = await recorder.measureStep(
+      const provider = await recorder.measureStep(
         "validate-input",
         { scope: "framework" },
         () => validateInput(input, config.factory, strategyId),
       );
-      store = createVerificationArtifactStore({
-        artifactRoot: config.artifactRoot,
-        durablePrefix: `attempt-${randomUUID()}`,
-      });
-      let artifactFailure = false;
-      let normalizedFailure: VerificationResult | undefined;
-      const result = await recorder
-        .measureStep("execute-strategy", { scope: "framework" }, async () => {
+      const executeHandle = recorder.startStep("execute-strategy", { scope: "framework" });
+      const outcome = await withStepContext(recorder, executeHandle, async () => {
+        try {
           markVerificationPhase("workspace-creation");
           const workspace = await recorder.measureStep(
             "prepare-strategy-workspace",
             { scope: "framework" },
-            () =>
-              createVerificationWorkspace(input, {
-                workspaceRoot: config.workspaceRoot,
-                artifactRoot: config.artifactRoot,
-                keepWorkspace: options.keepWorkspace,
-              }),
+            () => createVerificationWorkspace(input, {
+              workspaceRoot: config.workspaceRoot,
+              artifactRoot: config.artifactRoot,
+              keepWorkspace: options.keepWorkspace,
+            }),
           );
           store = workspace;
           markVerificationPhase("deadline-and-strategy-dispatch");
           const timeoutSignal = AbortSignal.timeout(config.timeoutMs);
-          const combinedSignal =
-            signal === undefined
-              ? timeoutSignal
-              : AbortSignal.any([signal, timeoutSignal]);
+          const combinedSignal = signal === undefined
+            ? timeoutSignal
+            : AbortSignal.any([signal, timeoutSignal]);
           workspace.context.deadlineAt = Date.now() + config.timeoutMs;
           workspace.context.measureStep = (name, work) =>
             recorder.measureStep(name, { scope: "strategy" }, work);
-          try {
-            const output = await runStrategy(
-              config.factory,
-              strategyId,
-              input,
-              workspace.context,
-              combinedSignal,
-            );
-            markVerificationPhase(
-              "result-normalization-and-artifact-validation",
-            );
-            let normalized = createVerificationResult(
-              input,
-              descriptor,
-              output,
-              config.now,
-            );
-            if (combinedSignal.aborted) {
-              const cancelled = signal?.aborted === true;
-              const code = cancelled ? "cancelled" : "agent_timeout";
-              const interrupted = {
-                ...normalized,
-                executionStatus: cancelled
-                  ? ("cancelled" as const)
-                  : normalized.executionStatus === "completed"
-                    ? ("partial" as const)
-                    : normalized.executionStatus,
-                problems: normalized.problems.some(
-                  (problem) => problem.code === code,
-                )
-                  ? normalized.problems
-                  : [
-                      ...normalized.problems,
-                      {
-                        code,
-                        message: cancelled
-                          ? signal.reason instanceof Error
-                            ? signal.reason.message ||
-                              "Verification cancelled by caller"
-                            : "Verification cancelled by caller"
-                          : "Verification strategy timed out",
-                      } as const,
-                    ],
-              };
-              normalized = createVerificationResult(
-                input,
-                descriptor,
-                interrupted,
-                config.now,
-              );
-            }
-            assertArtifactsMatch(
-              normalized.artifacts,
-              workspace.writtenArtifacts(),
-            );
-            return normalized;
-          } catch (error) {
-            const failureError = signal?.aborted
-              ? new DOMException(
-                  signal.reason instanceof Error
-                    ? signal.reason.message
-                    : "Verification cancelled by caller",
-                  "AbortError",
-                )
-              : error;
-            artifactFailure =
-              error instanceof VerificationArtifactPersistenceError;
-            normalizedFailure = createUnverifiedResult(
-              input,
-              descriptor,
-              failureError,
-              artifactFailure ? [] : workspace.writtenArtifacts(),
-              config.now,
-              artifactFailure,
-            );
-            throw error;
-          }
-        })
-        .catch((error: unknown) => {
-          // Valid requests still receive a Host report when workspace setup or dispatch fails.
-          return (
-            normalizedFailure ??
-            createUnverifiedResult(
-              input,
-              descriptor,
-              error,
-              store?.writtenArtifacts() ?? [],
-              config.now,
-            )
+          return await runStrategy(
+            provider,
+            input,
+            workspace.context,
+            combinedSignal,
+            workspace.writtenArtifacts,
+            signal,
           );
-        });
+        } catch (error) {
+          return strategyExecutionFailure(error, signal);
+        }
+      });
+      // Valid requests still receive an isolated Host report if workspace preparation failed.
+      store ??= createVerificationArtifactStore({
+        artifactRoot: config.artifactRoot,
+        durablePrefix: `attempt-${randomUUID()}`,
+      });
+      const { descriptor } = provider;
+      let result: VerificationResult;
+      try {
+        result = outcome.kind === "output"
+          ? createVerificationResult(input, descriptor, outcome.output, config.now)
+          : createFailureResult(
+              input,
+              descriptor,
+              outcome.error,
+              outcome.discardArtifacts ? [] : store.writtenArtifacts(),
+              config.now,
+              outcome.discardArtifacts,
+            );
+      } catch (error) {
+        recorder.endStep(executeHandle, stepFailureState(error), error);
+        throw error;
+      }
+      recorder.endStep(
+        executeHandle,
+        outcome.kind === "failure" ? stepFailureState(outcome.error) : "completed",
+        outcome.kind === "failure" ? outcome.error : undefined,
+      );
       saveHandle = recorder.startStep("save-report", { scope: "framework" });
-      if (artifactFailure) {
+      if (outcome.kind === "failure" && outcome.discardArtifacts) {
         saveFailure = "Required artifact persistence failed.";
         return assertVerificationReceipt({ result }, input, descriptor);
       }
       try {
-        const receipt = saveReport(result, input, descriptor, store!);
+        const receipt = saveReport(result, input, descriptor, store);
         receiptPersisted = true;
         return receipt;
       } catch (error) {
         saveFailure = error;
-        if (!(error instanceof VerificationArtifactPersistenceError))
-          throw error;
+        if (!(error instanceof VerificationArtifactPersistenceError)) throw error;
         // No retry: return the failure without inventing a canonical artifact.
         return assertVerificationReceipt(
-          {
-            result: createUnverifiedResult(
-              input,
-              descriptor,
-              error,
-              [],
-              config.now,
-              true,
-            ),
-          },
+          { result: createFailureResult(input, descriptor, error, [], config.now, true) },
           input,
           descriptor,
         );
@@ -227,9 +153,7 @@ export async function runVerification(
       } finally {
         recorder.endStep(
           saveHandle,
-          saveFailure === undefined
-            ? "completed"
-            : stepFailureState(saveFailure),
+          saveFailure === undefined ? "completed" : stepFailureState(saveFailure),
           saveFailure,
         );
         recorder.finish();

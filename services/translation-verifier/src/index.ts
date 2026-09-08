@@ -10,7 +10,7 @@ export { assertVerificationInput } from "./schemas/validate-verification-input.j
 export { assertVerificationResult } from "./schemas/validate-verification-result.js";
 export { assertVerificationReceipt } from "./schemas/validate-verification-receipt.js";
 export { assertVerificationRun } from "./schemas/validate-verification-run.js";
-export { createVerificationResult } from "./run-output/create-verification-result.js";
+export { createVerificationResult } from "./schemas/materialize-verification-result.js";
 export {
   validateRunSchema,
   validateRunEventSchema,

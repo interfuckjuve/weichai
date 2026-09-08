@@ -6,7 +6,7 @@ import {
   createRunRecorder,
   currentRunRecorder,
 } from "../src/run-output/record-run.js";
-import { createVerificationResult } from "../src/run-output/create-verification-result.js";
+import { createVerificationResult } from "../src/schemas/materialize-verification-result.js";
 import { DIFFERENTIAL_SMOKE_STRATEGY } from "../src/strategies/smoke-differential/strategy.js";
 import { writeSmokeTiming } from "./write-smoke-timing.js";
 import {

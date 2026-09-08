@@ -26,7 +26,7 @@ import {
 import { assertVerificationInput } from "./validate-verification-input.js";
 import { assertVerificationReceipt } from "./validate-verification-receipt.js";
 import { assertVerificationResult } from "./validate-verification-result.js";
-import { createVerificationResult } from "../run-output/create-verification-result.js";
+import { createVerificationResult } from "./materialize-verification-result.js";
 import {
   type VerificationInput,
   type VerificationStrategyDescriptor,
