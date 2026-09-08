@@ -29,6 +29,8 @@ import {
   DifferentialSmokeStrategy,
   type RunSmokeImpl,
 } from "./strategy.js";
+import * as smokePreflight from "./prepare-smoke-input.js";
+import * as smokeWorkspace from "./prepare-projects.js";
 import type {
   VerificationArtifact,
   VerificationInput,
@@ -47,6 +49,46 @@ afterEach(() => {
 });
 
 describe("DifferentialSmokeStrategy", () => {
+  it.each([
+    [10_000, 5000],
+    [500, 1500],
+    [undefined, 5000],
+  ] as const)(
+    "propagates the absolute Host/session deadline unchanged (timeout=%s)",
+    async (timeoutMs, expected) => {
+      const clock = vi.spyOn(Date, "now").mockReturnValue(1000);
+      const workspace = context();
+      workspace.deadlineAt = 5000;
+      const spawnClaude = vi.fn(async (_args, env, _timeout, options) => {
+        expect(options.deadlineAt).toBe(expected);
+        expect(env.VERIFIER_DEADLINE_AT).toBe(String(expected));
+        writeFileSync(
+          join(options.cwd, "report.json"),
+          JSON.stringify(validSmokeReport()),
+        );
+        writeFileSync(
+          join(options.cwd, "commands.jsonl"),
+          validCommandEvidence()
+            .map((entry) => JSON.stringify(entry))
+            .join("\n"),
+        );
+        return { stdout: "done", exitCode: 0 };
+      });
+      const runSmokeImpl: RunSmokeImpl = async (job, options, signal) => {
+        expect(options.deadlineAt).toBe(expected);
+        clock.mockReturnValue(1200);
+        return runSmoke(job, options, signal);
+      };
+      const result = await new DifferentialSmokeStrategy({
+        timeoutMs,
+        runSmokeImpl,
+        spawnClaude,
+        apiKey: "test",
+      }).verify(input(), workspace);
+      expect(result.executionStatus).toBe("completed");
+      expect(spawnClaude).toHaveBeenCalledOnce();
+    },
+  );
   it("keeps a caller-owned wrapper occurrence running while recording private smoke steps", async () => {
     const recorder = recording.createRunRecorder({
       runId: "legacy-strategy-caller",
@@ -57,7 +99,6 @@ describe("DifferentialSmokeStrategy", () => {
         ...validAssessment(),
         summary: "same",
         durationMs: 0,
-        generatedTestsKept: false,
         report: validSmokeReport(),
       }),
     });
@@ -85,7 +126,6 @@ describe("DifferentialSmokeStrategy", () => {
         summary: "Report absent",
         report: null,
         durationMs: 0,
-        generatedTestsKept: false,
       }),
     }).verify(input(), workspace);
     expect(result.strategyReport).toBeNull();
@@ -132,7 +172,6 @@ describe("DifferentialSmokeStrategy", () => {
           report,
           bugCases: [],
           durationMs: 0,
-          generatedTestsKept: false,
         }),
       }).verify(input(), context());
       expect(result).toMatchObject({
@@ -151,6 +190,11 @@ describe("DifferentialSmokeStrategy", () => {
   );
 
   it("maps the existing smoke result into strategy output", async () => {
+    const prepare = vi.spyOn(smokePreflight, "prepareSmokeInput");
+    const prepareLayout = vi.spyOn(
+      smokeWorkspace,
+      "prepareCallerOwnedWorkspace",
+    );
     const report = validSmokeReport({
       cases: [validSmokeCase({ targetAssessment: "bug_found" })],
     });
@@ -160,7 +204,6 @@ describe("DifferentialSmokeStrategy", () => {
           ...validAssessment("bug_found"),
           summary: "1/1 translation bug",
           durationMs: 10,
-          generatedTestsKept: false,
           report,
           bugCases: report.cases,
         }) satisfies SmokeResult,
@@ -173,6 +216,18 @@ describe("DifferentialSmokeStrategy", () => {
     const result = await strategy.verify(input(), workspace);
 
     expect(fakeRunSmoke).toHaveBeenCalledOnce();
+    expect(prepare).toHaveBeenCalledOnce();
+    expect(prepareLayout).toHaveBeenCalledOnce();
+    const preflight = prepare.mock.results[0].value;
+    if (!preflight.applicable) throw new Error("Expected prepared job");
+    expect(fakeRunSmoke).toHaveBeenCalledWith(
+      preflight.job,
+      expect.objectContaining({ layout: prepareLayout.mock.results[0].value }),
+      undefined,
+    );
+    const call = vi.mocked<RunSmokeImpl>(fakeRunSmoke).mock.calls[0];
+    expect(call[0]).toBe(preflight.job);
+    expect(call[1].layout).toBe(prepareLayout.mock.results[0].value);
     expect(result).not.toHaveProperty("strategyId");
     expect(result.targetAssessment).toBe("bug_found");
     expect(result.issues[0]).toMatchObject({
@@ -202,7 +257,6 @@ describe("DifferentialSmokeStrategy", () => {
           ...validAssessment(),
           summary: "1/1 case passed",
           durationMs: 10,
-          generatedTestsKept: false,
           passRate: 1,
           report,
           bugCases: [],
@@ -229,7 +283,6 @@ describe("DifferentialSmokeStrategy", () => {
 
           summary: "report.json is invalid",
           durationMs: 10,
-          generatedTestsKept: false,
           report: null,
           errorReason: "invalid-report" as const,
         }) satisfies SmokeResult,
@@ -310,7 +363,6 @@ describe("DifferentialSmokeStrategy", () => {
           ...validAssessment(),
           summary: "ok",
           durationMs: 1,
-          generatedTestsKept: false,
           report: validSmokeReport(),
           bugCases: [],
         }) satisfies SmokeResult,
@@ -340,7 +392,6 @@ describe("DifferentialSmokeStrategy", () => {
           ...validAssessment(),
           summary: "ok",
           durationMs: 10,
-          generatedTestsKept: false,
           report: validSmokeReport(),
           bugCases: [],
         }) satisfies SmokeResult,
@@ -373,18 +424,19 @@ describe("DifferentialSmokeStrategy", () => {
         }),
       }),
       expect.objectContaining({
-        mode: "verify-only",
-        workspaceDir: workspace.workspace.strategyRoot,
-        executionRoot: workspace.workspace.root,
-        baselinePath: join(workspace.workspace.root, "baseline.json"),
-        commandEvidencePath: join(
-          workspace.workspace.strategyRoot,
-          "commands.jsonl",
-        ),
-        runnerRoots: ["source/.forexplore-tests", "target/.forexplore-tests"],
+        layout: expect.objectContaining({
+          agentDir: workspace.workspace.strategyRoot,
+          executionRoot: workspace.workspace.root,
+          baselinePath: join(workspace.workspace.root, "baseline.json"),
+          evidencePath: join(
+            workspace.workspace.strategyRoot,
+            "commands.jsonl",
+          ),
+          runnerRoots: ["source/.forexplore-tests", "target/.forexplore-tests"],
+        }),
+        deadlineAt: expect.any(Number),
         apiKey: "k",
         model: "m",
-        timeoutMs: 123,
       }),
       undefined,
     );
@@ -459,7 +511,10 @@ describe("createDefaultVerificationService", () => {
         if (outcome === "cancelled") {
           controller.abort(cancellation);
           await expect(pending).resolves.toMatchObject({
-            result: { executionStatus: "cancelled", targetAssessment: "inconclusive" },
+            result: {
+              executionStatus: "cancelled",
+              targetAssessment: "inconclusive",
+            },
           });
         } else {
           release();
@@ -689,11 +744,9 @@ describe("createDefaultVerificationService", () => {
         "prepare-projects-and-baseline",
         "build-smoke-input",
         "run-smoke",
-        "prepare-smoke-layout",
         "build-test-task",
         "run-agent-session",
         "evaluate-evidence",
-        "cleanup-smoke-workspace",
         "persist-strategy-report",
         "map-strategy-result",
       ];

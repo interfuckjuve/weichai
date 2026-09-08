@@ -11,7 +11,7 @@
  */
 import type { VerificationInput } from "../../schemas/verification-types.js";
 import { resolveVerificationPolicy } from "../../schemas/verification-assessment.js";
-import type { SmokeMode, SmokeReport } from "./differential-test-types.js";
+import type { SmokeReport } from "./differential-test-types.js";
 
 /** 大小/数量上限(防御 agent 超限输出)。 */
 const MAX_CASES = 200;
@@ -377,13 +377,9 @@ function assertExecutions(raw: unknown, path: string): void {
   });
 }
 
-/**
- * 深度校验 SmokeReport 全部字段。mode 省略时不做 verify-only 约束
- * (兼容 diagnostic-repair 报告);mode="verify-only" 额外要求 rounds===0 且 targetFiles 为空。
- */
+/** Deep validation always rejects target implementation repairs. */
 export function assertSmokeReport(
   raw: unknown,
-  mode?: SmokeMode,
   input?: Pick<VerificationInput, "verificationPolicy">,
 ): asserts raw is SmokeReport {
   const obj = assertRecord(raw, "report 顶层");
@@ -393,7 +389,7 @@ export function assertSmokeReport(
     requireField(obj, "rounds", "number"),
     "rounds",
   );
-  if (mode === "verify-only" && rounds !== 0) {
+  if (rounds !== 0) {
     fail("rounds", "在 verify-only 模式下必须为 0(禁止目标修复轮)");
   }
   const cases = requireField(obj, "cases", "array") as unknown[];
@@ -404,7 +400,7 @@ export function assertSmokeReport(
     assertCaseVerdict(c, `cases[${i}]`, caseIds, input !== undefined),
   );
   const targetFiles = requireField(obj, "targetFiles", "array") as unknown[];
-  if (mode === "verify-only" && targetFiles.length !== 0) {
+  if (targetFiles.length !== 0) {
     fail("targetFiles", "在 verify-only 模式下必须为空(禁止修改目标实现)");
   }
   if (targetFiles.length > MAX_ARRAY_ITEMS)

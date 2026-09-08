@@ -12,7 +12,6 @@ import type {
   CaseResult,
   CommandEvidence,
   SmokeCaseVerdict,
-  SmokeMode,
   SmokeReport,
   SmokeSide,
 } from "./differential-test-types.js";
@@ -80,7 +79,6 @@ function aggregate(
 export function evaluateSmokeReport(
   report: SmokeReport,
   evidence: readonly CommandEvidence[],
-  mode: SmokeMode,
   input: PolicyInput = {},
 ): SmokeEvaluation {
   const { testBasis, ...policy } = resolveVerificationPolicy(input);
@@ -90,12 +88,8 @@ export function evaluateSmokeReport(
       "Independent Host-confirmed test basis is missing.",
       "insufficient_test_basis",
     );
-  if (!report.cases.length)
-    return rejected(input, "Report contains no cases.");
-  if (
-    mode === "verify-only" &&
-    (report.rounds !== 0 || report.targetFiles.length !== 0)
-  )
+  if (!report.cases.length) return rejected(input, "Report contains no cases.");
+  if (report.rounds !== 0 || report.targetFiles.length !== 0)
     return rejected(input, "verify-only report contains target repairs.");
   const sides: SmokeSide[] =
     policy.mode === "differential" ? ["source", "target"] : ["target"];

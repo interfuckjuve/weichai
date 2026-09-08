@@ -1,8 +1,4 @@
-import type {
-  SideFile,
-  SmokeMode,
-  VerifierLanguage,
-} from "./differential-test-types.js";
+import type { VerifierLanguage } from "./differential-test-types.js";
 import type { VerificationInput } from "../../schemas/verification-types.js";
 import { resolveVerificationPolicy } from "../../schemas/verification-assessment.js";
 
@@ -14,7 +10,6 @@ export interface SmokeTaskInput {
     language: VerifierLanguage;
     root?: string;
     candidatePath?: string;
-    files?: SideFile[];
   };
   target: {
     language: VerifierLanguage;
@@ -26,10 +21,7 @@ export interface SmokeTaskInput {
   };
 }
 
-export function buildSmokeTaskPrompt(
-  input: SmokeTaskInput,
-  mode: SmokeMode = "verify-only",
-): string {
+export function buildSmokeTaskPrompt(input: SmokeTaskInput): string {
   const policy = resolveVerificationPolicy(input);
   const differential = policy.mode === "differential";
   const sides = differential ? "BOTH source and target" : "target ONLY";
@@ -46,7 +38,7 @@ ${
     ? `SOURCE SIDE (reference, READ-ONLY; not an absolute oracle)
 - language: ${input.source.language}
 - project root: ${input.source.root ?? "see EXECUTION CONTEXT"}
-- candidate file: ${input.source.candidatePath ?? input.source.files?.[0]?.relativePath ?? "browse"}
+- candidate file: ${input.source.candidatePath ?? "browse"}
 ${input.analysisReport ? `ANALYZER REPORT (context only)\n${input.analysisReport}` : ""}
 `
     : "The reference is not accepted. Do not read, inspect, execute, or assess reference code. source must be null and sourceAssessment must be not_checked."
@@ -58,7 +50,7 @@ TARGET SIDE (translated artifact under test, READ-ONLY)
 - project root: ${input.target.root ?? "see EXECUTION CONTEXT"}
 - file: ${input.target.file ?? "browse"}
 
-WORKFLOW (${mode})
+WORKFLOW (verify-only)
 1. Read only the permitted project(s). Design normal, boundary, and error cases from the Host-confirmed basis.
 2. Write runners for ${sides}; record complete files in runnerFiles, including driver entries.
 3. Compile and run ${sides} only through the verifier-command proxy. Repair erroneous runners, never fabricate output. A dependency/build failure is not proof of a code bug.
@@ -66,7 +58,7 @@ WORKFLOW (${mode})
 5. Bind each case to real successful run commandIds and copy observed CaseResult values exactly from stdout.
 6. Derive an expected CaseResult from the independent basis for each case. Copy the exact Host basis into requirement.basis. For explicitly permitted representation differences (such as language-specific exception names), record expectedBySide overrides and explain them in reasoning; never invent an exception to the requirement to fit observed code. Judge each permitted side independently against its expectation. Matching outputs alone prove neither side correct; both may have the same bug. A source bug must not be replicated in the target.
 7. bug_found requires an executed observation contradicting requirement.expected; no_bug_observed requires an executed observation matching it. Use suspected_bug for unsupported suspicions and inconclusive when no conclusion is possible. sourceIssues are annotations, never confirmed findings.
-8. ${mode === "verify-only" ? "Never modify the target implementation. rounds must be 0 and targetFiles empty. There are no target repair rounds." : "Diagnostic mode only: propose targetFiles repairs with at most 2 rounds; never use this mode for write-back decisions."}
+8. Never modify the target implementation. rounds must be 0 and targetFiles empty. There are no target repair rounds.
 9. Write report.json in the working directory and STOP. If unable to finish, still write the available observations and explain the missing evidence.
 
 SANDBOX CONSTRAINTS
@@ -76,7 +68,7 @@ REPORT CONTRACT
 {
   "converged": boolean,
   "steps": nonnegative integer,
-  "rounds": ${mode === "verify-only" ? "0" : "nonnegative integer"},
+  "rounds": 0,
   "cases": [{
     "caseId": string, "intent": string,
     "source": ${differential ? "CaseResult" : "null"}, "target": CaseResult,

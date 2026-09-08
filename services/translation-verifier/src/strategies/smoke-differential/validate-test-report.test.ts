@@ -30,30 +30,30 @@ describe("assertSmokeReport", () => {
 
   describe("深校验", () => {
     it("拒绝空 cases 和重复 caseId", () => {
-      expect(() => assertSmokeReport({ ...validSmokeReport(), cases: [] }, "verify-only")).toThrow(/cases.*non-empty/);
+      expect(() => assertSmokeReport({ ...validSmokeReport(), cases: [] })).toThrow(/cases.*non-empty/);
       const c = validSmokeCase();
-      expect(() => assertSmokeReport({ ...validSmokeReport(), cases: [c, c] }, "verify-only")).toThrow(/duplicate.*c1/);
+      expect(() => assertSmokeReport({ ...validSmokeReport(), cases: [c, c] })).toThrow(/duplicate.*c1/);
     });
 
     it("拒绝 case 内外 ID 不一致和缺双侧 runner", () => {
       const broken = validSmokeCase();
       broken.target = { ...broken.target!, caseId: "other" };
-      expect(() => assertSmokeReport({ ...validSmokeReport(), cases: [broken] }, "verify-only")).toThrow(/target.*caseId/);
-      expect(() => assertSmokeReport({ ...validSmokeReport(), runnerFiles: validSmokeReport().runnerFiles!.slice(0, 1) }, "verify-only")).toThrow(/runnerFiles.*target/);
+      expect(() => assertSmokeReport({ ...validSmokeReport(), cases: [broken] })).toThrow(/target.*caseId/);
+      expect(() => assertSmokeReport({ ...validSmokeReport(), runnerFiles: validSmokeReport().runnerFiles!.slice(0, 1) })).toThrow(/runnerFiles.*target/);
     });
 
     it("拒绝逃逸路径、未知枚举和超限文本", () => {
-      expect(() => assertSmokeReport({ ...validSmokeReport(), summary: "x".repeat(100_001) }, "verify-only")).toThrow(/summary.*size/);
+      expect(() => assertSmokeReport({ ...validSmokeReport(), summary: "x".repeat(100_001) })).toThrow(/summary.*size/);
       const report = validSmokeReport();
       report.runnerFiles![0].files[0].path = "../Shadow.java";
-      expect(() => assertSmokeReport(report, "verify-only")).toThrow(/runnerFiles.*path/);
-      expect(() => assertSmokeReport({ ...validSmokeReport(), cases: [{ ...validSmokeCase(), decision: "maybe" }] }, "verify-only"))
+      expect(() => assertSmokeReport(report)).toThrow(/runnerFiles.*path/);
+      expect(() => assertSmokeReport({ ...validSmokeReport(), cases: [{ ...validSmokeCase(), decision: "maybe" }] }))
         .toThrow(/decision/);
     });
 
     it("verify-only 拒绝目标修复报告", () => {
-      expect(() => assertSmokeReport({ ...validSmokeReport(), rounds: 1 }, "verify-only")).toThrow(/rounds/);
-      expect(() => assertSmokeReport({ ...validSmokeReport(), targetFiles: [{ path: "Target.cs", content: "changed" }] }, "verify-only")).toThrow(/targetFiles/);
+      expect(() => assertSmokeReport({ ...validSmokeReport(), rounds: 1 })).toThrow(/rounds/);
+      expect(() => assertSmokeReport({ ...validSmokeReport(), targetFiles: [{ path: "Target.cs", content: "changed" }] })).toThrow(/targetFiles/);
     });
   });
 });

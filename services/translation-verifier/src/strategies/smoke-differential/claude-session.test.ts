@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as processManager from "./manage-test-process.js";
 import { runClaude, spawnClaudeProcess, type SpawnClaude } from "./claude-session.js";
 
 // ---- 测试辅助 ----
@@ -23,6 +24,8 @@ beforeEach(() => {
   delete process.env.DEEPSEEK_MODEL;
   delete process.env.DEEPSEEK_API_KEY;
 });
+
+afterEach(() => vi.restoreAllMocks());
 
 // ---- 测试 ----
 
@@ -155,6 +158,13 @@ decode MIME text`;
 // ---- 自主会话参数(参考 rev.2+ 契约) ----
 
 describe("spawnClaudeProcess 自主会话参数组装", () => {
+  it.each([5000, 1500, 900])("preserves absolute deadline %s at the managed process boundary, even after expiry", async (deadlineAt) => {
+    vi.spyOn(Date, "now").mockReturnValueOnce(1200).mockReturnValue(1300);
+    const managed = vi.spyOn(processManager, "runManagedProcess").mockResolvedValue({ exitCode: 0, timedOut: false, durationMs: 0, stdout: "ok", stderr: "" });
+    const signal = new AbortController().signal;
+    await spawnClaudeProcess(["-p", "p"], { VERIFIER_DEADLINE_AT: String(deadlineAt) }, 10_000, { deadlineAt, signal });
+    expect(managed).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ deadlineAt, env: { VERIFIER_DEADLINE_AT: String(deadlineAt) } }), signal);
+  });
   it("forwards the live observer to the existing injected process boundary", async () => {
     const onStdoutChunk = vi.fn();
     const injected: SpawnClaude = async (_args, _env, _timeout, options) => {

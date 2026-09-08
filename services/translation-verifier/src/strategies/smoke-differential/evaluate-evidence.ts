@@ -13,7 +13,6 @@ import { readReport, errorSummary } from "./read-test-report.js";
 import { assertSmokeReport } from "./validate-test-report.js";
 import type {
   CommandEvidence,
-  SmokeMode,
   SmokeReport,
 } from "./differential-test-types.js";
 import type { SmokeResult } from "./run-smoke-verification.js";
@@ -123,7 +122,6 @@ export type SmokeOutcome = VerificationAssessment &
 
 export async function evaluateEvidence(
   layout: RunLayout,
-  mode: SmokeMode,
   input: Pick<VerificationInput, "verificationPolicy">,
 ): Promise<SmokeOutcome> {
   const recorder = currentRunRecorder();
@@ -136,7 +134,7 @@ export async function evaluateEvidence(
   try {
     markVerificationPhase("report-read-and-schema-validation");
     report = await readReport<SmokeReport>(layout.agentDir, (raw) =>
-      assertSmokeReport(raw, mode, input),
+      assertSmokeReport(raw, input),
     );
   } catch (error) {
     const summary = errorSummary(error);
@@ -215,7 +213,7 @@ export async function evaluateEvidence(
   }
   try {
     markVerificationPhase("evidence-evaluation-and-smoke-result");
-    const evaluation = evaluateSmokeReport(report, evidence, mode, input);
+    const evaluation = evaluateSmokeReport(report, evidence, input);
     const passRate =
       report.cases.length === 0
         ? undefined

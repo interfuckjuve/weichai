@@ -197,16 +197,16 @@ export async function spawnClaudeProcess(
   if (options.spawn) {
     return options.spawn(fullArgs, env, timeoutMs, { cwd: options.cwd, ...(options.onStdoutChunk ? { onStdoutChunk: options.onStdoutChunk } : {}) });
   }
-  const deadlineRemainingMs =
-    options.deadlineAt === undefined ? Number.POSITIVE_INFINITY : Math.max(1, options.deadlineAt - Date.now());
-  const effectiveTimeoutMs = Math.min(timeoutMs, deadlineRemainingMs);
+  const now = Date.now();
+  const deadlineAt = Math.min(options.deadlineAt ?? Number.POSITIVE_INFINITY, now + timeoutMs);
+  const effectiveTimeoutMs = Math.max(0, deadlineAt - now);
   const result = await runManagedProcess(
     {
       command: "claude",
       args: fullArgs,
       cwd: options.cwd ?? process.cwd(),
       env,
-      deadlineAt: Date.now() + effectiveTimeoutMs,
+      deadlineAt,
       onStdoutChunk: options.onStdoutChunk,
     },
     options.signal,

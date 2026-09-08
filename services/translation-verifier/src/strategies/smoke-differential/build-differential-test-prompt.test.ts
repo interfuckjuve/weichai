@@ -13,7 +13,6 @@ const input: SmokeTaskInput = {
     language: "Java",
     root: "/private/reference",
     candidatePath: "Reference.java",
-    files: [{ relativePath: "secret.java", content: "PRIVATE CODE" }],
   },
   target: {
     language: "C#",
@@ -76,7 +75,6 @@ describe("Host-owned smoke prompt", () => {
   });
   it("defaults to verify-only, never permits target repairs, and stops after reporting", () => {
     const prompt = buildSmokeTaskPrompt(input);
-    expect(prompt).toBe(buildSmokeTaskPrompt(input, "verify-only"));
     for (const value of [
       "Never modify the target implementation",
       '"rounds": 0',
@@ -89,10 +87,5 @@ describe("Host-owned smoke prompt", () => {
     ])
       expect(prompt).toContain(value);
     expect(prompt).not.toContain("at most 2 rounds");
-  });
-  it("permits bounded repairs only with explicit diagnostic mode", () => {
-    const prompt = buildSmokeTaskPrompt(input, "diagnostic-repair");
-    expect(prompt).toContain("at most 2 rounds");
-    expect(prompt).toContain("never use this mode for write-back decisions");
   });
 });

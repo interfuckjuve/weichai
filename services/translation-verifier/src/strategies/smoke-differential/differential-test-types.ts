@@ -27,17 +27,8 @@ export interface CaseResult {
  exceptionMessage?: string;
 }
 
-/** 兼容小型 fixture 输入的源码文件。 */
-export interface SideFile {
- relativePath: string;
- content: string;
-}
-
 /** 冒烟验证的双侧:源侧(参考基准)与目标侧(翻译产物)。 */
 export type SmokeSide = "source" | "target";
-
-/** 冒烟会话的运行模式:verify-only 禁止目标修复;diagnostic-repair 允许(仅诊断用)。 */
-export type SmokeMode = "verify-only" | "diagnostic-repair";
 
 /** 报告声明的单条执行证据(report.executions 条目,commandId 必须能在命令证据日志中找到)。 */
 export interface SmokeExecutionEvidence {

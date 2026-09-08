@@ -14,31 +14,13 @@ import type { SmokeRunOptions } from "./run-smoke-verification.js";
 export function prepareAgentTask(
   job: SmokeTaskInput,
   options: SmokeRunOptions,
-  layout: RunLayout,
   signal?: AbortSignal,
 ) {
+  const layout = options.layout;
   const differential = resolveVerificationPolicy(job).mode === "differential";
-  const mode = options.mode ?? "verify-only";
-  const timeoutMs = options.timeoutMs ?? 300_000;
   signal?.throwIfAborted();
+  const deadlineAt = options.deadlineAt;
 
-  // 兼容暂存把双侧输入搬到请求级项目副本,提示/上下文一律指向暂存根。
-  const promptJob: SmokeTaskInput =
-    options.workspaceDir !== undefined
-      ? job
-      : {
-          ...job,
-          source: {
-            ...job.source,
-            root: layout.projectRoots[0] ?? job.source.root,
-          },
-          target: {
-            ...job.target,
-            root: layout.projectRoots.at(-1) ?? job.target.root,
-          },
-        };
-
-  const deadlineAt = Date.now() + timeoutMs;
   const allowedTools = [`Bash(npx tsx ${VERIFIER_COMMAND_ENTRY} *)`];
   const env: Record<string, string> = {
     VERIFIER_MODE: differential ? "differential" : "target_only",
@@ -51,7 +33,7 @@ export function prepareAgentTask(
   const llm = {
     apiKey: options.apiKey,
     model: options.model,
-    timeoutMs,
+    timeoutMs: Math.max(1, deadlineAt - Date.now()),
     ...(options.spawnClaude ? { spawnClaude: options.spawnClaude } : {}),
     cwd: layout.agentDir,
     addDirs: [...layout.projectRoots, ...layout.runnerDirs, layout.agentDir],
@@ -67,8 +49,8 @@ export function prepareAgentTask(
   };
   markVerificationPhase("prompt-construction");
   const prompt = [
-    buildSmokeTaskPrompt(promptJob, mode),
-    executionContextSection(promptJob, layout),
+    buildSmokeTaskPrompt(job),
+    executionContextSection(job, layout),
   ].join("\n\n");
 
   return { layout, prompt, llm };

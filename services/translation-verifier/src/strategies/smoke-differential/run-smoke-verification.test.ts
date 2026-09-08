@@ -3,6 +3,8 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
+  statSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -20,16 +22,13 @@ import type {
   CommandEvidence,
   SmokeReport,
 } from "./differential-test-types.js";
-import {
-  createWorkspaceBaseline,
-  writeWorkspaceBaseline,
-} from "./protect-project-files.js";
 import { VERIFIER_COMMAND_ENTRY } from "./test-execution-config.js";
 import {
   createRunRecorder,
   withRunRecorder,
 } from "../../run-output/record-run.js";
-import { runSmoke } from "./run-smoke-verification.js";
+import { runSmoke, type SmokeRunOptions } from "./run-smoke-verification.js";
+import { prepareSmokeWorkspaceFixture } from "./prepared-workspace-fixture.js";
 import type { SmokeTaskInput } from "./build-differential-test-prompt.js";
 
 const validReport = validSmokeReport;
@@ -40,20 +39,29 @@ function makeTmpRoot(): string {
   return mkdtempSync(join(tmpdir(), "tv-smoke-runner-"));
 }
 
-/** 文件型任务(无真实根,内部暂存由 files 落盘)。 */
+/** Caller stages its fixture before invoking the runner and retains cleanup ownership. */
+function runPreparedSmoke(
+  parent: string,
+  job: SmokeTaskInput,
+  options: Omit<SmokeRunOptions, "layout" | "deadlineAt">,
+  signal?: AbortSignal,
+) {
+  const prepared = prepareSmokeWorkspaceFixture(parent, job);
+  return runSmoke(
+    prepared.job,
+    { layout: prepared.layout, deadlineAt: prepared.deadlineAt, ...options },
+    signal,
+  );
+}
+
+/** Small self-contained source fixture staged by the test caller. */
 function fileBasedJob(): SmokeTaskInput {
   return {
     verificationPolicy: acceptedPolicy,
     requirement: "decode MIME text",
     source: {
       language: "C#",
-      files: [
-        {
-          relativePath: "src/MimeUtility.cs",
-          content:
-            "public class MimeUtility { public static string DecodeText(string s) => s; }\n",
-        },
-      ],
+      candidatePath: "src/MimeUtility.cs",
     },
     target: {
       language: "Java",
@@ -163,7 +171,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("runSmoke verify-only 内部暂存(files 输入)", () => {
+describe("runSmoke verify-only prepared fixtures", () => {
   it.each([true, false])(
     "retains a null-exit command observation without inventing its exit code (timedOut=%s)",
     async (timedOut) => {
@@ -174,8 +182,7 @@ describe("runSmoke verify-only 内部暂存(files 输入)", () => {
         evidence[0] = { ...evidence[0], exitCode: null, timedOut };
         const fake = writingFake(validReport(), evidence);
         const result = await withRunRecorder(recorder, () =>
-          runSmoke(fileBasedJob(), {
-            workspaceRoot: root,
+          runPreparedSmoke(root, fileBasedJob(), {
             apiKey: "k",
             spawnClaude: fake.fake as unknown as SpawnClaude,
           }),
@@ -232,8 +239,7 @@ describe("runSmoke verify-only 内部暂存(files 输入)", () => {
           return { stdout: "buffered only", exitCode: 0 };
         };
         const pending = withRunRecorder(recorder, () =>
-          runSmoke(fileBasedJob(), {
-            workspaceRoot: root,
+          runPreparedSmoke(root, fileBasedJob(), {
             apiKey: "k",
             spawnClaude,
           }),
@@ -289,8 +295,7 @@ describe("runSmoke verify-only 内部暂存(files 输入)", () => {
                 throw new Error("spawn failed");
               };
         const result = await withRunRecorder(recorder, () =>
-          runSmoke(fileBasedJob(), {
-            workspaceRoot: root,
+          runPreparedSmoke(root, fileBasedJob(), {
             apiKey: "test",
             spawnClaude,
           }),
@@ -318,8 +323,7 @@ describe("runSmoke verify-only 内部暂存(files 输入)", () => {
     const root = makeTmpRoot();
     try {
       const h = writingFake(validReport(), validEvidence());
-      const result = await runSmoke(fileBasedJob(), {
-        workspaceRoot: root,
+      const result = await runPreparedSmoke(root, fileBasedJob(), {
         apiKey: "test-key",
         spawnClaude: h.fake as unknown as SpawnClaude,
       });
@@ -360,9 +364,9 @@ describe("runSmoke verify-only 内部暂存(files 输入)", () => {
         resolve(cwd!, "..", "target", ".forexplore-tests"),
       );
       expect(options.addDirs).toContain(cwd);
-      // 默认不保留内部工作区。
-      expect(result.generatedTestsKept).toBe(false);
-      expect(existsSync(cwd!)).toBe(false);
+      // Runner leaves cleanup to the caller.
+      expect(result).not.toHaveProperty("generatedTestsKept");
+      expect(existsSync(cwd!)).toBe(true);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -374,8 +378,7 @@ describe("runSmoke verify-only 内部暂存(files 输入)", () => {
       const missingEvidence = writingFake(validReport(), []);
       expect(
         (
-          await runSmoke(fileBasedJob(), {
-            workspaceRoot: root,
+          await runPreparedSmoke(root, fileBasedJob(), {
             apiKey: "k",
             spawnClaude: missingEvidence.fake as unknown as SpawnClaude,
           })
@@ -394,11 +397,14 @@ describe("runSmoke verify-only 内部暂存(files 输入)", () => {
           );
         },
       );
-      const changedAfterLastCommand = await runSmoke(fileBasedJob(), {
-        workspaceRoot: root,
-        apiKey: "k",
-        spawnClaude: mutating.fake as unknown as SpawnClaude,
-      });
+      const changedAfterLastCommand = await runPreparedSmoke(
+        root,
+        fileBasedJob(),
+        {
+          apiKey: "k",
+          spawnClaude: mutating.fake as unknown as SpawnClaude,
+        },
+      );
       expect(changedAfterLastCommand.executionStatus).toBe("failed");
       expect(changedAfterLastCommand.errorReason).toBe("invalid-evidence");
 
@@ -407,8 +413,7 @@ describe("runSmoke verify-only 内部暂存(files 输入)", () => {
         validReport({ rounds: 1, converged: false }),
         validEvidence(),
       );
-      const repairResult = await runSmoke(fileBasedJob(), {
-        workspaceRoot: root,
+      const repairResult = await runPreparedSmoke(root, fileBasedJob(), {
         apiKey: "k",
         spawnClaude: repaired.fake as unknown as SpawnClaude,
       });
@@ -423,8 +428,7 @@ describe("runSmoke verify-only 内部暂存(files 输入)", () => {
     const root = makeTmpRoot();
     try {
       const h = writingFake("{ broken json", []);
-      const result = await runSmoke(fileBasedJob(), {
-        workspaceRoot: root,
+      const result = await runPreparedSmoke(root, fileBasedJob(), {
         apiKey: "k",
         spawnClaude: h.fake as unknown as SpawnClaude,
       });
@@ -442,8 +446,7 @@ describe("runSmoke verify-only 内部暂存(files 输入)", () => {
       // 大小检查在 JSON.parse 之前;超限即拒,不进入解析。
       const oversized = `{"pad":"${`x`.repeat(4 * 1024 * 1024)}"`;
       const h = writingFake(oversized, []);
-      const result = await runSmoke(fileBasedJob(), {
-        workspaceRoot: root,
+      const result = await runPreparedSmoke(root, fileBasedJob(), {
         apiKey: "k",
         spawnClaude: h.fake as unknown as SpawnClaude,
       });
@@ -461,8 +464,7 @@ describe("runSmoke verify-only 内部暂存(files 输入)", () => {
       const timedOut = vi.fn(async () => {
         throw new Error("claude subprocess timed out after 120000ms");
       }) as unknown as SpawnClaude;
-      const result = await runSmoke(fileBasedJob(), {
-        workspaceRoot: root,
+      const result = await runPreparedSmoke(root, fileBasedJob(), {
         apiKey: "k",
         spawnClaude: timedOut,
       });
@@ -474,29 +476,26 @@ describe("runSmoke verify-only 内部暂存(files 输入)", () => {
     }
   });
 
-  it("keep=true 保留内部工作区供诊断", async () => {
+  it("leaves the report and workspace available until the caller cleans up", async () => {
     const root = makeTmpRoot();
     try {
       const h = writingFake(validReport(), validEvidence());
-      const result = await runSmoke(fileBasedJob(), {
-        workspaceRoot: root,
-        keepGeneratedTests: true,
+      const result = await runPreparedSmoke(root, fileBasedJob(), {
         apiKey: "k",
         spawnClaude: h.fake as unknown as SpawnClaude,
       });
-      expect(result.generatedTestsKept).toBe(true);
-      expect(result.keptDir).toBeTruthy();
-      expect(existsSync(result.keptDir!)).toBe(true);
-      expect(existsSync(join(result.keptDir!, "agent", "report.json"))).toBe(
-        true,
-      );
+      expect(result).not.toHaveProperty("generatedTestsKept");
+      expect(result).not.toHaveProperty("keptDir");
+      expect(existsSync(join(h.cwd()!, "report.json"))).toBe(true);
+      rmSync(root, { recursive: true, force: true });
+      expect(existsSync(h.cwd()!)).toBe(false);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
   });
 });
 
-describe("runSmoke 内部暂存(root 输入复制双侧项目)", () => {
+describe("runSmoke caller-staged project copies", () => {
   it("真实双侧根被复制进 source/project+target/project 并只读,evidence 经命令代理", async () => {
     const root = makeTmpRoot();
     const srcRoot = join(root, "project-source");
@@ -525,18 +524,21 @@ describe("runSmoke 内部暂存(root 输入复制双侧项目)", () => {
           "utf8",
         );
       });
-      const result = await runSmoke(rootBasedJob(srcRoot, tgtRoot), {
-        workspaceRoot: root,
-        apiKey: "k",
-        spawnClaude: h.fake as unknown as SpawnClaude,
-      });
+      const result = await runPreparedSmoke(
+        root,
+        rootBasedJob(srcRoot, tgtRoot),
+        {
+          apiKey: "k",
+          spawnClaude: h.fake as unknown as SpawnClaude,
+        },
+      );
       expect(result.targetAssessment).toBe("no_bug_observed");
-      // 复制内容在工作区存在时(会话内)捕获;成功后内部暂存默认清理。
+      // Caller-created copies remain available after the session.
       expect(copies.source).toContain("public class MimeUtility");
       expect(copies.target).toContain("public class MimeUtility");
       const cwd = h.cwd();
       expect(cwd).toBeTruthy();
-      expect(existsSync(join(cwd!, ".."))).toBe(false);
+      expect(existsSync(join(cwd!, ".."))).toBe(true);
       // 原项目从未被写入(位于工作区外,不受清理影响)。
       expect(readFileSync(join(srcRoot, "MimeUtility.cs"), "utf8")).toContain(
         "public class MimeUtility",
@@ -552,89 +554,49 @@ describe("runSmoke 内部暂存(root 输入复制双侧项目)", () => {
   });
 });
 
-describe("runSmoke caller-owned 生产工作区(workspaceDir)", () => {
-  function productionWorkspace(parent: string): {
-    root: string;
-    agentDir: string;
-    baselinePath: string;
-    runnerSrc: string;
-    runnerTgt: string;
-    job: SmokeTaskInput;
-  } {
-    const root = join(parent, "forexplore-smoke-prod");
-    const sourceProject = join(root, "source", "project");
-    const targetProject = join(root, "target", "project");
-    const agentDir = join(root, "agent");
-    const runnerSrc = join(root, "source", ".forexplore-tests");
-    const runnerTgt = join(root, "target", ".forexplore-tests");
-    mkdirSync(sourceProject, { recursive: true });
-    mkdirSync(targetProject, { recursive: true });
-    mkdirSync(agentDir, { recursive: true });
-    mkdirSync(runnerSrc, { recursive: true });
-    mkdirSync(runnerTgt, { recursive: true });
-    writeFileSync(
-      join(sourceProject, "MimeUtility.cs"),
-      "public class MimeUtility {}\n",
-      "utf8",
-    );
-    writeFileSync(
-      join(targetProject, "MimeUtility.java"),
-      "public class MimeUtility {}\n",
-      "utf8",
-    );
-    const baselinePath = join(root, "baseline.json");
-    writeWorkspaceBaseline(
-      baselinePath,
-      createWorkspaceBaseline(
-        root,
-        ["source/.forexplore-tests", "target/.forexplore-tests"],
-        [
-          "agent/report.json",
-          "agent/claude-steps.jsonl",
-          "agent/commands.jsonl",
-        ],
-      ),
-    );
-    const job: SmokeTaskInput = {
-      verificationPolicy: acceptedPolicy,
-      requirement: "decode MIME text",
-      source: {
-        language: "C#",
-        root: sourceProject,
-        candidatePath: "MimeUtility.cs",
-      },
-      target: {
-        language: "Java",
-        className: "org.apache.commons.fileupload.util.mime.MimeUtility",
-        method: "decodeText",
-        isStatic: true,
-        root: targetProject,
-        file: "MimeUtility.java",
-      },
+describe("runSmoke caller-owned prepared workspace", () => {
+  function productionWorkspace(parent: string) {
+    const ws = prepareSmokeWorkspaceFixture(parent, fileBasedJob());
+    return {
+      ...ws,
+      root: ws.layout.executionRoot,
+      agentDir: ws.layout.agentDir,
+      baselinePath: ws.layout.baselinePath,
+      runnerSrc: ws.layout.runnerDirs[0],
+      runnerTgt: ws.layout.runnerDirs[1],
     };
-    return { root, agentDir, baselinePath, runnerSrc, runnerTgt, job };
   }
 
   it("生产布局:直接用 caller workspace,不创建/清理,固定 env 与代理只读边界", async () => {
     const parent = makeTmpRoot();
     try {
       const ws = productionWorkspace(parent);
+      const before = [
+        ws.root,
+        ws.agentDir,
+        ws.baselinePath,
+        ...ws.layout.projectRoots,
+      ].map((path) => ({ path, inode: statSync(path).ino }));
+      const siblings = readdirSync(parent);
+      const baseline = readFileSync(ws.baselinePath, "utf8");
       const h = writingFake(validReport(), validEvidence());
       const result = await runSmoke(ws.job, {
-        workspaceDir: ws.agentDir,
-        executionRoot: ws.root,
-        baselinePath: ws.baselinePath,
-        commandEvidencePath: join(ws.agentDir, "commands.jsonl"),
-        runnerRoots: ["source/.forexplore-tests", "target/.forexplore-tests"],
+        layout: ws.layout,
+        deadlineAt: ws.deadlineAt,
         apiKey: "k",
         spawnClaude: h.fake as unknown as SpawnClaude,
       });
       expect(result.targetAssessment).toBe("no_bug_observed");
       expect(result).not.toHaveProperty("evaluation");
       expect(result).not.toHaveProperty("status");
-      expect(result.keptDir).toBeUndefined();
-      // caller-owned 工作区保持存在。
+      expect(result).not.toHaveProperty("keptDir");
+      // caller-owned 工作区保持存在，目录身份和基线不变。
       expect(existsSync(ws.root)).toBe(true);
+      expect(readdirSync(parent)).toEqual(siblings);
+      expect(
+        before.map(({ path }) => ({ path, inode: statSync(path).ino })),
+      ).toEqual(before);
+      expect(readFileSync(ws.baselinePath, "utf8")).toBe(baseline);
       const { options, env } = h.lastCall();
       expect(options.cwd).toBe(ws.agentDir);
       expect(options.readOnlyDirs).toEqual([
@@ -669,11 +631,8 @@ describe("runSmoke caller-owned 生产工作区(workspaceDir)", () => {
         },
       );
       const result = await runSmoke(ws.job, {
-        workspaceDir: ws.agentDir,
-        executionRoot: ws.root,
-        baselinePath: ws.baselinePath,
-        commandEvidencePath: join(ws.agentDir, "commands.jsonl"),
-        runnerRoots: ["source/.forexplore-tests", "target/.forexplore-tests"],
+        layout: ws.layout,
+        deadlineAt: ws.deadlineAt,
         apiKey: "k",
         spawnClaude: mutating.fake as unknown as SpawnClaude,
       });
@@ -684,21 +643,21 @@ describe("runSmoke caller-owned 生产工作区(workspaceDir)", () => {
     }
   });
 
-  it("生产工作区集不完整(缺 runnerRoots)时给出内部错误而非静默", async () => {
+  it("does not recreate a missing caller-prepared Agent directory", async () => {
     const parent = makeTmpRoot();
     try {
       const ws = productionWorkspace(parent);
       const h = writingFake(validReport(), validEvidence());
+      rmSync(ws.agentDir, { recursive: true });
       const result = await runSmoke(ws.job, {
-        workspaceDir: ws.agentDir,
-        executionRoot: ws.root,
-        baselinePath: ws.baselinePath,
-        commandEvidencePath: join(ws.agentDir, "commands.jsonl"),
+        layout: ws.layout,
+        deadlineAt: ws.deadlineAt,
         apiKey: "k",
         spawnClaude: h.fake as unknown as SpawnClaude,
       });
       expect(result.executionStatus).toBe("failed");
-      expect(result.errorReason).toBe("internal");
+      expect(existsSync(ws.agentDir)).toBe(false);
+      expect(existsSync(ws.root)).toBe(true);
     } finally {
       rmSync(parent, { recursive: true, force: true });
     }
@@ -708,17 +667,23 @@ describe("runSmoke caller-owned 生产工作区(workspaceDir)", () => {
 describe("runSmoke policy and classified outcomes", () => {
   it("does not launch an Agent without an independent Host basis", async () => {
     const spawnClaude = vi.fn();
-    const result = await runSmoke(
-      { ...fileBasedJob(), verificationPolicy: undefined },
-      { spawnClaude },
-    );
-    expect(spawnClaude).not.toHaveBeenCalled();
-    expect(result).toMatchObject({
-      mode: "target_only",
-      executionStatus: "failed",
-      sourceAssessment: "not_checked",
-      problems: [{ code: "insufficient_test_basis" }],
-    });
+    const root = makeTmpRoot();
+    try {
+      const result = await runPreparedSmoke(
+        root,
+        { ...fileBasedJob(), verificationPolicy: undefined },
+        { spawnClaude },
+      );
+      expect(spawnClaude).not.toHaveBeenCalled();
+      expect(result).toMatchObject({
+        mode: "target_only",
+        executionStatus: "failed",
+        sourceAssessment: "not_checked",
+        problems: [{ code: "insufficient_test_basis" }],
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("target-only staging never copies or exposes reference projects, files, runners or analysis", async () => {
@@ -743,8 +708,7 @@ describe("runSmoke policy and classified outcomes", () => {
         referenceDecision: "rejected",
       };
       job.analysisReport = "PRIVATE ANALYSIS";
-      const result = await runSmoke(job, {
-        workspaceRoot: root,
+      const result = await runPreparedSmoke(root, job, {
         apiKey: "k",
         spawnClaude: h.fake as unknown as SpawnClaude,
       });
@@ -801,12 +765,12 @@ describe("runSmoke policy and classified outcomes", () => {
             );
           return { stdout: "done", exitCode: 0 };
         };
-        const result = await runSmoke(fileBasedJob(), {
-          workspaceRoot: root,
+        const result = await runPreparedSmoke(root, fileBasedJob(), {
           apiKey: "k",
           spawnClaude,
         });
-        if (["missing", "json", "schema"].includes(kind)) expect(result.report).toBeNull();
+        if (["missing", "json", "schema"].includes(kind))
+          expect(result.report).toBeNull();
         expect(result.bugCases ?? []).toEqual([]);
         expect(result).not.toHaveProperty("status");
         const codes = {
@@ -862,8 +826,7 @@ describe("runSmoke policy and classified outcomes", () => {
           );
           return { stdout: "done", exitCode: 0 };
         };
-        const result = await runSmoke(fileBasedJob(), {
-          workspaceRoot: root,
+        const result = await runPreparedSmoke(root, fileBasedJob(), {
           apiKey: "k",
           spawnClaude,
         });
@@ -898,8 +861,7 @@ describe("runSmoke policy and classified outcomes", () => {
     const root = makeTmpRoot();
     try {
       for (const evidence of ["{", "null\n{}"]) {
-        const result = await runSmoke(fileBasedJob(), {
-          workspaceRoot: root,
+        const result = await runPreparedSmoke(root, fileBasedJob(), {
           apiKey: "k",
           spawnClaude: async (_args, _env, _timeout, options) => {
             writeFileSync(join(options!.cwd!, "commands.jsonl"), evidence);
@@ -954,15 +916,16 @@ describe("runSmoke policy and classified outcomes", () => {
               ? new DOMException("cancelled", "AbortError")
               : new Error("claude subprocess timed out");
           };
-          const result = await runSmoke(fileBasedJob(), {
-            workspaceRoot: root,
+          const result = await runPreparedSmoke(root, fileBasedJob(), {
             apiKey: "k",
             spawnClaude,
           });
           expect(result.executionStatus).toBe(
             kind === "cancel" ? "cancelled" : corrupt ? "failed" : "partial",
           );
-          expect(result.bugCases?.map((item) => item.caseId) ?? []).toEqual(corrupt ? [] : ["c1"]);
+          expect(result.bugCases?.map((item) => item.caseId) ?? []).toEqual(
+            corrupt ? [] : ["c1"],
+          );
           expect(result).not.toHaveProperty("evaluation");
           expect(result.targetAssessment).toBe(
             corrupt ? "inconclusive" : "bug_found",
@@ -987,6 +950,10 @@ describe("runSmoke abort 语义", () => {
     const root = makeTmpRoot();
     try {
       const controller = new AbortController();
+      let entered!: () => void;
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
       const blocking = vi.fn(
         (
           _args: string[],
@@ -996,6 +963,7 @@ describe("runSmoke abort 语义", () => {
         ) =>
           new Promise<{ stdout: string; exitCode: number }>(
             (_resolve, reject) => {
+              entered();
               options?.signal?.addEventListener(
                 "abort",
                 () => reject(options.signal!.reason),
@@ -1004,11 +972,13 @@ describe("runSmoke abort 语义", () => {
             },
           ),
       ) as unknown as SpawnClaude;
-      const running = runSmoke(
+      const running = runPreparedSmoke(
+        root,
         fileBasedJob(),
-        { workspaceRoot: root, apiKey: "k", spawnClaude: blocking },
+        { apiKey: "k", spawnClaude: blocking },
         controller.signal,
       );
+      await started;
       controller.abort();
       await expect(running).resolves.toMatchObject({
         executionStatus: "cancelled",
@@ -1020,17 +990,36 @@ describe("runSmoke abort 语义", () => {
     }
   });
 
+  it("cancels between task construction and Agent launch without starting the Agent", async () => {
+    const root = makeTmpRoot();
+    try {
+      const controller = new AbortController();
+      const spawnClaude = vi.fn();
+      const running = runPreparedSmoke(
+        root,
+        fileBasedJob(),
+        { apiKey: "k", spawnClaude },
+        controller.signal,
+      );
+      const reason = new DOMException("cancel before launch", "AbortError");
+      controller.abort(reason);
+      await expect(running).resolves.toMatchObject({
+        executionStatus: "cancelled",
+        summary: reason.message,
+      });
+      expect(spawnClaude).not.toHaveBeenCalled();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("signal 已中止(调用前)→ 以 AbortError 拒绝", async () => {
     const root = makeTmpRoot();
     try {
       const aborted = new AbortController();
       aborted.abort();
       await expect(
-        runSmoke(
-          fileBasedJob(),
-          { workspaceRoot: root, apiKey: "k" },
-          aborted.signal,
-        ),
+        runPreparedSmoke(root, fileBasedJob(), { apiKey: "k" }, aborted.signal),
       ).resolves.toMatchObject({ executionStatus: "cancelled" });
     } finally {
       rmSync(root, { recursive: true, force: true });

@@ -76,7 +76,7 @@ const service = new VerificationService({
         return spawnClaudeProcess(args, env, timeout, options);
       },
       runSmokeImpl: async (job, options, signal) => {
-        agentCwd = options?.workspaceDir;
+        agentCwd = options.layout.agentDir;
         smoke = await runSmoke(job, options, signal);
         return smoke;
       },

@@ -15,7 +15,7 @@ const policy = { verificationPolicy: acceptedPolicy };
 const evaluate = (
   report = validSmokeReport(),
   evidence = validCommandEvidence(report),
-) => evaluateSmokeReport(report, evidence, "verify-only", policy);
+) => evaluateSmokeReport(report, evidence, policy);
 
 describe("independent side assessments", () => {
   it.each([
@@ -100,12 +100,8 @@ describe("independent side assessments", () => {
       },
     ]) {
       expect(
-        evaluateSmokeReport(
-          validSmokeReport(),
-          validCommandEvidence(),
-          "verify-only",
-          input,
-        ).problems[0].code,
+        evaluateSmokeReport(validSmokeReport(), validCommandEvidence(), input)
+          .problems[0].code,
       ).toBe("insufficient_test_basis");
     }
   });
@@ -130,7 +126,6 @@ describe("independent side assessments", () => {
     const result = evaluateSmokeReport(
       report,
       validCommandEvidence(report),
-      "verify-only",
       input,
     );
     expect(result).toMatchObject({
@@ -140,12 +135,8 @@ describe("independent side assessments", () => {
     });
     item.sourceAssessment = "no_bug_observed";
     expect(
-      evaluateSmokeReport(
-        report,
-        validCommandEvidence(report),
-        "verify-only",
-        input,
-      ).problems[0].code,
+      evaluateSmokeReport(report, validCommandEvidence(report), input)
+        .problems[0].code,
     ).toBe("report_evidence_invalid");
   });
 });
@@ -288,17 +279,9 @@ describe("execution evidence gates", () => {
     },
   );
 
-  it("rejects repairs in verify-only but permits explicit diagnostics", () => {
+  it("unconditionally rejects both repair rounds and target files", () => {
     const report = validSmokeReport({ rounds: 1 });
     rejected(report, validCommandEvidence(report));
-    expect(
-      evaluateSmokeReport(
-        report,
-        validCommandEvidence(report),
-        "diagnostic-repair",
-        policy,
-      ).executionStatus,
-    ).toBe("completed");
     report.rounds = 0;
     report.targetFiles = [{ path: "Target.cs", content: "changed" }];
     rejected(report, validCommandEvidence(report));
