@@ -2,7 +2,10 @@ import { markVerificationPhase } from "../run-output/measure-legacy-run.js";
 import { VerificationArtifactPersistenceError } from "../run-output/verification-artifact-store.js";
 import { normalizeVerificationStrategyOutput } from "../schemas/materialize-verification-result.js";
 import { assertArtifactsMatch } from "../schemas/validate-verification-artifacts.js";
-import { assertSchema, validateStrategyOutputSchema } from "../schemas/compile-schema-validators.js";
+import {
+  assertSchema,
+  validateStrategyOutputSchema,
+} from "../schemas/compile-schema-validators.js";
 import { assertVerificationAssessment } from "../schemas/verification-assessment.js";
 import type {
   VerificationInput,
@@ -28,11 +31,18 @@ export async function runStrategy(
     signal.throwIfAborted();
     const strategy = provider.create();
     signal.throwIfAborted();
-    const rawOutput = await waitForStrategy(strategy.verify(input, context, signal), signal);
+    const rawOutput = await waitForStrategy(
+      strategy.verify(input, context, signal),
+      signal,
+    );
     markVerificationPhase("result-normalization-and-artifact-validation");
     const output = normalizeVerificationStrategyOutput(input, rawOutput);
     if (signal.aborted || callerSignal?.aborted) {
-      normalizeStrategyInterruption({ kind: "output", output }, signal, callerSignal);
+      normalizeStrategyInterruption(
+        { kind: "output", output },
+        signal,
+        callerSignal,
+      );
       assertSchema(validateStrategyOutputSchema, output, "Verification result");
       assertVerificationAssessment(output, input);
     }
@@ -60,11 +70,15 @@ export function normalizeStrategyInterruption(
   const code = cancelled ? "cancelled" : "agent_timeout";
   output.executionStatus = cancelled
     ? "cancelled"
-    : output.executionStatus === "completed" ? "partial" : output.executionStatus;
+    : output.executionStatus === "completed"
+      ? "partial"
+      : output.executionStatus;
   if (!output.problems.some((problem) => problem.code === code)) {
     output.problems.push({
       code,
-      message: cancelled ? callerCancellation(callerSignal).message : "Verification strategy timed out",
+      message: cancelled
+        ? callerCancellation(callerSignal).message
+        : "Verification strategy timed out",
     });
   }
   return outcome;

@@ -74,7 +74,11 @@ describe("VerificationService", () => {
     expect(list).not.toHaveBeenCalled();
   });
 
-  it.each([new DOMException("caller timeout reason", "TimeoutError"), "stop", 42])(
+  it.each([
+    new DOMException("caller timeout reason", "TimeoutError"),
+    "stop",
+    42,
+  ])(
     "classifies caller cancellation before workspace failure with reason %s",
     async (reason) => {
       const controller = new AbortController();
@@ -82,25 +86,40 @@ describe("VerificationService", () => {
       writeFileSync(workspaceRoot, "blocked");
       const p = provider("first");
       const create = vi.spyOn(p, "create");
-      const receipt = await serviceWith([p], "first").verifyWithReceipt(input(), {}, controller.signal);
+      const receipt = await serviceWith([p], "first").verifyWithReceipt(
+        input(),
+        {},
+        controller.signal,
+      );
       expect(receipt.result).toMatchObject({
         executionStatus: "cancelled",
         problems: [{ code: "cancelled" }],
       });
       expect(receipt.resultArtifact).toBeDefined();
       expect(create).not.toHaveBeenCalled();
-      expect(JSON.parse(readFileSync(join(artifactRoot, receipt.resultArtifact!.path), "utf8"))).toEqual(receipt.result);
+      expect(
+        JSON.parse(
+          readFileSync(
+            join(artifactRoot, receipt.resultArtifact!.path),
+            "utf8",
+          ),
+        ),
+      ).toEqual(receipt.result);
     },
   );
   it("includes canonical materialization in the existing execution timing scope", async () => {
     const recorders = vi.spyOn(recording, "createRunRecorder");
     const resultNow = vi.fn(() => {
-      expect(recorders.mock.results[0]!.value.snapshot().stages.find(
-        (step: { name: string }) => step.name === "execute-strategy",
-      )).toMatchObject({ state: "running" });
+      expect(
+        recorders.mock.results[0]!.value.snapshot().stages.find(
+          (step: { name: string }) => step.name === "execute-strategy",
+        ),
+      ).toMatchObject({ state: "running" });
       return now;
     });
-    await serviceWith([provider("first")], "first", { now: resultNow }).verifyWithReceipt(input());
+    await serviceWith([provider("first")], "first", {
+      now: resultNow,
+    }).verifyWithReceipt(input());
     expect(resultNow).toHaveBeenCalledTimes(1);
   });
 
@@ -109,55 +128,9 @@ describe("VerificationService", () => {
     ["bug_found", "no_bug_observed"],
     ["no_bug_observed", "bug_found"],
     ["bug_found", "bug_found"],
-  ] as const)("preserves source %s and target %s when the caller cancels with TimeoutError", async (sourceAssessment, targetAssessment) => {
-    const value = input();
-    value.verificationPolicy = {
-      referenceDecision: "accepted",
-      reason: "Reviewed reference snapshot",
-      testBasis: "Both implementations return one",
-    };
-    const controller = new AbortController();
-    const resultNow = vi.fn(() => now);
-    const service = serviceWith([provider("first", async (_value, context) => {
-      const artifact = await evidence(context);
-      controller.abort(new DOMException("caller stopped", "TimeoutError"));
-      return {
-        mode: "differential",
-        referenceDecision: "accepted",
-        referenceReason: value.verificationPolicy!.reason,
-        executionStatus: "completed",
-        sourceAssessment,
-        targetAssessment,
-        problems: [],
-        summary: "Independent findings",
-        issues: [{ id: "finding", kind: "behavior", message: "Observed result", evidenceArtifactIds: [artifact.id] }],
-        artifacts: [artifact],
-        strategyReport: { observed: true },
-      };
-    })], "first", { now: resultNow });
-    const receipt = await service.verifyWithReceipt(value, {}, controller.signal);
-    expect(resultNow).toHaveBeenCalledTimes(1);
-    expect(receipt.result).toMatchObject({
-      executionStatus: "cancelled",
-      sourceAssessment,
-      targetAssessment,
-      problems: [{ code: "cancelled", message: "caller stopped" }],
-    });
-    expect(receipt.result.issues[0]!.evidenceArtifactIds).toEqual([receipt.result.artifacts[0]!.id]);
-    expect(JSON.parse(readFileSync(join(artifactRoot, receipt.resultArtifact!.path), "utf8"))).toEqual(receipt.result);
-  });
-
-  describe.each([3, 4])("late interruption at microtask %i", (microtasks) => {
-    function interrupt(callback: () => void, remaining = microtasks): void {
-      queueMicrotask(() => remaining === 1 ? callback() : interrupt(callback, remaining - 1));
-    }
-
-    it.each([
-      ["no_bug_observed", "no_bug_observed"],
-      ["bug_found", "no_bug_observed"],
-      ["no_bug_observed", "bug_found"],
-      ["bug_found", "bug_found"],
-    ] as const)("retains source %s and target %s before one final construction", async (sourceAssessment, targetAssessment) => {
+  ] as const)(
+    "preserves source %s and target %s when the caller cancels with TimeoutError",
+    async (sourceAssessment, targetAssessment) => {
       const value = input();
       value.verificationPolicy = {
         referenceDecision: "accepted",
@@ -165,98 +138,263 @@ describe("VerificationService", () => {
         testBasis: "Both implementations return one",
       };
       const controller = new AbortController();
-      const resultNow = vi.fn(() => {
-        expect(controller.signal.aborted).toBe(true);
-        return now;
-      });
-      const construct = vi.spyOn(materialization, "createVerificationResult");
-      const receipt = await serviceWith([provider("first", async (_value, context) => {
-        const artifact = await evidence(context);
-        interrupt(() => controller.abort(new DOMException("late caller stop", "TimeoutError")));
-        return {
-          mode: "differential",
-          referenceDecision: "accepted",
-          referenceReason: value.verificationPolicy!.reason,
-          executionStatus: "completed",
-          sourceAssessment,
-          targetAssessment,
-          problems: [],
-          summary: "Independent findings",
-          issues: [{ id: "finding", kind: "behavior", message: "Observed result", evidenceArtifactIds: [artifact.id] }],
-          artifacts: [artifact],
-          strategyReport: { observed: true },
-        };
-      })], "first", { now: resultNow }).verifyWithReceipt(value, {}, controller.signal);
+      const resultNow = vi.fn(() => now);
+      const service = serviceWith(
+        [
+          provider("first", async (_value, context) => {
+            const artifact = await evidence(context);
+            controller.abort(
+              new DOMException("caller stopped", "TimeoutError"),
+            );
+            return {
+              mode: "differential",
+              referenceDecision: "accepted",
+              referenceReason: value.verificationPolicy!.reason,
+              executionStatus: "completed",
+              sourceAssessment,
+              targetAssessment,
+              problems: [],
+              summary: "Independent findings",
+              issues: [
+                {
+                  id: "finding",
+                  kind: "behavior",
+                  message: "Observed result",
+                  evidenceArtifactIds: [artifact.id],
+                },
+              ],
+              artifacts: [artifact],
+              strategyReport: { observed: true },
+            };
+          }),
+        ],
+        "first",
+        { now: resultNow },
+      );
+      const receipt = await service.verifyWithReceipt(
+        value,
+        {},
+        controller.signal,
+      );
       expect(resultNow).toHaveBeenCalledTimes(1);
-      // Receipt validation rebuilds the envelope using its own clock, not the Host constructor clock.
-      expect(construct.mock.calls.filter((call) => call[3] === resultNow)).toHaveLength(1);
-      const persisted = JSON.parse(readFileSync(join(artifactRoot, receipt.resultArtifact!.path), "utf8"));
-      expect(persisted).toEqual(receipt.result);
-      expect(assertVerificationReceipt({ ...receipt, result: persisted }, value, descriptor("first"))).toEqual(receipt);
-      expect(persisted).toMatchObject({
+      expect(receipt.result).toMatchObject({
         executionStatus: "cancelled",
         sourceAssessment,
         targetAssessment,
-        problems: [{ code: "cancelled", message: "late caller stop" }],
-        strategyReport: { observed: true },
+        problems: [{ code: "cancelled", message: "caller stopped" }],
       });
-      expect(persisted.problems).toHaveLength(1);
-      expect(persisted.issues[0].evidenceArtifactIds).toEqual([persisted.artifacts[0].id]);
-      expect(readFileSync(join(artifactRoot, persisted.artifacts[0].path), "utf8")).toBe("xxx");
-      expect(readdirSync(workspaceRoot)).toEqual([]);
-    });
+      expect(receipt.result.issues[0]!.evidenceArtifactIds).toEqual([
+        receipt.result.artifacts[0]!.id,
+      ]);
+      expect(
+        JSON.parse(
+          readFileSync(
+            join(artifactRoot, receipt.resultArtifact!.path),
+            "utf8",
+          ),
+        ),
+      ).toEqual(receipt.result);
+    },
+  );
 
-    it.each(["ordinary", "persistence"])("preserves %s failure artifact semantics with late caller cancellation", async (failure) => {
-      const controller = new AbortController();
-      const resultNow = vi.fn(() => {
-        expect(controller.signal.aborted).toBe(true);
-        return now;
-      });
-      const value = input();
-      const receipt = await serviceWith([provider("first", async (_value, context) => {
-        const artifact = await evidence(context);
-        interrupt(() => controller.abort(new DOMException("late caller stop", "TimeoutError")));
+  describe.each([3, 4])("late interruption at microtask %i", (microtasks) => {
+    function interrupt(callback: () => void, remaining = microtasks): void {
+      queueMicrotask(() =>
+        remaining === 1 ? callback() : interrupt(callback, remaining - 1),
+      );
+    }
+
+    it.each([
+      ["no_bug_observed", "no_bug_observed"],
+      ["bug_found", "no_bug_observed"],
+      ["no_bug_observed", "bug_found"],
+      ["bug_found", "bug_found"],
+    ] as const)(
+      "retains source %s and target %s before one final construction",
+      async (sourceAssessment, targetAssessment) => {
+        const value = input();
+        value.verificationPolicy = {
+          referenceDecision: "accepted",
+          reason: "Reviewed reference snapshot",
+          testBasis: "Both implementations return one",
+        };
+        const controller = new AbortController();
+        const resultNow = vi.fn(() => {
+          expect(controller.signal.aborted).toBe(true);
+          return now;
+        });
+        const construct = vi.spyOn(materialization, "createVerificationResult");
+        const receipt = await serviceWith(
+          [
+            provider("first", async (_value, context) => {
+              const artifact = await evidence(context);
+              interrupt(() =>
+                controller.abort(
+                  new DOMException("late caller stop", "TimeoutError"),
+                ),
+              );
+              return {
+                mode: "differential",
+                referenceDecision: "accepted",
+                referenceReason: value.verificationPolicy!.reason,
+                executionStatus: "completed",
+                sourceAssessment,
+                targetAssessment,
+                problems: [],
+                summary: "Independent findings",
+                issues: [
+                  {
+                    id: "finding",
+                    kind: "behavior",
+                    message: "Observed result",
+                    evidenceArtifactIds: [artifact.id],
+                  },
+                ],
+                artifacts: [artifact],
+                strategyReport: { observed: true },
+              };
+            }),
+          ],
+          "first",
+          { now: resultNow },
+        ).verifyWithReceipt(value, {}, controller.signal);
+        expect(resultNow).toHaveBeenCalledTimes(1);
+        // Receipt validation rebuilds the envelope using its own clock, not the Host constructor clock.
+        expect(
+          construct.mock.calls.filter((call) => call[3] === resultNow),
+        ).toHaveLength(1);
+        const persisted = JSON.parse(
+          readFileSync(
+            join(artifactRoot, receipt.resultArtifact!.path),
+            "utf8",
+          ),
+        );
+        expect(persisted).toEqual(receipt.result);
+        expect(
+          assertVerificationReceipt(
+            { ...receipt, result: persisted },
+            value,
+            descriptor("first"),
+          ),
+        ).toEqual(receipt);
+        expect(persisted).toMatchObject({
+          executionStatus: "cancelled",
+          sourceAssessment,
+          targetAssessment,
+          problems: [{ code: "cancelled", message: "late caller stop" }],
+          strategyReport: { observed: true },
+        });
+        expect(persisted.problems).toHaveLength(1);
+        expect(persisted.issues[0].evidenceArtifactIds).toEqual([
+          persisted.artifacts[0].id,
+        ]);
+        expect(
+          readFileSync(join(artifactRoot, persisted.artifacts[0].path), "utf8"),
+        ).toBe("xxx");
+        expect(readdirSync(workspaceRoot)).toEqual([]);
+      },
+    );
+
+    it.each(["ordinary", "persistence"])(
+      "preserves %s failure artifact semantics with late caller cancellation",
+      async (failure) => {
+        const controller = new AbortController();
+        const resultNow = vi.fn(() => {
+          expect(controller.signal.aborted).toBe(true);
+          return now;
+        });
+        const value = input();
+        const receipt = await serviceWith(
+          [
+            provider("first", async (_value, context) => {
+              const artifact = await evidence(context);
+              interrupt(() =>
+                controller.abort(
+                  new DOMException("late caller stop", "TimeoutError"),
+                ),
+              );
+              if (failure === "persistence") {
+                context.writeArtifact({
+                  ...artifact,
+                  id: "missing",
+                  path: "missing.json",
+                });
+              }
+              throw new Error("strategy failed");
+            }),
+          ],
+          "first",
+          { now: resultNow },
+        ).verifyWithReceipt(value, {}, controller.signal);
+        expect(resultNow).toHaveBeenCalledTimes(1);
+        expect(
+          assertVerificationReceipt(receipt, value, descriptor("first")),
+        ).toEqual(receipt);
+        expect(receipt.result).toMatchObject({
+          executionStatus: failure === "persistence" ? "failed" : "cancelled",
+          problems: [
+            {
+              code:
+                failure === "persistence"
+                  ? "artifact_persistence_failed"
+                  : "cancelled",
+              message: "late caller stop",
+            },
+          ],
+        });
         if (failure === "persistence") {
-          context.writeArtifact({ ...artifact, id: "missing", path: "missing.json" });
+          expect(receipt.resultArtifact).toBeUndefined();
+          expect(receipt.result.artifacts).toEqual([]);
+          expect(receipt.result.issues[0]!.evidenceArtifactIds).toEqual([]);
+          expect(readdirSync(artifactRoot)).toEqual([]);
+        } else {
+          expect(receipt.result.artifacts).toHaveLength(1);
+          expect(
+            JSON.parse(
+              readFileSync(
+                join(artifactRoot, receipt.resultArtifact!.path),
+                "utf8",
+              ),
+            ),
+          ).toEqual(receipt.result);
         }
-        throw new Error("strategy failed");
-      })], "first", { now: resultNow }).verifyWithReceipt(value, {}, controller.signal);
-      expect(resultNow).toHaveBeenCalledTimes(1);
-      expect(assertVerificationReceipt(receipt, value, descriptor("first"))).toEqual(receipt);
-      expect(receipt.result).toMatchObject({
-        executionStatus: failure === "persistence" ? "failed" : "cancelled",
-        problems: [{
-          code: failure === "persistence" ? "artifact_persistence_failed" : "cancelled",
-          message: "late caller stop",
-        }],
-      });
-      if (failure === "persistence") {
-        expect(receipt.resultArtifact).toBeUndefined();
-        expect(receipt.result.artifacts).toEqual([]);
-        expect(receipt.result.issues[0]!.evidenceArtifactIds).toEqual([]);
-        expect(readdirSync(artifactRoot)).toEqual([]);
-      } else {
-        expect(receipt.result.artifacts).toHaveLength(1);
-        expect(JSON.parse(readFileSync(join(artifactRoot, receipt.resultArtifact!.path), "utf8"))).toEqual(receipt.result);
-      }
-      expect(readdirSync(workspaceRoot)).toEqual([]);
-    });
+        expect(readdirSync(workspaceRoot)).toEqual([]);
+      },
+    );
 
     it("marks a late Host timeout partial without losing findings", async () => {
       const timeout = new AbortController();
       vi.spyOn(AbortSignal, "timeout").mockReturnValue(timeout.signal);
-      const receipt = await serviceWith([provider("first", async () => {
-        interrupt(() => timeout.abort(new DOMException("deadline", "TimeoutError")));
-        return {
-          ...reportAssessment(), summary: "Checked", issues: [], artifacts: [], strategyReport: null,
-        };
-      })], "first").verifyWithReceipt(input());
+      const receipt = await serviceWith(
+        [
+          provider("first", async () => {
+            interrupt(() =>
+              timeout.abort(new DOMException("deadline", "TimeoutError")),
+            );
+            return {
+              ...reportAssessment(),
+              summary: "Checked",
+              issues: [],
+              artifacts: [],
+              strategyReport: null,
+            };
+          }),
+        ],
+        "first",
+      ).verifyWithReceipt(input());
       expect(receipt.result).toMatchObject({
         executionStatus: "partial",
         targetAssessment: "no_bug_observed",
         problems: [{ code: "agent_timeout" }],
       });
-      expect(JSON.parse(readFileSync(join(artifactRoot, receipt.resultArtifact!.path), "utf8"))).toEqual(receipt.result);
+      expect(
+        JSON.parse(
+          readFileSync(
+            join(artifactRoot, receipt.resultArtifact!.path),
+            "utf8",
+          ),
+        ),
+      ).toEqual(receipt.result);
     });
   });
 
@@ -326,12 +464,25 @@ describe("VerificationService", () => {
       ),
     ).toBe(true);
     expect(run.diagnostics).toEqual([]);
-    const execute = run.stages.find((step: { name: string }) => step.name === "execute-strategy")!;
-    const prepare = run.stages.find((step: { name: string }) => step.name === "prepare-strategy-workspace")!;
-    const strategySteps = run.stages.filter((step: { scope: string }) => step.scope === "strategy");
+    const execute = run.stages.find(
+      (step: { name: string }) => step.name === "execute-strategy",
+    )!;
+    const prepare = run.stages.find(
+      (step: { name: string }) => step.name === "prepare-strategy-workspace",
+    )!;
+    const strategySteps = run.stages.filter(
+      (step: { scope: string }) => step.scope === "strategy",
+    );
     expect(prepare.parentId).toBe(execute.id);
     expect(strategySteps[0].parentId).toBe(execute.id);
-    expect(strategySteps.slice(1).every((step: { parentId?: string }) => step.parentId === strategySteps[0].id)).toBe(true);
+    expect(
+      strategySteps
+        .slice(1)
+        .every(
+          (step: { parentId?: string }) =>
+            step.parentId === strategySteps[0].id,
+        ),
+    ).toBe(true);
   });
 
   it.each(["ordinary", "timeout", "abort"])(
@@ -853,7 +1004,10 @@ describe("VerificationService", () => {
       sameInput.translation.patchHash,
       sameInput.translation.patchHash,
     ]);
-    expect([first.targetAssessment, second.targetAssessment]).toEqual(["no_bug_observed", "no_bug_observed"]);
+    expect([first.targetAssessment, second.targetAssessment]).toEqual([
+      "no_bug_observed",
+      "no_bug_observed",
+    ]);
     expect(sameInput).toEqual(before);
     expect(service.listStrategies().map((descriptor) => descriptor.id)).toEqual(
       ["first", "second"],
@@ -884,7 +1038,9 @@ describe("VerificationService", () => {
       ],
       "failing",
     );
-    expect((await failingService.verify(input())).targetAssessment).toBe("inconclusive");
+    expect((await failingService.verify(input())).targetAssessment).toBe(
+      "inconclusive",
+    );
 
     const controller = new AbortController();
     controller.abort(new DOMException("cancelled", "AbortError"));
@@ -1131,7 +1287,7 @@ describe("VerificationService", () => {
     );
     expect(Date.now() - startedAt).toBeLessThan(500);
     expect(receipt.result).toMatchObject({
-            executionStatus: "cancelled",
+      executionStatus: "cancelled",
       problems: [{ code: "cancelled", message: "caller stopped" }],
     });
     rejectLate(new Error("late failure"));
@@ -1208,7 +1364,9 @@ describe("VerificationService", () => {
       ],
       "first",
     );
-    expect((await missing.verify(input())).targetAssessment).toBe("inconclusive");
+    expect((await missing.verify(input())).targetAssessment).toBe(
+      "inconclusive",
+    );
 
     const altered = serviceWith(
       [
@@ -1239,7 +1397,9 @@ describe("VerificationService", () => {
       ],
       "first",
     );
-    expect((await altered.verify(input())).targetAssessment).toBe("inconclusive");
+    expect((await altered.verify(input())).targetAssessment).toBe(
+      "inconclusive",
+    );
   });
 
   it("cleans temporary workspaces unless keepWorkspace is requested", async () => {
