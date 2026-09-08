@@ -11,7 +11,7 @@ import {
 } from "../run-output/record-run.js";
 import { validateInput } from "./validate-input.js";
 import { createVerificationWorkspace } from "./prepare-strategy-workspace.js";
-import { runStrategy, strategyExecutionFailure } from "./run-strategy.js";
+import { normalizeStrategyInterruption, runStrategy, strategyExecutionFailure } from "./run-strategy.js";
 import {
   createVerificationArtifactStore,
   VerificationArtifactPersistenceError,
@@ -52,7 +52,8 @@ export async function runVerification(
         () => validateInput(input, config.factory, strategyId),
       );
       const executeHandle = recorder.startStep("execute-strategy", { scope: "framework" });
-      const outcome = await withStepContext(recorder, executeHandle, async () => {
+      let combinedSignal: AbortSignal | undefined;
+      let outcome = await withStepContext(recorder, executeHandle, async () => {
         try {
           markVerificationPhase("workspace-creation");
           const workspace = await recorder.measureStep(
@@ -67,7 +68,7 @@ export async function runVerification(
           store = workspace;
           markVerificationPhase("deadline-and-strategy-dispatch");
           const timeoutSignal = AbortSignal.timeout(config.timeoutMs);
-          const combinedSignal = signal === undefined
+          combinedSignal = signal === undefined
             ? timeoutSignal
             : AbortSignal.any([signal, timeoutSignal]);
           workspace.context.deadlineAt = Date.now() + config.timeoutMs;
@@ -93,6 +94,8 @@ export async function runVerification(
       const { descriptor } = provider;
       let result: VerificationResult;
       try {
+        // No await may separate authoritative interruption from final materialization and hashing.
+        outcome = normalizeStrategyInterruption(outcome, combinedSignal, signal);
         result = outcome.kind === "output"
           ? createVerificationResult(input, descriptor, outcome.output, config.now)
           : createFailureResult(

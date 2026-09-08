@@ -13,6 +13,9 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import {
   createVerificationResult,
+  assertVerificationReceipt,
+  resolveVerificationPolicy,
+  type VerificationInput,
   VerificationService,
   VerificationStrategyFactory,
   DIFFERENTIAL_SMOKE_STRATEGY,
@@ -23,6 +26,7 @@ import {
 } from "@forexplore/translation-verifier";
 import {
   evaluateValidationPolicyGate,
+  calculatePatchHashV2,
   canonicalJson,
   materializeMigrationRuntimeCapabilitySnapshot,
   materializeMigrationRunManifestV2,
@@ -239,6 +243,77 @@ type VerificationResultMutation = (
 ) => VerificationResult;
 
 describe("status-free adapter gate matrix", () => {
+  it.each([3, 4])("maps a real disk receipt cancelled at microtask %i to unverified", async (microtasks) => {
+    const root = mkdtempSync(join(tmpdir(), "adaptation-late-cancellation-"));
+    const artifactRoot = join(root, "artifacts");
+    const workspaceRoot = join(root, "workspaces");
+    const controller = new AbortController();
+    const files: VerificationInput["translation"]["files"] = [{
+      path: "late-check.py",
+      status: "created",
+      expectedAbsent: true,
+      additions: 1,
+      deletions: 0,
+      hunks: [{ header: "@@ -0,0 +1,1 @@", lines: [{ type: "add", content: "value = 1" }] }],
+    }];
+    const input: VerificationInput = {
+      schemaVersion: "1.0",
+      request: createAdaptationV2TestFixture().request,
+      analysisReport: null,
+      migrationPlan: null,
+      translation: { round: 1, generatedContent: "value = 1\n", files, patchHash: calculatePatchHashV2(files) },
+    };
+    const resultNow = vi.fn(() => {
+      expect(controller.signal.aborted).toBe(true);
+      return adaptationV2TestNow;
+    });
+    const service = new VerificationService({
+      workspaceRoot,
+      artifactRoot,
+      defaultStrategyId: behaviorStrategyDescriptor.id,
+      now: resultNow,
+      factory: new VerificationStrategyFactory([{
+        descriptor: behaviorStrategyDescriptor,
+        create: () => ({
+          async verify(value) {
+            const interrupt = (remaining: number): void => {
+              queueMicrotask(() => remaining === 1
+                ? controller.abort(new Error("late caller stop"))
+                : interrupt(remaining - 1));
+            };
+            interrupt(microtasks);
+            return {
+              ...resolveVerificationPolicy(value),
+              executionStatus: "completed",
+              sourceAssessment: "not_checked",
+              targetAssessment: "no_bug_observed",
+              problems: [], summary: "Checked", issues: [], artifacts: [], strategyReport: null,
+            };
+          },
+        }),
+      }]),
+    });
+    try {
+      const receipt = await service.verifyWithReceipt(input, {}, controller.signal);
+      const diskReceipt = { ...receipt, result: JSON.parse(readFileSync(join(artifactRoot, receipt.resultArtifact!.path), "utf8")) };
+      expect(resultNow).toHaveBeenCalledTimes(1);
+      expect(assertVerificationReceipt(diskReceipt, input, behaviorStrategyDescriptor)).toEqual(receipt);
+      expect(verificationResultEvidence(diskReceipt, input, behaviorStrategyDescriptor)).toMatchObject({
+        status: "unverified",
+        artifact: { id: receipt.resultArtifact!.id, contentHash: receipt.resultArtifact!.contentHash },
+      });
+      expect(diskReceipt.result).toMatchObject({
+        executionStatus: "cancelled",
+        sourceAssessment: "not_checked",
+        targetAssessment: "no_bug_observed",
+        problems: [{ code: "cancelled", message: "late caller stop" }],
+      });
+      expect(readdirSync(workspaceRoot)).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it.each([
     ["source-only", "completed", "bug_found", "no_bug_observed", "pass"],
     ["target bug", "completed", "no_bug_observed", "bug_found", "fail"],

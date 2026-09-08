@@ -32,17 +32,7 @@ export async function runStrategy(
     markVerificationPhase("result-normalization-and-artifact-validation");
     const output = normalizeVerificationStrategyOutput(input, rawOutput);
     if (signal.aborted || callerSignal?.aborted) {
-      const cancelled = callerSignal?.aborted === true;
-      const code = cancelled ? "cancelled" : "agent_timeout";
-      output.executionStatus = cancelled
-        ? "cancelled"
-        : output.executionStatus === "completed" ? "partial" : output.executionStatus;
-      if (!output.problems.some((problem) => problem.code === code)) {
-        output.problems.push({
-          code,
-          message: cancelled ? callerCancellation(callerSignal).message : "Verification strategy timed out",
-        });
-      }
+      normalizeStrategyInterruption({ kind: "output", output }, signal, callerSignal);
       assertSchema(validateStrategyOutputSchema, output, "Verification result");
       assertVerificationAssessment(output, input);
     }
@@ -51,6 +41,33 @@ export async function runStrategy(
   } catch (error) {
     return strategyExecutionFailure(error, callerSignal);
   }
+}
+
+/** Recheck Host interruption without rebuilding findings or losing artifact-disposal requirements. */
+export function normalizeStrategyInterruption(
+  outcome: StrategyExecutionOutcome,
+  signal?: AbortSignal,
+  callerSignal?: AbortSignal,
+): StrategyExecutionOutcome {
+  if (outcome.kind === "failure") {
+    return callerSignal?.aborted
+      ? { ...outcome, error: callerCancellation(callerSignal) }
+      : outcome;
+  }
+  if (!signal?.aborted && !callerSignal?.aborted) return outcome;
+  const { output } = outcome;
+  const cancelled = callerSignal?.aborted === true;
+  const code = cancelled ? "cancelled" : "agent_timeout";
+  output.executionStatus = cancelled
+    ? "cancelled"
+    : output.executionStatus === "completed" ? "partial" : output.executionStatus;
+  if (!output.problems.some((problem) => problem.code === code)) {
+    output.problems.push({
+      code,
+      message: cancelled ? callerCancellation(callerSignal).message : "Verification strategy timed out",
+    });
+  }
+  return outcome;
 }
 
 /** Also used for Host failures before a strategy workspace is available. */

@@ -24,6 +24,8 @@ import { VerificationStrategyFactory } from "./workflow/select-strategy.js";
 import { resolveVerificationPolicy } from "./schemas/verification-assessment.js";
 import type { VerificationAssessment } from "./schemas/verification-types.js";
 import { createVerificationResult } from "./schemas/materialize-verification-result.js";
+import * as materialization from "./schemas/materialize-verification-result.js";
+import { assertVerificationReceipt } from "./schemas/validate-verification-receipt.js";
 import {
   type VerificationInput,
   type VerificationResult,
@@ -143,6 +145,119 @@ describe("VerificationService", () => {
     });
     expect(receipt.result.issues[0]!.evidenceArtifactIds).toEqual([receipt.result.artifacts[0]!.id]);
     expect(JSON.parse(readFileSync(join(artifactRoot, receipt.resultArtifact!.path), "utf8"))).toEqual(receipt.result);
+  });
+
+  describe.each([3, 4])("late interruption at microtask %i", (microtasks) => {
+    function interrupt(callback: () => void, remaining = microtasks): void {
+      queueMicrotask(() => remaining === 1 ? callback() : interrupt(callback, remaining - 1));
+    }
+
+    it.each([
+      ["no_bug_observed", "no_bug_observed"],
+      ["bug_found", "no_bug_observed"],
+      ["no_bug_observed", "bug_found"],
+      ["bug_found", "bug_found"],
+    ] as const)("retains source %s and target %s before one final construction", async (sourceAssessment, targetAssessment) => {
+      const value = input();
+      value.verificationPolicy = {
+        referenceDecision: "accepted",
+        reason: "Reviewed reference snapshot",
+        testBasis: "Both implementations return one",
+      };
+      const controller = new AbortController();
+      const resultNow = vi.fn(() => {
+        expect(controller.signal.aborted).toBe(true);
+        return now;
+      });
+      const construct = vi.spyOn(materialization, "createVerificationResult");
+      const receipt = await serviceWith([provider("first", async (_value, context) => {
+        const artifact = await evidence(context);
+        interrupt(() => controller.abort(new DOMException("late caller stop", "TimeoutError")));
+        return {
+          mode: "differential",
+          referenceDecision: "accepted",
+          referenceReason: value.verificationPolicy!.reason,
+          executionStatus: "completed",
+          sourceAssessment,
+          targetAssessment,
+          problems: [],
+          summary: "Independent findings",
+          issues: [{ id: "finding", kind: "behavior", message: "Observed result", evidenceArtifactIds: [artifact.id] }],
+          artifacts: [artifact],
+          strategyReport: { observed: true },
+        };
+      })], "first", { now: resultNow }).verifyWithReceipt(value, {}, controller.signal);
+      expect(resultNow).toHaveBeenCalledTimes(1);
+      // Receipt validation rebuilds the envelope using its own clock, not the Host constructor clock.
+      expect(construct.mock.calls.filter((call) => call[3] === resultNow)).toHaveLength(1);
+      const persisted = JSON.parse(readFileSync(join(artifactRoot, receipt.resultArtifact!.path), "utf8"));
+      expect(persisted).toEqual(receipt.result);
+      expect(assertVerificationReceipt({ ...receipt, result: persisted }, value, descriptor("first"))).toEqual(receipt);
+      expect(persisted).toMatchObject({
+        executionStatus: "cancelled",
+        sourceAssessment,
+        targetAssessment,
+        problems: [{ code: "cancelled", message: "late caller stop" }],
+        strategyReport: { observed: true },
+      });
+      expect(persisted.problems).toHaveLength(1);
+      expect(persisted.issues[0].evidenceArtifactIds).toEqual([persisted.artifacts[0].id]);
+      expect(readFileSync(join(artifactRoot, persisted.artifacts[0].path), "utf8")).toBe("xxx");
+      expect(readdirSync(workspaceRoot)).toEqual([]);
+    });
+
+    it.each(["ordinary", "persistence"])("preserves %s failure artifact semantics with late caller cancellation", async (failure) => {
+      const controller = new AbortController();
+      const resultNow = vi.fn(() => {
+        expect(controller.signal.aborted).toBe(true);
+        return now;
+      });
+      const value = input();
+      const receipt = await serviceWith([provider("first", async (_value, context) => {
+        const artifact = await evidence(context);
+        interrupt(() => controller.abort(new DOMException("late caller stop", "TimeoutError")));
+        if (failure === "persistence") {
+          context.writeArtifact({ ...artifact, id: "missing", path: "missing.json" });
+        }
+        throw new Error("strategy failed");
+      })], "first", { now: resultNow }).verifyWithReceipt(value, {}, controller.signal);
+      expect(resultNow).toHaveBeenCalledTimes(1);
+      expect(assertVerificationReceipt(receipt, value, descriptor("first"))).toEqual(receipt);
+      expect(receipt.result).toMatchObject({
+        executionStatus: failure === "persistence" ? "failed" : "cancelled",
+        problems: [{
+          code: failure === "persistence" ? "artifact_persistence_failed" : "cancelled",
+          message: "late caller stop",
+        }],
+      });
+      if (failure === "persistence") {
+        expect(receipt.resultArtifact).toBeUndefined();
+        expect(receipt.result.artifacts).toEqual([]);
+        expect(receipt.result.issues[0]!.evidenceArtifactIds).toEqual([]);
+        expect(readdirSync(artifactRoot)).toEqual([]);
+      } else {
+        expect(receipt.result.artifacts).toHaveLength(1);
+        expect(JSON.parse(readFileSync(join(artifactRoot, receipt.resultArtifact!.path), "utf8"))).toEqual(receipt.result);
+      }
+      expect(readdirSync(workspaceRoot)).toEqual([]);
+    });
+
+    it("marks a late Host timeout partial without losing findings", async () => {
+      const timeout = new AbortController();
+      vi.spyOn(AbortSignal, "timeout").mockReturnValue(timeout.signal);
+      const receipt = await serviceWith([provider("first", async () => {
+        interrupt(() => timeout.abort(new DOMException("deadline", "TimeoutError")));
+        return {
+          ...reportAssessment(), summary: "Checked", issues: [], artifacts: [], strategyReport: null,
+        };
+      })], "first").verifyWithReceipt(input());
+      expect(receipt.result).toMatchObject({
+        executionStatus: "partial",
+        targetAssessment: "no_bug_observed",
+        problems: [{ code: "agent_timeout" }],
+      });
+      expect(JSON.parse(readFileSync(join(artifactRoot, receipt.resultArtifact!.path), "utf8"))).toEqual(receipt.result);
+    });
   });
 
   it("runs a verify-only no-Agent provider with arbitrary repeated steps", async () => {
