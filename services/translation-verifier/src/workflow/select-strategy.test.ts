@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import type { VerificationResult, VerificationStrategy, VerificationStrategyDescriptor, VerificationStrategyProvider } from "../schemas/verification-types.js";
+import type {
+  VerificationResult,
+  VerificationStrategy,
+  VerificationStrategyDescriptor,
+  VerificationStrategyProvider,
+} from "../schemas/verification-types.js";
 import { VerificationStrategyFactory } from "./select-strategy.js";
 
 const descriptor: VerificationStrategyDescriptor = {
@@ -13,12 +18,20 @@ const result = {
   strategyId: descriptor.id,
   strategyVersion: descriptor.version,
   subjectHash: "a".repeat(64),
+  inputHash: "c".repeat(64),
   round: 0,
   status: "pass",
   summary: "ok",
   issues: [],
   artifacts: [],
   strategyReport: {},
+  mode: "target_only",
+  referenceDecision: "undetermined",
+  referenceReason: "The Host has not accepted the reference implementation.",
+  executionStatus: "completed",
+  sourceAssessment: "not_checked",
+  targetAssessment: "no_bug_observed",
+  problems: [],
   createdAt: "2026-09-05T00:00:00.000Z",
   contentHash: "b".repeat(64),
 } satisfies VerificationResult;
@@ -26,10 +39,11 @@ const result = {
 function provider(): VerificationStrategyProvider {
   return {
     descriptor,
-    create: () => ({
-      instance: Math.random(),
-      verify: async () => result,
-    } as VerificationStrategy),
+    create: () =>
+      ({
+        instance: Math.random(),
+        verify: async () => result,
+      }) as VerificationStrategy,
   };
 }
 
@@ -38,10 +52,11 @@ describe("VerificationStrategyFactory", () => {
     let instances = 0;
     const freshProvider: VerificationStrategyProvider = {
       descriptor,
-      create: () => ({
-        instance: ++instances,
-        verify: async () => result,
-      } as VerificationStrategy),
+      create: () =>
+        ({
+          instance: ++instances,
+          verify: async () => result,
+        }) as VerificationStrategy,
     };
     const factory = new VerificationStrategyFactory([freshProvider]);
 
@@ -51,8 +66,12 @@ describe("VerificationStrategyFactory", () => {
 
   it("rejects duplicate and unknown strategy IDs", () => {
     const currentProvider = provider();
-    expect(() => new VerificationStrategyFactory([currentProvider, currentProvider])).toThrow(/duplicate/i);
-    expect(() => new VerificationStrategyFactory([currentProvider]).create("missing")).toThrow(/unknown/i);
+    expect(
+      () => new VerificationStrategyFactory([currentProvider, currentProvider]),
+    ).toThrow(/duplicate/i);
+    expect(() =>
+      new VerificationStrategyFactory([currentProvider]).create("missing"),
+    ).toThrow(/unknown/i);
   });
 
   it("returns cloned descriptors", () => {

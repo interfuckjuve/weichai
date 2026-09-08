@@ -1,12 +1,20 @@
 export const translationVerifierSchemaVersion = "1.0" as const;
 
 export * from "./schemas/verification-types.js";
+export {
+  resolveVerificationPolicy,
+  deriveCompatibilityStatus,
+  failureAssessment,
+} from "./schemas/verification-assessment.js";
 export { assertVerificationInput } from "./schemas/validate-verification-input.js";
 export { assertVerificationResult } from "./schemas/validate-verification-result.js";
 export { assertVerificationReceipt } from "./schemas/validate-verification-receipt.js";
 export { assertVerificationRun } from "./schemas/validate-verification-run.js";
 export { createVerificationResult } from "./run-output/create-verification-result.js";
-export { validateRunSchema, validateRunEventSchema } from "./schemas/compile-schema-validators.js";
+export {
+  validateRunSchema,
+  validateRunEventSchema,
+} from "./schemas/compile-schema-validators.js";
 export { VerificationStrategyFactory } from "./workflow/select-strategy.js";
 export { VerificationService } from "./verification-service.js";
 export { createDefaultVerificationService } from "./create-default-verifier.js";

@@ -4,88 +4,229 @@
   "title": "VerificationInput",
   "description": "Public translation-verifier input. This schema validates the framework-owned envelope and staged artifacts; strategy-specific context and upstream AdaptationRequestV2 lineage are validated by their owners. Content hashes, patch hashes and safe normalized paths are additionally checked by the host.",
   "type": "object",
-  "required": ["schemaVersion", "request", "analysisReport", "migrationPlan", "translation"],
+  "required": [
+    "schemaVersion",
+    "request",
+    "analysisReport",
+    "migrationPlan",
+    "translation"
+  ],
   "properties": {
-    "schemaVersion": { "const": "1.0" },
+    "schemaVersion": {
+      "const": "1.0"
+    },
     "request": {
       "type": "object",
       "description": "AdaptationRequestV2. Only the framework-required subset is mandatory here, preserving standalone strategies. Additional upstream fields are preserved as JSON.",
-      "required": ["sourceBundle", "targetContext"],
+      "required": [
+        "sourceBundle",
+        "targetContext"
+      ],
       "properties": {
-        "requirement": { "type": "string", "description": "User requirements consumed by the selected strategy." },
-        "route": { "description": "Upstream language-open migration route." },
-        "candidate": { "description": "Upstream source implementation identity." },
-        "target": { "description": "Upstream target symbol identity." },
+        "requirement": {
+          "type": "string",
+          "description": "User requirements consumed by the selected strategy."
+        },
+        "route": {
+          "description": "Upstream language-open migration route."
+        },
+        "candidate": {
+          "description": "Upstream source implementation identity."
+        },
+        "target": {
+          "description": "Upstream target symbol identity."
+        },
         "sourceBundle": {
           "type": "object",
-          "required": ["files"],
-          "properties": { "files": { "type": "array", "items": { "$ref": "#/definitions/stagedFile" } } },
+          "required": [
+            "files"
+          ],
+          "properties": {
+            "files": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/stagedFile"
+              }
+            }
+          },
           "additionalProperties": true
         },
         "targetContext": {
           "type": "object",
-          "required": ["sourceFiles"],
-          "properties": { "sourceFiles": { "type": "array", "items": { "$ref": "#/definitions/stagedFile" } } },
+          "required": [
+            "sourceFiles"
+          ],
+          "properties": {
+            "sourceFiles": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/stagedFile"
+              }
+            }
+          },
           "additionalProperties": true
         }
       },
       "additionalProperties": true
     },
-    "analysisReport": { "description": "Strategy-owned JSON analysis; not necessarily a differential-smoke report." },
-    "migrationPlan": { "description": "Strategy-owned JSON migration plan." },
+    "analysisReport": {
+      "description": "Strategy-owned JSON analysis; not necessarily a differential-smoke report."
+    },
+    "migrationPlan": {
+      "description": "Strategy-owned JSON migration plan."
+    },
     "translation": {
       "type": "object",
-      "required": ["round", "generatedContent", "files", "patchHash"],
+      "required": [
+        "round",
+        "generatedContent",
+        "files",
+        "patchHash"
+      ],
       "properties": {
-        "round": { "type": "integer", "minimum": 0 },
-        "generatedContent": { "$ref": "#/definitions/nonEmptyString" },
-        "files": { "type": "array", "minItems": 1, "items": { "$ref": "#/definitions/filePatch" } },
-        "patchHash": { "$ref": "#/definitions/sha256" }
+        "round": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "generatedContent": {
+          "$ref": "#/definitions/nonEmptyString"
+        },
+        "files": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/definitions/filePatch"
+          }
+        },
+        "patchHash": {
+          "$ref": "#/definitions/sha256"
+        }
       },
       "additionalProperties": true
+    },
+    "verificationPolicy": {
+      "type": "object",
+      "description": "Host-owned reference trust decision and independent test basis. Omission never authorizes source execution.",
+      "required": [
+        "referenceDecision",
+        "reason"
+      ],
+      "properties": {
+        "referenceDecision": {
+          "enum": [
+            "accepted",
+            "rejected",
+            "undetermined"
+          ]
+        },
+        "reason": {
+          "$ref": "#/definitions/nonEmptyString"
+        },
+        "testBasis": {
+          "$ref": "#/definitions/nonEmptyString",
+          "description": "Host-confirmed requirements or acceptance criteria, independent of either implementation and the implementing Agent."
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": true,
   "definitions": {
-    "nonEmptyString": { "type": "string", "pattern": "\\S" },
-    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "nonEmptyString": {
+      "type": "string",
+      "pattern": "\\S"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
     "stagedFile": {
       "title": "StagedFileSchemaSubset",
       "type": "object",
-      "required": ["path", "content", "contentHash"],
+      "required": [
+        "path",
+        "content",
+        "contentHash"
+      ],
       "properties": {
-        "path": { "$ref": "#/definitions/nonEmptyString", "description": "Normalized, safe repository-relative POSIX path; checked by the host." },
-        "content": { "$ref": "#/definitions/nonEmptyString" },
-        "contentHash": { "$ref": "#/definitions/sha256" }
+        "path": {
+          "$ref": "#/definitions/nonEmptyString",
+          "description": "Normalized, safe repository-relative POSIX path; checked by the host."
+        },
+        "content": {
+          "$ref": "#/definitions/nonEmptyString"
+        },
+        "contentHash": {
+          "$ref": "#/definitions/sha256"
+        }
       },
       "additionalProperties": true
     },
     "filePatch": {
       "title": "FilePatchSchemaSubset",
       "type": "object",
-      "required": ["path", "status", "additions", "deletions", "hunks"],
+      "required": [
+        "path",
+        "status",
+        "additions",
+        "deletions",
+        "hunks"
+      ],
       "properties": {
-        "path": { "$ref": "#/definitions/nonEmptyString" },
-        "status": { "enum": ["created", "modified"] },
-        "additions": { "type": "integer", "minimum": 0 },
-        "deletions": { "type": "integer", "minimum": 0 },
-        "expectedAbsent": { "const": true },
-        "expectedOriginalSha256": { "$ref": "#/definitions/sha256" },
+        "path": {
+          "$ref": "#/definitions/nonEmptyString"
+        },
+        "status": {
+          "enum": [
+            "created",
+            "modified"
+          ]
+        },
+        "additions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "deletions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "expectedAbsent": {
+          "const": true
+        },
+        "expectedOriginalSha256": {
+          "$ref": "#/definitions/sha256"
+        },
         "hunks": {
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["header", "lines"],
+            "required": [
+              "header",
+              "lines"
+            ],
             "properties": {
-              "header": { "type": "string" },
+              "header": {
+                "type": "string"
+              },
               "lines": {
                 "type": "array",
                 "items": {
                   "type": "object",
-                  "required": ["type", "content"],
+                  "required": [
+                    "type",
+                    "content"
+                  ],
                   "properties": {
-                    "type": { "enum": ["context", "add", "remove"] },
-                    "content": { "type": "string" }
+                    "type": {
+                      "enum": [
+                        "context",
+                        "add",
+                        "remove"
+                      ]
+                    },
+                    "content": {
+                      "type": "string"
+                    }
                   },
                   "additionalProperties": true
                 }
@@ -96,8 +237,46 @@
         }
       },
       "allOf": [
-        { "if": { "properties": { "status": { "const": "created" } }, "required": ["status"] }, "then": { "properties": { "expectedAbsent": {} }, "required": ["expectedAbsent"] } },
-        { "if": { "properties": { "status": { "const": "modified" } }, "required": ["status"] }, "then": { "properties": { "expectedOriginalSha256": {} }, "required": ["expectedOriginalSha256"] } }
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "created"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "expectedAbsent": {}
+            },
+            "required": [
+              "expectedAbsent"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "modified"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "expectedOriginalSha256": {}
+            },
+            "required": [
+              "expectedOriginalSha256"
+            ]
+          }
+        }
       ],
       "additionalProperties": true
     }

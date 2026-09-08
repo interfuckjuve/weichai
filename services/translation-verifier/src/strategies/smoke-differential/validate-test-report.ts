@@ -9,6 +9,8 @@
  *
  * 仅使用 Node 标准库,不新增 schema 依赖;错误消息约定:<字段路径> <原因>。
  */
+import type { VerificationInput } from "../../schemas/verification-types.js";
+import { resolveVerificationPolicy } from "../../schemas/verification-assessment.js";
 import type { SmokeMode, SmokeReport } from "./differential-test-types.js";
 
 /** 大小/数量上限(防御 agent 超限输出)。 */
@@ -20,13 +22,37 @@ const MAX_TYPED_VALUE_DEPTH = 12;
 
 const PREFIX = "report schema 校验失败: ";
 
+const ASSESSMENTS = new Set([
+  "bug_found",
+  "no_bug_observed",
+  "suspected_bug",
+  "inconclusive",
+  "not_checked",
+]);
 const SIDES: ReadonlySet<string> = new Set(["source", "target"]);
-const LANGUAGES: ReadonlySet<string> = new Set(["Java", "C#", "Python", "TypeScript"]);
+const LANGUAGES: ReadonlySet<string> = new Set([
+  "Java",
+  "C#",
+  "Python",
+  "TypeScript",
+]);
 const MECHANICALS: ReadonlySet<string> = new Set(["pass", "fail", "divergent"]);
-const DECISIONS: ReadonlySet<string> = new Set(["pass", "translation-bug", "accepted-diff", "unclear"]);
+const DECISIONS: ReadonlySet<string> = new Set([
+  "pass",
+  "translation-bug",
+  "accepted-diff",
+  "unclear",
+]);
 const PHASES: ReadonlySet<string> = new Set(["compile", "run"]);
 const OUTCOMES: ReadonlySet<string> = new Set(["return", "exception"]);
-const TYPED_VALUE_TYPES: ReadonlySet<string> = new Set(["string", "number", "boolean", "null", "list", "map"]);
+const TYPED_VALUE_TYPES: ReadonlySet<string> = new Set([
+  "string",
+  "number",
+  "boolean",
+  "null",
+  "list",
+  "map",
+]);
 
 /** 统一错误出口:带前缀的明确信息,错误消息含 <path> 便于定位。 */
 function fail(path: string, reason: string): never {
@@ -41,14 +67,20 @@ function assertRecord(raw: unknown, path: string): Record<string, unknown> {
   return raw as Record<string, unknown>;
 }
 
+type ReportFieldValue = boolean | number | string | unknown[];
+
 /** 断言值存在且类型正确,失败抛带前缀的明确错误(字段级消息,兼容旧断言)。 */
-function requireField(obj: Record<string, unknown>, key: string, type: "boolean" | "number" | "string" | "array"): unknown {
+function requireField(
+  obj: Record<string, unknown>,
+  key: string,
+  type: "boolean" | "number" | "string" | "array",
+): ReportFieldValue {
   const value = obj[key];
   const ok = type === "array" ? Array.isArray(value) : typeof value === type;
   if (!ok) {
     fail(key, `字段缺失或类型错误(期望 ${type})`);
   }
-  return value;
+  return value as ReportFieldValue;
 }
 
 /** 断言字符串并返回。 */
@@ -58,10 +90,17 @@ function assertString(raw: unknown, path: string): string {
 }
 
 /** 断言字符串属于给定枚举。 */
-function assertEnum(raw: unknown, allowed: ReadonlySet<string>, path: string): string {
+function assertEnum(
+  raw: unknown,
+  allowed: ReadonlySet<string>,
+  path: string,
+): string {
   const value = assertString(raw, path);
   if (!allowed.has(value)) {
-    fail(path, `非法枚举值 ${JSON.stringify(value)}(允许:${[...allowed].join("|")})`);
+    fail(
+      path,
+      `非法枚举值 ${JSON.stringify(value)}(允许:${[...allowed].join("|")})`,
+    );
   }
   return value;
 }
@@ -86,7 +125,13 @@ function assertText(raw: unknown, path: string): string {
 /** 断言相对路径安全:拒绝绝对路径、windows 盘符/UNC、normalize 后逃逸出工作区。 */
 function assertSafeRelativePath(raw: string, path: string): void {
   const normalized = raw.replaceAll("\\", "/");
-  if (raw.startsWith("/") || /^[A-Za-z]:/.test(raw) || raw.startsWith("\\\\") || normalized === "" || normalized === ".") {
+  if (
+    raw.startsWith("/") ||
+    /^[A-Za-z]:/.test(raw) ||
+    raw.startsWith("\\\\") ||
+    normalized === "" ||
+    normalized === "."
+  ) {
     fail(path, "必须是工作区内相对路径(不允许绝对路径)");
   }
   const parts = normalized.split("/");
@@ -100,7 +145,10 @@ function assertSafeRelativePath(raw: string, path: string): void {
 /** 断言 RunnerFile 结构(path 安全相对路径 + content 文本)。 */
 function assertRunnerFile(raw: unknown, path: string): void {
   const file = assertRecord(raw, path);
-  assertSafeRelativePath(assertString(requireField(file, "path", "string"), `${path}.path`), `${path}.path`);
+  assertSafeRelativePath(
+    assertString(requireField(file, "path", "string"), `${path}.path`),
+    `${path}.path`,
+  );
   assertText(requireField(file, "content", "string"), `${path}.content`);
 }
 
@@ -108,13 +156,18 @@ function assertRunnerFile(raw: unknown, path: string): void {
 function assertTypedValue(raw: unknown, path: string, depth = 0): void {
   if (depth > MAX_TYPED_VALUE_DEPTH) fail(path, "嵌套超过深度上限");
   const t = assertRecord(raw, path);
-  const type = assertEnum(requireField(t, "type", "string"), TYPED_VALUE_TYPES, `${path}.type`);
+  const type = assertEnum(
+    requireField(t, "type", "string"),
+    TYPED_VALUE_TYPES,
+    `${path}.type`,
+  );
   switch (type) {
     case "string":
       assertText(requireField(t, "value", "string"), `${path}.value`);
       return;
     case "number":
-      if (typeof t.value !== "number" || !Number.isFinite(t.value)) fail(`${path}.value`, "必须为有限数值");
+      if (typeof t.value !== "number" || !Number.isFinite(t.value))
+        fail(`${path}.value`, "必须为有限数值");
       return;
     case "boolean":
       if (typeof t.value !== "boolean") fail(`${path}.value`, "必须为 boolean");
@@ -124,8 +177,11 @@ function assertTypedValue(raw: unknown, path: string, depth = 0): void {
       return;
     case "list": {
       const items = requireField(t, "value", "array") as unknown[];
-      if (items.length > MAX_ARRAY_ITEMS) fail(`${path}.value`, `条目数超过上限(${MAX_ARRAY_ITEMS})`);
-      items.forEach((item, i) => assertTypedValue(item, `${path}.value[${i}]`, depth + 1));
+      if (items.length > MAX_ARRAY_ITEMS)
+        fail(`${path}.value`, `条目数超过上限(${MAX_ARRAY_ITEMS})`);
+      items.forEach((item, i) =>
+        assertTypedValue(item, `${path}.value[${i}]`, depth + 1),
+      );
       return;
     }
     case "map": {
@@ -139,75 +195,185 @@ function assertTypedValue(raw: unknown, path: string, depth = 0): void {
 }
 
 /** 断言 CaseResult 结构完整,且 caseId 与外层一致。 */
-function assertCaseResult(raw: unknown, path: string, outerCaseId: string): void {
+function assertCaseResult(
+  raw: unknown,
+  path: string,
+  outerCaseId: string,
+): void {
   const result = assertRecord(raw, path);
-  const caseId = assertString(requireField(result, "caseId", "string"), `${path}.caseId`);
+  const caseId = assertString(
+    requireField(result, "caseId", "string"),
+    `${path}.caseId`,
+  );
   if (caseId !== outerCaseId) {
     fail(`${path}.caseId`, `与外层 caseId(${outerCaseId}) 不一致`);
   }
-  const outcome = assertEnum(requireField(result, "outcome", "string"), OUTCOMES, `${path}.outcome`);
+  const outcome = assertEnum(
+    requireField(result, "outcome", "string"),
+    OUTCOMES,
+    `${path}.outcome`,
+  );
   if (outcome === "return") {
-    if (result.returnValue === undefined) fail(`${path}.returnValue`, "字段缺失(return 结果必须携带 returnValue)");
+    if (result.returnValue === undefined)
+      fail(`${path}.returnValue`, "字段缺失(return 结果必须携带 returnValue)");
     assertTypedValue(result.returnValue, `${path}.returnValue`);
     return;
   }
-  assertText(requireField(result, "exceptionType", "string"), `${path}.exceptionType`);
-  if (result.exceptionMessage !== undefined) assertText(result.exceptionMessage, `${path}.exceptionMessage`);
+  assertText(
+    requireField(result, "exceptionType", "string"),
+    `${path}.exceptionType`,
+  );
+  if (result.exceptionMessage !== undefined)
+    assertText(result.exceptionMessage, `${path}.exceptionMessage`);
 }
 
 /** 断言单个 case verdict 结构。 */
-function assertCaseVerdict(raw: unknown, path: string, knownIds: Set<string>): void {
+function assertCaseVerdict(
+  raw: unknown,
+  path: string,
+  knownIds: Set<string>,
+  strict: boolean,
+): void {
   const c = assertRecord(raw, path);
-  const caseId = assertString(requireField(c, "caseId", "string"), `${path}.caseId`);
+  const caseId = assertString(
+    requireField(c, "caseId", "string"),
+    `${path}.caseId`,
+  );
   if (caseId.trim() === "") fail(`${path}.caseId`, "不能为空");
   if (knownIds.has(caseId)) fail("cases", `duplicate caseId: ${caseId}`);
   knownIds.add(caseId);
   assertText(requireField(c, "intent", "string"), `${path}.intent`);
   // source/target 可为 null(该侧未产出结果);非 null 时必须结构完整且 caseId 一致。
-  if (c.source !== null && c.source !== undefined) assertCaseResult(c.source, `${path}.source`, caseId);
-  if (c.target !== null && c.target !== undefined) assertCaseResult(c.target, `${path}.target`, caseId);
-  assertEnum(requireField(c, "mechanical", "string"), MECHANICALS, `${path}.mechanical`);
-  assertEnum(requireField(c, "decision", "string"), DECISIONS, `${path}.decision`);
+  if (c.source !== null && c.source !== undefined)
+    assertCaseResult(c.source, `${path}.source`, caseId);
+  if (c.target !== null && c.target !== undefined)
+    assertCaseResult(c.target, `${path}.target`, caseId);
+  assertEnum(
+    requireField(c, "mechanical", "string"),
+    MECHANICALS,
+    `${path}.mechanical`,
+  );
+  assertEnum(
+    requireField(c, "decision", "string"),
+    DECISIONS,
+    `${path}.decision`,
+  );
   assertText(requireField(c, "reasoning", "string"), `${path}.reasoning`);
+  if (strict || c.sourceAssessment !== undefined)
+    assertEnum(c.sourceAssessment, ASSESSMENTS, `${path}.sourceAssessment`);
+  if (strict || c.targetAssessment !== undefined)
+    assertEnum(c.targetAssessment, ASSESSMENTS, `${path}.targetAssessment`);
+  if (strict || c.requirement !== undefined) {
+    const requirement = assertRecord(c.requirement, `${path}.requirement`);
+    if (!assertText(requirement.basis, `${path}.requirement.basis`).trim())
+      fail(`${path}.requirement.basis`, "cannot be empty");
+    assertCaseResult(
+      requirement.expected,
+      `${path}.requirement.expected`,
+      caseId,
+    );
+    if (requirement.expectedBySide !== undefined) {
+      const expectedBySide = assertRecord(
+        requirement.expectedBySide,
+        `${path}.requirement.expectedBySide`,
+      );
+      for (const [side, expected] of Object.entries(expectedBySide)) {
+        if (!SIDES.has(side))
+          fail(`${path}.requirement.expectedBySide`, "unknown side");
+        assertCaseResult(
+          expected,
+          `${path}.requirement.expectedBySide.${side}`,
+          caseId,
+        );
+      }
+    }
+  }
+  if (strict || c.commandIds !== undefined) {
+    const ids = assertRecord(c.commandIds, `${path}.commandIds`);
+    if (!assertString(ids.target, `${path}.commandIds.target`))
+      fail(`${path}.commandIds.target`, "cannot be empty");
+    if (ids.source !== undefined)
+      assertString(ids.source, `${path}.commandIds.source`);
+  }
 }
 
 /** 校验可选字段 runnerFiles(存在时须同时含双侧,文件路径不逃逸)。 */
-function assertRunnerFiles(raw: unknown, path: string): void {
-  const groups = requireField(raw as Record<string, unknown>, "runnerFiles", "array") as unknown[];
-  if (groups.length > MAX_ARRAY_ITEMS) fail(path, `条目数超过上限(${MAX_ARRAY_ITEMS})`);
+function assertRunnerFiles(
+  raw: unknown,
+  path: string,
+  differential: boolean,
+): void {
+  const groups = requireField(
+    raw as Record<string, unknown>,
+    "runnerFiles",
+    "array",
+  ) as unknown[];
+  if (groups.length > MAX_ARRAY_ITEMS)
+    fail(path, `条目数超过上限(${MAX_ARRAY_ITEMS})`);
   const sides = new Set<string>();
   groups.forEach((group, i) => {
     const groupPath = `${path}[${i}]`;
     const g = assertRecord(group, groupPath);
-    const side = assertEnum(requireField(g, "side", "string"), SIDES, `${groupPath}.side`);
+    const side = assertEnum(
+      requireField(g, "side", "string"),
+      SIDES,
+      `${groupPath}.side`,
+    );
     sides.add(side);
-    assertEnum(requireField(g, "language", "string"), LANGUAGES, `${groupPath}.language`);
+    assertEnum(
+      requireField(g, "language", "string"),
+      LANGUAGES,
+      `${groupPath}.language`,
+    );
     const files = requireField(g, "files", "array") as unknown[];
-    if (files.length === 0) fail(`${groupPath}.files`, "不能为空(runner 组必须携带至少一个文件)");
-    if (files.length > MAX_ARRAY_ITEMS) fail(`${groupPath}.files`, `条目数超过上限(${MAX_ARRAY_ITEMS})`);
-    files.forEach((file, j) => assertRunnerFile(file, `${groupPath}.files[${j}]`));
+    if (files.length === 0)
+      fail(`${groupPath}.files`, "不能为空(runner 组必须携带至少一个文件)");
+    if (files.length > MAX_ARRAY_ITEMS)
+      fail(`${groupPath}.files`, `条目数超过上限(${MAX_ARRAY_ITEMS})`);
+    files.forEach((file, j) =>
+      assertRunnerFile(file, `${groupPath}.files[${j}]`),
+    );
   });
-  if (!sides.has("source") || !sides.has("target")) {
+  if (!sides.has("target") || (differential && !sides.has("source"))) {
     fail(path, "需同时包含 source 与 target 双侧 runner(缺 target 或 source)");
   }
+  if (!differential && sides.has("source"))
+    fail(path, "target_only forbids source runners");
 }
 
 /** 校验可选字段 executions(报告声明的执行证据,与命令证据的匹配在 evaluateSmokeReport)。 */
 function assertExecutions(raw: unknown, path: string): void {
-  const entries = requireField(raw as Record<string, unknown>, "executions", "array") as unknown[];
-  if (entries.length > MAX_ARRAY_ITEMS) fail(path, `条目数超过上限(${MAX_ARRAY_ITEMS})`);
+  const entries = requireField(
+    raw as Record<string, unknown>,
+    "executions",
+    "array",
+  ) as unknown[];
+  if (entries.length > MAX_ARRAY_ITEMS)
+    fail(path, `条目数超过上限(${MAX_ARRAY_ITEMS})`);
   const commandIds = new Set<string>();
   entries.forEach((entry, i) => {
     const entryPath = `${path}[${i}]`;
     const e = assertRecord(entry, entryPath);
     assertEnum(requireField(e, "side", "string"), SIDES, `${entryPath}.side`);
-    assertEnum(requireField(e, "phase", "string"), PHASES, `${entryPath}.phase`);
-    const commandId = assertString(requireField(e, "commandId", "string"), `${entryPath}.commandId`);
+    assertEnum(
+      requireField(e, "phase", "string"),
+      PHASES,
+      `${entryPath}.phase`,
+    );
+    const commandId = assertString(
+      requireField(e, "commandId", "string"),
+      `${entryPath}.commandId`,
+    );
     if (commandId === "") fail(`${entryPath}.commandId`, "不能为空");
-    if (commandIds.has(commandId)) fail(path, `duplicate commandId: ${commandId}`);
+    if (commandIds.has(commandId))
+      fail(path, `duplicate commandId: ${commandId}`);
     commandIds.add(commandId);
-    if (e.exitCode !== null) assertNonNegativeInteger(e.exitCode, `${entryPath}.exitCode`);
-    assertNonNegativeInteger(requireField(e, "durationMs", "number"), `${entryPath}.durationMs`);
+    if (e.exitCode !== null)
+      assertNonNegativeInteger(e.exitCode, `${entryPath}.exitCode`);
+    assertNonNegativeInteger(
+      requireField(e, "durationMs", "number"),
+      `${entryPath}.durationMs`,
+    );
   });
 }
 
@@ -215,11 +381,18 @@ function assertExecutions(raw: unknown, path: string): void {
  * 深度校验 SmokeReport 全部字段。mode 省略时不做 verify-only 约束
  * (兼容 diagnostic-repair 报告);mode="verify-only" 额外要求 rounds===0 且 targetFiles 为空。
  */
-export function assertSmokeReport(raw: unknown, mode?: SmokeMode): asserts raw is SmokeReport {
+export function assertSmokeReport(
+  raw: unknown,
+  mode?: SmokeMode,
+  input?: Pick<VerificationInput, "verificationPolicy">,
+): asserts raw is SmokeReport {
   const obj = assertRecord(raw, "report 顶层");
   requireField(obj, "converged", "boolean");
   assertNonNegativeInteger(requireField(obj, "steps", "number"), "steps");
-  const rounds = assertNonNegativeInteger(requireField(obj, "rounds", "number"), "rounds");
+  const rounds = assertNonNegativeInteger(
+    requireField(obj, "rounds", "number"),
+    "rounds",
+  );
   if (mode === "verify-only" && rounds !== 0) {
     fail("rounds", "在 verify-only 模式下必须为 0(禁止目标修复轮)");
   }
@@ -227,17 +400,29 @@ export function assertSmokeReport(raw: unknown, mode?: SmokeMode): asserts raw i
   if (cases.length === 0) fail("cases", "不能为空(non-empty)");
   if (cases.length > MAX_CASES) fail("cases", `数量超过上限(${MAX_CASES})`);
   const caseIds = new Set<string>();
-  cases.forEach((c, i) => assertCaseVerdict(c, `cases[${i}]`, caseIds));
+  cases.forEach((c, i) =>
+    assertCaseVerdict(c, `cases[${i}]`, caseIds, input !== undefined),
+  );
   const targetFiles = requireField(obj, "targetFiles", "array") as unknown[];
   if (mode === "verify-only" && targetFiles.length !== 0) {
     fail("targetFiles", "在 verify-only 模式下必须为空(禁止修改目标实现)");
   }
-  if (targetFiles.length > MAX_ARRAY_ITEMS) fail("targetFiles", `条目数超过上限(${MAX_ARRAY_ITEMS})`);
+  if (targetFiles.length > MAX_ARRAY_ITEMS)
+    fail("targetFiles", `条目数超过上限(${MAX_ARRAY_ITEMS})`);
   targetFiles.forEach((file, i) => assertRunnerFile(file, `targetFiles[${i}]`));
-  if (obj.runnerFiles !== undefined) assertRunnerFiles(obj, "runnerFiles");
+  if (input !== undefined && obj.runnerFiles === undefined)
+    fail("runnerFiles", "required for executed verification");
+  if (obj.runnerFiles !== undefined)
+    assertRunnerFiles(
+      obj,
+      "runnerFiles",
+      input === undefined ||
+        resolveVerificationPolicy(input).mode === "differential",
+    );
   if (obj.executions !== undefined) assertExecutions(obj, "executions");
   const sourceIssues = requireField(obj, "sourceIssues", "array") as unknown[];
-  if (sourceIssues.length > MAX_ARRAY_ITEMS) fail("sourceIssues", `条目数超过上限(${MAX_ARRAY_ITEMS})`);
+  if (sourceIssues.length > MAX_ARRAY_ITEMS)
+    fail("sourceIssues", `条目数超过上限(${MAX_ARRAY_ITEMS})`);
   sourceIssues.forEach((issue, i) => assertText(issue, `sourceIssues[${i}]`));
   assertText(requireField(obj, "summary", "string"), "summary");
 }

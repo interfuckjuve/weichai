@@ -1,6 +1,13 @@
+import { resolveVerificationPolicy } from "../../schemas/verification-assessment.js";
 import { markVerificationPhase } from "../../run-output/measure-legacy-run.js";
-import { DEFAULT_DISALLOWED_TOOLS, VERIFIER_COMMAND_ENTRY } from "./test-execution-config.js";
-import { buildSmokeTaskPrompt, type SmokeTaskInput } from "./build-differential-test-prompt.js";
+import {
+  DEFAULT_DISALLOWED_TOOLS,
+  VERIFIER_COMMAND_ENTRY,
+} from "./test-execution-config.js";
+import {
+  buildSmokeTaskPrompt,
+  type SmokeTaskInput,
+} from "./build-differential-test-prompt.js";
 import type { RunLayout } from "./prepare-projects.js";
 import type { SmokeRunOptions } from "./run-smoke-verification.js";
 
@@ -10,6 +17,7 @@ export function prepareAgentTask(
   layout: RunLayout,
   signal?: AbortSignal,
 ) {
+  const differential = resolveVerificationPolicy(job).mode === "differential";
   const mode = options.mode ?? "verify-only";
   const timeoutMs = options.timeoutMs ?? 300_000;
   signal?.throwIfAborted();
@@ -26,13 +34,14 @@ export function prepareAgentTask(
           },
           target: {
             ...job.target,
-            root: layout.projectRoots[1] ?? job.target.root,
+            root: layout.projectRoots.at(-1) ?? job.target.root,
           },
         };
 
   const deadlineAt = Date.now() + timeoutMs;
   const allowedTools = [`Bash(npx tsx ${VERIFIER_COMMAND_ENTRY} *)`];
   const env: Record<string, string> = {
+    VERIFIER_MODE: differential ? "differential" : "target_only",
     VERIFIER_WORKSPACE_ROOT: layout.executionRoot,
     VERIFIER_BASELINE_PATH: layout.baselinePath,
     VERIFIER_COMMAND_EVIDENCE_PATH: layout.evidencePath,
@@ -70,21 +79,24 @@ function executionContextSection(
   job: SmokeTaskInput,
   layout: RunLayout,
 ): string {
+  const differential = resolveVerificationPolicy(job).mode === "differential";
   return `EXECUTION CONTEXT (host-injected, authoritative)
 - Execution/workspace root: ${layout.executionRoot}
-- Source project (READ-ONLY): ${layout.projectRoots[0] ?? "(not resolved)"}
+${
+  differential
+    ? `- Source project (READ-ONLY): ${layout.projectRoots[0]}
   candidate file: ${job.source.candidatePath ?? "(browse)"}
-- Target project (READ-ONLY): ${layout.projectRoots[1] ?? "(not resolved)"}
+- Source runner directory: ${layout.runnerDirs[0]}\n`
+    : ""
+}- Target project (READ-ONLY): ${layout.projectRoots.at(-1) ?? "(not resolved)"}
   target file under test: ${job.target.file ?? "(browse)"}
-- Source runner directory (the ONLY writable source area): ${layout.runnerDirs[0]}
-- Target runner directory (the ONLY writable target area): ${layout.runnerDirs[1]}
+- Target runner directory (the ONLY writable target area): ${layout.runnerDirs.at(-1)}
 - Agent working directory (write report.json here): ${layout.agentDir}
 
 VERIFIER-COMMAND PROXY (the ONLY allowed Bash form)
 Run every compile/run through the proxy; never invoke javac/java/dotnet/python3/tsx directly.
-  npx tsx ${VERIFIER_COMMAND_ENTRY} --side source|target --phase compile|run --cwd <rel> -- <command...>
-where <rel> is relative to the execution root above (for example "source/project" or
-"target/project"). After each proxied command, read the last line of commands.jsonl in
+  npx tsx ${VERIFIER_COMMAND_ENTRY} --side ${differential ? "source|target" : "target"} --phase compile|run --cwd <rel> -- <command...>
+where <rel> is relative to the execution root above (for example "target/project"). After each proxied command, read the last line of commands.jsonl in
 your working directory and copy its commandId plus side/phase/exitCode/durationMs into the
 report executions entry. Never invent commandIds or exit codes.`;
 }

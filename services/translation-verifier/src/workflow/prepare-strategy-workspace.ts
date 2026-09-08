@@ -10,9 +10,18 @@ import {
 } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 import { applyHunksStrict, newFileContent } from "@forexplore/workflow-core";
+import { resolveVerificationPolicy } from "../schemas/verification-assessment.js";
 import { assertVerificationInput } from "../schemas/validate-verification-input.js";
-import { type VerificationInput, type VerificationArtifact, type VerificationStrategyContext, type VerificationResultArtifact } from "../schemas/verification-types.js";
-import { createVerificationArtifactStore, safePath } from "../run-output/verification-artifact-store.js";
+import {
+  type VerificationInput,
+  type VerificationArtifact,
+  type VerificationStrategyContext,
+  type VerificationResultArtifact,
+} from "../schemas/verification-types.js";
+import {
+  createVerificationArtifactStore,
+  safePath,
+} from "../run-output/verification-artifact-store.js";
 
 export interface VerificationWorkspaceOptions {
   workspaceRoot: string;
@@ -42,16 +51,16 @@ export function createVerificationWorkspace(
   const targetRoot = resolve(targetSideRoot, "project");
   const agentRoot = resolve(root, "agent");
   try {
-    for (const directory of [
-      sourceRoot,
-      targetRoot,
-      agentRoot,
-    ]) {
+    for (const directory of [sourceRoot, targetRoot, agentRoot]) {
       mkdirSync(directory, { recursive: true });
     }
 
     markVerificationPhase("source-snapshot-materialization");
-    for (const file of input.request.sourceBundle.files) {
+    const sourceFiles =
+      resolveVerificationPolicy(input).mode === "differential"
+        ? input.request.sourceBundle.files
+        : [];
+    for (const file of sourceFiles) {
       writeStagedFile(
         sourceRoot,
         file.path,

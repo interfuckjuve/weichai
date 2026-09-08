@@ -7,31 +7,72 @@ const {
   translationVerifierSchemaVersion,
   VerificationService,
   VerificationStrategyFactory,
+  resolveVerificationPolicy,
+  deriveCompatibilityStatus,
+  failureAssessment,
 } = verifier;
-
 describe("translation-verifier entry", () => {
   it("preserves public verification and result-builder signatures", () => {
     type Input = packageVerifier.VerificationInput;
     type Descriptor = packageVerifier.VerificationStrategyDescriptor;
     type Result = packageVerifier.VerificationResult;
     type Receipt = packageVerifier.VerificationReceipt;
-    type VerifyArgs = [Input, { strategyId?: string; keepWorkspace?: boolean }?, AbortSignal?];
-    expectTypeOf<packageVerifier.VerificationService["verify"]>().toEqualTypeOf<(...args: VerifyArgs) => Promise<Result>>();
-    expectTypeOf<packageVerifier.VerificationService["verifyWithReceipt"]>().toEqualTypeOf<(...args: VerifyArgs) => Promise<Receipt>>();
-    expectTypeOf(packageVerifier.createVerificationResult).toEqualTypeOf<(input: Input, descriptor: Descriptor, output: packageVerifier.VerificationStrategyOutput, now?: () => string) => Result>();
-    expectTypeOf(packageVerifier.assertVerificationInput).toEqualTypeOf<(input: Input) => Input>();
-    expectTypeOf(packageVerifier.assertVerificationResult).toEqualTypeOf<(result: Result, input: Input, descriptor: Descriptor) => Result>();
-    expectTypeOf(packageVerifier.assertVerificationReceipt).toEqualTypeOf<(receipt: Receipt, input: Input, descriptor: Descriptor) => Receipt>();
+    type VerifyArgs = [
+      Input,
+      { strategyId?: string; keepWorkspace?: boolean }?,
+      AbortSignal?,
+    ];
+    expectTypeOf<packageVerifier.VerificationService["verify"]>().toEqualTypeOf<
+      (...args: VerifyArgs) => Promise<Result>
+    >();
+    expectTypeOf<
+      packageVerifier.VerificationService["verifyWithReceipt"]
+    >().toEqualTypeOf<(...args: VerifyArgs) => Promise<Receipt>>();
+    expectTypeOf(packageVerifier.createVerificationResult).toEqualTypeOf<
+      (
+        input: Input,
+        descriptor: Descriptor,
+        output: packageVerifier.VerificationStrategyOutput,
+        now?: () => string,
+      ) => Result
+    >();
+    expectTypeOf(packageVerifier.assertVerificationInput).toEqualTypeOf<
+      (input: Input) => Input
+    >();
+    expectTypeOf(packageVerifier.assertVerificationResult).toEqualTypeOf<
+      (result: Result, input: Input, descriptor: Descriptor) => Result
+    >();
+    expectTypeOf(packageVerifier.assertVerificationReceipt).toEqualTypeOf<
+      (receipt: Receipt, input: Input, descriptor: Descriptor) => Receipt
+    >();
+    expectTypeOf(packageVerifier.resolveVerificationPolicy).toBeFunction();
+    expectTypeOf(packageVerifier.deriveCompatibilityStatus).toBeFunction();
+    expectTypeOf(packageVerifier.failureAssessment).toBeFunction();
   });
   it("preserves every runtime package export after internal moves", () => {
-    expect(Object.keys(packageVerifier).sort()).toEqual([
-      "DIFFERENTIAL_SMOKE_STRATEGY", "VerificationService", "VerificationStrategyFactory",
-      "assertVerificationInput", "assertVerificationReceipt", "assertVerificationResult", "assertVerificationRun",
-      "createDefaultVerificationService", "createVerificationResult", "translationVerifierSchemaVersion",
-      "validateRunEventSchema", "validateRunSchema",
-    ].sort());
+    expect(Object.keys(packageVerifier).sort()).toEqual(
+      [
+        "DIFFERENTIAL_SMOKE_STRATEGY",
+        "VerificationService",
+        "VerificationStrategyFactory",
+        "assertVerificationInput",
+        "assertVerificationReceipt",
+        "assertVerificationResult",
+        "assertVerificationRun",
+        "createDefaultVerificationService",
+        "createVerificationResult",
+        "deriveCompatibilityStatus",
+        "failureAssessment",
+        "resolveVerificationPolicy",
+        "translationVerifierSchemaVersion",
+        "validateRunEventSchema",
+        "validateRunSchema",
+      ].sort(),
+    );
     for (const key of Object.keys(verifier)) {
-      expect(packageVerifier[key as keyof typeof packageVerifier]).toBe(verifier[key as keyof typeof verifier]);
+      expect(packageVerifier[key as keyof typeof packageVerifier]).toBe(
+        verifier[key as keyof typeof verifier],
+      );
     }
   });
   it("exports run validation without exposing a mutable Ajv instance", () => {
@@ -55,6 +96,9 @@ describe("translation-verifier entry", () => {
     expect(typeof VerificationStrategyFactory).toBe("function");
     expect(typeof VerificationService).toBe("function");
     expect(typeof createDefaultVerificationService).toBe("function");
+    expect(typeof resolveVerificationPolicy).toBe("function");
+    expect(typeof deriveCompatibilityStatus).toBe("function");
+    expect(typeof failureAssessment).toBe("function");
   });
 
   it("does not expose the removed legacy driver API", () => {
@@ -66,4 +110,3 @@ describe("translation-verifier entry", () => {
     expect(verifier).not.toHaveProperty("TestMigratorAgent");
   });
 });
-

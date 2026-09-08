@@ -1,22 +1,44 @@
-import type { AdaptationRequestV2, FilePatch, RepositoryIngestionJsonValue } from "@forexplore/contracts";
+import type {
+  AdaptationRequestV2,
+  FilePatch,
+  RepositoryIngestionJsonValue,
+} from "@forexplore/contracts";
 import { calculatePatchHashV2 } from "@forexplore/workflow-core";
 import { Ajv } from "ajv";
 import runSchema from "./verification-run.schema.json" with { type: "json" };
 import { createHash } from "node:crypto";
 import { describe, expect, expectTypeOf, it } from "vitest";
-import type { VerificationReceipt as ServiceReceipt, VerificationResultArtifact as ServiceArtifact } from "../verification-service.js";
+import type {
+  VerificationReceipt as ServiceReceipt,
+  VerificationResultArtifact as ServiceArtifact,
+} from "../verification-service.js";
 import inputSchema from "./verification-input.schema.json" with {
   type: "json",
 };
 import outputSchema from "./verification-output.schema.json" with {
   type: "json",
 };
-import { validateInputSchema, validateResultSchema } from "./compile-schema-validators.js";
+import {
+  validateInputSchema,
+  validateResultSchema,
+} from "./compile-schema-validators.js";
 import { assertVerificationInput } from "./validate-verification-input.js";
 import { assertVerificationReceipt } from "./validate-verification-receipt.js";
 import { assertVerificationResult } from "./validate-verification-result.js";
 import { createVerificationResult } from "../run-output/create-verification-result.js";
-import { type VerificationInput, type VerificationStrategyDescriptor, type VerificationResult, type VerificationReceipt, type VerificationResultArtifact, type VerificationIssue, type VerificationArtifact, type VerificationStrategyOutput, type VerificationRun } from "./verification-types.js";
+import { deriveCompatibilityStatus } from "./verification-assessment.js";
+import {
+  type VerificationInput,
+  type VerificationStrategyDescriptor,
+  type VerificationResult,
+  type VerificationReceipt,
+  type VerificationResultArtifact,
+  type VerificationIssue,
+  type VerificationArtifact,
+  type VerificationStrategyOutput,
+  type VerificationRun,
+  type VerificationProblem,
+} from "./verification-types.js";
 
 const descriptor: VerificationStrategyDescriptor = {
   id: "fixture",
@@ -83,6 +105,67 @@ function input(): VerificationInput {
   };
 }
 
+function outputFor(
+  inputValue: VerificationInput,
+  overrides: Partial<VerificationStrategyOutput> = {},
+): VerificationStrategyOutput {
+  const {
+    status: requestedStatus,
+    summary = "verified",
+    issues = [],
+    artifacts = [],
+    strategyReport = {},
+    ...assessmentOverrides
+  } = overrides;
+  const policy = inputValue.verificationPolicy;
+  const assessment: VerificationAssessmentFixture = {
+    mode:
+      policy?.referenceDecision === "accepted" ? "differential" : "target_only",
+    referenceDecision: policy?.referenceDecision ?? "undetermined",
+    referenceReason:
+      policy?.reason ??
+      "The Host has not accepted the reference implementation.",
+    executionStatus: requestedStatus === "unverified" ? "failed" : "completed",
+    sourceAssessment:
+      policy?.referenceDecision === "accepted"
+        ? "no_bug_observed"
+        : "not_checked",
+    targetAssessment: fixtureTargetAssessment(requestedStatus),
+    problems:
+      requestedStatus === "unverified"
+        ? [{ code: "internal_error", message: "fixture could not complete" }]
+        : [],
+    ...assessmentOverrides,
+  };
+  return {
+    status: requestedStatus ?? deriveCompatibilityStatus(assessment),
+    summary,
+    issues,
+    artifacts,
+    strategyReport,
+    ...assessment,
+  };
+}
+
+type VerificationAssessmentFixture = Pick<
+  VerificationStrategyOutput,
+  | "mode"
+  | "referenceDecision"
+  | "referenceReason"
+  | "executionStatus"
+  | "sourceAssessment"
+  | "targetAssessment"
+  | "problems"
+>;
+
+function fixtureTargetAssessment(
+  status: VerificationStrategyOutput["status"] | undefined,
+): VerificationStrategyOutput["targetAssessment"] {
+  if (status === "fail") return "bug_found";
+  if (status === "unverified") return "inconclusive";
+  return "no_bug_observed";
+}
+
 describe("verification-types", () => {
   it("preserves the exact pre-refactor adapter-facing types and upstream ownership", () => {
     type LegacyInput = {
@@ -90,26 +173,80 @@ describe("verification-types", () => {
       request: AdaptationRequestV2;
       analysisReport: RepositoryIngestionJsonValue;
       migrationPlan: RepositoryIngestionJsonValue;
-      translation: { round: number; generatedContent: string; files: FilePatch[]; patchHash: string };
+      translation: {
+        round: number;
+        generatedContent: string;
+        files: FilePatch[];
+        patchHash: string;
+      };
+      verificationPolicy?: {
+        referenceDecision: "accepted" | "rejected" | "undetermined";
+        reason: string;
+        testBasis?: string;
+      };
     };
     type LegacyIssue = {
-      id: string; kind: string; message: string; caseId?: string;
+      id: string;
+      kind: string;
+      message: string;
+      caseId?: string;
       sourceObservation?: RepositoryIngestionJsonValue;
       targetObservation?: RepositoryIngestionJsonValue;
       evidenceArtifactIds: string[];
     };
-    type LegacyArtifact = { id: string; kind: string; path: string; contentHash: string; mediaType: string };
+    type LegacyArtifact = {
+      id: string;
+      kind: string;
+      path: string;
+      contentHash: string;
+      mediaType: string;
+    };
     type LegacyOutput = {
-      status: "pass" | "warn" | "fail" | "unverified"; summary: string;
-      issues: LegacyIssue[]; artifacts: LegacyArtifact[]; strategyReport: RepositoryIngestionJsonValue;
+      status: "pass" | "warn" | "fail" | "unverified";
+      summary: string;
+      issues: LegacyIssue[];
+      artifacts: LegacyArtifact[];
+      strategyReport: RepositoryIngestionJsonValue;
+      mode: "differential" | "target_only";
+      referenceDecision: "accepted" | "rejected" | "undetermined";
+      referenceReason: string;
+      executionStatus: "completed" | "partial" | "failed" | "cancelled";
+      sourceAssessment:
+        | "bug_found"
+        | "no_bug_observed"
+        | "suspected_bug"
+        | "inconclusive"
+        | "not_checked";
+      targetAssessment:
+        | "bug_found"
+        | "no_bug_observed"
+        | "suspected_bug"
+        | "inconclusive"
+        | "not_checked";
+      problems: {
+        code: VerificationProblem["code"];
+        message: string;
+        side?: "source" | "target";
+        commandId?: string;
+      }[];
     };
     type LegacyResult = LegacyOutput & {
-      schemaVersion: "1.0"; strategyId: string; strategyVersion: string;
-      subjectHash: string; round: number; createdAt: string; contentHash: string;
+      schemaVersion: "1.0";
+      strategyId: string;
+      strategyVersion: string;
+      subjectHash: string;
+      inputHash: string;
+      round: number;
+      createdAt: string;
+      contentHash: string;
     };
     type LegacyResultArtifact = {
-      id: string; kind: "verification-result"; path: string; contentHash: string;
-      size: number; mediaType: "application/json";
+      id: string;
+      kind: "verification-result";
+      path: string;
+      contentHash: string;
+      size: number;
+      mediaType: "application/json";
     };
     type LegacyReceipt =
       | { result: LegacyResult; resultArtifact: LegacyResultArtifact }
@@ -118,35 +255,60 @@ describe("verification-types", () => {
     expectTypeOf<VerificationInput>().toMatchTypeOf<LegacyInput>();
     expectTypeOf<LegacyInput>().toMatchTypeOf<VerificationInput>();
     expectTypeOf<keyof VerificationInput>().toEqualTypeOf<keyof LegacyInput>();
-    expectTypeOf<keyof VerificationInput["translation"]>().toEqualTypeOf<keyof LegacyInput["translation"]>();
+    expectTypeOf<keyof VerificationInput["translation"]>().toEqualTypeOf<
+      keyof LegacyInput["translation"]
+    >();
     expectTypeOf<Shape<VerificationIssue>>().toEqualTypeOf<LegacyIssue>();
     expectTypeOf<Shape<VerificationArtifact>>().toEqualTypeOf<LegacyArtifact>();
-    expectTypeOf<Shape<VerificationStrategyOutput>>().toEqualTypeOf<LegacyOutput>();
-    expectTypeOf<Shape<VerificationResult>>().toEqualTypeOf<Shape<LegacyResult>>();
+    expectTypeOf<
+      Shape<VerificationStrategyOutput>
+    >().toEqualTypeOf<LegacyOutput>();
+    expectTypeOf<Shape<VerificationResult>>().toEqualTypeOf<
+      Shape<LegacyResult>
+    >();
     expectTypeOf<VerificationReceipt>().toMatchTypeOf<LegacyReceipt>();
     expectTypeOf<LegacyReceipt>().toMatchTypeOf<VerificationReceipt>();
-    expectTypeOf<keyof VerificationReceipt>().toEqualTypeOf<keyof LegacyReceipt>();
+    expectTypeOf<keyof VerificationReceipt>().toEqualTypeOf<
+      keyof LegacyReceipt
+    >();
     expectTypeOf<VerificationResultArtifact>().toEqualTypeOf<LegacyResultArtifact>();
     expectTypeOf<ServiceReceipt>().toEqualTypeOf<VerificationReceipt>();
     expectTypeOf<ServiceArtifact>().toEqualTypeOf<VerificationResultArtifact>();
-    expectTypeOf<VerificationInput["request"]>().toEqualTypeOf<AdaptationRequestV2>();
-    expectTypeOf<VerificationInput["translation"]["files"]>().toEqualTypeOf<FilePatch[]>();
-    expectTypeOf<VerificationStrategyDescriptor>().toMatchTypeOf<NonNullable<VerificationRun["strategy"]["selected"]>>();
+    expectTypeOf<
+      VerificationInput["request"]
+    >().toEqualTypeOf<AdaptationRequestV2>();
+    expectTypeOf<VerificationInput["translation"]["files"]>().toEqualTypeOf<
+      FilePatch[]
+    >();
+    expectTypeOf<VerificationStrategyDescriptor>().toMatchTypeOf<
+      NonNullable<VerificationRun["strategy"]["selected"]>
+    >();
     const adapterInput: LegacyInput = input();
     const publicInput: VerificationInput = adapterInput;
     expect(publicInput).toBe(adapterInput);
   });
 
-  it.each([inputSchema, outputSchema])("compiles public $title with ordinary strict Ajv", (schema) => {
-    expect(() => new Ajv({ strict: true }).compile(schema)).not.toThrow();
-  });
+  it.each([inputSchema, outputSchema])(
+    "compiles public $title with ordinary strict Ajv",
+    (schema) => {
+      expect(() => new Ajv({ strict: true }).compile(schema)).not.toThrow();
+    },
+  );
 
   it("compiles the public run schema with local references and no custom keywords", () => {
     const ajv = new Ajv({ strict: true });
-    ajv.addSchema(inputSchema, new URL("verification-input.schema.json", runSchema.$id).href);
-    ajv.addSchema(outputSchema, new URL("verification-output.schema.json", runSchema.$id).href);
+    ajv.addSchema(
+      inputSchema,
+      new URL("verification-input.schema.json", runSchema.$id).href,
+    );
+    ajv.addSchema(
+      outputSchema,
+      new URL("verification-output.schema.json", runSchema.$id).href,
+    );
     expect(() => ajv.compile(runSchema)).not.toThrow();
-    expect(() => ajv.compile({ $ref: `${runSchema.$id}#/definitions/event` })).not.toThrow();
+    expect(() =>
+      ajv.compile({ $ref: `${runSchema.$id}#/definitions/event` }),
+    ).not.toThrow();
   });
 
   it("compiles the external schema files used by runtime validation", () => {
@@ -163,11 +325,18 @@ describe("verification-types", () => {
     Object.assign(value.translation, { upstreamExtension: true });
     expect(validateInputSchema(value)).toBe(true);
     expect(assertVerificationInput(value)).toBe(value);
-    const result = createVerificationResult(value, descriptor, {
-      status: "pass", summary: "checked", issues: [], artifacts: [], strategyReport: false,
-    });
+    const result = createVerificationResult(
+      value,
+      descriptor,
+      outputFor(value, {
+        summary: "checked",
+        strategyReport: false,
+      }),
+    );
     expect(validateResultSchema(result)).toBe(true);
-    expect(validateResultSchema({ ...result, upstreamExtension: true })).toBe(false);
+    expect(validateResultSchema({ ...result, upstreamExtension: true })).toBe(
+      false,
+    );
   });
 
   it("rejects malformed input fields without coercing or mutating data", () => {
@@ -214,29 +383,31 @@ describe("verification-types", () => {
     );
   });
 
-  it.each(["pass", "warn", "fail", "unverified"] as const)(
+  it.each(["pass", "fail", "unverified"] as const)(
     "materializes schema-valid %s results",
     (status) => {
-      const result = createVerificationResult(input(), descriptor, {
-        status,
-        summary: "checked",
-        artifacts: [],
-        issues:
-          status === "fail"
-            ? [
-                {
-                  id: "finding",
-                  kind: "behavior",
-                  message: "different",
-                  evidenceArtifactIds: [],
-                },
-              ]
-            : [],
-        strategyReport: {
-          languageId: "custom-language",
-          details: [null, true, 2, "value"],
-        },
-      });
+      const result = createVerificationResult(
+        input(),
+        descriptor,
+        outputFor(input(), {
+          status,
+          issues:
+            status === "fail"
+              ? [
+                  {
+                    id: "finding",
+                    kind: "behavior",
+                    message: "different",
+                    evidenceArtifactIds: [],
+                  },
+                ]
+              : [],
+          strategyReport: {
+            languageId: "custom-language",
+            details: [null, true, 2, "value"],
+          },
+        }),
+      );
       expect(validateResultSchema(result)).toBe(true);
       expect(assertVerificationResult(result, input(), descriptor)).toBe(
         result,
@@ -244,14 +415,84 @@ describe("verification-types", () => {
     },
   );
 
+  it("requires every detailed assessment field in addition to deprecated status", () => {
+    const result = outputFor(input());
+    for (const field of [
+      "mode",
+      "referenceDecision",
+      "referenceReason",
+      "executionStatus",
+      "sourceAssessment",
+      "targetAssessment",
+      "problems",
+    ] as const) {
+      const invalid = { ...result } as Record<string, unknown>;
+      delete invalid[field];
+      expect(validateResultSchema(invalid)).toBe(false);
+      expect(() =>
+        assertVerificationResult(invalid as never, input(), descriptor),
+      ).toThrow();
+    }
+  });
+
+  it("rejects contradictory target-only source findings", () => {
+    expect(() =>
+      createVerificationResult(
+        input(),
+        descriptor,
+        outputFor(input(), { sourceAssessment: "no_bug_observed" }),
+      ),
+    ).toThrow(/target-only verification cannot assess the unexecuted source/i);
+  });
+
+  it("binds mode and reference decision to the Host verification policy", () => {
+    const acceptedInput = {
+      ...input(),
+      verificationPolicy: {
+        referenceDecision: "accepted" as const,
+        reason: "trusted upstream implementation",
+      },
+    };
+    expect(() =>
+      createVerificationResult(
+        acceptedInput,
+        descriptor,
+        outputFor(acceptedInput, {
+          mode: "target_only",
+          referenceDecision: "undetermined",
+          referenceReason:
+            "The Host has not accepted the reference implementation.",
+          sourceAssessment: "not_checked",
+        }),
+      ),
+    ).toThrow(/does not match the Host reference decision/i);
+  });
+
+  it("rejects forged compatibility status and has no warn projection", () => {
+    expect(() =>
+      createVerificationResult(
+        input(),
+        descriptor,
+        outputFor(input(), { status: "pass", targetAssessment: "bug_found" }),
+      ),
+    ).toThrow(/compatibility status does not match/i);
+    expect(() =>
+      createVerificationResult(
+        input(),
+        descriptor,
+        outputFor(input(), { status: "warn" }),
+      ),
+    ).toThrow(/compatibility status does not match/i);
+  });
   it("rejects malformed output shape and fail-without-issues using the output schema", () => {
-    const result = createVerificationResult(input(), descriptor, {
-      status: "pass",
-      summary: "verified",
-      issues: [],
-      artifacts: [],
-      strategyReport: null,
-    });
+    const result = createVerificationResult(
+      input(),
+      descriptor,
+      outputFor(input(), {
+        summary: "verified",
+        strategyReport: null,
+      }),
+    );
     for (const invalid of [
       { ...result, schemaVersion: "2.0" },
       { ...result, status: "error" },
@@ -272,10 +513,9 @@ describe("verification-types", () => {
     value.translation.patchHash = "f".repeat(64);
     expect(validateInputSchema(value)).toBe(true);
     expect(() => assertVerificationInput(value)).toThrow(/patch hash.*files/i);
-    const output = {
-      status: "fail" as const,
+    const output = outputFor(input(), {
+      status: "fail",
       summary: "different",
-      artifacts: [],
       strategyReport: {},
       issues: [
         {
@@ -285,18 +525,22 @@ describe("verification-types", () => {
           evidenceArtifactIds: ["missing"],
         },
       ],
-    };
+    });
     expect(() => createVerificationResult(input(), descriptor, output)).toThrow(
       /evidence artifact reference/,
     );
     expect(() =>
-      createVerificationResult(input(), descriptor, {
-        ...output,
-        issues: [
-          { ...output.issues[0], evidenceArtifactIds: [] },
-          { ...output.issues[0], evidenceArtifactIds: [] },
-        ],
-      }),
+      createVerificationResult(
+        input(),
+        descriptor,
+        outputFor(input(), {
+          ...output,
+          issues: [
+            { ...output.issues[0], evidenceArtifactIds: [] },
+            { ...output.issues[0], evidenceArtifactIds: [] },
+          ],
+        }),
+      ),
     ).toThrow(/IDs must be unique/);
   });
 
@@ -304,13 +548,7 @@ describe("verification-types", () => {
     const result = createVerificationResult(
       input(),
       descriptor,
-      {
-        status: "pass",
-        summary: "verified",
-        issues: [],
-        artifacts: [],
-        strategyReport: { cases: 1 },
-      },
+      outputFor(input(), { strategyReport: { cases: 1 } }),
       () => "2026-09-05T00:00:00.000Z",
     );
     const bytes = Buffer.from(JSON.stringify(result), "utf8");
@@ -347,20 +585,37 @@ describe("verification-types", () => {
     const result = createVerificationResult(
       input(),
       descriptor,
-      {
-        status: "pass",
-        summary: "verified",
-        issues: [],
-        artifacts: [],
-        strategyReport: { cases: 1 },
-      },
+      outputFor(input(), { strategyReport: { cases: 1 } }),
       () => "2026-09-05T00:00:00.000Z",
     );
 
     expect(result.strategyId).toBe("fixture");
     expect(result.subjectHash).toBe(input().translation.patchHash);
+    expect(result.inputHash).toMatch(/^[0-9a-f]{64}$/);
     expect(result.contentHash).toMatch(/^[0-9a-f]{64}$/);
     expect(assertVerificationResult(result, input(), descriptor)).toBe(result);
+  });
+
+  it("rejects replay when the verification test basis changes", () => {
+    const originalInput = input();
+    const result = createVerificationResult(
+      originalInput,
+      descriptor,
+      outputFor(originalInput),
+      () => "2026-09-05T00:00:00.000Z",
+    );
+    const changedInput: VerificationInput = {
+      ...originalInput,
+      verificationPolicy: {
+        referenceDecision: "undetermined",
+        reason: "The Host has not accepted the reference implementation.",
+        testBasis: "independent acceptance suite v2",
+      },
+    };
+    expect(result.status).toBe("pass");
+    expect(() =>
+      assertVerificationResult(result, changedInput, descriptor),
+    ).toThrow(/input hash/i);
   });
 
   it("rejects missing or malformed staged file arrays", () => {
@@ -476,53 +731,59 @@ describe("verification-types", () => {
           migrationPlan: { bad: Symbol("bad") } as never,
         }),
       () =>
-        createVerificationResult(input(), descriptor, {
-          status: "pass",
-          summary: "verified",
-          issues: [],
-          artifacts: [],
-          strategyReport: { score: Number.POSITIVE_INFINITY },
-        }),
+        createVerificationResult(
+          input(),
+          descriptor,
+          outputFor(input(), {
+            strategyReport: { score: Number.POSITIVE_INFINITY },
+          }),
+        ),
       () =>
-        createVerificationResult(input(), descriptor, {
-          status: "pass",
-          summary: "verified",
-          issues: [],
-          artifacts: [],
-          strategyReport: new Map() as never,
-        }),
+        createVerificationResult(
+          input(),
+          descriptor,
+          outputFor(input(), {
+            strategyReport: new Map() as never,
+          }),
+        ),
       () =>
-        createVerificationResult(input(), descriptor, {
-          status: "fail",
-          summary: "different",
-          issues: [
-            {
-              id: "issue-1",
-              kind: "custom",
-              message: "different",
-              sourceObservation: cyclicValue() as never,
-              evidenceArtifactIds: [],
-            },
-          ],
-          artifacts: [],
-          strategyReport: {},
-        }),
+        createVerificationResult(
+          input(),
+          descriptor,
+          outputFor(input(), {
+            status: "fail",
+            summary: "different",
+            issues: [
+              {
+                id: "issue-1",
+                kind: "custom",
+                message: "different",
+                sourceObservation: cyclicValue() as never,
+                evidenceArtifactIds: [],
+              },
+            ],
+            strategyReport: {},
+          }),
+        ),
       () =>
-        createVerificationResult(input(), descriptor, {
-          status: "fail",
-          summary: "different",
-          issues: [
-            {
-              id: "issue-1",
-              kind: "custom",
-              message: "different",
-              targetObservation: [undefined] as never,
-              evidenceArtifactIds: [],
-            },
-          ],
-          artifacts: [],
-          strategyReport: {},
-        }),
+        createVerificationResult(
+          input(),
+          descriptor,
+          outputFor(input(), {
+            status: "fail",
+            summary: "different",
+            issues: [
+              {
+                id: "issue-1",
+                kind: "custom",
+                message: "different",
+                targetObservation: [undefined] as never,
+                evidenceArtifactIds: [],
+              },
+            ],
+            strategyReport: {},
+          }),
+        ),
     ];
 
     for (const testCase of cases) {
@@ -531,13 +792,13 @@ describe("verification-types", () => {
   });
 
   it("rejects a result from another patch", () => {
-    const result = createVerificationResult(input(), descriptor, {
-      status: "pass",
-      summary: "verified",
-      issues: [],
-      artifacts: [],
-      strategyReport: { cases: 1 },
-    });
+    const result = createVerificationResult(
+      input(),
+      descriptor,
+      outputFor(input(), {
+        strategyReport: { cases: 1 },
+      }),
+    );
 
     expect(() =>
       assertVerificationResult(
@@ -550,50 +811,56 @@ describe("verification-types", () => {
 
   it("rejects non-array issue lists and artifact lists", () => {
     expect(() =>
-      createVerificationResult(input(), descriptor, {
-        status: "pass",
-        summary: "verified",
-        issues: {} as never,
-        artifacts: [],
-        strategyReport: {},
-      }),
+      createVerificationResult(
+        input(),
+        descriptor,
+        outputFor(input(), {
+          issues: {} as never,
+          strategyReport: {},
+        }),
+      ),
     ).toThrow(/issues.*array/i);
 
     expect(() =>
-      createVerificationResult(input(), descriptor, {
-        status: "pass",
-        summary: "verified",
-        issues: [],
-        artifacts: {} as never,
-        strategyReport: {},
-      }),
+      createVerificationResult(
+        input(),
+        descriptor,
+        outputFor(input(), {
+          artifacts: {} as never,
+          strategyReport: {},
+        }),
+      ),
     ).toThrow(/artifacts.*array/i);
   });
 
   it("rejects non-array evidence artifact ids", () => {
     expect(() =>
-      createVerificationResult(input(), descriptor, {
-        status: "fail",
-        summary: "different",
-        issues: [
-          {
-            id: "issue-1",
-            kind: "custom",
-            message: "different",
-            evidenceArtifactIds: {} as never,
-          },
-        ],
-        artifacts: [
-          {
-            id: "artifact-1",
-            kind: "report",
-            path: "reports/result.json",
-            contentHash: "a".repeat(64),
-            mediaType: "application/json",
-          },
-        ],
-        strategyReport: {},
-      }),
+      createVerificationResult(
+        input(),
+        descriptor,
+        outputFor(input(), {
+          status: "fail",
+          summary: "different",
+          issues: [
+            {
+              id: "issue-1",
+              kind: "custom",
+              message: "different",
+              evidenceArtifactIds: {} as never,
+            },
+          ],
+          artifacts: [
+            {
+              id: "artifact-1",
+              kind: "report",
+              path: "reports/result.json",
+              contentHash: "a".repeat(64),
+              mediaType: "application/json",
+            },
+          ],
+          strategyReport: {},
+        }),
+      ),
     ).toThrow(/evidenceArtifactIds.*array/i);
   });
 });

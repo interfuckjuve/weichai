@@ -15,7 +15,7 @@ flowchart TD
 
 `src/workflow/run-verification.ts` owns the three outer phases, request recorder and cleanup. `validate-input.ts` checks the generic input envelope and selects the provider from `select-strategy.ts`. `run-strategy.ts` owns provider execution, deadline/cancellation handling and strategy output validation. `save-report.ts` binds and persists the canonical result through `run-output/verification-artifact-store.ts`. Timing never determines a verdict or rewrites a receipt/hash.
 
-`prepare-strategy-workspace.ts` stages generic source/target snapshots and the translation patch. It does not create smoke baselines, runner layouts or an Agent task sequence. A provider supplies `descriptor` and `create()`, and its strategy exposes `verify(input, context, signal)`. A strategy may have zero Agent calls, arbitrary steps and repeated or nested steps. `context.measureStep()` wraps existing work only; the recorder is not a workflow state machine.
+`prepare-strategy-workspace.ts` stages target snapshots and the translation patch, and stages source files only when the Host explicitly accepts the reference. It does not create smoke baselines, runner layouts or an Agent task sequence. A provider supplies `descriptor` and `create()`, and its strategy exposes `verify(input, context, signal)`. A strategy may have zero Agent calls, arbitrary steps and repeated or nested steps. `context.measureStep()` wraps existing work only; the recorder is not a workflow state machine.
 
 Register alternative providers in `VerificationStrategyFactory` and pass the same `VerificationInput` to each selected ID. Compare the same patch hash/round, snapshots, toolchain configuration and fixture. Do not force unrelated strategies to imitate smoke task names. See the [registration example](../README.md#register-and-compare-strategies).
 
@@ -23,18 +23,23 @@ Register alternative providers in `VerificationStrategyFactory` and pass the sam
 
 ```mermaid
 flowchart TD
-  M[strategy.ts: preflight and map input] --> P[prepare-projects.ts: smoke layout and read-only baseline]
-  P --> T[build-test-task.ts: private task and command permissions]
+  M[strategy.ts: Host policy and independent test basis] --> B{Reference accepted?}
+  B -->|yes| P[Differential: stage both sides]
+  B -->|no or undetermined| T0[Target-only: no source access or execution]
+  T0 --> T[build-test-task.ts: mode-specific task and permissions]
+  P --> T
   T --> A[run-agent-session.ts: Claude session]
   A --> C[controlled-test-command.ts: compile/run and command evidence]
   C --> A
   A --> E[evaluate-evidence.ts: report, baseline and mandatory evidence checks]
-  E --> D[decide-test-verdict.ts: pass / fail / unverified policy]
+  E --> D[Separate source/target assessments and execution problems]
   D --> O[strategy.ts: generic strategy output]
   A -. live assistant text only .-> Q[observe-agent-steps.ts: approximate task metadata]
   C -. metadata copied after session, even on failure .-> Q
   Q -. no verdict authority .-> R[RunRecorder]
 ```
+
+The Host controls the mode and test basis. Missing basis is an explicit preflight failure, not authorization for Agent-invented acceptance criteria. In target-only mode, source observations must remain absent and source assessment is `not_checked`; the command proxy denies source execution. Valid reports may distinguish source-only, target-only or common-mode bugs. Invalid reports/evidence cannot establish code findings. A timeout can preserve previously validated findings as `partial`; cancellation is distinct from an ordinary failure. The Host allows a bounded 250 ms report-finalization window after either signal, then returns even if a strategy does not cooperate. A slower recovery may be omitted. Missing or malformed reports do not suppress separate baseline and command diagnostics. Successfully retried runner compile errors remain in execution history but do not make the final report partial; unresolved compile errors, failed runs and timeouts remain problems.
 
 The diagram describes this strategy, not a required step list for every strategy. The Agent may explore, design cases, write runners, execute, compare and judge in its own order, including repeated tasks. The prompt requests a standalone `[VERIFIER_STEP] {"name":"explore","event":"start"}` line before a real task and `end` after it. `finalize-report` ends immediately after writing `report.json`; that final text marker is permitted before termination. There are no model timestamps. Insufficient evidence remains `unclear`, not a forced decisive answer.
 
@@ -46,7 +51,7 @@ The diagram describes this strategy, not a required step list for every strategy
 
 Host spans use the existing monotonic recorder. Agent intervals use Host receipt offsets with kind `agent-step-approximate`; buffering can make them inaccurate or zero-length. Missing starts/ends remain incomplete. Controlled-command durations and existing proxy subspans retain their own clock provenance, including when no valid report exists. Command timing metadata does not bypass the baseline or mandatory evidence checks, and Agent markers never establish that a command ran.
 
-The smoke E2E helper wraps `runSmoke()` in a recorder. It writes best-effort metadata-only `timing.json`/`timing.md` beside staged content in the existing `services/translation-verifier/test-results/smoke-*/` workspace. Agent reports/evidence remain under `agent/`. `--json` stdout is the original result object, with no timing fields or prose added. There is no new production run-root or diagnostic artifact system; `runRoot`, `debug`, `onRunRecorded` are reserved, ignored options.
+The smoke E2E wrapper uses the official service and retains complete Host reports plus fixed-field comparison results. Expected answers are never staged for the Agent. Timing sidecars remain diagnostic only; see [E2E documentation](../e2e/README.md) for current paths and output options. There is no new production diagnostic run-root system; `runRoot`, `debug`, `onRunRecorded` remain reserved options.
 
 Generic result artifacts still live under the configured artifact root, by default `<os.tmpdir()>/forexplore-verification-artifacts/attempt-*/`; receipts identify exact bytes. Generic workspaces default to `<os.tmpdir()>/forexplore-verification-workspaces/` and follow `keepWorkspace`. Content logging is a separate, bounded/redacted `VERIFIER_LOG_CONTENT=1` opt-in under `logs/`. No automatic tool hook capture is installed.
 

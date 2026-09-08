@@ -1,100 +1,313 @@
 import { describe, expect, it } from "vitest";
-import { validCommandEvidence, validSmokeCase, validSmokeReport } from "./differential-test-fixtures.js";
-import type { CommandEvidence, SmokeReport } from "./differential-test-types.js";
+import {
+  acceptedPolicy,
+  validCommandEvidence,
+  validSmokeCase,
+  validSmokeReport,
+} from "./differential-test-fixtures.js";
+import type {
+  CommandEvidence,
+  SmokeReport,
+} from "./differential-test-types.js";
 import { evaluateSmokeReport } from "./decide-test-verdict.js";
 
-describe("evaluateSmokeReport", () => {
-  it("只有 translation-bug 产生 fail", () => {
+const policy = { verificationPolicy: acceptedPolicy };
+const evaluate = (
+  report = validSmokeReport(),
+  evidence = validCommandEvidence(report),
+) => evaluateSmokeReport(report, evidence, "verify-only", policy);
+
+describe("independent side assessments", () => {
+  it.each([
+    [false, false],
+    [true, false],
+    [false, true],
+    [true, true],
+  ])("source bug=%s target bug=%s", (sourceBug, targetBug) => {
     const report = validSmokeReport();
-    report.cases = [validSmokeCase("translation-bug")];
-    const result = evaluateSmokeReport(report, validCommandEvidence(), "verify-only");
-    expect(result.status).toBe("fail");
-    expect(result.bugCases.map((item) => item.caseId)).toEqual(["c1"]);
+    const item = report.cases[0];
+    for (const [side, bug] of [
+      ["source", sourceBug],
+      ["target", targetBug],
+    ] as const) {
+      item[`${side}Assessment`] = bug ? "bug_found" : "no_bug_observed";
+      item[side] = {
+        caseId: "c1",
+        outcome: "return",
+        returnValue: { type: "string", value: bug ? "wrong" : "ok" },
+      };
+    }
+    // The legacy decision is deliberately pass, including two equal buggy observations.
+    const result = evaluate(report);
+    expect(result).toMatchObject({
+      executionStatus: "completed",
+      sourceAssessment: sourceBug ? "bug_found" : "no_bug_observed",
+      targetAssessment: targetBug ? "bug_found" : "no_bug_observed",
+      status: targetBug ? "fail" : "pass",
+    });
   });
-
-  it.each(["accepted-diff", "pass"] as const)("%s 且证据完整时通过", (decision) => {
+  it("accepts explicitly justified language-specific exception expectations", () => {
     const report = validSmokeReport();
-    report.cases = [validSmokeCase(decision)];
-    expect(evaluateSmokeReport(report, validCommandEvidence(), "verify-only").status).toBe("pass");
-  });
-
-  it("unclear、零 case 和证据不一致均为 unverified", () => {
-    const unclear = validSmokeReport();
-    unclear.cases = [validSmokeCase("unclear")];
-    expect(evaluateSmokeReport(unclear, validCommandEvidence(), "verify-only").status).toBe("unverified");
-    expect(evaluateSmokeReport(validSmokeReport(), [], "verify-only").reason).toBe("invalid-evidence");
-  });
-
-  describe("证据信任门控(禁止误判 pass)", () => {
-    const result = (evidence: CommandEvidence[], report: SmokeReport = validSmokeReport()) =>
-      evaluateSmokeReport(report, evidence, "verify-only");
-    const expectRejected = (evaluation: ReturnType<typeof evaluateSmokeReport>) => {
-      expect(evaluation.status).toBe("unverified");
-      expect(evaluation.reason).toBe("invalid-evidence");
-      expect(evaluation.bugCases).toEqual([]);
+    const item = report.cases[0];
+    item.source = {
+      caseId: "c1",
+      outcome: "exception",
+      exceptionType: "ValueError",
     };
-
-    it("commandId 匹配到重复证据(多于一条)→ 拒绝", () => {
-      const evidence = validCommandEvidence();
-      evidence.push({ ...evidence[0], commandId: "source-compile" });
-      expectRejected(result(evidence));
+    item.target = {
+      caseId: "c1",
+      outcome: "exception",
+      exceptionType: "IllegalArgumentException",
+    };
+    item.requirement = {
+      basis: acceptedPolicy.testBasis,
+      expected: item.source,
+      expectedBySide: { target: item.target },
+    };
+    item.decision = "accepted-diff";
+    item.reasoning =
+      "The independently supplied requirement permits different exception representations.";
+    expect(evaluate(report)).toMatchObject({
+      status: "pass",
+      sourceAssessment: "no_bug_observed",
+      targetAssessment: "no_bug_observed",
     });
+  });
 
-    it("证据 side 与报告声明不一致 → 拒绝", () => {
-      const evidence = validCommandEvidence();
-      evidence[1] = { ...evidence[1], side: "target" };
-      expectRejected(result(evidence));
-    });
-
-    it("证据 phase 与报告声明不一致 → 拒绝", () => {
-      const evidence = validCommandEvidence();
-      evidence[2] = { ...evidence[2], phase: "run" };
-      expectRejected(result(evidence));
-    });
-
-    it("证据 exitCode 与报告声明不一致 → 拒绝", () => {
-      const evidence = validCommandEvidence();
-      evidence[3] = { ...evidence[3], exitCode: 5 };
-      expectRejected(result(evidence));
-    });
-
-    it("证据 baselineValid=false → 拒绝", () => {
-      const evidence = validCommandEvidence();
-      evidence[0] = { ...evidence[0], baselineValid: false };
-      expectRejected(result(evidence));
-    });
-
-    it("证据 timedOut=true → 拒绝", () => {
-      const evidence = validCommandEvidence();
-      evidence[0] = { ...evidence[0], timedOut: true };
-      expectRejected(result(evidence));
-    });
-
-    it("证据 exitCode 非零(报告如实声明)→ 拒绝", () => {
+  it("does not turn sourceIssues annotations into confirmed source defects", () => {
+    expect(
+      evaluate(validSmokeReport({ sourceIssues: ["possible defect"] }))
+        .sourceAssessment,
+    ).toBe("no_bug_observed");
+  });
+  it.each(["suspected_bug", "inconclusive"] as const)(
+    "retains %s without a false bug claim",
+    (targetAssessment) => {
       const report = validSmokeReport();
-      report.executions![0] = { ...report.executions![0], exitCode: 5 };
-      const evidence = validCommandEvidence();
-      evidence[0] = { ...evidence[0], exitCode: 5 };
-      expectRejected(result(evidence, report));
+      report.cases[0].targetAssessment = targetAssessment;
+      expect(evaluate(report)).toMatchObject({
+        status: "unverified",
+        targetAssessment,
+        executionStatus: "completed",
+      });
+    },
+  );
+  it("missing policy or independent basis fails closed", () => {
+    for (const input of [
+      {},
+      {
+        verificationPolicy: {
+          referenceDecision: "accepted" as const,
+          reason: "accepted",
+        },
+      },
+    ]) {
+      expect(
+        evaluateSmokeReport(
+          validSmokeReport(),
+          validCommandEvidence(),
+          "verify-only",
+          input,
+        ).problems[0].code,
+      ).toBe("insufficient_test_basis");
+    }
+  });
+  it("target-only checks exactly one side and rejects a source claim", () => {
+    const report = validSmokeReport();
+    const item = report.cases[0];
+    item.source = null;
+    item.sourceAssessment = "not_checked";
+    item.commandIds = { target: "target-run" };
+    report.executions = report.executions!.filter(
+      (entry) => entry.side === "target",
+    );
+    report.runnerFiles = report.runnerFiles!.filter(
+      (entry) => entry.side === "target",
+    );
+    const input = {
+      verificationPolicy: {
+        ...acceptedPolicy,
+        referenceDecision: "rejected" as const,
+      },
+    };
+    const result = evaluateSmokeReport(
+      report,
+      validCommandEvidence(report),
+      "verify-only",
+      input,
+    );
+    expect(result).toMatchObject({
+      mode: "target_only",
+      sourceAssessment: "not_checked",
+      targetAssessment: "no_bug_observed",
+      status: "pass",
     });
+    item.sourceAssessment = "no_bug_observed";
+    expect(
+      evaluateSmokeReport(
+        report,
+        validCommandEvidence(report),
+        "verify-only",
+        input,
+      ).problems[0].code,
+    ).toBe("report_evidence_invalid");
+  });
+});
 
-    it("verify-only 报告携带 rounds>0 目标修复 → 拒绝(兜底)", () => {
-      const report = validSmokeReport();
-      report.rounds = 1;
-      expectRejected(result(validCommandEvidence(), report));
+describe("execution evidence gates", () => {
+  const rejected = (report: SmokeReport, evidence: CommandEvidence[]) => {
+    const result = evaluate(report, evidence);
+    expect(result.status).toBe("unverified");
+    expect(result.bugCases).toEqual([]);
+    expect(result.targetAssessment).toBe("inconclusive");
+    return result;
+  };
+  it.each([
+    "duplicate",
+    "side",
+    "phase",
+    "exit",
+    "baseline",
+    "timeout",
+    "stdout",
+  ])("rejects invalid %s evidence", (kind) => {
+    const report = validSmokeReport();
+    const evidence = validCommandEvidence();
+    if (kind === "duplicate") evidence.push({ ...evidence[0] });
+    if (kind === "side") evidence[1].side = "target";
+    if (kind === "phase") evidence[0].phase = "run";
+    if (kind === "exit") {
+      evidence[0].exitCode = 5;
+      report.executions![0].exitCode = 5;
+    }
+    if (kind === "baseline") evidence[0].baselineValid = false;
+    if (kind === "timeout") evidence[0].timedOut = true;
+    if (kind === "stdout") evidence[3].stdout = "[]";
+    const result = rejected(report, evidence);
+    if (kind === "timeout")
+      expect(result.problems[0].code).toBe("command_timeout");
+    if (kind === "exit")
+      expect(result.problems[0].code).toBe("environment_unavailable");
+    if (kind === "baseline")
+      expect(result.problems[0].code).toBe("workspace_integrity_violation");
+  });
+  it.each([
+    "no commands",
+    "compile missing",
+    "run reference missing",
+    "wrong basis",
+    "contradictory assessment",
+    "duplicate observation",
+  ])("rejects %s", (kind) => {
+    const report = validSmokeReport();
+    const evidence = validCommandEvidence();
+    if (kind === "no commands") report.executions = [];
+    if (kind === "compile missing")
+      report.executions = report.executions!.filter(
+        (item) => item.commandId !== "source-compile",
+      );
+    if (kind === "run reference missing")
+      report.cases[0].commandIds = undefined;
+    if (kind === "wrong basis")
+      report.cases[0].requirement!.basis = "Agent invented a requirement";
+    if (kind === "contradictory assessment")
+      report.cases[0].targetAssessment = "bug_found";
+    if (kind === "duplicate observation")
+      evidence[3].stdout = JSON.stringify([
+        report.cases[0].target,
+        report.cases[0].target,
+      ]);
+    rejected(report, evidence);
+  });
+  it.each([false, true])(
+    "preserves validated findings with a later timeout (declared=%s)",
+    (declared) => {
+      const report = validSmokeReport({
+        cases: [validSmokeCase("translation-bug")],
+      });
+      const evidence = validCommandEvidence(report);
+      const later = {
+        ...evidence[3],
+        commandId: "later-command",
+        timedOut: true,
+        exitCode: null,
+      };
+      evidence.push(later);
+      if (declared)
+        report.executions!.push({
+          side: later.side,
+          phase: later.phase,
+          commandId: later.commandId,
+          exitCode: null,
+          durationMs: later.durationMs,
+        });
+      expect(evaluate(report, evidence)).toMatchObject({
+        executionStatus: "partial",
+        targetAssessment: "bug_found",
+        status: "fail",
+        problems: [{ code: "command_timeout" }],
+      });
+    },
+  );
+  it("accepts a recovered runner compile error without discarding its execution history", () => {
+    const report = validSmokeReport();
+    const evidence = validCommandEvidence(report);
+    const failed = {
+      ...evidence[0],
+      commandId: "initial-compile",
+      exitCode: 1,
+    };
+    evidence.unshift(failed);
+    report.executions!.unshift({
+      commandId: failed.commandId,
+      side: failed.side,
+      phase: failed.phase,
+      exitCode: failed.exitCode,
+      durationMs: failed.durationMs,
     });
+    expect(evaluate(report, evidence)).toMatchObject({
+      executionStatus: "completed",
+      status: "pass",
+      problems: [],
+    });
+    expect(report.executions![0].exitCode).toBe(1);
+  });
 
-    it("verify-only 报告携带非空 targetFiles → 拒绝(兜底)", () => {
+  it.each(["later-compile", "earlier-run", "compile-timeout"])(
+    "retains an unresolved %s failure",
+    (kind) => {
       const report = validSmokeReport();
-      report.targetFiles = [{ path: "Target.cs", content: "changed" }];
-      expectRejected(result(validCommandEvidence(), report));
-    });
+      const evidence = validCommandEvidence(report);
+      const failed: CommandEvidence = {
+        ...evidence[0],
+        commandId: "unresolved",
+        exitCode: 1,
+        phase: kind === "earlier-run" ? "run" : "compile",
+        timedOut: kind === "compile-timeout",
+      };
+      if (kind === "later-compile") evidence.push(failed);
+      else evidence.unshift(failed);
+      expect(evaluate(report, evidence)).toMatchObject({
+        executionStatus: "partial",
+        status: "unverified",
+        problems: [expect.objectContaining({ commandId: "unresolved" })],
+      });
+    },
+  );
 
-    it("同形报告在 diagnostic-repair 模式不触发 verify-only 兜底", () => {
-      const report = validSmokeReport();
-      report.rounds = 1;
-      const evaluation = evaluateSmokeReport(report, validCommandEvidence(), "diagnostic-repair");
-      expect(evaluation.status).toBe("pass");
-    });
+  it("rejects repairs in verify-only but permits explicit diagnostics", () => {
+    const report = validSmokeReport({ rounds: 1 });
+    rejected(report, validCommandEvidence(report));
+    expect(
+      evaluateSmokeReport(
+        report,
+        validCommandEvidence(report),
+        "diagnostic-repair",
+        policy,
+      ).status,
+    ).toBe("pass");
+    report.rounds = 0;
+    report.targetFiles = [{ path: "Target.cs", content: "changed" }];
+    rejected(report, validCommandEvidence(report));
   });
 });

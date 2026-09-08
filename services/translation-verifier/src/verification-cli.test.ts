@@ -16,7 +16,10 @@ import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createVerificationResult } from "./run-output/create-verification-result.js";
-import { type VerificationInput, type VerificationStrategyDescriptor } from "./schemas/verification-types.js";
+import {
+  type VerificationInput,
+  type VerificationStrategyDescriptor,
+} from "./schemas/verification-types.js";
 import {
   runVerificationCli,
   type VerificationCliDependencies,
@@ -162,6 +165,14 @@ describe("runVerificationCli", () => {
       issues: [],
       artifacts: [],
       strategyReport: {},
+      mode: "target_only",
+      referenceDecision: "undetermined",
+      referenceReason:
+        "The Host has not accepted the reference implementation.",
+      executionStatus: "completed",
+      sourceAssessment: "not_checked",
+      targetAssessment: "no_bug_observed",
+      problems: [],
     });
     service.verify.mockResolvedValueOnce({
       ...result,
@@ -345,6 +356,14 @@ function fakeService(strategyId = "differential-smoke") {
             issues: [],
             artifacts: [],
             strategyReport: { ok: true },
+            mode: "target_only",
+            referenceDecision: "undetermined",
+            referenceReason:
+              "The Host has not accepted the reference implementation.",
+            executionStatus: "completed",
+            sourceAssessment: "not_checked",
+            targetAssessment: "no_bug_observed",
+            problems: [],
           },
         );
       },

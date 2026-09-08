@@ -18,7 +18,11 @@ import { appendFileSync, existsSync, mkdirSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { CommandEvidence, SmokeSide } from "./differential-test-types.js";
-import { DEFAULT_MAX_OUTPUT_BYTES, runManagedProcess, sanitizedBuildEnvironment } from "./manage-test-process.js";
+import {
+  DEFAULT_MAX_OUTPUT_BYTES,
+  runManagedProcess,
+  sanitizedBuildEnvironment,
+} from "./manage-test-process.js";
 import { assertWorkspaceBaseline } from "./protect-project-files.js";
 
 /** 构建/运行阶段。 */
@@ -55,6 +59,7 @@ const ALLOWED_TOOL_NAMES: ReadonlySet<string> = new Set([
 const LOCAL_WRAPPER_NAMES: ReadonlySet<string> = new Set(["mvnw", "gradlew"]);
 
 export interface RunVerifierCommandInput {
+  verificationMode?: "differential" | "target_only";
   workspaceRoot: string;
   side: SmokeSide;
   phase: CommandPhase;
@@ -158,12 +163,22 @@ export async function runVerifierCommand(
   // 已中止的 signal 优先于一切门禁生效:取消不以“baseline 违规”等理由被吞掉。
   signal?.throwIfAborted();
   const { side, phase } = input;
+  if (input.verificationMode === "target_only" && side !== "target") {
+    throw new Error("source execution denied in target_only mode");
+  }
   if (side !== "source" && side !== "target")
     throw new Error(`invalid side: ${String(side)}`);
   if (phase !== "compile" && phase !== "run")
     throw new Error(`invalid phase: ${String(phase)}`);
   const workspaceRoot = resolve(input.workspaceRoot);
   containedRealPath(workspaceRoot, input.cwd, "cwd");
+  if (input.verificationMode === "target_only") {
+    containedRealPath(
+      join(workspaceRoot, "target"),
+      input.cwd,
+      "target_only cwd",
+    );
+  }
   const beforeBaseline = performance.now();
   assertBaselineGated(workspaceRoot, input.baselinePath);
   const afterBaseline = performance.now();
@@ -309,6 +324,8 @@ export async function runVerifierCommandCli(
   const { side, phase, cwd: cwdRel, command, args } = parsed.invocation;
   try {
     const evidence = await runVerifierCommand({
+      verificationMode:
+        env.VERIFIER_MODE === "differential" ? "differential" : "target_only",
       workspaceRoot,
       side,
       phase,

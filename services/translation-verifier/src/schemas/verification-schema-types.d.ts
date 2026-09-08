@@ -121,6 +121,17 @@ export type VerificationResult = VerificationStrategyOutput & {
   strategyReport?: unknown;
   createdAt: string;
   contentHash: string;
+  mode?: unknown;
+  referenceDecision?: unknown;
+  referenceReason?: unknown;
+  executionStatus?: unknown;
+  sourceAssessment?: unknown;
+  targetAssessment?: unknown;
+  problems?: unknown;
+  /**
+   * SHA-256 of canonical complete VerificationInput, including reference policy, independent test basis and both snapshots.
+   */
+  inputHash: string;
 };
 
 /**
@@ -298,6 +309,21 @@ export interface VerificationInput {
     patchHash: string;
     [k: string]: unknown;
   };
+  /**
+   * Host-owned reference trust decision and independent test basis. Omission never authorizes source execution.
+   */
+  verificationPolicy?: {
+    referenceDecision: "accepted" | "rejected" | "undetermined";
+    /**
+     * This interface was referenced by `VerificationInput`'s JSON-Schema
+     * via the `definition` "nonEmptyString".
+     */
+    reason: string;
+    /**
+     * Host-confirmed requirements or acceptance criteria, independent of either implementation and the implementing Agent.
+     */
+    testBasis?: string;
+  };
   [k: string]: unknown;
 }
 /**
@@ -322,6 +348,9 @@ export interface StagedFileSchemaSubset {
   [k: string]: unknown;
 }
 export interface VerificationStrategyOutput {
+  /**
+   * Deprecated compatibility projection only. Never compare this field without mode and the independent assessments. Host validates it against the detailed fields.
+   */
   status: "pass" | "warn" | "fail" | "unverified";
   summary: string;
   issues: VerificationIssue[];
@@ -332,6 +361,13 @@ export interface VerificationStrategyOutput {
   strategyReport: {
     [k: string]: unknown;
   };
+  mode: "differential" | "target_only";
+  referenceDecision: "accepted" | "rejected" | "undetermined";
+  referenceReason: string;
+  executionStatus: "completed" | "partial" | "failed" | "cancelled";
+  sourceAssessment: "bug_found" | "no_bug_observed" | "suspected_bug" | "inconclusive" | "not_checked";
+  targetAssessment: "bug_found" | "no_bug_observed" | "suspected_bug" | "inconclusive" | "not_checked";
+  problems: VerificationProblem[];
   [k: string]: unknown;
 }
 export interface VerificationIssue {
@@ -364,6 +400,28 @@ export interface VerificationArtifact {
   contentHash: string;
   mediaType: string;
   [k: string]: unknown;
+}
+export interface VerificationProblem {
+  code:
+    | "report_missing"
+    | "report_invalid_json"
+    | "report_schema_invalid"
+    | "report_evidence_invalid"
+    | "agent_timeout"
+    | "command_timeout"
+    | "agent_error"
+    | "environment_unavailable"
+    | "insufficient_test_basis"
+    | "workspace_integrity_violation"
+    | "context_incomplete"
+    | "unsupported_language"
+    | "input_invalid"
+    | "artifact_persistence_failed"
+    | "internal_error"
+    | "cancelled";
+  message: string;
+  side?: "source" | "target";
+  commandId?: string;
 }
 /**
  * resultArtifact may be absent only for an unverified artifact-persistence-failed result; the host enforces this cross-field rule and canonical-byte metadata.

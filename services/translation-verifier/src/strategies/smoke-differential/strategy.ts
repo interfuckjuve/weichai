@@ -1,13 +1,37 @@
+import {
+  deriveCompatibilityStatus,
+  failureAssessment,
+  resolveVerificationPolicy,
+} from "../../schemas/verification-assessment.js";
 import { measureStep } from "../../run-output/record-run.js";
 import { markVerificationPhase } from "../../run-output/measure-legacy-run.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { RepositoryIngestionJsonValue } from "@forexplore/contracts";
 import type { EffortLevel, SpawnClaude } from "./claude-session.js";
-import type { SmokeCaseVerdict, VerifierLanguage } from "./differential-test-types.js";
-import type { VerificationArtifact, VerificationInput, VerificationIssue, VerificationStrategy, VerificationStrategyContext, VerificationStrategyDescriptor, VerificationStrategyOutput, VerificationStrategyProvider } from "../../schemas/verification-types.js";
-import { prepareCallerOwnedWorkspace, smokeRunnerRoots as runnerRoots } from "./prepare-projects.js";
-import { runSmoke, type SmokeResult, type SmokeRunOptions } from "./run-smoke-verification.js";
+import type {
+  SmokeCaseVerdict,
+  VerifierLanguage,
+} from "./differential-test-types.js";
+import type {
+  VerificationArtifact,
+  VerificationInput,
+  VerificationIssue,
+  VerificationStrategy,
+  VerificationStrategyContext,
+  VerificationStrategyDescriptor,
+  VerificationStrategyOutput,
+  VerificationStrategyProvider,
+} from "../../schemas/verification-types.js";
+import {
+  prepareCallerOwnedWorkspace,
+  smokeRunnerRoots as runnerRoots,
+} from "./prepare-projects.js";
+import {
+  runSmoke,
+  type SmokeResult,
+  type SmokeRunOptions,
+} from "./run-smoke-verification.js";
 import type { SmokeTaskInput } from "./build-differential-test-prompt.js";
 
 export const DIFFERENTIAL_SMOKE_STRATEGY: VerificationStrategyDescriptor = {
@@ -43,8 +67,22 @@ export class DifferentialSmokeStrategy implements VerificationStrategy {
     this.#options = options;
   }
 
-  #checkApplicability(input: VerificationInput): VerificationStrategyOutput | undefined {
+  #checkApplicability(
+    input: VerificationInput,
+  ): VerificationStrategyOutput | undefined {
     markVerificationPhase("strategy-capability-and-context-preflight");
+    const policy = resolveVerificationPolicy(input);
+    if (!policy.testBasis?.trim()) {
+      const summary = "Independent Host-confirmed test basis is missing.";
+      return {
+        ...failureAssessment(input, "insufficient_test_basis", summary),
+        status: "unverified",
+        summary,
+        issues: [],
+        artifacts: [],
+        strategyReport: null,
+      };
+    }
     const sourceLanguageId =
       input.request.route?.sourceLanguageId ??
       input.request.candidate.entity.languageId;
@@ -53,8 +91,16 @@ export class DifferentialSmokeStrategy implements VerificationStrategy {
       input.request.target.entity.languageId;
     const sourceLanguage = languageFor(sourceLanguageId);
     const targetLanguage = languageFor(targetLanguageId);
-    if (sourceLanguage === undefined || targetLanguage === undefined) {
+    if (
+      (policy.mode === "differential" && sourceLanguage === undefined) ||
+      targetLanguage === undefined
+    ) {
       return {
+        ...failureAssessment(
+          input,
+          "unsupported_language",
+          `Unsupported language route: ${sourceLanguageId} -> ${targetLanguageId}`,
+        ),
         status: "unverified",
         summary: `Unsupported differential smoke language route: ${sourceLanguageId} -> ${targetLanguageId}`,
         issues: [
@@ -75,6 +121,11 @@ export class DifferentialSmokeStrategy implements VerificationStrategy {
     const insufficientContext = insufficientContextReason(input);
     if (insufficientContext !== undefined) {
       return {
+        ...failureAssessment(
+          input,
+          "context_incomplete",
+          insufficientContext.message,
+        ),
         status: "unverified",
         summary:
           "Differential smoke verification requires additional migration context.",
@@ -94,17 +145,35 @@ export class DifferentialSmokeStrategy implements VerificationStrategy {
     return undefined;
   }
 
-  async verify(input: VerificationInput, context: VerificationStrategyContext, signal?: AbortSignal): Promise<VerificationStrategyOutput> {
+  async verify(
+    input: VerificationInput,
+    context: VerificationStrategyContext,
+    signal?: AbortSignal,
+  ): Promise<VerificationStrategyOutput> {
     const measure = context.measureStep ?? measureStep;
-    const early = await measure("check-applicability", () => this.#checkApplicability(input));
+    const early = await measure("check-applicability", () =>
+      this.#checkApplicability(input),
+    );
     if (early !== undefined) return early;
     await measure("prepare-projects-and-baseline", () => {
       markVerificationPhase("workspace-baseline-creation");
-      prepareCallerOwnedWorkspace(context);
+      prepareCallerOwnedWorkspace(
+        context,
+        resolveVerificationPolicy(input).mode === "differential",
+      );
     });
-    const sourceLanguage = languageFor(input.request.route?.sourceLanguageId ?? input.request.candidate.entity.languageId)!;
-    const targetLanguage = languageFor(input.request.route?.targetLanguageId ?? input.request.target.entity.languageId)!;
-    const run = this.#options.runSmokeImpl ?? this.#options.runSmoke ?? runSmoke;
+    const targetLanguage = languageFor(
+      input.request.route?.targetLanguageId ??
+        input.request.target.entity.languageId,
+    )!;
+    // The source language is unused in target_only prompts and execution.
+    const sourceLanguage =
+      languageFor(
+        input.request.route?.sourceLanguageId ??
+          input.request.candidate.entity.languageId,
+      ) ?? targetLanguage;
+    const run =
+      this.#options.runSmokeImpl ?? this.#options.runSmoke ?? runSmoke;
     const { job, options } = await measure("build-smoke-input", () => ({
       job: smokeInput(input, context, sourceLanguage, targetLanguage),
       options: smokeOptions(context, this.#options),
@@ -117,7 +186,14 @@ export class DifferentialSmokeStrategy implements VerificationStrategy {
     return measure("map-strategy-result", (): VerificationStrategyOutput => {
       markVerificationPhase("strategy-result-mapping");
       return {
-        status: smokeStatus(smoke),
+        mode: smoke.mode,
+        referenceDecision: smoke.referenceDecision,
+        referenceReason: smoke.referenceReason,
+        executionStatus: smoke.executionStatus,
+        sourceAssessment: smoke.sourceAssessment,
+        targetAssessment: smoke.targetAssessment,
+        problems: smoke.problems,
+        status: deriveCompatibilityStatus(smoke),
         summary: smoke.summary,
         issues: smokeIssues(smoke, artifact.id),
         artifacts: [artifact],
@@ -151,6 +227,7 @@ function smokeInput(
         fact.path === targetEntity.path,
     ) ?? input.request.targetContext.declarations[0];
   return {
+    verificationPolicy: input.verificationPolicy,
     requirement: input.request.requirement,
     analysisReport: JSON.stringify(input.analysisReport),
     source: {
@@ -216,17 +293,22 @@ async function writeSmokeReportArtifact(
   });
 }
 
-function smokeStatus(smoke: SmokeResult): VerificationStrategyOutput["status"] {
-  if (smoke.status === "pass") return "pass";
-  if (smoke.status === "fail") return "fail";
-  return "unverified";
-}
-
 function smokeIssues(
   smoke: SmokeResult,
   artifactId: string,
 ): VerificationIssue[] {
-  if (smoke.status === "pass") return [];
+  const sourceBugs =
+    smoke.sourceAssessment === "bug_found"
+      ? (smoke.report.cases ?? []).filter(
+          (item) => item.sourceAssessment === "bug_found",
+        )
+      : [];
+  const sourceIssues = sourceBugs.map((item, index) => ({
+    ...caseIssue(item, artifactId, index),
+    id: `source-bug-${index + 1}-${item.caseId}`,
+    kind: "source-bug",
+  }));
+  if (smoke.status === "pass") return sourceIssues;
   if (smoke.status === "fail") {
     const bugCases = smoke.evaluation?.bugCases ?? [];
     if (bugCases.length === 0) {
@@ -239,11 +321,15 @@ function smokeIssues(
         ),
       ];
     }
-    return bugCases.map((caseVerdict, index) =>
-      caseIssue(caseVerdict, artifactId, index),
-    );
+    return [
+      ...sourceIssues,
+      ...bugCases.map((caseVerdict, index) =>
+        caseIssue(caseVerdict, artifactId, index),
+      ),
+    ];
   }
   return [
+    ...sourceIssues,
     issue(
       "smoke-error",
       smoke.errorReason ?? "smoke-error",
@@ -293,7 +379,10 @@ function insufficientContextReason(
   ].flatMap(([field, value]) =>
     isNonEmptyStringArray(recordValue(value, "unresolved")) ? [field] : [],
   );
-  const sourceDependencies = input.request.sourceBundle.dependencyIds ?? [];
+  const sourceDependencies =
+    resolveVerificationPolicy(input).mode === "differential"
+      ? (input.request.sourceBundle.dependencyIds ?? [])
+      : [];
   const targetDependencies = input.request.targetContext.dependencies ?? [];
   const missingBuildFacts =
     (sourceDependencies.length > 0 || targetDependencies.length > 0) &&

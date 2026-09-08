@@ -14,11 +14,23 @@
  * 兼容路径(无 workspaceDir):把旧 root/files 双侧输入内部暂存为 source/project +
  * target/project + 双侧 runner 根 + agent 目录并创建基线,同样只经命令代理。
  */
+import {
+  deriveCompatibilityStatus,
+  failureAssessment,
+  resolveVerificationPolicy,
+} from "../../schemas/verification-assessment.js";
+import type {
+  VerificationAssessment,
+  VerificationProblem,
+} from "../../schemas/verification-types.js";
 import { markVerificationPhase } from "../../run-output/measure-legacy-run.js";
 import { measureStep } from "../../run-output/record-run.js";
 import { createLogger } from "../../run-output/verification-logger.js";
 import { defaultWorkspaceRoot } from "./test-execution-config.js";
-import { createWorkspace, type WorkspaceHandle } from "./create-smoke-workspace.js";
+import {
+  createWorkspace,
+  type WorkspaceHandle,
+} from "./create-smoke-workspace.js";
 import type { EffortLevel, SpawnClaude } from "./claude-session.js";
 import type { SmokeEvaluation } from "./decide-test-verdict.js";
 import type { SmokeMode, SmokeReport } from "./differential-test-types.js";
@@ -27,7 +39,10 @@ import { errorSummary } from "./read-test-report.js";
 import { prepareAgentTask } from "./build-test-task.js";
 import { prepareSmokeProjects, type RunLayout } from "./prepare-projects.js";
 import { runAgentTests } from "./run-agent-session.js";
-import { evaluateEvidence, observeCommandTimings } from "./evaluate-evidence.js";
+import {
+  evaluateEvidence,
+  observeCommandTimings,
+} from "./evaluate-evidence.js";
 export { readCommandEvidence } from "./evaluate-evidence.js";
 
 export type SmokeStatus = "pass" | "fail" | "error";
@@ -75,7 +90,7 @@ export interface SmokeRunOptions {
   spawnClaude?: SpawnClaude;
 }
 
-export interface SmokeResult {
+export interface SmokeResult extends VerificationAssessment {
   status: SmokeStatus;
   /** cases 机械 pass 占比;cases 为空时缺省。 */
   passRate?: number;
@@ -131,7 +146,8 @@ export async function runSmoke(
   let layout: RunLayout | undefined;
 
   const finish = (
-    partial: Pick<SmokeResult, "status" | "summary" | "report"> &
+    partial: VerificationAssessment &
+      Pick<SmokeResult, "status" | "summary" | "report"> &
       Partial<Pick<SmokeResult, "passRate" | "evaluation" | "errorReason">>,
   ): SmokeResult => {
     const result: SmokeResult = {
@@ -147,21 +163,86 @@ export async function runSmoke(
   };
 
   try {
+    signal?.throwIfAborted();
+    if (!resolveVerificationPolicy(job).testBasis?.trim()) {
+      const summary = "Independent Host-confirmed test basis is missing.";
+      return finish({
+        ...failureAssessment(job, "insufficient_test_basis", summary),
+        status: "error",
+        summary,
+        report: {} as SmokeReport,
+      });
+    }
     layout = await measureStep("prepare-smoke-layout", () => {
-      if (options.workspaceDir === undefined) ws = createWorkspace(options.workspaceRoot ?? defaultWorkspaceRoot());
+      if (options.workspaceDir === undefined)
+        ws = createWorkspace(options.workspaceRoot ?? defaultWorkspaceRoot());
       return prepareSmokeProjects(job, options, ws);
     });
     const preparedLayout = layout;
-    const prepared = await measureStep("build-test-task", () => prepareAgentTask(job, options, preparedLayout, signal));
+    const prepared = await measureStep("build-test-task", () =>
+      prepareAgentTask(job, options, preparedLayout, signal),
+    );
     await runAgentTests(prepared);
-    return finish(await evaluateEvidence(prepared.layout, mode));
+    return finish(await evaluateEvidence(prepared.layout, mode, job));
   } catch (error) {
-    if (isAbortError(error)) throw error;
+    const runError = signal?.aborted ? signal.reason : error;
+    const summary = errorSummary(runError);
+    const timedOut =
+      typeof runError === "object" &&
+      runError !== null &&
+      "name" in runError &&
+      runError.name === "TimeoutError";
+    const legacyReason = timedOut ? "timeout" : classifyRunError(runError);
+    const code: VerificationProblem["code"] = timedOut
+      ? "agent_timeout"
+      : signal?.aborted || isAbortError(error)
+        ? "cancelled"
+        : legacyReason === "timeout"
+          ? "agent_timeout"
+          : legacyReason === "toolchain"
+            ? "agent_error"
+            : legacyReason === "invalid-evidence"
+              ? "report_evidence_invalid"
+              : "internal_error";
+    if (
+      layout &&
+      (code === "agent_timeout" ||
+        code === "cancelled" ||
+        code === "agent_error")
+    ) {
+      const recovered = await evaluateEvidence(layout, mode, job);
+      if (
+        recovered.executionStatus === "completed" ||
+        recovered.executionStatus === "partial"
+      ) {
+        const assessment: VerificationAssessment = {
+          ...recovered,
+          executionStatus: code === "cancelled" ? "cancelled" : "partial",
+          problems: [...recovered.problems, { code, message: summary }],
+        };
+        const status = deriveCompatibilityStatus(assessment);
+        return finish({
+          ...recovered,
+          ...assessment,
+          status: status === "unverified" ? "error" : status,
+          summary,
+          errorReason: legacyReason,
+        });
+      }
+      return finish({
+        ...recovered,
+        executionStatus: code === "cancelled" ? "cancelled" : "failed",
+        problems: [...recovered.problems, { code, message: summary }],
+        summary,
+        errorReason: legacyReason,
+      });
+    }
     return finish({
+      ...failureAssessment(job, code, summary),
       status: "error",
-      summary: errorSummary(error),
+      summary,
       report: {} as SmokeReport,
-      errorReason: classifyRunError(error),
+      errorReason: legacyReason,
     });
   } finally {
     if (layout) observeCommandTimings(layout.evidencePath);

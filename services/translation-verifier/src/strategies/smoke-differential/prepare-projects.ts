@@ -1,6 +1,10 @@
+import { resolveVerificationPolicy } from "../../schemas/verification-assessment.js";
 import { cpSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { createWorkspaceBaseline, writeWorkspaceBaseline } from "./protect-project-files.js";
+import {
+  createWorkspaceBaseline,
+  writeWorkspaceBaseline,
+} from "./protect-project-files.js";
 import type { SmokeTaskInput } from "./build-differential-test-prompt.js";
 import type { WorkspaceHandle } from "./create-smoke-workspace.js";
 import type { SmokeRunOptions } from "./run-smoke-verification.js";
@@ -33,7 +37,10 @@ export interface RunLayout {
   runnerDirs: string[];
 }
 
-export const smokeRunnerRoots = ["source/.forexplore-tests", "target/.forexplore-tests"] as const;
+export const smokeRunnerRoots = [
+  "source/.forexplore-tests",
+  "target/.forexplore-tests",
+] as const;
 
 const MUTABLE_FILES = [
   "agent/report.json",
@@ -56,6 +63,7 @@ function callerOwnedLayout(
       "runSmoke: workspaceDir 模式必须同时提供 executionRoot/baselinePath/commandEvidencePath/runnerRoots",
     );
   }
+  const differential = resolveVerificationPolicy(job).mode === "differential";
   const runnerRoots = options.runnerRoots;
   const executionRoot = resolve(options.executionRoot);
   return {
@@ -65,12 +73,18 @@ function callerOwnedLayout(
     evidencePath: resolve(options.commandEvidencePath),
     runnerRoots,
     projectRoots: projectRootsOf(job),
-    runnerDirs: runnerRoots.map((root) => resolve(executionRoot, root)),
+    runnerDirs: runnerRoots
+      .filter((_, index) => differential || index === 1)
+      .map((root) => resolve(executionRoot, root)),
   };
 }
 
 function projectRootsOf(job: SmokeTaskInput): string[] {
-  return [job.source.root, job.target.root]
+  return (
+    resolveVerificationPolicy(job).mode === "differential"
+      ? [job.source.root, job.target.root]
+      : [job.target.root]
+  )
     .filter(
       (root): root is string => typeof root === "string" && root.length > 0,
     )
@@ -122,20 +136,25 @@ function stagedLayout(job: SmokeTaskInput, ws: WorkspaceHandle): RunLayout {
   const targetProject = join(executionRoot, "target", "project");
   const agentDir = join(executionRoot, "agent");
   const runnerRoots = smokeRunnerRoots;
-  const runnerDirs = runnerRoots.map((root) => join(executionRoot, root));
-  mkdirSync(sourceProject, { recursive: true });
+  const differential = resolveVerificationPolicy(job).mode === "differential";
+  const runnerDirs = runnerRoots
+    .filter((_, index) => differential || index === 1)
+    .map((root) => join(executionRoot, root));
+  if (differential) mkdirSync(sourceProject, { recursive: true });
   mkdirSync(targetProject, { recursive: true });
   mkdirSync(agentDir, { recursive: true });
   for (const dir of runnerDirs) mkdirSync(dir, { recursive: true });
 
-  if (job.source.files && job.source.files.length > 0) {
-    writeSideFiles(sourceProject, job.source.files);
-  } else if (isReadableDirectory(job.source.root ?? "")) {
-    copyProject(resolve(job.source.root!), sourceProject);
-  } else {
-    throw new Error(
-      "runSmoke 暂存源项目失败:缺少 source.files 或可读的 source.root",
-    );
+  if (differential) {
+    if (job.source.files && job.source.files.length > 0) {
+      writeSideFiles(sourceProject, job.source.files);
+    } else if (isReadableDirectory(job.source.root ?? "")) {
+      copyProject(resolve(job.source.root!), sourceProject);
+    } else {
+      throw new Error(
+        "runSmoke 暂存源项目失败:缺少 source.files 或可读的 source.root",
+      );
+    }
   }
   if (isReadableDirectory(job.target.root ?? "")) {
     copyProject(resolve(job.target.root!), targetProject);
@@ -151,21 +170,38 @@ function stagedLayout(job: SmokeTaskInput, ws: WorkspaceHandle): RunLayout {
     baselinePath,
     evidencePath: join(agentDir, "commands.jsonl"),
     runnerRoots,
-    projectRoots: [sourceProject, targetProject],
+    projectRoots: differential
+      ? [sourceProject, targetProject]
+      : [targetProject],
     runnerDirs,
   };
 }
 
-export function prepareCallerOwnedWorkspace(context: VerificationStrategyContext): void {
+export function prepareCallerOwnedWorkspace(
+  context: VerificationStrategyContext,
+  differential = true,
+): void {
   mkdirSync(context.workspace.strategyRoot, { recursive: true });
-  for (const root of smokeRunnerRoots)
+  for (const root of smokeRunnerRoots.filter(
+    (_, index) => differential || index === 1,
+  ))
     mkdirSync(join(context.workspace.root, root), { recursive: true });
   writeWorkspaceBaseline(
     join(context.workspace.root, "baseline.json"),
-    createWorkspaceBaseline(context.workspace.root, smokeRunnerRoots, MUTABLE_FILES),
+    createWorkspaceBaseline(
+      context.workspace.root,
+      smokeRunnerRoots,
+      MUTABLE_FILES,
+    ),
   );
 }
 
-export function prepareSmokeProjects(job: SmokeTaskInput, options: SmokeRunOptions, workspace: WorkspaceHandle | null): RunLayout {
-  return options.workspaceDir !== undefined ? callerOwnedLayout(options, job) : stagedLayout(job, workspace!);
+export function prepareSmokeProjects(
+  job: SmokeTaskInput,
+  options: SmokeRunOptions,
+  workspace: WorkspaceHandle | null,
+): RunLayout {
+  return options.workspaceDir !== undefined
+    ? callerOwnedLayout(options, job)
+    : stagedLayout(job, workspace!);
 }

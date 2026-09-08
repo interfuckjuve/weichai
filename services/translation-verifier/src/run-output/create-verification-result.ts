@@ -1,9 +1,30 @@
-import type { VerificationInput, VerificationResult, VerificationStrategyDescriptor, VerificationStrategyOutput, VerificationIssue, VerificationArtifact } from "../schemas/verification-types.js";
+import type {
+  VerificationInput,
+  VerificationResult,
+  VerificationStrategyDescriptor,
+  VerificationStrategyOutput,
+  VerificationIssue,
+  VerificationArtifact,
+} from "../schemas/verification-types.js";
 import { VerificationArtifactPersistenceError } from "./verification-artifact-store.js";
 import { canonicalJson } from "@forexplore/workflow-core";
-import { assertSchema, validateDescriptorSchema, validateStrategyOutputSchema, validateResultSchema } from "../schemas/compile-schema-validators.js";
+import {
+  assertSchema,
+  validateDescriptorSchema,
+  validateStrategyOutputSchema,
+  validateResultSchema,
+} from "../schemas/compile-schema-validators.js";
 import { assertVerificationInput } from "../schemas/validate-verification-input.js";
-import { cloneJsonValue, normalizeArtifactPath, sha256Hex } from "../schemas/validate-json-paths.js";
+import {
+  assertVerificationAssessment,
+  deriveCompatibilityStatus,
+  failureAssessment,
+} from "../schemas/verification-assessment.js";
+import {
+  cloneJsonValue,
+  normalizeArtifactPath,
+  sha256Hex,
+} from "../schemas/validate-json-paths.js";
 
 export function createVerificationResult(
   input: VerificationInput,
@@ -18,6 +39,11 @@ export function createVerificationResult(
     "Verification strategy descriptor",
   );
   assertSchema(validateStrategyOutputSchema, output, "Verification result");
+  assertVerificationAssessment(output, input);
+  if (output.status !== deriveCompatibilityStatus(output))
+    throw new Error(
+      "Verification compatibility status does not match the detailed assessments.",
+    );
   const issues = output.issues.map((issue) => materializeIssue(issue));
   const artifacts = output.artifacts.map((artifact) =>
     materializeArtifact(artifact),
@@ -46,8 +72,16 @@ export function createVerificationResult(
     strategyId: descriptor.id,
     strategyVersion: descriptor.version,
     subjectHash: input.translation.patchHash,
+    inputHash: sha256Hex(canonicalJson(input)),
     round: input.translation.round,
-    status: output.status,
+    status: deriveCompatibilityStatus(output),
+    mode: output.mode,
+    referenceDecision: output.referenceDecision,
+    referenceReason: output.referenceReason,
+    executionStatus: output.executionStatus,
+    sourceAssessment: output.sourceAssessment,
+    targetAssessment: output.targetAssessment,
+    problems: output.problems.map((problem) => ({ ...problem })),
     summary: output.summary,
     issues,
     artifacts,
@@ -126,10 +160,22 @@ export function createUnverifiedResult(
   const persistence =
     artifactFailure || error instanceof VerificationArtifactPersistenceError;
 
+  const cancelled = isNamedError(error, "AbortError");
   return createVerificationResult(
     input,
     descriptor,
     {
+      ...failureAssessment(
+        input,
+        persistence
+          ? "artifact_persistence_failed"
+          : cancelled
+            ? "cancelled"
+            : timeout
+              ? "agent_timeout"
+              : "internal_error",
+        message,
+      ),
       status: "unverified",
       summary: `Verification framework could not complete: ${message}`,
       issues: [

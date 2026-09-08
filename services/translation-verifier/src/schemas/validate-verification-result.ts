@@ -1,6 +1,14 @@
-import type { VerificationInput, VerificationResult, VerificationStrategyDescriptor } from "./verification-types.js";
+import type {
+  VerificationInput,
+  VerificationResult,
+  VerificationStrategyDescriptor,
+} from "./verification-types.js";
 import { canonicalJson } from "@forexplore/workflow-core";
-import { assertSchema, validateDescriptorSchema, validateResultSchema } from "./compile-schema-validators.js";
+import {
+  assertSchema,
+  validateDescriptorSchema,
+  validateResultSchema,
+} from "./compile-schema-validators.js";
 import { assertVerificationInput } from "./validate-verification-input.js";
 import { createVerificationResult } from "../run-output/create-verification-result.js";
 
@@ -41,6 +49,13 @@ export function assertVerificationResult(
     descriptor,
     {
       status: result.status,
+      mode: result.mode,
+      referenceDecision: result.referenceDecision,
+      referenceReason: result.referenceReason,
+      executionStatus: result.executionStatus,
+      sourceAssessment: result.sourceAssessment,
+      targetAssessment: result.targetAssessment,
+      problems: result.problems,
       summary: result.summary,
       issues: result.issues,
       artifacts: result.artifacts,
@@ -48,6 +63,11 @@ export function assertVerificationResult(
     },
     () => result.createdAt,
   );
+  if (result.inputHash !== expected.inputHash) {
+    throw new Error(
+      "Verification result input hash does not match the request, reference policy and test basis.",
+    );
+  }
   if (
     result.contentHash !== expected.contentHash ||
     canonicalJson(expected) !== canonicalJson(result)

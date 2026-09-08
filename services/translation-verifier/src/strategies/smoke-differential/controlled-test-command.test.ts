@@ -12,28 +12,75 @@ import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { expectProcessGone, LONG_RUNNING_FIXTURE, pidFilePath, readPids, waitFor } from "./process-test-fixtures.js";
+import {
+  expectProcessGone,
+  LONG_RUNNING_FIXTURE,
+  pidFilePath,
+  readPids,
+  waitFor,
+} from "./process-test-fixtures.js";
 import { sanitizedBuildEnvironment } from "./manage-test-process.js";
-import { VERIFIER_COMMAND_ENTRY, packageRoot } from "./test-execution-config.js";
-import { runVerifierCommand, runVerifierCommandCli } from "./controlled-test-command.js";
-import { createWorkspaceBaseline, writeWorkspaceBaseline } from "./protect-project-files.js";
+import {
+  VERIFIER_COMMAND_ENTRY,
+  packageRoot,
+} from "./test-execution-config.js";
+import {
+  runVerifierCommand,
+  runVerifierCommandCli,
+} from "./controlled-test-command.js";
+import {
+  createWorkspaceBaseline,
+  writeWorkspaceBaseline,
+} from "./protect-project-files.js";
 
 describe("controlled command executable entry", () => {
   it("executes the new sole entry and rejects arbitrary commands before evidence is written", () => {
     const ws = makeWorkspace();
     try {
-      const entry = join(packageRoot, "src/strategies/smoke-differential/controlled-test-command.ts");
+      const entry = join(
+        packageRoot,
+        "src/strategies/smoke-differential/controlled-test-command.ts",
+      );
       expect(VERIFIER_COMMAND_ENTRY).toBe(entry);
-      const env = { ...process.env, VERIFIER_WORKSPACE_ROOT: ws.root, VERIFIER_BASELINE_PATH: ws.baselinePath, VERIFIER_COMMAND_EVIDENCE_PATH: ws.evidencePath, VERIFIER_DEADLINE_AT: String(Date.now() + 30_000) };
-      const prefix = ["tsx", entry, "--side", "source", "--phase", "run", "--cwd", "source/project", "--"];
-      const denied = spawnSync("npx", [...prefix, "sh", "-c", "exit 0"], { cwd: packageRoot, env, encoding: "utf8" });
+      const env = {
+        ...process.env,
+        VERIFIER_MODE: "differential",
+        VERIFIER_WORKSPACE_ROOT: ws.root,
+        VERIFIER_BASELINE_PATH: ws.baselinePath,
+        VERIFIER_COMMAND_EVIDENCE_PATH: ws.evidencePath,
+        VERIFIER_DEADLINE_AT: String(Date.now() + 30_000),
+      };
+      const prefix = [
+        "tsx",
+        entry,
+        "--side",
+        "source",
+        "--phase",
+        "run",
+        "--cwd",
+        "source/project",
+        "--",
+      ];
+      const denied = spawnSync("npx", [...prefix, "sh", "-c", "exit 0"], {
+        cwd: packageRoot,
+        env,
+        encoding: "utf8",
+      });
       expect(denied.status).toBe(1);
       expect(denied.stderr).toContain("command not allowed");
       expect(readEvidenceLines(ws.evidencePath)).toEqual([]);
-      const allowed = spawnSync("npx", [...prefix, process.execPath, "-e", "process.stdout.write('entry-ok')"], { cwd: packageRoot, env, encoding: "utf8" });
+      const allowed = spawnSync(
+        "npx",
+        [...prefix, process.execPath, "-e", "process.stdout.write('entry-ok')"],
+        { cwd: packageRoot, env, encoding: "utf8" },
+      );
       expect(allowed.status, allowed.stderr).toBe(0);
-      expect(readEvidenceLines(ws.evidencePath)).toMatchObject([{ baselineValid: true, exitCode: 0, stdout: "entry-ok" }]);
-    } finally { rmSync(ws.root, { recursive: true, force: true }); }
+      expect(readEvidenceLines(ws.evidencePath)).toMatchObject([
+        { baselineValid: true, exitCode: 0, stdout: "entry-ok" },
+      ]);
+    } finally {
+      rmSync(ws.root, { recursive: true, force: true });
+    }
   });
 });
 
@@ -354,6 +401,7 @@ describe("runVerifierCommandCli", () => {
   function cliEnv(ws: Ws): NodeJS.ProcessEnv {
     return {
       ...process.env,
+      VERIFIER_MODE: "differential",
       VERIFIER_WORKSPACE_ROOT: ws.root,
       VERIFIER_BASELINE_PATH: ws.baselinePath,
       VERIFIER_COMMAND_EVIDENCE_PATH: ws.evidencePath,
@@ -386,6 +434,68 @@ describe("runVerifierCommandCli", () => {
     expect(lines[0].phase).toBe("compile");
     expect(lines[0].exitCode).toBe(0);
   });
+
+  it.each(["target_only", undefined])(
+    "denies source execution with Host mode %s",
+    async (mode) => {
+      const ws = makeWorkspace();
+      root = ws.root;
+      const env = { ...cliEnv(ws), VERIFIER_MODE: mode };
+      expect(
+        await runVerifierCommandCli(
+          [
+            "--side",
+            "source",
+            "--phase",
+            "run",
+            "--cwd",
+            "source/project",
+            "--",
+            process.execPath,
+            "-e",
+            "process.exit(0)",
+          ],
+          env,
+        ),
+      ).toBe(1);
+      expect(readEvidenceLines(ws.evidencePath)).toEqual([]);
+      expect(
+        await runVerifierCommandCli(
+          [
+            "--side",
+            "target",
+            "--phase",
+            "run",
+            "--cwd",
+            "source/project",
+            "--",
+            process.execPath,
+            "-e",
+            "process.exit(0)",
+          ],
+          env,
+        ),
+      ).toBe(1);
+      expect(readEvidenceLines(ws.evidencePath)).toEqual([]);
+      expect(
+        await runVerifierCommandCli(
+          [
+            "--side",
+            "target",
+            "--phase",
+            "run",
+            "--cwd",
+            "target/project",
+            "--",
+            process.execPath,
+            "-e",
+            "process.exit(0)",
+          ],
+          env,
+        ),
+      ).toBe(0);
+    },
+  );
 
   it("严格校验 side/phase 枚举", async () => {
     const ws = makeWorkspace();
@@ -460,7 +570,7 @@ describe("runVerifierCommandCli", () => {
   });
 });
 
-// ---- Task 8: 真实本地依赖 fixture(离线可构建)----
+// Real repository projects: dependency resolution and read-only build baselines.
 
 function fixtureProjectWorkspace(fixtureDir: string): Ws {
   const r = mkdtempSync(join(tmpdir(), "fx-verifier-fixture-"));
@@ -469,7 +579,13 @@ function fixtureProjectWorkspace(fixtureDir: string): Ws {
   mkdirSync(join(r, "target", ".forexplore-tests"), { recursive: true });
   mkdirSync(join(r, "target", "project"), { recursive: true });
   mkdirSync(join(r, "agent"), { recursive: true });
-  cpSync(fixtureDir, join(r, "source", "project"), { recursive: true });
+  cpSync(fixtureDir, join(r, "source", "project"), {
+    recursive: true,
+    filter: (path) =>
+      ![".git", "bin", "obj", "target", "node_modules"].includes(
+        path.split("/").pop() ?? "",
+      ),
+  });
   writeFileSync(
     join(r, "target", "project", "Placeholder.cs"),
     "class Placeholder {}",
@@ -502,26 +618,32 @@ const DOTNET = process.env.DOTNET_COMMAND?.trim() || "dotnet";
 const mavenAvailable = toolAvailable(MAVEN, ["-v"]);
 const dotnetAvailable = toolAvailable(DOTNET, ["--version"]);
 
-describe("真实依赖 fixture(离线本地构建)", () => {
+describe("real FileUpload project dependency builds", () => {
   const mavenFixture = fileURLToPath(
-    new URL("../../../e2e/fixtures/dependencies/maven", import.meta.url),
+    new URL(
+      "../../../../../fixtures/target-system/commons-fileupload-java-skeleton",
+      import.meta.url,
+    ),
   );
   const dotnetFixture = fileURLToPath(
-    new URL("../../../e2e/fixtures/dependencies/dotnet", import.meta.url),
+    new URL(
+      "../../../../../fixtures/code-corpus/commons-fileupload-csharp",
+      import.meta.url,
+    ),
   );
 
   it.runIf(mavenAvailable)(
-    "Maven reactor runner 解析 sibling module 依赖",
+    "compiles the Java skeleton with its real Maven dependencies",
     async () => {
       const ws = fixtureProjectWorkspace(mavenFixture);
       root = ws.root;
       const evidence = await runVerifierCommand(
         baseInput(ws, {
           side: "source",
-          phase: "run",
+          phase: "compile",
           cwd: join(ws.root, "source", "project"),
           command: MAVEN,
-          args: ["-q", "test"],
+          args: ["-q", "-Dmaven.test.skip=true", "compile"],
           deadlineAt: Date.now() + 180_000,
         }),
       );
@@ -532,7 +654,7 @@ describe("真实依赖 fixture(离线本地构建)", () => {
   );
 
   it.runIf(dotnetAvailable)(
-    "ProjectReference runner 解析 sibling 项目依赖",
+    "builds the real C# FileUpload source project",
     async () => {
       const ws = fixtureProjectWorkspace(dotnetFixture);
       root = ws.root;
