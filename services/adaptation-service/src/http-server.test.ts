@@ -34,10 +34,11 @@ import {
   type CodeAdaptationPortV2,
 } from './adaptation-adapter-v2';
 import {
+  fixtureVerificationAssessment,
   adaptationV2GeneratedContent,
   adaptationV2TestNow,
   createAdaptationV2TestFixture,
-} from './adaptation-v2-test-support';
+} from "./adaptation-v2-test-support";
 import { createAdaptationRuntimeCapabilitySnapshot } from './runtime-capability-snapshot';
 
 const httpBehaviorStrategyDescriptor: VerificationStrategyDescriptor = {
@@ -199,80 +200,107 @@ function deterministicAdapterV2(
   return new AdaptationAdapterV2({
     runtimeCapabilities,
     analyzer: {
-      providerId: 'forexplore.analyzer.deepseek',
-      providerVersion: '1.0.0',
+      providerId: "forexplore.analyzer.deepseek",
+      providerVersion: "1.0.0",
       analyze: async () => ({
-        schemaVersion: '1.0',
-        behavior: ['Normalize text.'],
-        targetConstraints: ['Keep sibling function.'],
+        schemaVersion: "1.0",
+        behavior: ["Normalize text."],
+        targetConstraints: ["Keep sibling function."],
         mappings: [],
         risks: [],
         unresolved: [],
       }),
     },
     planner: {
-      providerId: 'forexplore.planner.deepseek',
-      providerVersion: '1.0.0',
+      providerId: "forexplore.planner.deepseek",
+      providerVersion: "1.0.0",
       plan: async () => ({
-        schemaVersion: '1.0',
-        steps: ['Replace the approved declaration.'],
+        schemaVersion: "1.0",
+        steps: ["Replace the approved declaration."],
         preservedFacts: [],
-        expectedTargetChanges: ['normalize'],
-        validationFocus: ['behavior'],
+        expectedTargetChanges: ["normalize"],
+        validationFocus: ["behavior"],
         unresolved: [],
       }),
     },
     translator: {
-      providerId: 'forexplore.translator.deepseek',
-      providerVersion: '1.0.0',
-      strategy: 'translate',
+      providerId: "forexplore.translator.deepseek",
+      providerVersion: "1.0.0",
+      strategy: "translate",
       translate: async () => ({
-        schemaVersion: '1.0',
+        schemaVersion: "1.0",
         generatedContent: adaptationV2GeneratedContent,
-        completedSteps: ['translated'],
+        completedSteps: ["translated"],
         unresolved: [],
       }),
       repair: async (_input, _analysis, _plan, previous) => ({
-        schemaVersion: '1.0' as const,
+        schemaVersion: "1.0" as const,
         generatedContent: previous.generatedContent,
         completedSteps: previous.completedSteps,
         unresolved: previous.unresolved,
       }),
     },
     verifier: {
-      providerId: 'forexplore.translation-verifier.differential',
-      providerVersion: '1.0.0',
+      providerId: "forexplore.translation-verifier.differential",
+      providerVersion: "1.0.0",
       strategyDescriptor: httpBehaviorStrategyDescriptor,
-      verifyWithReceipt: async (input) => ({ result: createVerificationResult({
-        schemaVersion: '1.0',
-        request: input.request,
-        analysisReport: input.analysis as unknown as RepositoryIngestionJsonValue,
-        migrationPlan: input.plan as unknown as RepositoryIngestionJsonValue,
-        translation: {
-          round: input.round,
-          generatedContent: input.translation.generatedContent,
-          files: input.files,
-          patchHash: input.patchHash,
+      verifyWithReceipt: async (input) => ({
+        result: createVerificationResult(
+          {
+            schemaVersion: "1.0",
+            request: input.request,
+            analysisReport:
+              input.analysis as unknown as RepositoryIngestionJsonValue,
+            migrationPlan:
+              input.plan as unknown as RepositoryIngestionJsonValue,
+            translation: {
+              round: input.round,
+              generatedContent: input.translation.generatedContent,
+              files: input.files,
+              patchHash: input.patchHash,
+            },
+          },
+          httpBehaviorStrategyDescriptor,
+          {
+            ...fixtureVerificationAssessment({}),
+            status: "pass",
+            summary: "Controlled local test-fixture verifier passed.",
+            issues: [],
+            artifacts: [
+              {
+                id: "http-v2-report",
+                kind: "report",
+                path: ".forexplore/evidence/http-v2.json",
+                contentHash: "a".repeat(64),
+                mediaType: "application/json",
+              },
+            ],
+            strategyReport: { fixture: true },
+          },
+          () => adaptationV2TestNow,
+        ),
+        resultArtifact: {
+          id: "verification-result:http",
+          kind: "verification-result",
+          path: "verification-result.json",
+          contentHash: "c".repeat(64),
+          size: 2,
+          mediaType: "application/json",
         },
-      }, httpBehaviorStrategyDescriptor, {
-        status: 'pass',
-        summary: 'Controlled local test-fixture verifier passed.',
-        issues: [],
-        artifacts: [{
-          id: 'http-v2-report',
-          kind: 'report',
-          path: '.forexplore/evidence/http-v2.json',
-          contentHash: 'a'.repeat(64),
-          mediaType: 'application/json',
-        }],
-        strategyReport: { fixture: true },
-      }, () => adaptationV2TestNow), resultArtifact: { id: 'verification-result:http', kind: 'verification-result', path: 'verification-result.json', contentHash: 'c'.repeat(64), size: 2, mediaType: 'application/json' }, }),
+      }),
     },
     compiler: {
-      capability: (languageId) => languageId === 'python'
-        ? { providerId: 'forexplore.compiler.python', providerVersion: '1.0.0' }
-        : undefined,
-      validate: () => ({ status: 'pass', summary: 'Python syntax fixture passed.' }),
+      capability: (languageId) =>
+        languageId === "python"
+          ? {
+              providerId: "forexplore.compiler.python",
+              providerVersion: "1.0.0",
+            }
+          : undefined,
+      validate: () => ({
+        status: "pass",
+        summary: "Python syntax fixture passed.",
+      }),
     },
     now: () => adaptationV2TestNow,
   });

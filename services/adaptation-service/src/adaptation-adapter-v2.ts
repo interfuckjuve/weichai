@@ -780,11 +780,15 @@ function indentGeneratedContent(content: string, indentation: string): string {
   }).join("\n");
 }
 
-function behaviorVerificationInput(input: MigrationBehaviorVerificationInputV2): VerificationInput {
+function behaviorVerificationInput(
+  input: MigrationBehaviorVerificationInputV2,
+): VerificationInput {
   return {
     schemaVersion: "1.0",
     request: input.request,
+    // SAFETY: validated migration artifacts contain only JSON fields; the verifier validates the envelope.
     analysisReport: input.analysis as unknown as RepositoryIngestionJsonValue,
+    // SAFETY: the validated plan contains only JSON fields; the verifier validates the envelope.
     migrationPlan: input.plan as unknown as RepositoryIngestionJsonValue,
     translation: {
       round: input.round,
@@ -814,13 +818,18 @@ function verificationResultEvidence(
     }
     const verified = assertVerificationReceipt(receipt, input, descriptor);
     return {
-      status: verified.result.status,
-      summary: verified.result.summary,
+      status:
+        verified.result.executionStatus === "cancelled"
+          ? "unverified"
+          : verified.result.status,
+      summary: `[${verified.result.mode}; source=${verified.result.sourceAssessment}; target=${verified.result.targetAssessment}; execution=${verified.result.executionStatus}] ${verified.result.summary}`,
       artifactPath: receipt.resultArtifact.path,
       artifact: artifactRef(receipt.resultArtifact),
-      ...(verified.result.status === "fail" || verified.result.status === "unverified") && verified.result.issues[0] !== undefined
+      ...((verified.result.status === "fail" ||
+        verified.result.status === "unverified") &&
+      verified.result.issues[0] !== undefined
         ? { failureReason: verified.result.issues[0].kind }
-        : {},
+        : {}),
     };
   } catch (error) {
     return {
@@ -864,9 +873,27 @@ function repairIssues(
   failed: ValidationRecord[],
   compiler?: ProviderIdentity,
 ): MigrationRepairIssueV2[] {
-  const issues: MigrationRepairIssueV2[] = attempt.verification?.result.status === "fail"
-    ? attempt.verification.result.issues.map((issue) => ({ ...structuredClone(issue), evidenceArtifactIds: issue.evidenceArtifactIds.length > 0 ? issue.evidenceArtifactIds : attempt.verification!.result.artifacts.map((artifact) => artifact.id) }))
-    : [];
+  const verification = attempt.verification?.result;
+  const resultArtifact = attempt.verification?.resultArtifact;
+  const hasValidatedBehaviorFailure =
+    resultArtifact !== undefined &&
+    failed.some(
+      (record) =>
+        record.artifact?.id === resultArtifact.id &&
+        record.artifact.contentHash === resultArtifact.contentHash,
+    );
+  const issues: MigrationRepairIssueV2[] =
+    hasValidatedBehaviorFailure && verification?.status === "fail"
+      ? verification.issues
+          .filter((issue) => issue.kind !== "source-bug")
+          .map((issue) => ({
+            ...structuredClone(issue),
+            evidenceArtifactIds:
+              issue.evidenceArtifactIds.length > 0
+                ? issue.evidenceArtifactIds
+                : verification.artifacts.map((artifact) => artifact.id),
+          }))
+      : [];
   for (const record of failed) {
     if (compiler && isCompilerFailure(record, compiler)) {
       issues.push({
@@ -938,9 +965,12 @@ function validateTranslation(value: unknown): MigrationTranslationV2 {
   ) {
     throw new Error("V2 translator returned an invalid MigrationTranslationV2 artifact.");
   }
+  // SAFETY: all required translation fields were validated above; extra JSON fields are permitted.
   return value as unknown as MigrationTranslationV2;
 }
 
+// Each caller immediately applies its domain validator to this syntax-only parse.
+// pi-lens-ignore: no-unknown-returns
 function parseJson(value: string, label: string): unknown {
   try {
     return JSON.parse(value) as unknown;

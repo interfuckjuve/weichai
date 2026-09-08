@@ -10,6 +10,7 @@ import { createVerificationResult, DIFFERENTIAL_SMOKE_STRATEGY, type Verificatio
 import { canonicalJson } from "@forexplore/workflow-core";
 import { createAdaptationV2Runtime } from "./adaptation-v2-runtime";
 import {
+  fixtureVerificationAssessment,
   adaptationV2GeneratedContent,
   adaptationV2TestNow,
   createAdaptationV2TestFixture,
@@ -62,12 +63,23 @@ describe("createAdaptationV2Runtime", () => {
     createAdaptationV2Runtime({ apiKey: "explicit-key", verificationWorkspaceRoot: "/workspace-root", verificationArtifactRoot: "/artifact-root", verificationTimeoutMs: 456 });
     expect(factory).toHaveBeenCalledWith({ workspaceRoot: "/workspace-root", artifactRoot: "/artifact-root", timeoutMs: 456, apiKey: "explicit-key" });
   });
-  it("executes V2 verification through the server-owned local verifier", async () => {
+  it("executes V2 verification without inventing a Host reference policy", async () => {
     const fixture = createAdaptationV2TestFixture();
-    const verify = vi.fn<VerificationService["verifyWithReceipt"]>(async (input) => {
-      const result = createVerificationResult(input, DIFFERENTIAL_SMOKE_STRATEGY, {
-        status: "pass", summary: "verified", issues: [], artifacts: [], strategyReport: {},
-      }, () => adaptationV2TestNow);
+    const verify = vi.fn<VerificationService["verifyWithReceipt"]>(
+      async (input) => {
+        const result = createVerificationResult(
+          input,
+          DIFFERENTIAL_SMOKE_STRATEGY,
+          {
+            ...fixtureVerificationAssessment(input),
+            status: "pass",
+            summary: "verified",
+            issues: [],
+            artifacts: [],
+            strategyReport: {},
+          },
+          () => adaptationV2TestNow,
+        );
       const path = "verification-result.json";
       const bytes = Buffer.from(canonicalJson(result), "utf8");
       return { result, resultArtifact: {
@@ -75,7 +87,8 @@ describe("createAdaptationV2Runtime", () => {
         contentHash: createHash("sha256").update(bytes).digest("hex"), size: bytes.byteLength,
         mediaType: "application/json",
       } };
-    });
+      },
+    );
     const runtime = createAdaptationV2Runtime({
       apiKey: "test-key",
       verificationWorkspaceRoot: "/tmp/workspaces",
@@ -93,6 +106,7 @@ describe("createAdaptationV2Runtime", () => {
     expect(result.files).toHaveLength(1);
     expect(verify).toHaveBeenCalledOnce();
     const input = verify.mock.calls[0]![0];
+    expect(input).not.toHaveProperty("verificationPolicy");
     expect(input.translation.generatedContent).toBe(adaptationV2GeneratedContent);
     expect(input.request).toBe(fixture.request);
     expect(input.translation.round).toBe(0);

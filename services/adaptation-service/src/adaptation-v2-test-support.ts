@@ -1,3 +1,10 @@
+import type { RepositoryIngestionJsonValue } from "@forexplore/contracts";
+import type { MigrationBehaviorVerificationInputV2 } from "./adaptation-adapter-v2";
+import {
+  resolveVerificationPolicy,
+  type VerificationAssessment,
+  type VerificationInput,
+} from "@forexplore/translation-verifier";
 import {
   migrationExecutionV2SchemaVersion,
   migrationReferenceSchemaVersion,
@@ -22,6 +29,57 @@ import {
 } from "@forexplore/workflow-core";
 import { createAdaptationRuntimeCapabilitySnapshot, routeByExactPair } from "./runtime-capability-snapshot";
 import type { MigrationExecutionV2ServerArtifacts } from "./http-server";
+
+export function fixtureVerificationInput(
+  input: MigrationBehaviorVerificationInputV2,
+): VerificationInput {
+  return {
+    schemaVersion: "1.0",
+    request: input.request,
+    // SAFETY: these typed artifacts contain only JSON fields; the result factory validates the input.
+    analysisReport: input.analysis as unknown as RepositoryIngestionJsonValue,
+    // SAFETY: the plan has only typed JSON fields and is validated by the result factory.
+    migrationPlan: input.plan as unknown as RepositoryIngestionJsonValue,
+    translation: {
+      round: input.round,
+      generatedContent: input.translation.generatedContent,
+      files: input.files,
+      patchHash: input.patchHash,
+    },
+  };
+}
+
+export function fixtureVerificationAssessment(
+  input: Pick<VerificationInput, "verificationPolicy">,
+  status: "pass" | "fail" | "unverified" = "pass",
+): VerificationAssessment {
+  const { testBasis: _basis, ...policy } = resolveVerificationPolicy(input);
+  return {
+    ...policy,
+    executionStatus: status === "unverified" ? "failed" : "completed",
+    sourceAssessment:
+      policy.mode === "target_only"
+        ? "not_checked"
+        : status === "unverified"
+          ? "inconclusive"
+          : "no_bug_observed",
+    targetAssessment:
+      status === "fail"
+        ? "bug_found"
+        : status === "pass"
+          ? "no_bug_observed"
+          : "inconclusive",
+    problems:
+      status === "unverified"
+        ? [
+            {
+              code: "insufficient_test_basis",
+              message: "Fixture evidence unavailable.",
+            },
+          ]
+        : [],
+  };
+}
 
 export const adaptationV2TestNow = "2026-09-02T12:00:00.000Z";
 export const adaptationV2SourceContent = [

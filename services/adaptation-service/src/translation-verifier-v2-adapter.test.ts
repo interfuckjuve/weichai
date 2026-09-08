@@ -18,6 +18,7 @@ import type {
   MigrationTranslationV2,
 } from "./adaptation-adapter-v2";
 import {
+  fixtureVerificationAssessment,
   adaptationV2GeneratedContent,
   createAdaptationV2TestFixture,
 } from "./adaptation-v2-test-support";
@@ -48,7 +49,7 @@ const translation: MigrationTranslationV2 = {
 };
 
 describe("TranslationVerifierV2Adapter", () => {
-  it("maps V2 migration artifacts to the verification service without strategy options", async () => {
+  it("maps V2 migration artifacts without adding a reference policy or strategy options", async () => {
     const { request } = createAdaptationV2TestFixture();
     const files = [{
       path: "app/normalize.py",
@@ -78,13 +79,19 @@ describe("TranslationVerifierV2Adapter", () => {
         patchHash,
       },
     };
-    const result = createVerificationResult(verificationInput, DIFFERENTIAL_SMOKE_STRATEGY, {
-      status: "pass",
-      summary: "verified",
-      issues: [],
-      artifacts: [],
-      strategyReport: { cases: 1 },
-    }, () => "2026-09-05T00:00:00.000Z");
+    const result = createVerificationResult(
+      verificationInput,
+      DIFFERENTIAL_SMOKE_STRATEGY,
+      {
+        ...fixtureVerificationAssessment({}),
+        status: "pass",
+        summary: "verified",
+        issues: [],
+        artifacts: [],
+        strategyReport: { cases: 1 },
+      },
+      () => "2026-09-05T00:00:00.000Z",
+    );
     const path = "verification-result.json";
     const bytes = Buffer.from(canonicalJson(result), "utf8");
     const receipt = { result, resultArtifact: {
@@ -96,7 +103,9 @@ describe("TranslationVerifierV2Adapter", () => {
       mediaType: "application/json" as const,
     } };
     const service = {
-      verifyWithReceipt: vi.fn(async () => receipt),
+      verifyWithReceipt: vi.fn<VerificationService["verifyWithReceipt"]>(
+        async () => receipt,
+      ),
     } satisfies Pick<VerificationService, "verifyWithReceipt">;
     const adapter = new TranslationVerifierV2Adapter(service);
 
@@ -109,6 +118,10 @@ describe("TranslationVerifierV2Adapter", () => {
       files,
       patchHash,
     } satisfies MigrationBehaviorVerificationInputV2, signal)).resolves.toBe(receipt);
+
+    expect(service.verifyWithReceipt.mock.calls[0]?.[0]).toEqual(
+      verificationInput,
+    );
 
     expect(adapter.providerId).toBe("forexplore.translation-verifier.differential");
     expect(adapter.providerVersion).toBe("1.0.0");
