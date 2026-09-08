@@ -1,9 +1,24 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createLogger, redactSecrets, DEFAULT_LOG_DIR, type LoggerOptions } from "./verification-logger.js";
+import {
+  createLogger,
+  redactSecrets,
+  DEFAULT_LOG_DIR,
+  type LoggerOptions,
+} from "./verification-logger.js";
 
 // ---- 测试辅助 ----
 
@@ -29,7 +44,13 @@ afterEach(() => {
 });
 
 function baseOptions(c: ReturnType<typeof fakeConsole>): LoggerOptions {
-  return { logDir: tempDir, fileName: "test.log", console: c, level: "INFO", fileLevel: "INFO" };
+  return {
+    logDir: tempDir,
+    fileName: "test.log",
+    console: c,
+    level: "INFO",
+    fileLevel: "INFO",
+  };
 }
 
 function readLog(): string {
@@ -47,12 +68,17 @@ describe("createLogger: 文件默认 INFO + content 默认关闭 + 脱敏", () =
     expect(readLog()).not.toContain("SOURCE_METHOD");
     expect(readLog()).toContain("done");
     // content 也不会进控制台。
-    expect(c.debug).not.toHaveBeenCalledWith(expect.stringContaining("SOURCE_METHOD"));
+    expect(c.debug).not.toHaveBeenCalledWith(
+      expect.stringContaining("SOURCE_METHOD"),
+    );
   });
 
   it("contentEnabled=true 时 content 以 DEBUG 记录到文件(可经 options 或 env 打开)", () => {
     const c = fakeConsole();
-    const logger = createLogger("test", { ...baseOptions(c), contentEnabled: true });
+    const logger = createLogger("test", {
+      ...baseOptions(c),
+      contentEnabled: true,
+    });
     logger.content("SOURCE_METHOD full body");
     expect(readLog()).toContain("SOURCE_METHOD full body");
     expect(readLog()).toContain("DEBUG");
@@ -67,12 +93,17 @@ describe("createLogger: 文件默认 INFO + content 默认关闭 + 脱敏", () =
     const logger = createLogger("verify", baseOptions(fakeConsole()));
     logger.info("hello");
     const line = readLog();
-    expect(line.trimEnd()).toMatch(/^\d{4}-\d{2}-\d{2}T.*\[verify\] INFO hello$/);
+    expect(line.trimEnd()).toMatch(
+      /^\d{4}-\d{2}-\d{2}T.*\[verify\] INFO hello$/,
+    );
   });
 
   it("多行消息每行都带前缀且单次 append(注入 writeFile 计数)", () => {
     const writes: string[] = [];
-    const logger = createLogger("test", { ...baseOptions(fakeConsole()), writeFile: (_p, payload) => writes.push(payload) });
+    const logger = createLogger("test", {
+      ...baseOptions(fakeConsole()),
+      writeFile: (_p, payload) => writes.push(payload),
+    });
     logger.info("line 1\nline 2");
     expect(writes).toHaveLength(1);
     const lines = writes[0].trimEnd().split("\n");
@@ -91,7 +122,12 @@ describe("createLogger: 文件默认 INFO + content 默认关闭 + 脱敏", () =
 
   it("logDir 不存在时自动递归创建", () => {
     const nested = join(tempDir, "a", "b");
-    const logger = createLogger("deep", { logDir: nested, fileName: "x.log", level: "INFO", fileLevel: "DEBUG" });
+    const logger = createLogger("deep", {
+      logDir: nested,
+      fileName: "x.log",
+      level: "INFO",
+      fileLevel: "DEBUG",
+    });
     logger.debug("created");
     expect(readFileSync(join(nested, "x.log"), "utf8")).toContain("created");
   });
@@ -99,20 +135,31 @@ describe("createLogger: 文件默认 INFO + content 默认关闭 + 脱敏", () =
 
 describe("redactSecrets", () => {
   it("凭据被脱敏", () => {
-    expect(redactSecrets("Authorization: Bearer abc DEEPSEEK_API_KEY=sk-secret"))
-      .toBe("Authorization: [REDACTED] DEEPSEEK_API_KEY=[REDACTED]");
+    expect(
+      redactSecrets("Authorization: Bearer abc DEEPSEEK_API_KEY=sk-secret"),
+    ).toBe("Authorization: [REDACTED] DEEPSEEK_API_KEY=[REDACTED]");
   });
 
   it("覆盖 Authorization 冒号形态、token/sk- 值与 key: value 形态", () => {
-    expect(redactSecrets("Authorization: Bearer abc")).toBe("Authorization: [REDACTED]");
-    expect(redactSecrets("Authorization: Basic Zm9v")).toBe("Authorization: [REDACTED]");
+    expect(redactSecrets("Authorization: Bearer abc")).toBe(
+      "Authorization: [REDACTED]",
+    );
+    expect(redactSecrets("Authorization: Basic Zm9v")).toBe(
+      "Authorization: [REDACTED]",
+    );
     expect(redactSecrets("sk-abc12345 rest")).toBe("[REDACTED] rest");
-    expect(redactSecrets("ANTHROPIC_AUTH_TOKEN=sk-ant-abcdef")).toContain("ANTHROPIC_AUTH_TOKEN=[REDACTED]");
-    expect(redactSecrets("NPM_AUTH_TOKEN: secret-value")).toContain("NPM_AUTH_TOKEN: [REDACTED]");
+    expect(redactSecrets("ANTHROPIC_AUTH_TOKEN=sk-ant-abcdef")).toContain(
+      "ANTHROPIC_AUTH_TOKEN=[REDACTED]",
+    );
+    expect(redactSecrets("NPM_AUTH_TOKEN: secret-value")).toContain(
+      "NPM_AUTH_TOKEN: [REDACTED]",
+    );
   });
 
   it("普通日志原样保留", () => {
-    expect(redactSecrets("case c1 passed in 12ms")).toBe("case c1 passed in 12ms");
+    expect(redactSecrets("case c1 passed in 12ms")).toBe(
+      "case c1 passed in 12ms",
+    );
   });
 });
 
@@ -127,7 +174,9 @@ describe("createLogger: 轮转保留 maxFiles", () => {
       maxFiles: 2,
     });
     for (let index = 0; index < 20; index += 1) logger.info("x".repeat(40));
-    const files = readdirSync(tempDir).filter((name) => name.startsWith("rot.log"));
+    const files = readdirSync(tempDir).filter((name) =>
+      name.startsWith("rot.log"),
+    );
     expect(files.length).toBeLessThanOrEqual(3); // rot.log + 两份轮转档
     expect(files.length).toBeGreaterThanOrEqual(1);
   });
@@ -142,13 +191,89 @@ describe("createLogger: 轮转保留 maxFiles", () => {
       maxFiles: 2,
     });
     for (let index = 0; index < 10; index += 1) logger.info("ok");
-    const files = readdirSync(tempDir).filter((name) => name.startsWith("small.log"));
+    const files = readdirSync(tempDir).filter((name) =>
+      name.startsWith("small.log"),
+    );
     expect(files).toEqual(["small.log"]);
   });
 });
 
 describe("默认 logDir(monorepo 根 logs/,不依赖 cwd)", () => {
   it("默认日志目录解析到仓库根 logs/", () => {
-    expect(DEFAULT_LOG_DIR).toMatch(/logs$/);
+    const root = fileURLToPath(new URL("../../../../", import.meta.url));
+    expect(
+      JSON.parse(readFileSync(join(root, "package.json"), "utf8")).name,
+    ).toBe("forexplore-monorepo");
+    expect(DEFAULT_LOG_DIR).toBe(join(root, "logs"));
   });
+
+  it.each([
+    ["default", undefined, undefined, "logs"],
+    ["relative env", "custom-logs", undefined, "custom-logs"],
+    ["relative option overrides env", "ignored", "option-logs", "option-logs"],
+    ["empty env", "", undefined, "logs"],
+    ["absolute option", "ignored", "absolute", "absolute"],
+  ])(
+    "keeps %s logs rooted independently of module depth and cwd",
+    (_name, envDir, optionDir, expectedDir) => {
+      const root = join(tempDir, "repo");
+      const modulePath = join(
+        root,
+        "services/verifier/src/nested/output/verification-logger.ts",
+      );
+      const cwd = join(root, "fixtures/target-system/project");
+      const otherCwd = join(tempDir, "other-cwd");
+      mkdirSync(dirname(modulePath), { recursive: true });
+      mkdirSync(cwd, { recursive: true });
+      mkdirSync(otherCwd);
+      writeFileSync(
+        join(root, "package.json"),
+        JSON.stringify({ name: "forexplore-monorepo", type: "module" }),
+      );
+      writeFileSync(
+        join(root, "services/verifier/package.json"),
+        JSON.stringify({
+          name: "@forexplore/translation-verifier",
+          type: "module",
+        }),
+      );
+      copyFileSync(
+        fileURLToPath(new URL("./verification-logger.ts", import.meta.url)),
+        modulePath,
+      );
+      const absoluteDir = join(tempDir, "absolute-logs");
+      const logDir = optionDir === "absolute" ? absoluteDir : optionDir;
+      const expected =
+        expectedDir === "absolute" ? absoluteDir : join(root, expectedDir);
+      const env = { ...process.env };
+      if (envDir === undefined) delete env.VERIFIER_LOG_DIR;
+      else env.VERIFIER_LOG_DIR = envDir;
+      execFileSync(
+        process.execPath,
+        [
+          "--import",
+          import.meta.resolve("tsx"),
+          "--input-type=module",
+          "-e",
+          `
+      import { createLogger } from ${JSON.stringify(pathToFileURL(modulePath).href)};
+      const logger = createLogger("path-test", ${JSON.stringify({ logDir, level: "ERROR" })});
+      logger.info("before cwd change");
+      process.chdir(${JSON.stringify(otherCwd)});
+      logger.info("after cwd change");
+    `,
+        ],
+        { cwd, env, timeout: 10000 },
+      );
+      const log = readFileSync(
+        join(expected, "translation-verifier.log"),
+        "utf8",
+      );
+      expect(log).toContain("before cwd change");
+      expect(log).toContain("after cwd change");
+      expect(readdirSync(cwd)).toEqual([]);
+      expect(readdirSync(otherCwd)).toEqual([]);
+      expect(existsSync(join(root, "services/logs"))).toBe(false);
+    },
+  );
 });

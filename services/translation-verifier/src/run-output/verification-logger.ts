@@ -1,32 +1,49 @@
-import { appendFileSync, existsSync, mkdirSync, renameSync, statSync, unlinkSync } from "node:fs";
-import { join } from "node:path";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+} from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** 默认日志目录:monorepo 根 logs/(由模块位置解析,不依赖运行 cwd)。 */
-export const DEFAULT_LOG_DIR = fileURLToPath(new URL("../../../../logs", import.meta.url));
+function findRepositoryRoot(): string {
+  let directory = dirname(fileURLToPath(import.meta.url));
+  while (true) {
+    const manifest = join(directory, "package.json");
+    if (existsSync(manifest)) {
+      try {
+        if (
+          JSON.parse(readFileSync(manifest, "utf8")).name ===
+          "forexplore-monorepo"
+        )
+          return directory;
+      } catch (cause) {
+        throw new Error(
+          `Cannot inspect repository manifest for verifier logs: ${manifest}`,
+          { cause },
+        );
+      }
+    }
+    const parent = dirname(directory);
+    if (parent === directory)
+      throw new Error("Cannot locate forexplore-monorepo for verifier logs.");
+    directory = parent;
+  }
+}
+
+const repositoryRoot = findRepositoryRoot();
+
+/** 默认日志目录:monorepo 根 logs/(由项目标识定位,不依赖模块层级或 cwd)。 */
+export const DEFAULT_LOG_DIR = join(repositoryRoot, "logs");
 
 /** 默认文件级别:INFO(content 需要显式打开)。 */
 const DEFAULT_FILE_LEVEL = "INFO";
 const DEFAULT_MAX_FILE_BYTES = 10 * 1024 * 1024;
 const DEFAULT_MAX_FILES = 3;
-
-/** 命名的敏感环境/凭据前缀(键名匹配,值脱敏)。 */
-const SENSITIVE_NAME_PATTERNS: readonly RegExp[] = [
-  /^DEEPSEEK_/i,
-  /^ANTHROPIC_/i,
-  /^OPENAI_/i,
-  /API[_-]?KEY/i,
-  /ACCESS[_-]?KEY/i,
-  /PRIVATE[_-]?KEY/i,
-  /TOKEN/i,
-  /SECRET/i,
-  /PASSWORD/i,
-  /PASSWD/i,
-  /CREDENTIAL/i,
-  /AUTH/i,
-  /CONNECTION_STRING/i,
-  /CONNSTR/i,
-];
 
 /**
  * 凭据脱敏:替换常见敏感值形态。
@@ -36,9 +53,18 @@ const SENSITIVE_NAME_PATTERNS: readonly RegExp[] = [
  *   DEEPSEEK_API_KEY / ANTHROPIC_AUTH_TOKEN / sk-… 等),保留键名供定位。
  */
 export function redactSecrets(message: string): string {
-  let redacted = message.replace(/(Authorization\s*[:=]\s*)(?:(?:Bearer|Basic|Digest|Token|Plain)\s+)?[^\s,;]+/gi, "$1[REDACTED]");
-  redacted = redacted.replace(/((?:DEEPSEEK|ANTHROPIC|OPENAI|AWS)[A-Z0-9_]*|[A-Z0-9_]*?(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)[A-Z0-9_]*)(\s*(?:=|:)\s*)\S+/gi, (_all, name: string, separator: string) => `${name}${separator}[REDACTED]`);
-  redacted = redacted.replace(/(sk-[A-Za-z0-9_-]{4,}|Bearer\s+[A-Za-z0-9._~+/=-]{8,})/g, "[REDACTED]");
+  let redacted = message.replace(
+    /(Authorization\s*[:=]\s*)(?:(?:Bearer|Basic|Digest|Token|Plain)\s+)?[^\s,;]+/gi,
+    "$1[REDACTED]",
+  );
+  redacted = redacted.replace(
+    /((?:DEEPSEEK|ANTHROPIC|OPENAI|AWS)[A-Z0-9_]*|[A-Z0-9_]*?(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)[A-Z0-9_]*)(\s*(?:=|:)\s*)\S+/gi,
+    (_all, name: string, separator: string) => `${name}${separator}[REDACTED]`,
+  );
+  redacted = redacted.replace(
+    /(sk-[A-Za-z0-9_-]{4,}|Bearer\s+[A-Za-z0-9._~+/=-]{8,})/g,
+    "[REDACTED]",
+  );
   return redacted;
 }
 
@@ -66,7 +92,7 @@ export interface Logger {
 export interface LoggerOptions {
   /** 控制台级别;默认 process.env.VERIFIER_LOG_LEVEL ?? "INFO"。 */
   level?: LogLevel;
-  /** 日志目录;默认 process.env.VERIFIER_LOG_DIR ?? monorepo 根 logs/(与 cwd 无关)。 */
+  /** 日志目录;默认 VERIFIER_LOG_DIR 或 monorepo 根 logs/;相对路径基于仓库根解析。 */
   logDir?: string;
   /** 文件级别;默认 "INFO"。 */
   fileLevel?: LogLevel;
@@ -86,7 +112,12 @@ export interface LoggerOptions {
   disabled?: boolean;
 }
 
-const LEVEL_ORDER: Record<LogLevel, number> = { DEBUG: 0, INFO: 1, WARN: 2, ERROR: 3 };
+const LEVEL_ORDER: Record<LogLevel, number> = {
+  DEBUG: 0,
+  INFO: 1,
+  WARN: 2,
+  ERROR: 3,
+};
 
 /** 把任意字符串(如环境变量)校验为 LogLevel;非法时回退默认值。 */
 function toLogLevel(value: string | undefined, fallback: LogLevel): LogLevel {
@@ -125,9 +156,18 @@ function rotateIfNeeded(
   }
 }
 
-export function createLogger(name: string, options: LoggerOptions = {}): Logger {
-  const level: LogLevel = toLogLevel(options.level ?? process.env.VERIFIER_LOG_LEVEL, "INFO");
-  const logDir = options.logDir ?? process.env.VERIFIER_LOG_DIR ?? DEFAULT_LOG_DIR;
+export function createLogger(
+  name: string,
+  options: LoggerOptions = {},
+): Logger {
+  const level: LogLevel = toLogLevel(
+    options.level ?? process.env.VERIFIER_LOG_LEVEL,
+    "INFO",
+  );
+  const logDir = resolve(
+    repositoryRoot,
+    (options.logDir ?? process.env.VERIFIER_LOG_DIR) || DEFAULT_LOG_DIR,
+  );
   const fileLevel: LogLevel = toLogLevel(options.fileLevel, DEFAULT_FILE_LEVEL);
   const fileName = options.fileName ?? "translation-verifier.log";
   const consoleApi = options.console ?? console;
@@ -140,7 +180,11 @@ export function createLogger(name: string, options: LoggerOptions = {}): Logger 
   const fileThreshold = LEVEL_ORDER[fileLevel];
   const filePath = join(logDir, fileName);
 
-  const emit = (messageLevel: LogLevel, message: string, forceContent: boolean): void => {
+  const emit = (
+    messageLevel: LogLevel,
+    message: string,
+    forceContent: boolean,
+  ): void => {
     if (options.disabled) return;
     if (forceContent && !contentOn) return;
     const safe = redactSecrets(message);
@@ -160,7 +204,10 @@ export function createLogger(name: string, options: LoggerOptions = {}): Logger 
 
     // 控制台:按 level 过滤,对应方法输出(每行一次)。
     if (levelIndex >= consoleThreshold) {
-      const method = consoleApi[messageLevel.toLowerCase() as "info" | "debug" | "warn" | "error"];
+      const method =
+        consoleApi[
+          messageLevel.toLowerCase() as "info" | "debug" | "warn" | "error"
+        ];
       for (const l of lines) method(l);
     }
   };
