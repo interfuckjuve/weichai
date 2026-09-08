@@ -51,6 +51,7 @@ describe("translation-verifier entry", () => {
     expect(Object.keys(packageVerifier).sort()).toEqual(
       [
         "DIFFERENTIAL_SMOKE_STRATEGY",
+        "MULTI_AGENT_DIFFERENTIAL_STRATEGY",
         "VerificationService",
         "VerificationStrategyFactory",
         "assertVerificationInput",

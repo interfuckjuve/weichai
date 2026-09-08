@@ -1,0 +1,156 @@
+import { createHash } from "node:crypto";
+import {
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { applyHunksStrict, newFileContent } from "@forexplore/workflow-core";
+import type { VerificationInput } from "../../schemas/verification-types.js";
+import type {
+  VerificationArtifact,
+  VerificationStrategyContext,
+} from "../../schemas/verification-types.js";
+
+export const TEST_DIRECTORY = ".forexplore-tests";
+export function hashContent(content: string | Buffer): string {
+  return createHash("sha256").update(content).digest("hex");
+}
+export function inside(root: string, path: string): boolean {
+  const rel = relative(root, path);
+  return (
+    rel === "" ||
+    (!isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`))
+  );
+}
+export function assertProjectRoots(context: VerificationStrategyContext): void {
+  const { sourceRoot, targetRoot, strategyRoot } = context.workspace;
+  const roots = [sourceRoot, targetRoot, strategyRoot].map((root) => {
+    if (
+      !isAbsolute(root) ||
+      !lstatSync(root).isDirectory() ||
+      lstatSync(root).isSymbolicLink()
+    )
+      throw new Error("Expected existing absolute project directories.");
+    return realpathSync(root);
+  });
+  for (let i = 0; i < roots.length; i++)
+    for (let j = i + 1; j < roots.length; j++)
+      if (inside(roots[i], roots[j]) || inside(roots[j], roots[i]))
+        throw new Error("Project and artifact directories must not overlap.");
+}
+/** Reject links instead of following them into the original workspace. */
+export function projectHash(root: string): string {
+  const digest = createHash("sha256");
+  const walk = (directory: string): void => {
+    for (const name of readdirSync(directory).sort()) {
+      if (directory === root && name === TEST_DIRECTORY) continue;
+      const path = join(directory, name);
+      const stat = lstatSync(path);
+      if (stat.isSymbolicLink() || (!stat.isDirectory() && !stat.isFile()))
+        throw new Error(`Unsupported project entry: ${relative(root, path)}`);
+      digest.update(JSON.stringify([relative(root, path), stat.mode]));
+      if (stat.isDirectory()) walk(path);
+      else {
+        if (stat.nlink > 1)
+          throw new Error("Hard-linked project files are not isolated copies.");
+        digest.update(readFileSync(path));
+      }
+    }
+  };
+  walk(root);
+  return digest.digest("hex");
+}
+export function prepareTestDirectory(root: string): string {
+  const path = join(root, TEST_DIRECTORY);
+  // Do not reuse possibly attacker-controlled stale runners or artifacts.
+  mkdirSync(path);
+  return path;
+}
+export function readTestFile(root: string, name: string): string {
+  if (
+    isAbsolute(name) ||
+    name.split(/[\\/]/).some((part) => part === ".." || part === "." || !part)
+  )
+    throw new Error("Unsafe test file path.");
+  const file = resolve(root, name);
+  const realRoot = realpathSync(root);
+  let current = realRoot;
+  for (const part of name.split(/[\\/]/)) {
+    current = join(current, part);
+    if (lstatSync(current).isSymbolicLink())
+      throw new Error("Invalid linked test path.");
+  }
+  const stat = lstatSync(file);
+  if (
+    !inside(realRoot, realpathSync(file)) ||
+    stat.isSymbolicLink() ||
+    !stat.isFile() ||
+    stat.nlink !== 1 ||
+    stat.size > 1024 * 1024
+  )
+    throw new Error("Invalid or oversized test file.");
+  return readFileSync(file, "utf8");
+}
+/** Bind caller-owned directories to the exact submitted source and translation. */
+export function assertDeclaredSnapshot(
+  input: VerificationInput,
+  root: string,
+  side: "source" | "target",
+): void {
+  const expected = new Map<string, string>();
+  if (side === "source") {
+    for (const file of input.request.sourceBundle.files)
+      expected.set(file.path, file.content);
+  } else {
+    for (const file of input.request.targetContext.sourceFiles) {
+      if (typeof file.path === "string" && typeof file.content === "string")
+        expected.set(file.path, file.content);
+    }
+    for (const patch of input.translation.files) {
+      if (patch.status === "created") {
+        if (expected.has(patch.path))
+          throw new Error("Created patch overlaps target context.");
+        expected.set(patch.path, newFileContent(patch.hunks));
+      } else {
+        const original = expected.get(patch.path);
+        if (
+          original === undefined ||
+          hashContent(original) !== patch.expectedOriginalSha256
+        )
+          throw new Error("Patch original does not match target context.");
+        expected.set(patch.path, applyHunksStrict(original, patch.hunks));
+      }
+    }
+  }
+  for (const [path, content] of expected) {
+    if (path.split(/[\\/]/)[0] === TEST_DIRECTORY)
+      throw new Error("Declared implementation overlaps the test directory.");
+    if (readTestFile(root, path) !== content)
+      throw new Error(
+        `${side} copy differs from the submitted snapshot: ${path}`,
+      );
+  }
+}
+export async function persistBehaviorArtifact(
+  context: VerificationStrategyContext,
+  id: string,
+  content: unknown,
+): Promise<VerificationArtifact> {
+  const path = `${id}.json`;
+  writeFileSync(
+    join(context.workspace.strategyRoot, path),
+    `${JSON.stringify(content, null, 2)}\n`,
+    { encoding: "utf8", flag: "wx" },
+  );
+  return context.writeArtifact({
+    id,
+    kind: id,
+    path,
+    contentHash: "0".repeat(64),
+    mediaType: "application/json",
+  });
+}

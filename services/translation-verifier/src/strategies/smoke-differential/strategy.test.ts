@@ -815,7 +815,10 @@ describe("createDefaultVerificationService", () => {
       runSmokeImpl: vi.fn() as RunSmokeImpl,
     });
 
-    expect(service.listStrategies()).toEqual([DIFFERENTIAL_SMOKE_STRATEGY]);
+    expect(service.listStrategies().map(({ id }) => id)).toEqual([
+      DIFFERENTIAL_SMOKE_STRATEGY.id,
+      "multi-agent-differential",
+    ]);
   });
 });
 

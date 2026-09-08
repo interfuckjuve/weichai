@@ -26,6 +26,7 @@ import {
   type FileUploadTaskId,
 } from "./fileupload-benchmark-fixture.js";
 import { DIFFERENTIAL_SMOKE_STRATEGY } from "../src/strategies/smoke-differential/strategy.js";
+import { runMultiAgentE2E } from "./run-multi-agent-e2e.js";
 
 export interface SmokeE2EOptions {
   task: FileUploadTaskId;
@@ -202,6 +203,11 @@ export function compareVerificationFields(
 }
 
 export async function runSmokeE2E(argv: string[]): Promise<number> {
+  if (
+    argv.includes("--strategy") &&
+    argv[argv.indexOf("--strategy") + 1] === "multi-agent-differential"
+  )
+    return runMultiAgentE2E(argv);
   if (!process.env.VERIFIER_LOG_DIR)
     process.env.VERIFIER_LOG_DIR = DEFAULT_LOG_DIR;
   const parsed = parseArgs(argv);
