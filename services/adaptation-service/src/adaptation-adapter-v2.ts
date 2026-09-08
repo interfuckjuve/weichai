@@ -117,13 +117,15 @@ interface MigrationAttemptV2 {
 
 const MAX_MIGRATION_REPAIR_ROUNDS = 2;
 
-
 interface ProviderIdentity {
   providerId: string;
   providerVersion: string;
 }
 export interface MigrationAnalyzerV2 extends ProviderIdentity {
-  analyze(input: MigrationEvidenceInputV2, signal?: AbortSignal): Promise<MigrationAnalysisV2>;
+  analyze(
+    input: MigrationEvidenceInputV2,
+    signal?: AbortSignal,
+  ): Promise<MigrationAnalysisV2>;
 }
 
 export interface MigrationPlannerV2 extends ProviderIdentity {
@@ -156,7 +158,13 @@ export interface MigrationValidationEvidenceV2 {
   status: ValidationStatus;
   summary: string;
   command?: string;
-  artifact?: { id: string; kind: string; path: string; contentHash: string; mediaType: string };
+  artifact?: {
+    id: string;
+    kind: string;
+    path: string;
+    contentHash: string;
+    mediaType: string;
+  };
   artifactPath?: string;
   failureReason?: string;
 }
@@ -219,16 +227,27 @@ export class MigrationRouteExecutionError extends Error {
   }
 }
 
-function compilerFromRegistry(registry: CompilerRouteRegistry): MigrationCompilerV2 {
+function compilerFromRegistry(
+  registry: CompilerRouteRegistry,
+): MigrationCompilerV2 {
   return {
     capability(languageId) {
-      const capability = resolveCompilerRouteCapabilityByLanguageId(languageId, registry);
+      const capability = resolveCompilerRouteCapabilityByLanguageId(
+        languageId,
+        registry,
+      );
       return capability
-        ? { providerId: capability.providerId, providerVersion: capability.version }
+        ? {
+            providerId: capability.providerId,
+            providerVersion: capability.version,
+          }
         : undefined;
     },
     validate(languageId, generatedContent, targetName) {
-      const capability = resolveCompilerRouteCapabilityByLanguageId(languageId, registry);
+      const capability = resolveCompilerRouteCapabilityByLanguageId(
+        languageId,
+        registry,
+      );
       if (!capability) {
         return {
           status: "unverified",
@@ -265,11 +284,14 @@ export class AdaptationAdapterV2 implements CodeAdaptationPortV2 {
     this.#planner = options.planner;
     this.#translator = options.translator;
     this.#verifier = options.verifier;
-    this.#compiler = options.compiler ?? compilerFromRegistry(
-      options.compilerRegistry ?? createDefaultCompilerRouteRegistry(),
-    );
+    this.#compiler =
+      options.compiler ??
+      compilerFromRegistry(
+        options.compilerRegistry ?? createDefaultCompilerRouteRegistry(),
+      );
     this.#targetEngineeringRegistry =
-      options.targetEngineeringRegistry ?? createDefaultTargetEngineeringAdapterRegistry();
+      options.targetEngineeringRegistry ??
+      createDefaultTargetEngineeringAdapterRegistry();
     this.#now = options.now ?? (() => new Date().toISOString());
   }
 
@@ -289,7 +311,9 @@ export class AdaptationAdapterV2 implements CodeAdaptationPortV2 {
     } catch (error) {
       throw new MigrationRouteExecutionError(
         "MIGRATION_ROUTE_UNAVAILABLE",
-        error instanceof Error ? error.message : "Runtime composition is invalid.",
+        error instanceof Error
+          ? error.message
+          : "Runtime composition is invalid.",
         ["service-owned-stage-composition-mismatch"],
       );
     }
@@ -306,7 +330,10 @@ export class AdaptationAdapterV2 implements CodeAdaptationPortV2 {
     }
     const route = routeForExecution(request, context.runtimeCapabilities);
     validateAdaptationRequestV2(request, context);
-    if (route.strategy !== "translate" || this.#translator.strategy !== "translate") {
+    if (
+      route.strategy !== "translate" ||
+      this.#translator.strategy !== "translate"
+    ) {
       throw new MigrationRouteExecutionError(
         "MIGRATION_STRATEGY_UNSUPPORTED",
         `AdaptationAdapterV2 cannot execute strategy ${route.strategy}.`,
@@ -319,14 +346,19 @@ export class AdaptationAdapterV2 implements CodeAdaptationPortV2 {
     const targetAdapter = this.#targetEngineeringRegistry.adapterFor(
       request.target.entity.languageId,
     );
-    if (!targetAdapter || targetAdapter.descriptor.patchLocator.status !== "supported") {
+    if (
+      !targetAdapter ||
+      targetAdapter.descriptor.patchLocator.status !== "supported"
+    ) {
       throw new MigrationRouteExecutionError(
         "TARGET_ENGINEERING_CAPABILITY_UNAVAILABLE",
         `No target engineering patch adapter is available for ${request.target.entity.languageId}.`,
         ["target-patch-locator-capability-unavailable"],
       );
     }
-    const targetEngineeringProvider = engineeringProvider(targetAdapter.descriptor);
+    const targetEngineeringProvider = engineeringProvider(
+      targetAdapter.descriptor,
+    );
     requireProvider(route, "context-collection", targetEngineeringProvider);
     requireProvider(route, "patch-generation", targetEngineeringProvider);
 
@@ -339,9 +371,13 @@ export class AdaptationAdapterV2 implements CodeAdaptationPortV2 {
       requirement: request.requirement,
       decisionNotes: [...request.decisionNotes],
     };
-    const analysis = validateAnalysis(await this.#analyzer.analyze(evidenceInput, signal));
+    const analysis = validateAnalysis(
+      await this.#analyzer.analyze(evidenceInput, signal),
+    );
     signal?.throwIfAborted();
-    const plan = validatePlan(await this.#planner.plan(evidenceInput, analysis, signal));
+    const plan = validatePlan(
+      await this.#planner.plan(evidenceInput, analysis, signal),
+    );
     signal?.throwIfAborted();
     const translation = validateTranslation(
       await this.#translator.translate(evidenceInput, analysis, plan, signal),
@@ -358,37 +394,90 @@ export class AdaptationAdapterV2 implements CodeAdaptationPortV2 {
       throw new TargetEngineeringUnsupportedError(located.reason);
     }
     let attempt = await this.#buildAttempt(
-      0, translation, request, route, analysis, plan, targetEngineeringProvider,
-      targetFile.content, located.value, signal,
+      0,
+      translation,
+      request,
+      route,
+      analysis,
+      plan,
+      targetEngineeringProvider,
+      targetFile.content,
+      located.value,
+      signal,
     );
     const repairRounds: MigrationRepairRoundV2[] = [];
     while (true) {
       signal?.throwIfAborted();
-      const requiredUnverified = attempt.validation.some((record) =>
-        record.required && record.status === "unverified");
-      const failed = attempt.validation.filter((record) => record.required && record.status === "fail");
-      if (requiredUnverified || failed.length === 0 || repairRounds.length >= MAX_MIGRATION_REPAIR_ROUNDS) break;
-      const issues = repairIssues(attempt, failed, this.#compiler.capability(request.target.entity.languageId));
-      const nextRound = repairRounds.length + 1;
-      const repaired = validateTranslation(await this.#translator.repair(
-        evidenceInput, analysis, plan, attempt.translation,
-        {
-          round: nextRound,
-          inputPatchHash: attempt.patchHash,
-          issues,
-          validationRecordIds: failed.map((record) => record.id).sort(),
-          ...(attempt.verification ? { verificationResultHash: attempt.verification.result.contentHash } : {}),
-          ...(attempt.verification?.resultArtifact ? { verificationArtifactPath: attempt.verification.resultArtifact.path } : {}),
-        }, signal,
-      ));
-      const candidateFiles = [buildProtectedPatch(request.target.entity.path, targetFile.content, repaired.generatedContent, located.value)];
-      const candidateHash = calculatePatchHashV2(candidateFiles);
-      if (candidateHash === attempt.patchHash) throw new Error("V2 repair must produce a new patch hash.");
-      const nextAttempt = await this.#buildAttempt(
-        nextRound, repaired, request, route, analysis, plan, targetEngineeringProvider,
-        targetFile.content, located.value, signal,
+      const requiredUnverified = attempt.validation.some(
+        (record) => record.required && record.status === "unverified",
       );
-      if (nextAttempt.patchHash === attempt.patchHash) throw new Error("V2 repair must produce a new patch hash.");
+      const failed = attempt.validation.filter(
+        (record) => record.required && record.status === "fail",
+      );
+      if (
+        requiredUnverified ||
+        failed.length === 0 ||
+        repairRounds.length >= MAX_MIGRATION_REPAIR_ROUNDS
+      )
+        break;
+      const issues = repairIssues(
+        attempt,
+        failed,
+        this.#compiler.capability(request.target.entity.languageId),
+      );
+      const nextRound = repairRounds.length + 1;
+      const repaired = validateTranslation(
+        await this.#translator.repair(
+          evidenceInput,
+          analysis,
+          plan,
+          attempt.translation,
+          {
+            round: nextRound,
+            inputPatchHash: attempt.patchHash,
+            issues,
+            validationRecordIds: failed.map((record) => record.id).sort(),
+            ...(attempt.verification
+              ? {
+                  verificationResultHash:
+                    attempt.verification.result.contentHash,
+                }
+              : {}),
+            ...(attempt.verification?.resultArtifact
+              ? {
+                  verificationArtifactPath:
+                    attempt.verification.resultArtifact.path,
+                }
+              : {}),
+          },
+          signal,
+        ),
+      );
+      const candidateFiles = [
+        buildProtectedPatch(
+          request.target.entity.path,
+          targetFile.content,
+          repaired.generatedContent,
+          located.value,
+        ),
+      ];
+      const candidateHash = calculatePatchHashV2(candidateFiles);
+      if (candidateHash === attempt.patchHash)
+        throw new Error("V2 repair must produce a new patch hash.");
+      const nextAttempt = await this.#buildAttempt(
+        nextRound,
+        repaired,
+        request,
+        route,
+        analysis,
+        plan,
+        targetEngineeringProvider,
+        targetFile.content,
+        located.value,
+        signal,
+      );
+      if (nextAttempt.patchHash === attempt.patchHash)
+        throw new Error("V2 repair must produce a new patch hash.");
       repairRounds.push({
         round: nextRound,
         inputPatchHash: attempt.patchHash,
@@ -396,24 +485,33 @@ export class AdaptationAdapterV2 implements CodeAdaptationPortV2 {
         triggerValidationRecordIds: failed.map((record) => record.id).sort(),
         triggerValidationRecords: structuredClone(attempt.validation),
         issues,
-          ...(attempt.verification ? { verificationResultHash: attempt.verification.result.contentHash } : {}),
-          verifierArtifacts: attempt.verification ? [
-            ...(attempt.verification?.resultArtifact ? [artifactRef(attempt.verification.resultArtifact)] : []),
-            ...attempt.verification.result.artifacts.map(artifactRef),
-          ] : [],
+        ...(attempt.verification
+          ? { verificationResultHash: attempt.verification.result.contentHash }
+          : {}),
+        verifierArtifacts: attempt.verification
+          ? [
+              ...(attempt.verification?.resultArtifact
+                ? [artifactRef(attempt.verification.resultArtifact)]
+                : []),
+              ...attempt.verification.result.artifacts.map(artifactRef),
+            ]
+          : [],
         provider: providerRef(this.#translator),
         createdAt: this.#now(),
       });
       attempt = nextAttempt;
     }
-    const result = materializeAdaptationResultV2({
-      request,
-      files: attempt.files,
-      validation: attempt.validation,
-      repairRounds,
-      producer: providerRef(this.#translator),
-      createdAt: this.#now(),
-    }, context);
+    const result = materializeAdaptationResultV2(
+      {
+        request,
+        files: attempt.files,
+        validation: attempt.validation,
+        repairRounds,
+        producer: providerRef(this.#translator),
+        createdAt: this.#now(),
+      },
+      context,
+    );
     return validateAdaptationResultV2(result, request, context);
   }
 
@@ -429,12 +527,35 @@ export class AdaptationAdapterV2 implements CodeAdaptationPortV2 {
     location: TargetPatchLocation,
     signal?: AbortSignal,
   ): Promise<MigrationAttemptV2> {
-    const files = [buildProtectedPatch(request.target.entity.path, originalContent, translation.generatedContent, location)];
+    const files = [
+      buildProtectedPatch(
+        request.target.entity.path,
+        originalContent,
+        translation.generatedContent,
+        location,
+      ),
+    ];
     const patchHash = calculatePatchHashV2(files);
     const { validation, verification } = await this.#validateAttempt(
-      round, request, route, analysis, plan, translation, files, patchHash, targetAdapter, signal,
+      round,
+      request,
+      route,
+      analysis,
+      plan,
+      translation,
+      files,
+      patchHash,
+      targetAdapter,
+      signal,
     );
-    return { round, translation, files, patchHash, validation, ...(verification ? { verification } : {}) };
+    return {
+      round,
+      translation,
+      files,
+      patchHash,
+      validation,
+      ...(verification ? { verification } : {}),
+    };
   }
 
   async #validateAttempt(
@@ -448,13 +569,20 @@ export class AdaptationAdapterV2 implements CodeAdaptationPortV2 {
     patchHash: string,
     targetAdapter: ProviderIdentity,
     signal: AbortSignal | undefined,
-  ): Promise<{ validation: ValidationRecord[]; verification?: VerificationReceipt }> {
-    const compiler = this.#compiler.capability(request.target.entity.languageId);
+  ): Promise<{
+    validation: ValidationRecord[];
+    verification?: VerificationReceipt;
+  }> {
+    const compiler = this.#compiler.capability(
+      request.target.entity.languageId,
+    );
     if (compiler) requireProvider(route, "compile-validation", compiler);
-    if (this.#verifier) requireProvider(route, "behavior-validation", this.#verifier);
+    if (this.#verifier)
+      requireProvider(route, "behavior-validation", this.#verifier);
 
-    const behaviorCheck = request.validationPolicy.checks.find((check) =>
-      this.#verifier && providerMatches(check, this.#verifier));
+    const behaviorCheck = request.validationPolicy.checks.find(
+      (check) => this.#verifier && providerMatches(check, this.#verifier),
+    );
     const compileEvidence = compiler
       ? this.#compiler.validate(
           request.target.entity.languageId,
@@ -463,65 +591,79 @@ export class AdaptationAdapterV2 implements CodeAdaptationPortV2 {
         )
       : undefined;
     signal?.throwIfAborted();
-    const behaviorInput: MigrationBehaviorVerificationInputV2 | undefined = behaviorCheck && this.#verifier
-      ? {
-          request,
-          analysis,
-          plan,
-          translation,
-          round,
-          files,
-          patchHash,
-        }
-      : undefined;
-    const verification = behaviorInput && this.#verifier
-      ? await this.#verifier.verifyWithReceipt(behaviorInput, signal)
-      : undefined;
-    const behaviorEvidence = behaviorInput && this.#verifier && verification
-      ? verificationResultEvidence(
-          verification,
-          behaviorVerificationInput(behaviorInput),
-          this.#verifier.strategyDescriptor,
-        )
-      : undefined;
-    return {
-      validation: request.validationPolicy.checks.map((check): ValidationRecord => {
-      const evidence = providerMatches(check, targetAdapter)
+    const behaviorInput: MigrationBehaviorVerificationInputV2 | undefined =
+      behaviorCheck && this.#verifier
         ? {
-            status: "pass" as const,
-            summary: "The registered target-language adapter isolated the authorized declaration boundary.",
+            request,
+            analysis,
+            plan,
+            translation,
+            round,
+            files,
+            patchHash,
           }
-        : compiler && providerMatches(check, compiler)
-          ? compileEvidence
-          : this.#verifier && providerMatches(check, this.#verifier)
-            ? behaviorEvidence
-            : undefined;
-      const resolved: MigrationValidationEvidenceV2 = evidence ?? {
-        status: "unverified",
-        summary: `Required provider ${check.verifierId} did not produce evidence.`,
-        failureReason: "required-verifier-evidence-missing",
-      };
-      return {
-        id: `validation:${check.id}`,
-        label: check.label,
-        status: resolved.status,
-        required: check.required,
-        policyCheckId: check.id,
-        routeId: request.route.routeId,
-        routeVersion: request.route.routeVersion,
-        phase: check.phase,
-        verifierId: check.verifierId,
-        ...(check.verifierVersion === undefined
-          ? {}
-          : { verifierVersion: check.verifierVersion }),
-        subjectHash: patchHash,
-        ...(resolved.command === undefined ? {} : { command: resolved.command }),
-        summary: resolved.summary,
-        ...(resolved.artifact === undefined ? {} : { artifact: resolved.artifact }),
-        ...(resolved.artifactPath === undefined ? {} : { artifactPath: resolved.artifactPath }),
-        ...(resolved.failureReason === undefined ? {} : { failureReason: resolved.failureReason }),
-      };
-      }),
+        : undefined;
+    const verification =
+      behaviorInput && this.#verifier
+        ? await this.#verifier.verifyWithReceipt(behaviorInput, signal)
+        : undefined;
+    const behaviorEvidence =
+      behaviorInput && this.#verifier && verification
+        ? verificationResultEvidence(
+            verification,
+            behaviorVerificationInput(behaviorInput),
+            this.#verifier.strategyDescriptor,
+          )
+        : undefined;
+    return {
+      validation: request.validationPolicy.checks.map(
+        (check): ValidationRecord => {
+          const evidence = providerMatches(check, targetAdapter)
+            ? {
+                status: "pass" as const,
+                summary:
+                  "The registered target-language adapter isolated the authorized declaration boundary.",
+              }
+            : compiler && providerMatches(check, compiler)
+              ? compileEvidence
+              : this.#verifier && providerMatches(check, this.#verifier)
+                ? behaviorEvidence
+                : undefined;
+          const resolved: MigrationValidationEvidenceV2 = evidence ?? {
+            status: "unverified",
+            summary: `Required provider ${check.verifierId} did not produce evidence.`,
+            failureReason: "required-verifier-evidence-missing",
+          };
+          return {
+            id: `validation:${check.id}`,
+            label: check.label,
+            status: resolved.status,
+            required: check.required,
+            policyCheckId: check.id,
+            routeId: request.route.routeId,
+            routeVersion: request.route.routeVersion,
+            phase: check.phase,
+            verifierId: check.verifierId,
+            ...(check.verifierVersion === undefined
+              ? {}
+              : { verifierVersion: check.verifierVersion }),
+            subjectHash: patchHash,
+            ...(resolved.command === undefined
+              ? {}
+              : { command: resolved.command }),
+            summary: resolved.summary,
+            ...(resolved.artifact === undefined
+              ? {}
+              : { artifact: resolved.artifact }),
+            ...(resolved.artifactPath === undefined
+              ? {}
+              : { artifactPath: resolved.artifactPath }),
+            ...(resolved.failureReason === undefined
+              ? {}
+              : { failureReason: resolved.failureReason }),
+          };
+        },
+      ),
       ...(verification ? { verification } : {}),
     };
   }
@@ -536,7 +678,10 @@ export class DeepSeekMigrationAnalyzerV2 implements MigrationAnalyzerV2 {
   readonly providerVersion = "1.0.0";
   constructor(private readonly options: DeepSeekMigrationAgentsV2Options) {}
 
-  async analyze(input: MigrationEvidenceInputV2, signal?: AbortSignal): Promise<MigrationAnalysisV2> {
+  async analyze(
+    input: MigrationEvidenceInputV2,
+    signal?: AbortSignal,
+  ): Promise<MigrationAnalysisV2> {
     const raw = await neutralCompletion(
       "Analyze migration behavior and constraints. Do not generate code.",
       { input, output: analysisShape },
@@ -643,29 +788,35 @@ async function neutralCompletion(
   options: DeepSeekMigrationAgentsV2Options,
   signal: AbortSignal | undefined,
 ): Promise<string> {
-  return completeWithDeepSeek([
+  return completeWithDeepSeek(
+    [
+      {
+        role: "system",
+        content: [
+          "You are a provider in a content-addressed, language-open migration workflow.",
+          instruction,
+          "Use only the supplied V2 artifacts. Return one JSON object and no markdown.",
+        ].join(" "),
+      },
+      { role: "user", content: JSON.stringify(payload, null, 2) },
+    ],
     {
-      role: "system",
-      content: [
-        "You are a provider in a content-addressed, language-open migration workflow.",
-        instruction,
-        "Use only the supplied V2 artifacts. Return one JSON object and no markdown.",
-      ].join(" "),
+      apiKey: options.apiKey,
+      ...(options.request ? { request: options.request } : {}),
+      jsonMode: true,
+      temperature: 0,
     },
-    { role: "user", content: JSON.stringify(payload, null, 2) },
-  ], {
-    apiKey: options.apiKey,
-    ...(options.request ? { request: options.request } : {}),
-    jsonMode: true,
-    temperature: 0,
-  }, signal);
+    signal,
+  );
 }
 
 function routeForExecution(
   request: AdaptationRequestV2,
   runtime: MigrationRuntimeCapabilitySnapshot,
 ): MaterializedMigrationRouteDescriptor {
-  const route = runtime.routes.find((candidate) => candidate.id === request.route.routeId);
+  const route = runtime.routes.find(
+    (candidate) => candidate.id === request.route.routeId,
+  );
   if (!route || route.availability.status === "unavailable") {
     throw new MigrationRouteExecutionError(
       "MIGRATION_ROUTE_UNAVAILABLE",
@@ -698,14 +849,18 @@ function requireProvider(
   }
 }
 
-function authoritativeTargetFile(context: TargetContextSnapshotV2): { content: string } {
+function authoritativeTargetFile(context: TargetContextSnapshotV2): {
+  content: string;
+} {
   const target = context.target.entity;
-  const candidates = context.sourceFiles.filter((fact) =>
-    fact.role === "source-file" &&
-    fact.fileId === target.fileId &&
-    fact.path === target.path &&
-    typeof fact.content === "string" &&
-    fact.contentHash === target.fileContentHash);
+  const candidates = context.sourceFiles.filter(
+    (fact) =>
+      fact.role === "source-file" &&
+      fact.fileId === target.fileId &&
+      fact.path === target.path &&
+      typeof fact.content === "string" &&
+      fact.contentHash === target.fileContentHash,
+  );
   if (candidates.length !== 1) {
     throw new MigrationRouteExecutionError(
       "TARGET_CONTEXT_FILE_UNAVAILABLE",
@@ -717,8 +872,9 @@ function authoritativeTargetFile(context: TargetContextSnapshotV2): { content: s
 }
 
 function authoritativeTargetDeclaration(context: TargetContextSnapshotV2) {
-  const candidates = context.declarations.filter((fact) =>
-    fact.entityId === context.target.entity.entityId);
+  const candidates = context.declarations.filter(
+    (fact) => fact.entityId === context.target.entity.entityId,
+  );
   if (candidates.length !== 1) {
     throw new MigrationRouteExecutionError(
       "TARGET_CONTEXT_FILE_UNAVAILABLE",
@@ -735,24 +891,38 @@ function buildProtectedPatch(
   generatedContent: string,
   location: TargetPatchLocation,
 ): FilePatch {
-  const originalLines = originalContent.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+  const originalLines = originalContent
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .split("\n");
   if (
     location.startLine < 0 ||
     location.endLine < location.startLine ||
     location.endLine >= originalLines.length
   ) {
-    throw new Error("Target engineering adapter returned an invalid patch range.");
+    throw new Error(
+      "Target engineering adapter returned an invalid patch range.",
+    );
   }
   const removed = originalLines.slice(location.startLine, location.endLine + 1);
-  const added = indentGeneratedContent(generatedContent, location.declarationIndentation).split("\n");
+  const added = indentGeneratedContent(
+    generatedContent,
+    location.declarationIndentation,
+  ).split("\n");
   const lines: FilePatch["hunks"][number]["lines"] = [];
   if (location.startLine > 0) {
-    lines.push({ type: "context", content: originalLines[location.startLine - 1]! });
+    lines.push({
+      type: "context",
+      content: originalLines[location.startLine - 1]!,
+    });
   }
   for (const line of removed) lines.push({ type: "remove", content: line });
   for (const line of added) lines.push({ type: "add", content: line });
   if (location.endLine < originalLines.length - 1) {
-    lines.push({ type: "context", content: originalLines[location.endLine + 1]! });
+    lines.push({
+      type: "context",
+      content: originalLines[location.endLine + 1]!,
+    });
   }
   return {
     path,
@@ -760,24 +930,29 @@ function buildProtectedPatch(
     expectedOriginalSha256: sha256(originalContent),
     additions: added.length,
     deletions: removed.length,
-    hunks: [{
-      header: `@@ -${location.startLine + 1},${removed.length} +${location.startLine + 1},${added.length} @@`,
-      lines,
-    }],
+    hunks: [
+      {
+        header: `@@ -${location.startLine + 1},${removed.length} +${location.startLine + 1},${added.length} @@`,
+        lines,
+      },
+    ],
   };
 }
 
 function indentGeneratedContent(content: string, indentation: string): string {
   const normalized = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
-  if (!normalized) throw new Error("V2 translator returned empty generated content.");
+  if (!normalized)
+    throw new Error("V2 translator returned empty generated content.");
   const lines = normalized.split("\n");
   const baseIndent = lines[0]?.match(/^\s*/)?.[0].length ?? 0;
-  return lines.map((line, index) => {
-    if (!line.trim()) return "";
-    if (index === 0) return `${indentation}${line.trimStart()}`;
-    const current = line.match(/^\s*/)?.[0].length ?? 0;
-    return `${indentation}${line.slice(Math.min(current, baseIndent))}`.trimEnd();
-  }).join("\n");
+  return lines
+    .map((line, index) => {
+      if (!line.trim()) return "";
+      if (index === 0) return `${indentation}${line.trimStart()}`;
+      const current = line.match(/^\s*/)?.[0].length ?? 0;
+      return `${indentation}${line.slice(Math.min(current, baseIndent))}`.trimEnd();
+    })
+    .join("\n");
 }
 
 function behaviorVerificationInput(
@@ -799,8 +974,26 @@ function behaviorVerificationInput(
   };
 }
 
-function artifactRef(artifact: { id: string; kind: string; path: string; contentHash: string; mediaType: string }): { id: string; kind: string; path: string; contentHash: string; mediaType: string } {
-  return { id: artifact.id, kind: artifact.kind, path: artifact.path, contentHash: artifact.contentHash, mediaType: artifact.mediaType };
+function artifactRef(artifact: {
+  id: string;
+  kind: string;
+  path: string;
+  contentHash: string;
+  mediaType: string;
+}): {
+  id: string;
+  kind: string;
+  path: string;
+  contentHash: string;
+  mediaType: string;
+} {
+  return {
+    id: artifact.id,
+    kind: artifact.kind,
+    path: artifact.path,
+    contentHash: artifact.contentHash,
+    mediaType: artifact.mediaType,
+  };
 }
 
 function verificationResultEvidence(
@@ -846,17 +1039,25 @@ function messageOf(error: unknown): string {
     : "unknown verification result validation error";
 }
 
-function compilerEvidence(result: CompileResult, command: string): MigrationValidationEvidenceV2 {
+function compilerEvidence(
+  result: CompileResult,
+  command: string,
+): MigrationValidationEvidenceV2 {
   const unavailable = isCompilerUnavailable(result);
   return {
     status: unavailable ? "unverified" : result.success ? "pass" : "fail",
     command,
     summary: result.success
       ? "Target-language compiler accepted the generated entity. Compilation does not prove behavior."
-      : result.errors.slice(0, 6).join("; ") || "Compiler failed without diagnostics.",
+      : result.errors.slice(0, 6).join("; ") ||
+        "Compiler failed without diagnostics.",
     ...(result.success
       ? {}
-      : { failureReason: unavailable ? "compiler-unavailable" : "compiler-failed" }),
+      : {
+          failureReason: unavailable
+            ? "compiler-unavailable"
+            : "compiler-failed",
+        }),
   };
 }
 
@@ -864,8 +1065,10 @@ function providerMatches(
   check: AdaptationRequestV2["validationPolicy"]["checks"][number],
   provider: ProviderIdentity,
 ): boolean {
-  return check.verifierId === provider.providerId &&
-    check.verifierVersion === provider.providerVersion;
+  return (
+    check.verifierId === provider.providerId &&
+    check.verifierVersion === provider.providerVersion
+  );
 }
 
 function repairIssues(
@@ -907,17 +1110,28 @@ function repairIssues(
   return issues;
 }
 
-function isCompilerFailure(record: ValidationRecord, compiler: ProviderIdentity): boolean {
-  return record.verifierId === compiler.providerId &&
+function isCompilerFailure(
+  record: ValidationRecord,
+  compiler: ProviderIdentity,
+): boolean {
+  return (
+    record.verifierId === compiler.providerId &&
     record.verifierVersion === compiler.providerVersion &&
-    (record.phase === "compile" || record.phase === "syntax");
+    (record.phase === "compile" || record.phase === "syntax")
+  );
 }
 
 function providerRef(provider: ProviderIdentity): MigrationProviderRefV2 {
-  return { providerId: provider.providerId, providerVersion: provider.providerVersion };
+  return {
+    providerId: provider.providerId,
+    providerVersion: provider.providerVersion,
+  };
 }
 
-function engineeringProvider(provider: { id: string; version: string }): ProviderIdentity {
+function engineeringProvider(provider: {
+  id: string;
+  version: string;
+}): ProviderIdentity {
   return { providerId: provider.id, providerVersion: provider.version };
 }
 
@@ -930,12 +1144,18 @@ function validateAnalysis(value: unknown): MigrationAnalysisV2 {
     !Array.isArray(object.mappings) ||
     !object.mappings.every((mapping) => {
       if (!isObject(mapping)) return false;
-      return nonEmptyString(mapping.source) && nonEmptyString(mapping.target) && nonEmptyString(mapping.rationale);
+      return (
+        nonEmptyString(mapping.source) &&
+        nonEmptyString(mapping.target) &&
+        nonEmptyString(mapping.rationale)
+      );
     }) ||
     !stringArray(object.risks) ||
     !stringArray(object.unresolved)
   ) {
-    throw new Error("V2 analyzer returned an invalid MigrationAnalysisV2 artifact.");
+    throw new Error(
+      "V2 analyzer returned an invalid MigrationAnalysisV2 artifact.",
+    );
   }
   return value as MigrationAnalysisV2;
 }
@@ -944,7 +1164,8 @@ function validatePlan(value: unknown): MigrationPlanV2 {
   const object = requiredObject(value, "V2 plan");
   if (
     object.schemaVersion !== "1.0" ||
-    !stringArray(object.steps) || object.steps.length === 0 ||
+    !stringArray(object.steps) ||
+    object.steps.length === 0 ||
     !stringArray(object.preservedFacts) ||
     !stringArray(object.expectedTargetChanges) ||
     !stringArray(object.validationFocus) ||
@@ -963,7 +1184,9 @@ function validateTranslation(value: unknown): MigrationTranslationV2 {
     !stringArray(object.completedSteps) ||
     !stringArray(object.unresolved)
   ) {
-    throw new Error("V2 translator returned an invalid MigrationTranslationV2 artifact.");
+    throw new Error(
+      "V2 translator returned an invalid MigrationTranslationV2 artifact.",
+    );
   }
   // SAFETY: all required translation fields were validated above; extra JSON fields are permitted.
   return value as unknown as MigrationTranslationV2;
@@ -979,7 +1202,10 @@ function parseJson(value: string, label: string): unknown {
   }
 }
 
-function requiredObject(value: unknown, label: string): Record<string, unknown> {
+function requiredObject(
+  value: unknown,
+  label: string,
+): Record<string, unknown> {
   if (!isObject(value)) throw new Error(`${label} must be an object.`);
   return value;
 }

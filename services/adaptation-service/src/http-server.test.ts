@@ -1,4 +1,4 @@
-import type { AddressInfo } from 'node:net';
+import type { AddressInfo } from "node:net";
 import type {
   AdaptationRequest,
   AdaptationResultV2,
@@ -9,54 +9,56 @@ import type {
   RepositoryIngestionJsonValue,
   RepositoryStaticAnalysis,
   SearchCandidate,
-} from '@forexplore/contracts';
+} from "@forexplore/contracts";
 import type {
   CodeAdaptationPort,
   MigrationExecutionV2ValidationContext,
   RepositoryArchitecturePort,
-} from '@forexplore/workflow-core';
+} from "@forexplore/workflow-core";
 import {
   materializeMigrationRuntimeCapabilitySnapshot,
   validateAdaptationResultV2,
-} from '@forexplore/workflow-core';
+} from "@forexplore/workflow-core";
 import {
   createVerificationResult,
   type VerificationStrategyDescriptor,
-} from '@forexplore/translation-verifier';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+} from "@forexplore/translation-verifier";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createHttpServer,
   type MigrationExecutionV2ArtifactStore,
   type StaticAnalysisSnapshotStore,
-} from './http-server';
+} from "./http-server";
 import {
   AdaptationAdapterV2,
   type CodeAdaptationPortV2,
-} from './adaptation-adapter-v2';
+} from "./adaptation-adapter-v2";
 import {
   fixtureVerificationAssessment,
   adaptationV2GeneratedContent,
   adaptationV2TestNow,
   createAdaptationV2TestFixture,
 } from "./adaptation-v2-test-support";
-import { createAdaptationRuntimeCapabilitySnapshot } from './runtime-capability-snapshot';
+import { createAdaptationRuntimeCapabilitySnapshot } from "./runtime-capability-snapshot";
 
 const httpBehaviorStrategyDescriptor: VerificationStrategyDescriptor = {
-  id: 'forexplore.translation-verifier.differential',
-  version: '1.0.0',
-  displayName: 'Fixture Differential Verifier',
+  id: "forexplore.translation-verifier.differential",
+  version: "1.0.0",
+  displayName: "Fixture Differential Verifier",
 };
 
 const servers: ReturnType<typeof createHttpServer>[] = [];
 
 afterEach(async () => {
   await Promise.all(
-    servers.splice(0).map(
-      (server) =>
-        new Promise<void>((resolve, reject) =>
-          server.close((error) => (error ? reject(error) : resolve())),
-        ),
-    ),
+    servers
+      .splice(0)
+      .map(
+        (server) =>
+          new Promise<void>((resolve, reject) =>
+            server.close((error) => (error ? reject(error) : resolve())),
+          ),
+      ),
   );
 });
 
@@ -73,26 +75,26 @@ async function listen(
   const server = createHttpServer({
     adapter,
     ...options,
-    corsOrigin: 'http://localhost:4173',
+    corsOrigin: "http://localhost:4173",
   });
   servers.push(server);
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address() as AddressInfo;
   return `http://127.0.0.1:${address.port}`;
 }
 
 const javaCandidate: SearchCandidate = {
-  id: 'java-candidate',
-  title: 'calculate',
-  repository: 'fixture/java',
-  license: 'Apache-2.0',
-  language: 'Java',
-  kind: 'function',
-  path: 'src/Calculator.java',
-  signature: 'public double calculate()',
-  summary: 'Calculates a value.',
+  id: "java-candidate",
+  title: "calculate",
+  repository: "fixture/java",
+  license: "Apache-2.0",
+  language: "Java",
+  kind: "function",
+  path: "src/Calculator.java",
+  signature: "public double calculate()",
+  summary: "Calculates a value.",
   score: { overall: 1, semantic: 1, symbol: 1, contract: 1 },
-  preview: 'public double calculate() { return 1.0; }',
+  preview: "public double calculate() { return 1.0; }",
   dependencies: [],
   compatibility: [],
   risks: [],
@@ -100,47 +102,47 @@ const javaCandidate: SearchCandidate = {
 
 const adaptationRequest: AdaptationRequest = {
   target: {
-    id: 'target',
-    name: 'Calculate',
-    kind: 'function',
-    path: 'src/Calculator.cs',
-    language: 'C#',
-    signature: 'public decimal Calculate()',
+    id: "target",
+    name: "Calculate",
+    kind: "function",
+    path: "src/Calculator.cs",
+    language: "C#",
+    signature: "public decimal Calculate()",
   },
   candidate: javaCandidate,
-  requirement: 'Translate the calculation.',
-  strategy: 'translate',
-  decisionNotes: '',
+  requirement: "Translate the calculation.",
+  strategy: "translate",
+  decisionNotes: "",
 };
 
 const adaptationResult: AdaptationResult = {
-  strategy: 'translate',
-  targetLanguage: 'C#',
-  generatedCode: 'public decimal Calculate() { return 1.0m; }',
+  strategy: "translate",
+  targetLanguage: "C#",
+  generatedCode: "public decimal Calculate() { return 1.0m; }",
   interfaceMappings: [],
   validation: [
     {
-      id: 'compile',
-      label: '独立编译',
-      status: 'pass',
+      id: "compile",
+      label: "独立编译",
+      status: "pass",
       required: true,
-      command: 'dotnet build --nologo -v q',
-      summary: '编译通过。编译通过不证明业务行为正确。',
+      command: "dotnet build --nologo -v q",
+      summary: "编译通过。编译通过不证明业务行为正确。",
     },
   ],
   files: [
     {
-      path: 'src/Calculator.cs',
-      status: 'modified',
-      expectedOriginalSha256: 'a'.repeat(64),
+      path: "src/Calculator.cs",
+      status: "modified",
+      expectedOriginalSha256: "a".repeat(64),
       additions: 1,
       deletions: 1,
       hunks: [
         {
-          header: '@@ -1,1 +1,1 @@',
+          header: "@@ -1,1 +1,1 @@",
           lines: [
-            { type: 'remove', content: 'throw new NotImplementedException();' },
-            { type: 'add', content: 'return 1.0m;' },
+            { type: "remove", content: "throw new NotImplementedException();" },
+            { type: "add", content: "return 1.0m;" },
           ],
         },
       ],
@@ -149,47 +151,55 @@ const adaptationResult: AdaptationResult = {
 };
 
 const staticAnalysis: RepositoryStaticAnalysis = {
-  schemaVersion: '1.0',
-  snapshotId: 'snapshot-http-1',
-  contentHash: 'a'.repeat(64),
-  analyzerVersion: 'code-indexer/1.0',
-  createdAt: '2026-08-26T00:00:00.000Z',
-  repository: { revision: 'abc123' },
-  files: [{
-    path: 'src/Quote.java',
-    sha256: 'b'.repeat(64),
-    role: 'source',
-    language: 'Java',
-  }],
-  symbols: [{
-    id: 'quote-symbol',
-    name: 'Quote',
-    qualifiedName: 'example.Quote',
-    kind: 'class',
-    language: 'Java',
-    path: 'src/Quote.java',
-  }],
+  schemaVersion: "1.0",
+  snapshotId: "snapshot-http-1",
+  contentHash: "a".repeat(64),
+  analyzerVersion: "code-indexer/1.0",
+  createdAt: "2026-08-26T00:00:00.000Z",
+  repository: { revision: "abc123" },
+  files: [
+    {
+      path: "src/Quote.java",
+      sha256: "b".repeat(64),
+      role: "source",
+      language: "Java",
+    },
+  ],
+  symbols: [
+    {
+      id: "quote-symbol",
+      name: "Quote",
+      qualifiedName: "example.Quote",
+      kind: "class",
+      language: "Java",
+      path: "src/Quote.java",
+    },
+  ],
   dependencies: [],
   diagnostics: [],
 };
 
 const modulePlan: ModuleMigrationProposal = {
-  schemaVersion: '1.0',
+  schemaVersion: "1.0",
   snapshotId: staticAnalysis.snapshotId,
-  objective: 'Plan quote migration modules.',
-  modules: [{
-    id: 'quote',
-    name: 'Quote',
-    kind: 'feature',
-    description: 'Quote feature.',
-    sourceFiles: ['src/Quote.java'],
-    symbolIds: ['quote-symbol'],
-    dependsOn: [],
-    writeSet: ['src/Quote.java'],
-    resourceLocks: [],
-    evidenceIds: ['quote-symbol'],
-  }],
-  fileAssignments: [{ path: 'src/Quote.java', kind: 'module', moduleId: 'quote' }],
+  objective: "Plan quote migration modules.",
+  modules: [
+    {
+      id: "quote",
+      name: "Quote",
+      kind: "feature",
+      description: "Quote feature.",
+      sourceFiles: ["src/Quote.java"],
+      symbolIds: ["quote-symbol"],
+      dependsOn: [],
+      writeSet: ["src/Quote.java"],
+      resourceLocks: [],
+      evidenceIds: ["quote-symbol"],
+    },
+  ],
+  fileAssignments: [
+    { path: "src/Quote.java", kind: "module", moduleId: "quote" },
+  ],
   dependencies: [],
   risks: [],
 };
@@ -306,66 +316,79 @@ function deterministicAdapterV2(
   });
 }
 
-describe('adaptation HTTP API', () => {
-  it('serves health check', async () => {
+describe("adaptation HTTP API", () => {
+  it("serves health check", async () => {
     const adapter: CodeAdaptationPort = { adapt: vi.fn() };
     const url = await listen(adapter);
 
     const response = await fetch(`${url}/health`);
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ status: 'ok', provider: 'deepseek' });
+    expect(await response.json()).toEqual({
+      status: "ok",
+      provider: "deepseek",
+    });
   });
 
-  it('always serves a validated runtime capability snapshot', async () => {
+  it("always serves a validated runtime capability snapshot", async () => {
     const adapter: CodeAdaptationPort = { adapt: vi.fn() };
     const emptyUrl = await listen(adapter);
 
     const emptyResponse = await fetch(`${emptyUrl}/v2/runtime-capabilities`);
     expect(emptyResponse.status).toBe(200);
-    expect(await emptyResponse.json()).toEqual(expect.objectContaining({
-      schemaVersion: '2.0',
-      id: expect.stringMatching(/^migration-runtime-capabilities:/),
-      routes: [],
-      contentHash: expect.stringMatching(/^[a-f0-9]{64}$/),
-    }));
+    expect(await emptyResponse.json()).toEqual(
+      expect.objectContaining({
+        schemaVersion: "2.0",
+        id: expect.stringMatching(/^migration-runtime-capabilities:/),
+        routes: [],
+        contentHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+      }),
+    );
 
     const snapshot = createAdaptationRuntimeCapabilitySnapshot({
-      createdAt: '2026-09-02T00:00:00.000Z',
-      analysisExecution: 'trusted-host',
-      verifierExecution: 'local-process',
-      workspaceMutationExecution: 'trusted-host',
+      createdAt: "2026-09-02T00:00:00.000Z",
+      analysisExecution: "trusted-host",
+      verifierExecution: "local-process",
+      workspaceMutationExecution: "trusted-host",
     });
-    const configuredUrl = await listen(adapter, { runtimeCapabilitySnapshot: snapshot });
-    const configuredResponse = await fetch(`${configuredUrl}/v2/runtime-capabilities`);
+    const configuredUrl = await listen(adapter, {
+      runtimeCapabilitySnapshot: snapshot,
+    });
+    const configuredResponse = await fetch(
+      `${configuredUrl}/v2/runtime-capabilities`,
+    );
     expect(configuredResponse.status).toBe(200);
     expect(await configuredResponse.json()).toEqual(snapshot);
     expect(adapter.adapt).not.toHaveBeenCalled();
   });
 
-  it('rejects a tampered runtime capability snapshot before listening', () => {
+  it("rejects a tampered runtime capability snapshot before listening", () => {
     const adapter: CodeAdaptationPort = { adapt: vi.fn() };
     const snapshot = createAdaptationRuntimeCapabilitySnapshot({
-      createdAt: '2026-09-02T00:00:00.000Z',
-      analysisExecution: 'trusted-host',
-      verifierExecution: 'local-process',
-      workspaceMutationExecution: 'trusted-host',
+      createdAt: "2026-09-02T00:00:00.000Z",
+      analysisExecution: "trusted-host",
+      verifierExecution: "local-process",
+      workspaceMutationExecution: "trusted-host",
     });
     const tampered = structuredClone(snapshot);
-    tampered.contentHash = '0'.repeat(64);
+    tampered.contentHash = "0".repeat(64);
 
-    expect(() => createHttpServer({
-      adapter,
-      runtimeCapabilitySnapshot: tampered,
-    })).toThrow('Runtime capability snapshot hash or canonical structure is invalid');
+    expect(() =>
+      createHttpServer({
+        adapter,
+        runtimeCapabilitySnapshot: tampered,
+      }),
+    ).toThrow(
+      "Runtime capability snapshot hash or canonical structure is invalid",
+    );
   });
 
-  it('returns production route unavailability as a structured 409 capability fact', async () => {
+  it("returns production route unavailability as a structured 409 capability fact", async () => {
     const fixture = createAdaptationV2TestFixture();
     const productionSnapshot = createAdaptationRuntimeCapabilitySnapshot({
       createdAt: adaptationV2TestNow,
-      analysisExecution: 'disabled',
-      verifierExecution: 'disabled',
-      workspaceMutationExecution: 'disabled',
+      analysisExecution: "disabled",
+      verifierExecution: "disabled",
+      workspaceMutationExecution: "disabled",
     });
     const adapter: CodeAdaptationPort = { adapt: vi.fn() };
     const adapterV2: CodeAdaptationPortV2 = { adapt: vi.fn() };
@@ -375,34 +398,39 @@ describe('adaptation HTTP API', () => {
     });
 
     const response = await fetch(`${url}/v2/adapt`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      method: "POST",
+      headers: { "content-type": "application/json" },
       body: JSON.stringify(fixture.request),
     });
-    const body = await response.json() as Record<string, unknown>;
+    const body = (await response.json()) as Record<string, unknown>;
 
     expect(response.status).toBe(409);
     expect(body).toMatchObject({
-      schemaVersion: '2.0',
-      code: 'MIGRATION_ROUTE_UNAVAILABLE',
+      schemaVersion: "2.0",
+      code: "MIGRATION_ROUTE_UNAVAILABLE",
       routeId: fixture.request.route.routeId,
       reasonCodes: expect.arrayContaining([
-        'behavior-validation:behavior-verifier-execution-disabled',
+        "behavior-validation:behavior-verifier-execution-disabled",
       ]),
     });
     expect(adapterV2.adapt).not.toHaveBeenCalled();
     expect(adapter.adapt).not.toHaveBeenCalled();
   });
 
-  it('executes POST /v2/adapt only after resolving and validating server-owned artifacts', async () => {
+  it("executes POST /v2/adapt only after resolving and validating server-owned artifacts", async () => {
     const fixture = createAdaptationV2TestFixture();
-    expect(fixture.serviceRuntime.routes.find((route) => route.id === fixture.route.id)?.availability)
-      .toMatchObject({ status: 'unavailable' });
-    expect(fixture.runtime.routes.find((route) => route.id === fixture.route.id)?.availability)
-      .toMatchObject({ status: 'available' });
+    expect(
+      fixture.serviceRuntime.routes.find(
+        (route) => route.id === fixture.route.id,
+      )?.availability,
+    ).toMatchObject({ status: "unavailable" });
+    expect(
+      fixture.runtime.routes.find((route) => route.id === fixture.route.id)
+        ?.availability,
+    ).toMatchObject({ status: "available" });
     const adapter: CodeAdaptationPort = { adapt: vi.fn() };
     const adapterV2 = deterministicAdapterV2(fixture.serviceRuntime);
-    const adapterSpy = vi.spyOn(adapterV2, 'adapt');
+    const adapterSpy = vi.spyOn(adapterV2, "adapt");
     const migrationExecutionV2Artifacts: MigrationExecutionV2ArtifactStore = {
       getArtifacts: vi.fn(async () => fixture.serverArtifacts),
     };
@@ -413,14 +441,20 @@ describe('adaptation HTTP API', () => {
     });
 
     const response = await fetch(`${url}/v2/adapt`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      method: "POST",
+      headers: { "content-type": "application/json" },
       body: JSON.stringify(fixture.request),
     });
-    const body = await response.json() as AdaptationResultV2;
+    const body = (await response.json()) as AdaptationResultV2;
 
     expect(response.status).toBe(200);
-    expect(validateAdaptationResultV2(body, fixture.request, fixture.validationContext)).toBe(body);
+    expect(
+      validateAdaptationResultV2(
+        body,
+        fixture.request,
+        fixture.validationContext,
+      ),
+    ).toBe(body);
     expect(migrationExecutionV2Artifacts.getArtifacts).toHaveBeenCalledWith(
       expect.objectContaining({
         requestId: fixture.request.id,
@@ -438,7 +472,7 @@ describe('adaptation HTTP API', () => {
     expect(adapter.adapt).not.toHaveBeenCalled();
   });
 
-  it('rejects request artifacts that differ from the authoritative store before V2 execution', async () => {
+  it("rejects request artifacts that differ from the authoritative store before V2 execution", async () => {
     const fixture = createAdaptationV2TestFixture();
     const adapter: CodeAdaptationPort = { adapt: vi.fn() };
     const adapterV2: CodeAdaptationPortV2 = { adapt: vi.fn() };
@@ -451,44 +485,47 @@ describe('adaptation HTTP API', () => {
       migrationExecutionV2Artifacts,
     });
     const tampered = structuredClone(fixture.request);
-    tampered.sourceBundle.files[0]!.content = 'preview-like untrusted replacement';
+    tampered.sourceBundle.files[0]!.content =
+      "preview-like untrusted replacement";
 
     const response = await fetch(`${url}/v2/adapt`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      method: "POST",
+      headers: { "content-type": "application/json" },
       body: JSON.stringify(tampered),
     });
 
     expect(response.status).toBe(422);
     expect(await response.json()).toMatchObject({
-      schemaVersion: '2.0',
-      code: 'ADAPTATION_ARTIFACT_BINDING_MISMATCH',
-      reasonCodes: ['source-bundle-mismatch'],
+      schemaVersion: "2.0",
+      code: "ADAPTATION_ARTIFACT_BINDING_MISMATCH",
+      reasonCodes: ["source-bundle-mismatch"],
     });
     expect(adapterV2.adapt).not.toHaveBeenCalled();
     expect(adapter.adapt).not.toHaveBeenCalled();
   });
 
-  it('rejects a host-composed snapshot that overrides a service-owned behavior stage', async () => {
+  it("rejects a host-composed snapshot that overrides a service-owned behavior stage", async () => {
     const serviceRuntime = createAdaptationRuntimeCapabilitySnapshot({
       createdAt: adaptationV2TestNow,
-      analysisExecution: 'disabled',
-      verifierExecution: 'local-process',
-      workspaceMutationExecution: 'disabled',
+      analysisExecution: "disabled",
+      verifierExecution: "local-process",
+      workspaceMutationExecution: "disabled",
     });
     const validCombined = createAdaptationRuntimeCapabilitySnapshot({
       createdAt: adaptationV2TestNow,
-      analysisExecution: 'trusted-host',
-      verifierExecution: 'local-process',
-      workspaceMutationExecution: 'trusted-host',
+      analysisExecution: "trusted-host",
+      verifierExecution: "local-process",
+      workspaceMutationExecution: "trusted-host",
     });
     const maliciousCombined = materializeMigrationRuntimeCapabilitySnapshot({
       createdAt: adaptationV2TestNow,
       routes: validCombined.routes.map((route) => ({
         ...route,
-        stages: route.stages.map((stage) => stage.stage === 'behavior-validation'
-          ? { ...stage, providerId: 'host-overrode-behavior-verifier' }
-          : stage),
+        stages: route.stages.map((stage) =>
+          stage.stage === "behavior-validation"
+            ? { ...stage, providerId: "host-overrode-behavior-verifier" }
+            : stage,
+        ),
       })),
     });
     const fixture = createAdaptationV2TestFixture({
@@ -507,29 +544,29 @@ describe('adaptation HTTP API', () => {
     });
 
     const response = await fetch(`${url}/v2/adapt`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      method: "POST",
+      headers: { "content-type": "application/json" },
       body: JSON.stringify(fixture.request),
     });
 
     expect(response.status).toBe(409);
     expect(await response.json()).toMatchObject({
-      schemaVersion: '2.0',
-      code: 'MIGRATION_RUNTIME_COMPOSITION_REJECTED',
-      reasonCodes: ['service-owned-stage-composition-mismatch'],
+      schemaVersion: "2.0",
+      code: "MIGRATION_RUNTIME_COMPOSITION_REJECTED",
+      reasonCodes: ["service-owned-stage-composition-mismatch"],
     });
     expect(adapterV2.adapt).not.toHaveBeenCalled();
   });
 
-  it('routes adaptation requests to the adapter', async () => {
+  it("routes adaptation requests to the adapter", async () => {
     const adapter: CodeAdaptationPort = {
       adapt: vi.fn(async () => adaptationResult),
     };
     const url = await listen(adapter);
 
     const response = await fetch(`${url}/v1/adapt`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      method: "POST",
+      headers: { "content-type": "application/json" },
       body: JSON.stringify(adaptationRequest),
     });
 
@@ -539,30 +576,33 @@ describe('adaptation HTTP API', () => {
       expect.any(AbortSignal),
     );
     expect(await response.json()).toEqual(adaptationResult);
-    expect(response.headers.get('access-control-allow-origin')).toBe(
-      'http://localhost:4173',
+    expect(response.headers.get("access-control-allow-origin")).toBe(
+      "http://localhost:4173",
     );
   });
 
-  it('plans modules from a server-owned snapshot without accepting repository source', async () => {
+  it("plans modules from a server-owned snapshot without accepting repository source", async () => {
     const adapter: CodeAdaptationPort = { adapt: vi.fn() };
     const architecturePort: RepositoryArchitecturePort = {
       proposeModulePlan: vi.fn(async () => modulePlan),
     };
     const staticAnalysisSnapshots: StaticAnalysisSnapshotStore = {
-      getSnapshot: vi.fn(async (snapshotId) => (
-        snapshotId === staticAnalysis.snapshotId ? staticAnalysis : null
-      )),
+      getSnapshot: vi.fn(async (snapshotId) =>
+        snapshotId === staticAnalysis.snapshotId ? staticAnalysis : null,
+      ),
     };
-    const url = await listen(adapter, { architecturePort, staticAnalysisSnapshots });
+    const url = await listen(adapter, {
+      architecturePort,
+      staticAnalysisSnapshots,
+    });
 
     const response = await fetch(`${url}/v1/module-plan`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      method: "POST",
+      headers: { "content-type": "application/json" },
       body: JSON.stringify({
         snapshotId: staticAnalysis.snapshotId,
         objective: modulePlan.objective,
-        immutableConstraints: ['Keep the public contract stable.'],
+        immutableConstraints: ["Keep the public contract stable."],
       }),
     });
 
@@ -573,10 +613,10 @@ describe('adaptation HTTP API', () => {
     );
     expect(architecturePort.proposeModulePlan).toHaveBeenCalledWith(
       {
-        schemaVersion: '1.0',
+        schemaVersion: "1.0",
         analysis: staticAnalysis,
         objective: modulePlan.objective,
-        immutableConstraints: ['Keep the public contract stable.'],
+        immutableConstraints: ["Keep the public contract stable."],
       } satisfies RepositoryArchitectureRequest,
       expect.any(AbortSignal),
     );
@@ -584,20 +624,39 @@ describe('adaptation HTTP API', () => {
     expect(adapter.adapt).not.toHaveBeenCalled();
   });
 
-  it('rejects module-plan bodies that try to upload analysis, source, or paths', async () => {
+  it("rejects module-plan bodies that try to upload analysis, source, or paths", async () => {
     const adapter: CodeAdaptationPort = { adapt: vi.fn() };
-    const architecturePort: RepositoryArchitecturePort = { proposeModulePlan: vi.fn() };
-    const staticAnalysisSnapshots: StaticAnalysisSnapshotStore = { getSnapshot: vi.fn() };
-    const url = await listen(adapter, { architecturePort, staticAnalysisSnapshots });
+    const architecturePort: RepositoryArchitecturePort = {
+      proposeModulePlan: vi.fn(),
+    };
+    const staticAnalysisSnapshots: StaticAnalysisSnapshotStore = {
+      getSnapshot: vi.fn(),
+    };
+    const url = await listen(adapter, {
+      architecturePort,
+      staticAnalysisSnapshots,
+    });
 
     for (const body of [
-      { snapshotId: staticAnalysis.snapshotId, objective: modulePlan.objective, analysis: staticAnalysis },
-      { snapshotId: staticAnalysis.snapshotId, objective: modulePlan.objective, source: 'class Secret {}' },
-      { snapshotId: staticAnalysis.snapshotId, objective: modulePlan.objective, path: 'src/Secret.java' },
+      {
+        snapshotId: staticAnalysis.snapshotId,
+        objective: modulePlan.objective,
+        analysis: staticAnalysis,
+      },
+      {
+        snapshotId: staticAnalysis.snapshotId,
+        objective: modulePlan.objective,
+        source: "class Secret {}",
+      },
+      {
+        snapshotId: staticAnalysis.snapshotId,
+        objective: modulePlan.objective,
+        path: "src/Secret.java",
+      },
     ]) {
       const response = await fetch(`${url}/v1/module-plan`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        method: "POST",
+        headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
       expect(response.status).toBe(400);
@@ -606,93 +665,111 @@ describe('adaptation HTTP API', () => {
     expect(architecturePort.proposeModulePlan).not.toHaveBeenCalled();
   });
 
-  it('does not expose module planning when the read-only host port is absent', async () => {
+  it("does not expose module planning when the read-only host port is absent", async () => {
     const adapter: CodeAdaptationPort = { adapt: vi.fn() };
     const url = await listen(adapter);
 
     const response = await fetch(`${url}/v1/module-plan`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ snapshotId: staticAnalysis.snapshotId, objective: modulePlan.objective }),
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        snapshotId: staticAnalysis.snapshotId,
+        objective: modulePlan.objective,
+      }),
     });
 
     expect(response.status).toBe(404);
-    expect(await response.json()).toEqual({ error: 'Module planning is not configured.' });
+    expect(await response.json()).toEqual({
+      error: "Module planning is not configured.",
+    });
   });
 
-  it('returns 404 when the requested server-owned snapshot does not exist', async () => {
+  it("returns 404 when the requested server-owned snapshot does not exist", async () => {
     const adapter: CodeAdaptationPort = { adapt: vi.fn() };
-    const architecturePort: RepositoryArchitecturePort = { proposeModulePlan: vi.fn() };
-    const staticAnalysisSnapshots: StaticAnalysisSnapshotStore = { getSnapshot: vi.fn(async () => null) };
-    const url = await listen(adapter, { architecturePort, staticAnalysisSnapshots });
+    const architecturePort: RepositoryArchitecturePort = {
+      proposeModulePlan: vi.fn(),
+    };
+    const staticAnalysisSnapshots: StaticAnalysisSnapshotStore = {
+      getSnapshot: vi.fn(async () => null),
+    };
+    const url = await listen(adapter, {
+      architecturePort,
+      staticAnalysisSnapshots,
+    });
 
     const response = await fetch(`${url}/v1/module-plan`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ snapshotId: 'unknown', objective: modulePlan.objective }),
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        snapshotId: "unknown",
+        objective: modulePlan.objective,
+      }),
     });
 
     expect(response.status).toBe(404);
     expect(architecturePort.proposeModulePlan).not.toHaveBeenCalled();
   });
 
-  it('disables bare HTTP write-back', async () => {
+  it("disables bare HTTP write-back", async () => {
     const adapter: CodeAdaptationPort = { adapt: vi.fn() };
     const url = await listen(adapter);
 
     const response = await fetch(`${url}/v1/backfill`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: '[]',
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "[]",
     });
 
     expect(response.status).toBe(410);
     expect(await response.json()).toEqual({
-      error: 'HTTP write-back is disabled. Apply an approved migration from the VS Code host.',
+      error:
+        "HTTP write-back is disabled. Apply an approved migration from the VS Code host.",
     });
   });
 
-  it('rejects malformed adaptation requests', async () => {
+  it("rejects malformed adaptation requests", async () => {
     const adapter: CodeAdaptationPort = { adapt: vi.fn() };
     const url = await listen(adapter);
 
     const response = await fetch(`${url}/v1/adapt`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ strategy: 'translate' }),
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ strategy: "translate" }),
     });
 
     expect(response.status).toBe(400);
     expect(adapter.adapt).not.toHaveBeenCalled();
   });
 
-  it('requires JSON content type and valid JSON', async () => {
+  it("requires JSON content type and valid JSON", async () => {
     const adapter: CodeAdaptationPort = { adapt: vi.fn() };
     const url = await listen(adapter);
 
     const noContentType = await fetch(`${url}/v1/adapt`, {
-      method: 'POST',
+      method: "POST",
       body: JSON.stringify(adaptationRequest),
     });
     expect(noContentType.status).toBe(415);
 
     const invalidJson = await fetch(`${url}/v1/adapt`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: '{',
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{",
     });
     expect(invalidJson.status).toBe(400);
-    expect(await invalidJson.json()).toEqual({ error: 'Request body must be valid JSON.' });
+    expect(await invalidJson.json()).toEqual({
+      error: "Request body must be valid JSON.",
+    });
     expect(adapter.adapt).not.toHaveBeenCalled();
   });
 
-  it('rejects oversized request bodies', async () => {
+  it("rejects oversized request bodies", async () => {
     const adapter: CodeAdaptationPort = { adapt: vi.fn() };
     const url = await listen(adapter);
 
     const response = await fetch(`${url}/v1/adapt`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      method: "POST",
+      headers: { "content-type": "application/json" },
       body: Buffer.alloc(2 * 1024 * 1024 + 1),
     });
 
@@ -700,26 +777,30 @@ describe('adaptation HTTP API', () => {
     expect(adapter.adapt).not.toHaveBeenCalled();
   });
 
-  it('returns 404 for unknown routes and handles OPTIONS', async () => {
+  it("returns 404 for unknown routes and handles OPTIONS", async () => {
     const adapter: CodeAdaptationPort = { adapt: vi.fn() };
     const url = await listen(adapter);
     expect((await fetch(`${url}/unknown`)).status).toBe(404);
-    expect((await fetch(`${url}/v1/adapt`, { method: 'OPTIONS' })).status).toBe(204);
+    expect((await fetch(`${url}/v1/adapt`, { method: "OPTIONS" })).status).toBe(
+      204,
+    );
   });
 
-  it('returns 502 when the adapter throws', async () => {
+  it("returns 502 when the adapter throws", async () => {
     const adapter: CodeAdaptationPort = {
       adapt: vi.fn(async () => {
-        throw new Error('DeepSeek API timeout');
+        throw new Error("DeepSeek API timeout");
       }),
     };
     const url = await listen(adapter);
     const response = await fetch(`${url}/v1/adapt`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      method: "POST",
+      headers: { "content-type": "application/json" },
       body: JSON.stringify(adaptationRequest),
     });
     expect(response.status).toBe(502);
-    expect((await response.json() as { error: string }).error).toBe('DeepSeek API timeout');
+    expect(((await response.json()) as { error: string }).error).toBe(
+      "DeepSeek API timeout",
+    );
   });
 });

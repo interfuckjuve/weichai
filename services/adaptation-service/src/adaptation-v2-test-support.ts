@@ -27,7 +27,10 @@ import {
   materializeTargetContextSnapshotV2,
   sha256Hex,
 } from "@forexplore/workflow-core";
-import { createAdaptationRuntimeCapabilitySnapshot, routeByExactPair } from "./runtime-capability-snapshot";
+import {
+  createAdaptationRuntimeCapabilitySnapshot,
+  routeByExactPair,
+} from "./runtime-capability-snapshot";
 import type { MigrationExecutionV2ServerArtifacts } from "./http-server";
 
 export function fixtureVerificationInput(
@@ -110,7 +113,9 @@ export const adaptationV2GeneratedContent = [
 function repositoryIr(side: "source" | "target"): UnifiedRepositoryIR {
   const source = side === "source";
   const languageId = source ? "typescript" : "python";
-  const content = source ? adaptationV2SourceContent : adaptationV2TargetContent;
+  const content = source
+    ? adaptationV2SourceContent
+    : adaptationV2TargetContent;
   const fileId = `${side}-file`;
   return {
     schemaVersion: repositoryIngestionSchemaVersion,
@@ -121,25 +126,29 @@ function repositoryIr(side: "source" | "target"): UnifiedRepositoryIR {
     repositoryContentHash: (source ? "1" : "2").repeat(64),
     sourceShardIds: [`${side}-shard-v2-fixture`],
     capabilities: ["file-inventory", "symbol-index"],
-    files: [{
-      id: fileId,
-      path: source ? "src/normalize.ts" : "app/normalize.py",
-      contentHash: sha256Hex(content),
-      role: "source",
-      languageId,
-      projectIds: [],
-    }],
+    files: [
+      {
+        id: fileId,
+        path: source ? "src/normalize.ts" : "app/normalize.py",
+        contentHash: sha256Hex(content),
+        role: "source",
+        languageId,
+        projectIds: [],
+      },
+    ],
     entities: source
-      ? [{
-          id: "source-call",
-          kind: "callable",
-          name: "normalize",
-          qualifiedName: "normalize.normalize",
-          languageId,
-          fileId,
-          signature: "normalize(value: string): string",
-          attributes: { staticSymbolKind: "top-level-function" },
-        }]
+      ? [
+          {
+            id: "source-call",
+            kind: "callable",
+            name: "normalize",
+            qualifiedName: "normalize.normalize",
+            languageId,
+            fileId,
+            signature: "normalize(value: string): string",
+            attributes: { staticSymbolKind: "top-level-function" },
+          },
+        ]
       : [
           {
             id: "target-module-entity",
@@ -176,7 +185,11 @@ function repositoryIr(side: "source" | "target"): UnifiedRepositoryIR {
     },
     diagnostics: [],
     contentHash: (source ? "3" : "4").repeat(64),
-    producer: { kind: "ingestion-host", id: "v2-fixture-host", version: "1.0.0" },
+    producer: {
+      kind: "ingestion-host",
+      id: "v2-fixture-host",
+      version: "1.0.0",
+    },
     createdAt: adaptationV2TestNow,
   };
 }
@@ -186,7 +199,9 @@ function moduleCatalog(
   repository: UnifiedRepositoryIR,
 ): RepositoryModuleCatalog {
   const source = side === "source";
-  const entityIds = source ? ["source-call"] : ["target-module-entity", "target-call"];
+  const entityIds = source
+    ? ["source-call"]
+    : ["target-module-entity", "target-call"];
   return {
     schemaVersion: repositoryIngestionSchemaVersion,
     id: `${side}-catalog-v2-fixture`,
@@ -196,34 +211,42 @@ function moduleCatalog(
     sourceProposalId: `${side}-proposal-v2-fixture`,
     sourceProposalHash: (source ? "5" : "6").repeat(64),
     status: "active",
-    modules: [{
-      id: `${side}-module`,
-      name: `${side} normalize module`,
-      kind: "application-service",
-      description: `${side} normalize fixture module`,
-      responsibilities: ["Normalize text"],
-      businessCapabilities: [],
-      fileIds: [`${side}-file`],
-      entityIds,
-      entryPointEntityIds: [source ? "source-call" : "target-call"],
-      publicApiEntityIds: [source ? "source-call" : "target-call"],
-      boundaryRationale: "Fixture module boundary",
-      evidenceRefs: [],
-    }],
-    assignments: [{
-      fileId: `${side}-file`,
-      moduleIds: [`${side}-module`],
-      kind: "owned",
-      rationale: "Fixture ownership",
-      evidenceRefs: [],
-    }],
+    modules: [
+      {
+        id: `${side}-module`,
+        name: `${side} normalize module`,
+        kind: "application-service",
+        description: `${side} normalize fixture module`,
+        responsibilities: ["Normalize text"],
+        businessCapabilities: [],
+        fileIds: [`${side}-file`],
+        entityIds,
+        entryPointEntityIds: [source ? "source-call" : "target-call"],
+        publicApiEntityIds: [source ? "source-call" : "target-call"],
+        boundaryRationale: "Fixture module boundary",
+        evidenceRefs: [],
+      },
+    ],
+    assignments: [
+      {
+        fileId: `${side}-file`,
+        moduleIds: [`${side}-module`],
+        kind: "owned",
+        rationale: "Fixture ownership",
+        evidenceRefs: [],
+      },
+    ],
     dependencies: [],
     unassignedFileIds: [],
     overlappingFileIds: [],
     reviewId: `${side}-review-v2-fixture`,
     reviewHash: (source ? "7" : "8").repeat(64),
     contentHash: (source ? "9" : "a").repeat(64),
-    producer: { kind: "ingestion-host", id: "v2-fixture-host", version: "1.0.0" },
+    producer: {
+      kind: "ingestion-host",
+      id: "v2-fixture-host",
+      version: "1.0.0",
+    },
     createdAt: adaptationV2TestNow,
     updatedAt: adaptationV2TestNow,
   };
@@ -237,18 +260,22 @@ export interface AdaptationV2TestFixtureOptions {
 export function createAdaptationV2TestFixture(
   options: AdaptationV2TestFixtureOptions = {},
 ) {
-  const serviceRuntime = options.serviceRuntime ?? createAdaptationRuntimeCapabilitySnapshot({
-    createdAt: adaptationV2TestNow,
-    analysisExecution: "disabled",
-    verifierExecution: "local-process",
-    workspaceMutationExecution: "disabled",
-  });
-  const runtime = options.executionRuntime ?? createAdaptationRuntimeCapabilitySnapshot({
-    createdAt: adaptationV2TestNow,
-    analysisExecution: "trusted-host",
-    verifierExecution: "local-process",
-    workspaceMutationExecution: "trusted-host",
-  });
+  const serviceRuntime =
+    options.serviceRuntime ??
+    createAdaptationRuntimeCapabilitySnapshot({
+      createdAt: adaptationV2TestNow,
+      analysisExecution: "disabled",
+      verifierExecution: "local-process",
+      workspaceMutationExecution: "disabled",
+    });
+  const runtime =
+    options.executionRuntime ??
+    createAdaptationRuntimeCapabilitySnapshot({
+      createdAt: adaptationV2TestNow,
+      analysisExecution: "trusted-host",
+      verifierExecution: "local-process",
+      workspaceMutationExecution: "trusted-host",
+    });
   const route = routeByExactPair(runtime, "typescript", "python")!;
   const routeRef = createMigrationRouteSnapshotRef(runtime, route.id);
   const sourceIr = repositoryIr("source");
@@ -261,16 +288,18 @@ export function createAdaptationV2TestFixture(
     targetIr,
     targetCatalog,
     objective: "Move the reviewed TypeScript normalize behavior to Python.",
-    mappings: [{
-      id: "mapping-normalize",
-      cardinality: "one-to-one",
-      sourceModuleIds: ["source-module"],
-      targetModuleIds: ["target-module"],
-      sourceEntityIds: ["source-call"],
-      targetEntityIds: ["target-call"],
-      rationale: "Reviewed top-level function destination",
-      evidenceIds: [],
-    }],
+    mappings: [
+      {
+        id: "mapping-normalize",
+        cardinality: "one-to-one",
+        sourceModuleIds: ["source-module"],
+        targetModuleIds: ["target-module"],
+        sourceEntityIds: ["source-call"],
+        targetEntityIds: ["target-call"],
+        rationale: "Reviewed top-level function destination",
+        evidenceIds: [],
+      },
+    ],
     createdAt: adaptationV2TestNow,
   });
   const review = materializeModuleMappingReview({
@@ -292,15 +321,23 @@ export function createAdaptationV2TestFixture(
     targetCatalog,
     routeId: routeRef.routeId,
     routeVersion: routeRef.routeVersion,
-    groups: [{
-      id: "execution-normalize",
-      mappingIds: ["mapping-normalize"],
-      dependsOnGroupIds: [],
-    }],
+    groups: [
+      {
+        id: "execution-normalize",
+        mappingIds: ["mapping-normalize"],
+        dependsOnGroupIds: [],
+      },
+    ],
     createdAt: adaptationV2TestNow,
   });
-  const currentSourceCatalog = createRepositoryModuleCatalogRef(sourceIr, sourceCatalog);
-  const currentTargetCatalog = createRepositoryModuleCatalogRef(targetIr, targetCatalog);
+  const currentSourceCatalog = createRepositoryModuleCatalogRef(
+    sourceIr,
+    sourceCatalog,
+  );
+  const currentTargetCatalog = createRepositoryModuleCatalogRef(
+    targetIr,
+    targetCatalog,
+  );
   const validationContext = {
     runtimeCapabilities: runtime,
     currentSourceCatalog,
@@ -313,33 +350,36 @@ export function createAdaptationV2TestFixture(
     "def normalize(value: str) -> str:",
     "    raise NotImplementedError()",
   ].join("\n");
-  const target = materializeMigrationTargetRefV2({
-    schemaVersion: migrationReferenceSchemaVersion,
-    workspaceId: "python-workspace-v2-fixture",
-    targetWorkspaceSnapshotId: "target-snapshot-v2-fixture",
-    targetWorkspaceSnapshotHash: "b".repeat(64),
-    lineage: currentTargetCatalog,
-    entity: {
-      entityId: "target-call",
-      fileId: "target-file",
-      languageId: "python",
-      kind: "top-level-function",
-      name: "normalize",
-      qualifiedName: "normalize.normalize",
-      path: "app/normalize.py",
-      signature: "def normalize(value: str) -> str",
-      fileContentHash: sha256Hex(adaptationV2TargetContent),
-      declarationIdentity: {
-        kind: "declaration",
-        contentHash: sha256Hex(declarationContent),
-        schemaVersion: "python-lexical-v1",
-        providerId: "forexplore.target-engineering.python.lexical",
-        providerVersion: "1.0.0",
+  const target = materializeMigrationTargetRefV2(
+    {
+      schemaVersion: migrationReferenceSchemaVersion,
+      workspaceId: "python-workspace-v2-fixture",
+      targetWorkspaceSnapshotId: "target-snapshot-v2-fixture",
+      targetWorkspaceSnapshotHash: "b".repeat(64),
+      lineage: currentTargetCatalog,
+      entity: {
+        entityId: "target-call",
+        fileId: "target-file",
+        languageId: "python",
+        kind: "top-level-function",
+        name: "normalize",
+        qualifiedName: "normalize.normalize",
+        path: "app/normalize.py",
+        signature: "def normalize(value: str) -> str",
+        fileContentHash: sha256Hex(adaptationV2TargetContent),
+        declarationIdentity: {
+          kind: "declaration",
+          contentHash: sha256Hex(declarationContent),
+          schemaVersion: "python-lexical-v1",
+          providerId: "forexplore.target-engineering.python.lexical",
+          providerVersion: "1.0.0",
+        },
       },
+      route: routeRef,
+      allowedModificationPaths: ["app/normalize.py"],
     },
-    route: routeRef,
-    allowedModificationPaths: ["app/normalize.py"],
-  }, runtime);
+    runtime,
+  );
   const candidate = materializeImplementationCandidateRefV2({
     schemaVersion: migrationReferenceSchemaVersion,
     id: "implementation-candidate:typescript-normalize",
@@ -359,76 +399,92 @@ export function createAdaptationV2TestFixture(
   const sourceBundle = materializeSourceImplementationBundleV2({
     candidate,
     primaryEntityId: "source-call",
-    files: [{
-      fileId: "source-file",
-      path: "src/normalize.ts",
-      languageId: "typescript",
-      role: "primary",
-      content: adaptationV2SourceContent,
-      contentHash: sha256Hex(adaptationV2SourceContent),
-    }],
-    producer: { providerId: "forexplore.source-bundle.fixture", providerVersion: "1.0.0" },
+    files: [
+      {
+        fileId: "source-file",
+        path: "src/normalize.ts",
+        languageId: "typescript",
+        role: "primary",
+        content: adaptationV2SourceContent,
+        contentHash: sha256Hex(adaptationV2SourceContent),
+      },
+    ],
+    producer: {
+      providerId: "forexplore.source-bundle.fixture",
+      providerVersion: "1.0.0",
+    },
     createdAt: adaptationV2TestNow,
   });
   const targetProvider = {
     providerId: "forexplore.target-engineering.python.lexical",
     providerVersion: "1.0.0",
   };
-  const targetContext = materializeTargetContextSnapshotV2({
-    schemaVersion: migrationExecutionV2SchemaVersion,
-    target,
-    route: routeRef,
-    sourceFiles: [{
-      id: "target-normalize-source-file",
-      role: "source-file",
-      languageId: "python",
-      entityId: "target-module-entity",
-      fileId: "target-file",
-      path: "app/normalize.py",
-      content: adaptationV2TargetContent,
-      contentHash: sha256Hex(adaptationV2TargetContent),
-      provider: targetProvider,
-      attributes: { nativeKind: "module", wholeFile: true },
-    }],
-    declarations: [{
-      id: "target-normalize-declaration",
-      role: "declaration",
-      languageId: "python",
-      entityId: "target-call",
-      fileId: "target-file",
-      path: "app/normalize.py",
-      content: declarationContent,
-      contentHash: sha256Hex(declarationContent),
-      provider: targetProvider,
-      attributes: { nativeKind: "top-level-function", startLine: 1 },
-    }],
-    containers: [{
-      id: "target-normalize-full-file",
-      role: "container",
-      languageId: "python",
-      entityId: "target-module-entity",
-      fileId: "target-file",
-      path: "app/normalize.py",
-      content: adaptationV2TargetContent,
-      contentHash: sha256Hex(adaptationV2TargetContent),
-      provider: targetProvider,
-      attributes: { nativeKind: "module", wholeFile: true },
-    }],
-    imports: [],
-    dependencies: [],
-    references: [],
-    callers: [],
-    tests: [],
-    buildFacts: [],
-    allowedModifications: [{
-      path: "app/normalize.py",
-      operation: "modify",
-      expectedContentHash: sha256Hex(adaptationV2TargetContent),
-    }],
-    constraints: ["Keep the sibling top-level function unchanged."],
-    producer: targetProvider,
-    createdAt: adaptationV2TestNow,
-  }, runtime);
+  const targetContext = materializeTargetContextSnapshotV2(
+    {
+      schemaVersion: migrationExecutionV2SchemaVersion,
+      target,
+      route: routeRef,
+      sourceFiles: [
+        {
+          id: "target-normalize-source-file",
+          role: "source-file",
+          languageId: "python",
+          entityId: "target-module-entity",
+          fileId: "target-file",
+          path: "app/normalize.py",
+          content: adaptationV2TargetContent,
+          contentHash: sha256Hex(adaptationV2TargetContent),
+          provider: targetProvider,
+          attributes: { nativeKind: "module", wholeFile: true },
+        },
+      ],
+      declarations: [
+        {
+          id: "target-normalize-declaration",
+          role: "declaration",
+          languageId: "python",
+          entityId: "target-call",
+          fileId: "target-file",
+          path: "app/normalize.py",
+          content: declarationContent,
+          contentHash: sha256Hex(declarationContent),
+          provider: targetProvider,
+          attributes: { nativeKind: "top-level-function", startLine: 1 },
+        },
+      ],
+      containers: [
+        {
+          id: "target-normalize-full-file",
+          role: "container",
+          languageId: "python",
+          entityId: "target-module-entity",
+          fileId: "target-file",
+          path: "app/normalize.py",
+          content: adaptationV2TargetContent,
+          contentHash: sha256Hex(adaptationV2TargetContent),
+          provider: targetProvider,
+          attributes: { nativeKind: "module", wholeFile: true },
+        },
+      ],
+      imports: [],
+      dependencies: [],
+      references: [],
+      callers: [],
+      tests: [],
+      buildFacts: [],
+      allowedModifications: [
+        {
+          path: "app/normalize.py",
+          operation: "modify",
+          expectedContentHash: sha256Hex(adaptationV2TargetContent),
+        },
+      ],
+      constraints: ["Keep the sibling top-level function unchanged."],
+      producer: targetProvider,
+      createdAt: adaptationV2TestNow,
+    },
+    runtime,
+  );
   const executionLineage = {
     sourceCatalog: currentSourceCatalog,
     targetCatalog: currentTargetCatalog,
@@ -439,21 +495,25 @@ export function createAdaptationV2TestFixture(
     executionOverlayId: overlay.id,
     executionOverlayHash: overlay.contentHash,
   };
-  const request = materializeAdaptationRequestV2({
-    schemaVersion: migrationExecutionV2SchemaVersion,
-    route: routeRef,
-    executionLineage,
-    target,
-    candidate,
-    sourceBundle,
-    targetContext,
-    patchSubjectHash: calculatePatchSubjectHashV2(targetContext),
-    validationPolicy: route.validationPolicy,
-    requirement: "Normalize text using the approved historical implementation.",
-    strategy: "translate",
-    decisionNotes: ["Candidate explicitly selected by the reviewer."],
-    createdAt: adaptationV2TestNow,
-  }, validationContext);
+  const request = materializeAdaptationRequestV2(
+    {
+      schemaVersion: migrationExecutionV2SchemaVersion,
+      route: routeRef,
+      executionLineage,
+      target,
+      candidate,
+      sourceBundle,
+      targetContext,
+      patchSubjectHash: calculatePatchSubjectHashV2(targetContext),
+      validationPolicy: route.validationPolicy,
+      requirement:
+        "Normalize text using the approved historical implementation.",
+      strategy: "translate",
+      decisionNotes: ["Candidate explicitly selected by the reviewer."],
+      createdAt: adaptationV2TestNow,
+    },
+    validationContext,
+  );
   const serverArtifacts: MigrationExecutionV2ServerArtifacts = {
     runtimeCapabilities: runtime,
     currentSourceCatalog,

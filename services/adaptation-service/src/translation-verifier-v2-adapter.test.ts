@@ -1,10 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import type { RepositoryIngestionJsonValue } from "@forexplore/contracts";
-import {
-  calculatePatchHashV2,
-  canonicalJson,
-} from "@forexplore/workflow-core";
+import { calculatePatchHashV2, canonicalJson } from "@forexplore/workflow-core";
 import {
   createVerificationResult,
   DIFFERENTIAL_SMOKE_STRATEGY,
@@ -27,7 +24,13 @@ const analysis: MigrationAnalysisV2 = {
   schemaVersion: "1.0",
   behavior: ["Trim and uppercase."],
   targetConstraints: ["Keep sibling declarations."],
-  mappings: [{ source: "trim", target: "strip", rationale: "Equivalent whitespace normalization." }],
+  mappings: [
+    {
+      source: "trim",
+      target: "strip",
+      rationale: "Equivalent whitespace normalization.",
+    },
+  ],
   risks: [],
   unresolved: [],
 };
@@ -51,20 +54,30 @@ const translation: MigrationTranslationV2 = {
 describe("TranslationVerifierV2Adapter", () => {
   it("maps V2 migration artifacts without adding a reference policy or strategy options", async () => {
     const { request } = createAdaptationV2TestFixture();
-    const files = [{
-      path: "app/normalize.py",
-      status: "modified" as const,
-      expectedOriginalSha256: request.target.entity.fileContentHash,
-      additions: 1,
-      deletions: 1,
-      hunks: [{
-        header: "@@ -1,2 +1,3 @@",
-        lines: [
-          { type: "remove" as const, content: "    raise NotImplementedError()" },
-          { type: "add" as const, content: "    return value.strip().upper()" },
+    const files = [
+      {
+        path: "app/normalize.py",
+        status: "modified" as const,
+        expectedOriginalSha256: request.target.entity.fileContentHash,
+        additions: 1,
+        deletions: 1,
+        hunks: [
+          {
+            header: "@@ -1,2 +1,3 @@",
+            lines: [
+              {
+                type: "remove" as const,
+                content: "    raise NotImplementedError()",
+              },
+              {
+                type: "add" as const,
+                content: "    return value.strip().upper()",
+              },
+            ],
+          },
         ],
-      }],
-    }];
+      },
+    ];
     const patchHash = calculatePatchHashV2(files);
     const signal = AbortSignal.abort("stop");
     const verificationInput = {
@@ -94,14 +107,17 @@ describe("TranslationVerifierV2Adapter", () => {
     );
     const path = "verification-result.json";
     const bytes = Buffer.from(canonicalJson(result), "utf8");
-    const receipt = { result, resultArtifact: {
-      id: `verification-result:${path}`,
-      kind: "verification-result" as const,
-      path,
-      contentHash: createHash("sha256").update(bytes).digest("hex"),
-      size: bytes.byteLength,
-      mediaType: "application/json" as const,
-    } };
+    const receipt = {
+      result,
+      resultArtifact: {
+        id: `verification-result:${path}`,
+        kind: "verification-result" as const,
+        path,
+        contentHash: createHash("sha256").update(bytes).digest("hex"),
+        size: bytes.byteLength,
+        mediaType: "application/json" as const,
+      },
+    };
     const service = {
       verifyWithReceipt: vi.fn<VerificationService["verifyWithReceipt"]>(
         async () => receipt,
@@ -109,21 +125,28 @@ describe("TranslationVerifierV2Adapter", () => {
     } satisfies Pick<VerificationService, "verifyWithReceipt">;
     const adapter = new TranslationVerifierV2Adapter(service);
 
-    await expect(adapter.verifyWithReceipt({
-      request,
-      analysis,
-      plan,
-      translation,
-      round: 1,
-      files,
-      patchHash,
-    } satisfies MigrationBehaviorVerificationInputV2, signal)).resolves.toBe(receipt);
+    await expect(
+      adapter.verifyWithReceipt(
+        {
+          request,
+          analysis,
+          plan,
+          translation,
+          round: 1,
+          files,
+          patchHash,
+        } satisfies MigrationBehaviorVerificationInputV2,
+        signal,
+      ),
+    ).resolves.toBe(receipt);
 
     expect(service.verifyWithReceipt.mock.calls[0]?.[0]).toEqual(
       verificationInput,
     );
 
-    expect(adapter.providerId).toBe("forexplore.translation-verifier.differential");
+    expect(adapter.providerId).toBe(
+      "forexplore.translation-verifier.differential",
+    );
     expect(adapter.providerVersion).toBe("1.0.0");
     expect(adapter.strategyDescriptor).toEqual(DIFFERENTIAL_SMOKE_STRATEGY);
     expect(adapter.strategyDescriptor).not.toBe(DIFFERENTIAL_SMOKE_STRATEGY);
