@@ -57,7 +57,9 @@ describe("VerificationStrategyFactory", () => {
     expect(() => factory.resolve("missing")).toThrow(/unknown/i);
     expect(create).not.toHaveBeenCalled();
     resolved.descriptor.displayName = "mutated";
-    resolved.create = () => { throw new Error("mutated"); };
+    resolved.create = () => {
+      throw new Error("mutated");
+    };
     expect(factory.resolve("fixture").descriptor).toEqual(descriptor);
     expect(factory.resolve("fixture").create).toBe(create);
     expect(factory.list()).toEqual([descriptor]);

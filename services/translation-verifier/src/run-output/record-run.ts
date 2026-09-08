@@ -4,7 +4,11 @@ import { performance } from "node:perf_hooks";
 import { redactSecrets } from "./verification-logger.js";
 import { validateRunEventSchema } from "../schemas/compile-schema-validators.js";
 import type RunSchema from "../schemas/verification-run.schema.json";
-import type { VerificationRun, VerificationRunEvent, VerificationStage } from "../schemas/verification-types.js";
+import type {
+  VerificationRun,
+  VerificationRunEvent,
+  VerificationStage,
+} from "../schemas/verification-types.js";
 
 const require = createRequire(import.meta.url);
 const schema: typeof RunSchema = require("../schemas/verification-run.schema.json");
@@ -14,19 +18,37 @@ const MAX_DIAGNOSTICS = schema.properties.diagnostics.maxItems;
 const IDENTIFIER_LIMIT = schema.definitions.identifier.maxLength;
 const MESSAGE_LIMIT = schema.definitions.message.maxLength;
 const context = new AsyncLocalStorage<RunRecorder>();
-const stepContext = new AsyncLocalStorage<{ recorder: RunRecorder; handle: StepHandle }>();
+const stepContext = new AsyncLocalStorage<{
+  recorder: RunRecorder;
+  handle: StepHandle;
+}>();
 
 /** Identity is checked by the owning recorder, not by the caller-visible ID. */
-export interface StepHandle { readonly id: string }
-export interface StepOptions { scope: VerificationStage["scope"]; parentId?: string }
+export interface StepHandle {
+  readonly id: string;
+}
+export interface StepOptions {
+  scope: VerificationStage["scope"];
+  parentId?: string;
+}
 
 export interface RunRecorder {
   readonly runId: string;
   startStep(name: string, options: StepOptions): StepHandle | undefined;
-  endStep(handle: StepHandle | undefined, state: "completed" | "failed" | "cancelled", error?: unknown): void;
+  endStep(
+    handle: StepHandle | undefined,
+    state: "completed" | "failed" | "cancelled",
+    error?: unknown,
+  ): void;
   skipStep(name: string, options: StepOptions, reason: string): void;
-  measureStep<T>(name: string, options: StepOptions, work: () => T | Promise<T>): Promise<T>;
-  observe(event: Omit<VerificationRunEvent, "runId" | "sequence" | "receivedAt">): void;
+  measureStep<T>(
+    name: string,
+    options: StepOptions,
+    work: () => T | Promise<T>,
+  ): Promise<T>;
+  observe(
+    event: Omit<VerificationRunEvent, "runId" | "sequence" | "receivedAt">,
+  ): void;
   anomaly(code: string, message: string): void;
   finish(): VerificationRun;
   snapshot(): VerificationRun;
@@ -34,7 +56,10 @@ export interface RunRecorder {
   events(): VerificationRunEvent[];
 }
 
-export function withRunRecorder<T>(recorder: RunRecorder, work: () => Promise<T>): Promise<T> {
+export function withRunRecorder<T>(
+  recorder: RunRecorder,
+  work: () => Promise<T>,
+): Promise<T> {
   return context.run(recorder, work);
 }
 
@@ -51,26 +76,45 @@ export function currentRunRecorder(): RunRecorder | undefined {
 }
 
 /** Optional instrumentation for standalone strategy callers; never dispatches work. */
-export async function measureStep<T>(name: string, work: () => T | Promise<T>): Promise<T> {
+export async function measureStep<T>(
+  name: string,
+  work: () => T | Promise<T>,
+): Promise<T> {
   const recorder = currentRunRecorder();
-  return recorder ? recorder.measureStep(name, { scope: "strategy" }, work) : work();
+  return recorder
+    ? recorder.measureStep(name, { scope: "strategy" }, work)
+    : work();
 }
 
 export function stepFailureState(error: unknown): "cancelled" | "failed" {
   try {
-    return typeof error === "object" && error !== null && "name" in error && error.name === "AbortError" ? "cancelled" : "failed";
+    return typeof error === "object" &&
+      error !== null &&
+      "name" in error &&
+      error.name === "AbortError"
+      ? "cancelled"
+      : "failed";
   } catch {
     return "failed";
   }
 }
 
 function safeText(value: string, limit: number): string {
-  return redactSecrets(value.slice(0, limit)).slice(0, limit).trim() || "Unavailable";
+  return (
+    redactSecrets(value.slice(0, limit)).slice(0, limit).trim() || "Unavailable"
+  );
 }
 
 function errorText(error: unknown): string {
   try {
-    return safeText(error instanceof Error ? error.message : typeof error === "string" ? error : "Non-Error failure.", MESSAGE_LIMIT);
+    return safeText(
+      error instanceof Error
+        ? error.message
+        : typeof error === "string"
+          ? error
+          : "Non-Error failure.",
+      MESSAGE_LIMIT,
+    );
   } catch {
     return "Error details unavailable.";
   }
@@ -82,13 +126,18 @@ export function createRunRecorder(options: {
   monotonicNow?: () => number;
 }): RunRecorder {
   if (!options.runId.trim() || options.runId.length > IDENTIFIER_LIMIT) {
-    throw new TypeError("Run ID must be a nonempty identifier of at most 256 characters.");
+    throw new TypeError(
+      "Run ID must be a nonempty identifier of at most 256 characters.",
+    );
   }
   const now = options.now ?? (() => new Date().toISOString());
   const monotonicNow = options.monotonicNow ?? (() => performance.now());
   const started = monotonicNow();
   const retained: VerificationRunEvent[] = [];
-  const starts = new Map<StepHandle, { stage: VerificationStage; at: number }>();
+  const starts = new Map<
+    StepHandle,
+    { stage: VerificationStage; at: number }
+  >();
   const stagesById = new Map<string, VerificationStage>();
   let stepsTruncated = false;
   let finished = false;
@@ -97,42 +146,81 @@ export function createRunRecorder(options: {
     schemaVersion: "1.0",
     runId: options.runId,
     startedAt: now(),
-    input: { availability: "unavailable", reason: "Input snapshot not recorded." },
+    input: {
+      availability: "unavailable",
+      reason: "Input snapshot not recorded.",
+    },
     strategy: { selection: "default", applicability: "not-checked" },
     stages: [],
-    agentTimeline: { availability: "unavailable", reason: "Agent observations not persisted.", source: "host-observed", completeness: "unavailable" },
-    hostEvents: { availability: "unavailable", reason: "Host observations not persisted.", source: "host-observed", completeness: "unavailable" },
-    report: { availability: "unavailable", reason: "Canonical report not recorded." },
+    agentTimeline: {
+      availability: "unavailable",
+      reason: "Agent observations not persisted.",
+      source: "host-observed",
+      completeness: "unavailable",
+    },
+    hostEvents: {
+      availability: "unavailable",
+      reason: "Host observations not persisted.",
+      source: "host-observed",
+      completeness: "unavailable",
+    },
+    report: {
+      availability: "unavailable",
+      reason: "Canonical report not recorded.",
+    },
     diagnostics: [],
   };
 
   function anomaly(code: string, message: string): void {
     if (finished) return;
     if (run.diagnostics.length >= MAX_DIAGNOSTICS) {
-      run.diagnostics[MAX_DIAGNOSTICS - 1] = { code: "diagnostics-truncated", message: "Further diagnostics were omitted." };
+      run.diagnostics[MAX_DIAGNOSTICS - 1] = {
+        code: "diagnostics-truncated",
+        message: "Further diagnostics were omitted.",
+      };
       return;
     }
-    run.diagnostics.push({ code: safeText(code, IDENTIFIER_LIMIT), message: safeText(message, MESSAGE_LIMIT) });
+    run.diagnostics.push({
+      code: safeText(code, IDENTIFIER_LIMIT),
+      message: safeText(message, MESSAGE_LIMIT),
+    });
   }
 
-  function newStep(name: string, options: StepOptions, state: "running" | "skipped"): VerificationStage | undefined {
+  function newStep(
+    name: string,
+    options: StepOptions,
+    state: "running" | "skipped",
+  ): VerificationStage | undefined {
     if (finished) return;
     if (run.stages.length >= MAX_STEPS) {
-      if (!stepsTruncated) anomaly("steps-truncated", `The ${MAX_STEPS} step limit was reached; further steps were omitted.`);
+      if (!stepsTruncated)
+        anomaly(
+          "steps-truncated",
+          `The ${MAX_STEPS} step limit was reached; further steps were omitted.`,
+        );
       stepsTruncated = true;
       return;
     }
     try {
       const active = stepContext.getStore();
-      const parentId = options.parentId ?? (active?.recorder === recorder ? active.handle.id : undefined);
-      if (typeof name !== "string" || !name.trim() || name.length > IDENTIFIER_LIMIT ||
-          !["framework", "strategy"].includes(options.scope) ||
-          (parentId !== undefined && !stagesById.has(parentId))) {
+      const parentId =
+        options.parentId ??
+        (active?.recorder === recorder ? active.handle.id : undefined);
+      if (
+        typeof name !== "string" ||
+        !name.trim() ||
+        name.length > IDENTIFIER_LIMIT ||
+        !["framework", "strategy"].includes(options.scope) ||
+        (parentId !== undefined && !stagesById.has(parentId))
+      ) {
         anomaly("invalid-step", "Step name, scope or parent was invalid.");
         return;
       }
       const stage: VerificationStage = {
-        id: `step-${run.stages.length + 1}`, name: safeText(name, IDENTIFIER_LIMIT), scope: options.scope, state,
+        id: `step-${run.stages.length + 1}`,
+        name: safeText(name, IDENTIFIER_LIMIT),
+        scope: options.scope,
+        state,
         ...(parentId === undefined ? {} : { parentId }),
       };
       run.stages.push(stage);
@@ -158,7 +246,10 @@ export function createRunRecorder(options: {
       if (finished || handle === undefined) return;
       const entry = starts.get(handle);
       if (!entry || !["completed", "failed", "cancelled"].includes(state)) {
-        anomaly("step-lifecycle", "End observation did not match an active occurrence handle.");
+        anomaly(
+          "step-lifecycle",
+          "End observation did not match an active occurrence handle.",
+        );
         return;
       }
       const { stage, at } = entry;
@@ -192,7 +283,10 @@ export function createRunRecorder(options: {
         truncated = true;
         run.agentTimeline.completeness = "truncated";
         run.hostEvents.completeness = "truncated";
-        anomaly("events-truncated", "The 10,000 normalized event limit was reached; further observations were omitted.");
+        anomaly(
+          "events-truncated",
+          "The 10,000 normalized event limit was reached; further observations were omitted.",
+        );
         return;
       }
       try {
@@ -209,15 +303,26 @@ export function createRunRecorder(options: {
         else if (normalized.source === "host-performance") {
           normalized.offsetMs = Math.max(0, monotonicNow() - started);
         }
-        for (const key of ["operationId", "parentOperationId", "name", "event", "commandId"] as const) {
+        for (const key of [
+          "operationId",
+          "parentOperationId",
+          "name",
+          "event",
+          "commandId",
+        ] as const) {
           const value = event[key];
-          if (value !== undefined) normalized[key] = safeText(value, IDENTIFIER_LIMIT);
+          if (value !== undefined)
+            normalized[key] = safeText(value, IDENTIFIER_LIMIT);
         }
-        if (event.durationMs !== undefined) normalized.durationMs = event.durationMs;
+        if (event.durationMs !== undefined)
+          normalized.durationMs = event.durationMs;
         if (event.exitCode !== undefined) normalized.exitCode = event.exitCode;
         if (event.timedOut !== undefined) normalized.timedOut = event.timedOut;
         if (!validateRunEventSchema(normalized)) {
-          anomaly("invalid-event", "Observation did not match the normalized event schema.");
+          anomaly(
+            "invalid-event",
+            "Observation did not match the normalized event schema.",
+          );
           return;
         }
         retained.push(normalized);
@@ -232,7 +337,10 @@ export function createRunRecorder(options: {
           if (stage.state !== "running") continue;
           stage.state = "failed";
           stage.reason = "Stage ended without a matching end observation.";
-          anomaly("stage-missing-end", `Missing end observation for ${stage.id}.`);
+          anomaly(
+            "stage-missing-end",
+            `Missing end observation for ${stage.id}.`,
+          );
         }
         starts.clear();
         run.endedAt = now();

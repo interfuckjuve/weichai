@@ -160,7 +160,6 @@ describe("runVerificationCli", () => {
     const service = fakeService();
     const errors: string[] = [];
     const result = createVerificationResult(input(), descriptor, {
-
       summary: "ok",
       issues: [],
       artifacts: [],
@@ -185,7 +184,9 @@ describe("runVerificationCli", () => {
         dependencies(service, errors),
       ),
     ).toBe(1);
-    expect(errors.join("\n")).toContain("Verification result must NOT be valid.");
+    expect(errors.join("\n")).toContain(
+      "Verification result must NOT be valid.",
+    );
     expect(readFileSync(outputPath, "utf8")).toBe("original");
   });
 
@@ -350,7 +351,6 @@ function fakeService(strategyId = "differential-smoke") {
           inputValue,
           { ...descriptor, id: options.strategyId ?? strategyId },
           {
-
             summary: "verified",
             issues: [],
             artifacts: [],

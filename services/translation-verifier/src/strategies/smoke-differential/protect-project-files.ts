@@ -8,7 +8,13 @@
  * adaptation-service 不得重复实现。
  */
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { SmokeVerificationError } from "./smoke-errors.js";
 import type { WorkspaceBaseline } from "./differential-test-types.js";
@@ -82,7 +88,10 @@ function isMutableFilePath(rel: string): boolean {
  * 顶层 source|target 项目内是否存在登记产物目录段。构建工具会把新文件写进
  * bin/obj/target 等目录,这些位置不出现在 protectedFiles 且在断言时放行。
  */
-function isArtifactPath(rel: string, artifactDirectoryNames: readonly string[]): boolean {
+function isArtifactPath(
+  rel: string,
+  artifactDirectoryNames: readonly string[],
+): boolean {
   if (!rel.startsWith("source/") && !rel.startsWith("target/")) return false;
   const segments = rel.split("/").slice(1); // 去掉顶层 source|target
   return segments.some((segment) => artifactDirectoryNames.includes(segment));
@@ -140,14 +149,21 @@ export function createWorkspaceBaseline(
     schemaVersion: "1.0",
     workspaceRoot: root,
     protectedFiles,
-    runnerRoots: [...CANONICAL_RUNNER_ROOTS] as WorkspaceBaseline["runnerRoots"],
-    mutableFiles: [...CANONICAL_MUTABLE_FILES] as WorkspaceBaseline["mutableFiles"],
+    runnerRoots: [
+      ...CANONICAL_RUNNER_ROOTS,
+    ] as WorkspaceBaseline["runnerRoots"],
+    mutableFiles: [
+      ...CANONICAL_MUTABLE_FILES,
+    ] as WorkspaceBaseline["mutableFiles"],
     artifactDirectoryNames: artifactNames,
   };
 }
 
 /** 把 baseline 写为 workspaceRoot/baseline.json 同构 JSON(path 由调用方给定)。 */
-export function writeWorkspaceBaseline(path: string, baseline: WorkspaceBaseline): void {
+export function writeWorkspaceBaseline(
+  path: string,
+  baseline: WorkspaceBaseline,
+): void {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, `${JSON.stringify(baseline, null, 2)}\n`, "utf8");
 }
@@ -156,12 +172,17 @@ export function writeWorkspaceBaseline(path: string, baseline: WorkspaceBaseline
  * 复查工作区:受保护文件哈希必须不变;受保护文件被删、既有文件被改或
  * runner/产物/可变文件之外出现新文件都会抛错。baseline.json 自身被忽略。
  */
-export function assertWorkspaceBaseline(workspaceRoot: string, baselinePath: string): void {
+export function assertWorkspaceBaseline(
+  workspaceRoot: string,
+  baselinePath: string,
+): void {
   try {
     const root = resolve(workspaceRoot);
     const raw: unknown = JSON.parse(readFileSync(baselinePath, "utf8"));
     const baseline =
-      typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : {};
+      typeof raw === "object" && raw !== null
+        ? (raw as Record<string, unknown>)
+        : {};
     const protectedFiles = baseline.protectedFiles;
     if (!Array.isArray(protectedFiles)) {
       throw new Error(
@@ -173,10 +194,12 @@ export function assertWorkspaceBaseline(workspaceRoot: string, baselinePath: str
       : DEFAULT_ARTIFACT_DIRECTORY_NAMES;
 
     const snapshot = new Map(
-      protectedFiles.map((entry: { relativePath?: string; sha256?: string }) => [
-        entry.relativePath ?? "",
-        entry.sha256 ?? "",
-      ]),
+      protectedFiles.map(
+        (entry: { relativePath?: string; sha256?: string }) => [
+          entry.relativePath ?? "",
+          entry.sha256 ?? "",
+        ],
+      ),
     );
 
     // 1) 既有受保护文件必须仍存在且内容一致。
@@ -204,6 +227,10 @@ export function assertWorkspaceBaseline(workspaceRoot: string, baselinePath: str
       );
     }
   } catch (error) {
-    throw new SmokeVerificationError("workspace_integrity_violation", error instanceof Error ? error.message : String(error), { cause: error });
+    throw new SmokeVerificationError(
+      "workspace_integrity_violation",
+      error instanceof Error ? error.message : String(error),
+      { cause: error },
+    );
   }
 }

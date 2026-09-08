@@ -57,7 +57,10 @@ const TYPED_VALUE_TYPES: ReadonlySet<string> = new Set([
 
 /** 统一错误出口:带前缀的明确信息,错误消息含 <path> 便于定位。 */
 function fail(path: string, reason: string): never {
-  throw new SmokeVerificationError("report_schema_invalid", `${PREFIX}${path} ${reason}`);
+  throw new SmokeVerificationError(
+    "report_schema_invalid",
+    `${PREFIX}${path} ${reason}`,
+  );
 }
 
 /** 断言值是非 null/非数组的普通对象。 */

@@ -1,7 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SmokeVerificationError } from "./smoke-errors.js";
 import * as processManager from "./manage-test-process.js";
-import { runClaude, spawnClaudeProcess, type SpawnClaude } from "./claude-session.js";
+import {
+  runClaude,
+  spawnClaudeProcess,
+  type SpawnClaude,
+} from "./claude-session.js";
 
 // ---- 测试辅助 ----
 
@@ -14,10 +18,18 @@ function fakeSpawn(stdout: string, exitCode = 0, stderr = ""): FakeSpawn {
 }
 
 /** 断言 runClaude 调用 spawnClaude 时的 args/env/timeout 三要素。 */
-function lastCall(spawnClaude: FakeSpawn): { args: string[]; env: NodeJS.ProcessEnv; timeoutMs: number } {
+function lastCall(spawnClaude: FakeSpawn): {
+  args: string[];
+  env: NodeJS.ProcessEnv;
+  timeoutMs: number;
+} {
   const call = spawnClaude.mock.calls.at(-1);
   if (!call) throw new Error("spawnClaude was never called");
-  return { args: call[0] as string[], env: call[1] as NodeJS.ProcessEnv, timeoutMs: call[2] as number };
+  return {
+    args: call[0] as string[],
+    env: call[1] as NodeJS.ProcessEnv,
+    timeoutMs: call[2] as number,
+  };
 }
 
 beforeEach(() => {
@@ -32,48 +44,118 @@ afterEach(() => vi.restoreAllMocks());
 
 describe("coded Claude failures", () => {
   it("does not classify arbitrary error prose as a timeout", async () => {
-    const cause = Object.assign(new Error("ENOENT report baseline timed out"), { code: "ENOENT" });
-    await expect(runClaude("p", { apiKey: "k", spawnClaude: async () => { throw cause; } })).rejects.toMatchObject({ code: "agent_error", cause });
+    const cause = Object.assign(new Error("ENOENT report baseline timed out"), {
+      code: "ENOENT",
+    });
+    await expect(
+      runClaude("p", {
+        apiKey: "k",
+        spawnClaude: async () => {
+          throw cause;
+        },
+      }),
+    ).rejects.toMatchObject({ code: "agent_error", cause });
   });
   it("preserves explicitly coded failures and their cause independent of wording", async () => {
     const cause = new Error("original failure");
-    const error = new SmokeVerificationError("agent_timeout", "Different wording", { cause });
-    await expect(runClaude("p", { apiKey: "k", spawnClaude: async () => { throw error; } })).rejects.toBe(error);
+    const error = new SmokeVerificationError(
+      "agent_timeout",
+      "Different wording",
+      { cause },
+    );
+    await expect(
+      runClaude("p", {
+        apiKey: "k",
+        spawnClaude: async () => {
+          throw error;
+        },
+      }),
+    ).rejects.toBe(error);
     expect(error.cause).toBe(cause);
   });
-  it.each([true, false])("translates neutral managed process results at the Claude boundary (timeout=%s)", async (timedOut) => {
-    const result = { exitCode: timedOut ? null : 2, timedOut, durationMs: 1, stdout: "", stderr: "different wording" };
-    vi.spyOn(processManager, "runManagedProcess").mockResolvedValue(result);
-    await expect(spawnClaudeProcess([], {}, 1000)).rejects.toMatchObject({ code: timedOut ? "agent_timeout" : "agent_error" });
-    expect(result).not.toHaveProperty("code");
-  });
+  it.each([true, false])(
+    "translates neutral managed process results at the Claude boundary (timeout=%s)",
+    async (timedOut) => {
+      const result = {
+        exitCode: timedOut ? null : 2,
+        timedOut,
+        durationMs: 1,
+        stdout: "",
+        stderr: "different wording",
+      };
+      vi.spyOn(processManager, "runManagedProcess").mockResolvedValue(result);
+      await expect(spawnClaudeProcess([], {}, 1000)).rejects.toMatchObject({
+        code: timedOut ? "agent_timeout" : "agent_error",
+      });
+      expect(result).not.toHaveProperty("code");
+    },
+  );
   it("preserves spawn system errors as causes at the direct Claude boundary", async () => {
-    const cause = Object.assign(new Error("Different wording"), { code: "ENOENT" });
+    const cause = Object.assign(new Error("Different wording"), {
+      code: "ENOENT",
+    });
     vi.spyOn(processManager, "runManagedProcess").mockRejectedValue(cause);
-    await expect(spawnClaudeProcess([], {}, 1000)).rejects.toMatchObject({ code: "agent_error", cause });
+    await expect(spawnClaudeProcess([], {}, 1000)).rejects.toMatchObject({
+      code: "agent_error",
+      cause,
+    });
   });
-  it.each([new Error("caller reason"), "caller reason", null, new DOMException("request expired", "TimeoutError")])("retains the exact AbortSignal reason %s", async (reason) => {
+  it.each([
+    new Error("caller reason"),
+    "caller reason",
+    null,
+    new DOMException("request expired", "TimeoutError"),
+  ])("retains the exact AbortSignal reason %s", async (reason) => {
     const controller = new AbortController();
     controller.abort(reason);
-    await expect(runClaude("p", { apiKey: "k", signal: controller.signal, spawnClaude: async () => { throw reason; } })).rejects.toBe(reason);
+    await expect(
+      runClaude("p", {
+        apiKey: "k",
+        signal: controller.signal,
+        spawnClaude: async () => {
+          throw reason;
+        },
+      }),
+    ).rejects.toBe(reason);
     vi.spyOn(processManager, "runManagedProcess").mockRejectedValue(reason);
-    await expect(spawnClaudeProcess([], {}, 1000, { signal: controller.signal })).rejects.toBe(reason);
+    await expect(
+      spawnClaudeProcess([], {}, 1000, { signal: controller.signal }),
+    ).rejects.toBe(reason);
   });
   it("codes missing credentials and nonzero injected exit codes", async () => {
-    await expect(runClaude("p", { apiKey: "" })).rejects.toMatchObject({ code: "agent_error" });
-    await expect(runClaude("p", { apiKey: "k", spawnClaude: fakeSpawn("", 1) })).rejects.toMatchObject({ code: "agent_error" });
+    await expect(runClaude("p", { apiKey: "" })).rejects.toMatchObject({
+      code: "agent_error",
+    });
+    await expect(
+      runClaude("p", { apiKey: "k", spawnClaude: fakeSpawn("", 1) }),
+    ).rejects.toMatchObject({ code: "agent_error" });
   });
 });
 
 describe("runClaude", () => {
   it("enables partial stream-json only for observed calls without replaying buffered stdout", async () => {
-    const observer = vi.fn(() => { throw new Error("observer failed"); });
+    const observer = vi.fn(() => {
+      throw new Error("observer failed");
+    });
     const fake: SpawnClaude = async (args, _env, _timeout, options) => {
-      expect(args).toEqual(["-p", "p", "--output-format", "stream-json", "--verbose", "--include-partial-messages"]);
+      expect(args).toEqual([
+        "-p",
+        "p",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--include-partial-messages",
+      ]);
       options?.onStdoutChunk?.(Buffer.from("live"));
       return { stdout: "buffered", exitCode: 0 };
     };
-    expect(await runClaude("p", { apiKey: "k", spawnClaude: fake, onStdoutChunk: observer })).toBe("buffered");
+    expect(
+      await runClaude("p", {
+        apiKey: "k",
+        spawnClaude: fake,
+        onStdoutChunk: observer,
+      }),
+    ).toBe("buffered");
     expect(observer).toHaveBeenCalledExactlyOnceWith(Buffer.from("live"));
   });
   it("① 返回 claude 子进程的 stdout 原样", async () => {
@@ -107,7 +189,11 @@ decode MIME text`;
   it("③ env 含 ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN / ANTHROPIC_MODEL(及各默认模型别名)正确值", async () => {
     const spawnClaude = fakeSpawn("ok");
 
-    await runClaude("p", { apiKey: "sk-test", model: "deepseek-v4-flash", spawnClaude });
+    await runClaude("p", {
+      apiKey: "sk-test",
+      model: "deepseek-v4-flash",
+      spawnClaude,
+    });
 
     const { env } = lastCall(spawnClaude);
     expect(env.ANTHROPIC_BASE_URL).toBe("https://api.deepseek.com/anthropic");
@@ -143,9 +229,9 @@ decode MIME text`;
   it("④ exitCode ≠ 0 → 抛错且错误含 stderr", async () => {
     const spawnClaude = fakeSpawn("", 1, "claude: error: invalid model config");
 
-    await expect(runClaude("p", { apiKey: "test-key", spawnClaude })).rejects.toThrow(
-      /claude: error: invalid model config/,
-    );
+    await expect(
+      runClaude("p", { apiKey: "test-key", spawnClaude }),
+    ).rejects.toThrow(/claude: error: invalid model config/);
   });
 
   it("⑤ 无 apiKey(缺省且环境未设)→ 抛错且 spawnClaude 未被调用", async () => {
@@ -160,7 +246,9 @@ decode MIME text`;
   it("⑤b 空/空白 apiKey → 抛错且 spawnClaude 未被调用", async () => {
     const spawnClaude = fakeSpawn("ok");
 
-    await expect(runClaude("p", { apiKey: "   ", spawnClaude })).rejects.toThrow(
+    await expect(
+      runClaude("p", { apiKey: "   ", spawnClaude }),
+    ).rejects.toThrow(
       /DEEPSEEK_API_KEY is required for claude subprocess requests/,
     );
     expect(spawnClaude).not.toHaveBeenCalled();
@@ -171,7 +259,9 @@ decode MIME text`;
       throw new Error("claude subprocess timed out after 120000ms");
     }) as unknown as FakeSpawn;
 
-    await expect(runClaude("p", { apiKey: "test-key", spawnClaude })).rejects.toThrow(/timed out after 120000ms/);
+    await expect(
+      runClaude("p", { apiKey: "test-key", spawnClaude }),
+    ).rejects.toThrow(/timed out after 120000ms/);
   });
 
   it("⑦ options.env 自定义变量置于 ANTHROPIC_* 覆盖之后合并(如 JAVA_HOME)", async () => {
@@ -194,20 +284,45 @@ decode MIME text`;
 // ---- 自主会话参数(参考 rev.2+ 契约) ----
 
 describe("spawnClaudeProcess 自主会话参数组装", () => {
-  it.each([5000, 1500, 900])("preserves absolute deadline %s at the managed process boundary, even after expiry", async (deadlineAt) => {
-    vi.spyOn(Date, "now").mockReturnValueOnce(1200).mockReturnValue(1300);
-    const managed = vi.spyOn(processManager, "runManagedProcess").mockResolvedValue({ exitCode: 0, timedOut: false, durationMs: 0, stdout: "ok", stderr: "" });
-    const signal = new AbortController().signal;
-    await spawnClaudeProcess(["-p", "p"], { VERIFIER_DEADLINE_AT: String(deadlineAt) }, 10_000, { deadlineAt, signal });
-    expect(managed).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ deadlineAt, env: { VERIFIER_DEADLINE_AT: String(deadlineAt) } }), signal);
-  });
+  it.each([5000, 1500, 900])(
+    "preserves absolute deadline %s at the managed process boundary, even after expiry",
+    async (deadlineAt) => {
+      vi.spyOn(Date, "now").mockReturnValueOnce(1200).mockReturnValue(1300);
+      const managed = vi
+        .spyOn(processManager, "runManagedProcess")
+        .mockResolvedValue({
+          exitCode: 0,
+          timedOut: false,
+          durationMs: 0,
+          stdout: "ok",
+          stderr: "",
+        });
+      const signal = new AbortController().signal;
+      await spawnClaudeProcess(
+        ["-p", "p"],
+        { VERIFIER_DEADLINE_AT: String(deadlineAt) },
+        10_000,
+        { deadlineAt, signal },
+      );
+      expect(managed).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          deadlineAt,
+          env: { VERIFIER_DEADLINE_AT: String(deadlineAt) },
+        }),
+        signal,
+      );
+    },
+  );
   it("forwards the live observer to the existing injected process boundary", async () => {
     const onStdoutChunk = vi.fn();
     const injected: SpawnClaude = async (_args, _env, _timeout, options) => {
       options?.onStdoutChunk?.(Buffer.from("chunk"));
       return { stdout: "buffered", exitCode: 0 };
     };
-    await spawnClaudeProcess(["-p", "p"], {}, 1000, { spawn: injected, onStdoutChunk });
+    await spawnClaudeProcess(["-p", "p"], {}, 1000, {
+      spawn: injected,
+      onStdoutChunk,
+    });
     expect(onStdoutChunk).toHaveBeenCalledExactlyOnceWith(Buffer.from("chunk"));
   });
   it("组装 add-dir/disallowedTools/permission-mode/max-turns/allowedTools/settings 并透传 cwd 与注入 spawn", async () => {
@@ -259,11 +374,23 @@ describe("spawnClaudeProcess 自主会话参数组装", () => {
       captured.push(args);
       return { stdout: "ok", exitCode: 0 };
     };
-    await spawnClaudeProcess(["-p", "x", "--output-format", "text"], {} as NodeJS.ProcessEnv, 1000, {
-      effort: "low",
-      spawn: injected,
-    });
-    expect(captured[0]).toEqual(["-p", "x", "--output-format", "text", "--effort", "low"]);
+    await spawnClaudeProcess(
+      ["-p", "x", "--output-format", "text"],
+      {} as NodeJS.ProcessEnv,
+      1000,
+      {
+        effort: "low",
+        spawn: injected,
+      },
+    );
+    expect(captured[0]).toEqual([
+      "-p",
+      "x",
+      "--output-format",
+      "text",
+      "--effort",
+      "low",
+    ]);
   });
 
   it("无自主选项时 args 与现状一致(不加任何新参数)", async () => {
@@ -273,9 +400,14 @@ describe("spawnClaudeProcess 自主会话参数组装", () => {
       return { stdout: "ok", exitCode: 0 };
     };
 
-    await spawnClaudeProcess(["-p", "x", "--output-format", "text"], {} as NodeJS.ProcessEnv, 1000, {
-      spawn: injected,
-    });
+    await spawnClaudeProcess(
+      ["-p", "x", "--output-format", "text"],
+      {} as NodeJS.ProcessEnv,
+      1000,
+      {
+        spawn: injected,
+      },
+    );
     expect(captured[0]).toEqual(["-p", "x", "--output-format", "text"]);
   });
 
@@ -286,16 +418,24 @@ describe("spawnClaudeProcess 自主会话参数组装", () => {
       return { stdout: "ok", exitCode: 0 };
     };
 
-    await spawnClaudeProcess(["-p", "x", "--output-format", "text"], {} as NodeJS.ProcessEnv, 1000, {
-      readOnlyDirs: ["/ref-a"],
-      disallowedTools: ["TaskCreate", "TaskUpdate"],
-      spawn: injected,
-    });
+    await spawnClaudeProcess(
+      ["-p", "x", "--output-format", "text"],
+      {} as NodeJS.ProcessEnv,
+      1000,
+      {
+        readOnlyDirs: ["/ref-a"],
+        disallowedTools: ["TaskCreate", "TaskUpdate"],
+        spawn: injected,
+      },
+    );
 
     const args = captured[0].args;
     const flags = args.filter((a) => a === "--disallowedTools");
     expect(flags).toHaveLength(1);
-    const values = args.slice(args.indexOf("--disallowedTools") + 1, args.indexOf("--disallowedTools") + 4);
+    const values = args.slice(
+      args.indexOf("--disallowedTools") + 1,
+      args.indexOf("--disallowedTools") + 4,
+    );
     expect(values).toEqual(["Edit(//ref-a/**)", "TaskCreate", "TaskUpdate"]);
   });
 });
@@ -324,10 +464,16 @@ describe("runClaude 透传自主会话选项", () => {
     expect(captured[0].opts?.cwd).toBe("/ws");
     expect(captured[0].opts?.addDirs).toEqual(["/ws"]);
     expect(captured[0].opts?.readOnlyDirs).toEqual(["/ref-a"]);
-    expect(captured[0].opts?.disallowedTools).toEqual(["TaskCreate", "TaskUpdate"]);
+    expect(captured[0].opts?.disallowedTools).toEqual([
+      "TaskCreate",
+      "TaskUpdate",
+    ]);
     expect(captured[0].opts?.permissionMode).toBe("acceptEdits");
     expect(captured[0].opts?.maxTurns).toBe(40);
-    expect(captured[0].opts?.allowedTools).toEqual(["Bash(javac *)", "Bash(java *)"]);
+    expect(captured[0].opts?.allowedTools).toEqual([
+      "Bash(javac *)",
+      "Bash(java *)",
+    ]);
   });
 
   it("无自主选项时保持三参调用(旧行为兼容)", async () => {
@@ -341,7 +487,11 @@ describe("runClaude 透传自主会话选项", () => {
 
   it("does not install raw tool hooks even for the legacy hooksLogPath option", async () => {
     const fake = fakeSpawn("ok");
-    await runClaude("p", { apiKey: "k", spawnClaude: fake, hooksLogPath: "/tmp/unused-hooks.jsonl" });
+    await runClaude("p", {
+      apiKey: "k",
+      spawnClaude: fake,
+      hooksLogPath: "/tmp/unused-hooks.jsonl",
+    });
     expect(fake.mock.calls[0]).toHaveLength(3);
   });
 });
@@ -375,7 +525,11 @@ describe("runClaude signal/deadlineAt 透传", () => {
       return { stdout: "ok", exitCode: 0 };
     };
 
-    await runClaude("p", { apiKey: "k", spawnClaude: fake, signal: controller.signal });
+    await runClaude("p", {
+      apiKey: "k",
+      spawnClaude: fake,
+      signal: controller.signal,
+    });
 
     expect(captured[0].call).toHaveLength(4);
     const options = captured[0].call[3] as { signal?: AbortSignal };

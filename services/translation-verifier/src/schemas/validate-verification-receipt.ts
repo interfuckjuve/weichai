@@ -1,7 +1,14 @@
-import type { VerificationInput, VerificationReceipt, VerificationStrategyDescriptor } from "./verification-types.js";
+import type {
+  VerificationInput,
+  VerificationReceipt,
+  VerificationStrategyDescriptor,
+} from "./verification-types.js";
 import { createHash } from "node:crypto";
 import { canonicalJson } from "@forexplore/workflow-core";
-import { assertSchema, validateReceiptSchema } from "./compile-schema-validators.js";
+import {
+  assertSchema,
+  validateReceiptSchema,
+} from "./compile-schema-validators.js";
 import { assertVerificationResult } from "./validate-verification-result.js";
 import { normalizeArtifactPath } from "./validate-json-paths.js";
 

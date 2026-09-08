@@ -29,9 +29,17 @@ export function normalizeVerificationStrategyOutput(
   assertSchema(validateStrategyOutputSchema, output, "Verification result");
   assertVerificationAssessment(output, input);
   const issues = output.issues.map((issue) => materializeIssue(issue));
-  const artifacts = output.artifacts.map((artifact) => materializeArtifact(artifact));
-  assertUniqueIds(issues.map((issue) => issue.id), "Verification issue");
-  assertUniqueIds(artifacts.map((artifact) => artifact.id), "Verification artifact");
+  const artifacts = output.artifacts.map((artifact) =>
+    materializeArtifact(artifact),
+  );
+  assertUniqueIds(
+    issues.map((issue) => issue.id),
+    "Verification issue",
+  );
+  assertUniqueIds(
+    artifacts.map((artifact) => artifact.id),
+    "Verification artifact",
+  );
   const artifactIds = new Set(artifacts.map((artifact) => artifact.id));
   for (const issue of issues) {
     for (const artifactId of issue.evidenceArtifactIds) {
@@ -53,7 +61,10 @@ export function normalizeVerificationStrategyOutput(
     summary: output.summary,
     issues,
     artifacts,
-    strategyReport: cloneJsonValue(output.strategyReport, "Verification strategy report"),
+    strategyReport: cloneJsonValue(
+      output.strategyReport,
+      "Verification strategy report",
+    ),
   };
 }
 
@@ -65,7 +76,11 @@ export function createVerificationResult(
   now: () => string = () => new Date().toISOString(),
 ): VerificationResult {
   assertVerificationInput(input);
-  assertSchema(validateDescriptorSchema, descriptor, "Verification strategy descriptor");
+  assertSchema(
+    validateDescriptorSchema,
+    descriptor,
+    "Verification strategy descriptor",
+  );
   const normalized = normalizeVerificationStrategyOutput(input, output);
   const payload: Omit<VerificationResult, "contentHash"> = {
     schemaVersion: "2.0",
@@ -121,7 +136,9 @@ function materializeIssue(issue: VerificationIssue): VerificationIssue {
   };
 }
 
-function materializeArtifact(artifact: VerificationArtifact): VerificationArtifact {
+function materializeArtifact(
+  artifact: VerificationArtifact,
+): VerificationArtifact {
   return {
     id: artifact.id,
     kind: artifact.kind,

@@ -57,14 +57,20 @@ describe("prepared smoke task", () => {
       expect(first.layout.executionRoot).not.toBe(second.layout.executionRoot);
       expect(first.layout.executionRoot.startsWith(parent)).toBe(true);
       expect(existsSync(first.layout.agentDir)).toBe(true);
-      expect(first.layout.evidencePath).toBe(join(first.layout.agentDir, "commands.jsonl"));
-      expect(first.layout.baselinePath).toBe(join(first.layout.executionRoot, "baseline.json"));
+      expect(first.layout.evidencePath).toBe(
+        join(first.layout.agentDir, "commands.jsonl"),
+      );
+      expect(first.layout.baselinePath).toBe(
+        join(first.layout.executionRoot, "baseline.json"),
+      );
       first.cleanup();
       first.cleanup();
       expect(existsSync(first.layout.executionRoot)).toBe(false);
       expect(existsSync(second.layout.executionRoot)).toBe(true);
       expect(existsSync(parent)).toBe(true);
-    } finally { rmSync(root, { recursive: true, force: true }); }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
   it("constructs prompts and session settings without copying, writing or re-baselining projects", () => {
     const root = mkdtempSync(join(tmpdir(), "tv-task-layout-"));

@@ -69,15 +69,18 @@ export class DifferentialSmokeStrategy implements VerificationStrategy {
         preflight.job.verificationPolicy?.referenceDecision === "accepted",
       );
     });
-    const options = await measure("build-smoke-input", (): SmokeRunOptions => ({
-      layout,
-      deadlineAt,
-      apiKey: this.#options.apiKey,
-      model: this.#options.model,
-      maxTurns: this.#options.maxTurns,
-      effort: this.#options.effort,
-      spawnClaude: this.#options.spawnClaude,
-    }));
+    const options = await measure(
+      "build-smoke-input",
+      (): SmokeRunOptions => ({
+        layout,
+        deadlineAt,
+        apiKey: this.#options.apiKey,
+        model: this.#options.model,
+        maxTurns: this.#options.maxTurns,
+        effort: this.#options.effort,
+        spawnClaude: this.#options.spawnClaude,
+      }),
+    );
     const run = this.#options.runSmokeImpl ?? runSmoke;
     const smoke = await measure("run-smoke", () =>
       run(preflight.job, options, signal),

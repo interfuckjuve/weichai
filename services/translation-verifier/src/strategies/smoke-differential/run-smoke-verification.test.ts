@@ -250,9 +250,14 @@ describe("runSmoke verify-only prepared fixtures", () => {
         else
           expect(await pending).toMatchObject({
             executionStatus: "failed",
-            problems: expect.arrayContaining([expect.objectContaining({
-              code: failure === "missing-report" ? "report_missing" : "agent_error",
-            })]),
+            problems: expect.arrayContaining([
+              expect.objectContaining({
+                code:
+                  failure === "missing-report"
+                    ? "report_missing"
+                    : "agent_error",
+              }),
+            ]),
           });
         const commands = recorder
           .events()
@@ -408,7 +413,9 @@ describe("runSmoke verify-only prepared fixtures", () => {
         },
       );
       expect(changedAfterLastCommand.executionStatus).toBe("failed");
-      expect(changedAfterLastCommand.problems[0].code).toBe("workspace_integrity_violation");
+      expect(changedAfterLastCommand.problems[0].code).toBe(
+        "workspace_integrity_violation",
+      );
 
       // verify-only 报告携带 rounds>0 → invalid-report。
       const repaired = writingFake(
@@ -471,7 +478,10 @@ describe("runSmoke verify-only prepared fixtures", () => {
         spawnClaude: timedOut,
       });
       expect(result.executionStatus).toBe("failed");
-      expect(result.problems).toContainEqual({ code: "agent_timeout", message: "Different wording" });
+      expect(result.problems).toContainEqual({
+        code: "agent_timeout",
+        message: "Different wording",
+      });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -672,9 +682,14 @@ describe("runSmoke policy and classified outcomes", () => {
       const message = "ENOENT report baseline timed out";
       const result = await runPreparedSmoke(root, fileBasedJob(), {
         apiKey: "k",
-        spawnClaude: async () => { throw new Error(message); },
+        spawnClaude: async () => {
+          throw new Error(message);
+        },
       });
-      expect(result.problems.map((problem) => problem.code)).toEqual(["report_missing", "agent_error"]);
+      expect(result.problems.map((problem) => problem.code)).toEqual([
+        "report_missing",
+        "agent_error",
+      ]);
       expect(result.summary).toBe(message);
       expect(result).not.toHaveProperty("errorReason");
     } finally {
@@ -929,7 +944,10 @@ describe("runSmoke policy and classified outcomes", () => {
               );
             throw kind === "cancel"
               ? new DOMException("cancelled", "AbortError")
-              : new SmokeVerificationError("agent_timeout", "Different wording");
+              : new SmokeVerificationError(
+                  "agent_timeout",
+                  "Different wording",
+                );
           };
           const result = await runPreparedSmoke(root, fileBasedJob(), {
             apiKey: "k",

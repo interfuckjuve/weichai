@@ -1,15 +1,26 @@
 import { resolve } from "node:path";
-import { createLogger, type Logger } from "../../run-output/verification-logger.js";
+import {
+  createLogger,
+  type Logger,
+} from "../../run-output/verification-logger.js";
 import { runManagedProcess } from "./manage-test-process.js";
 import { isAbortError, SmokeVerificationError } from "./smoke-errors.js";
 import { errorSummary } from "./read-test-report.js";
 
 function throwSessionError(error: unknown, signal?: AbortSignal): never {
   signal?.throwIfAborted();
-  if (error instanceof SmokeVerificationError || isAbortError(error)) throw error;
-  const timedOut = error !== null && typeof error === "object" &&
-    "name" in error && error.name === "TimeoutError";
-  throw new SmokeVerificationError(timedOut ? "agent_timeout" : "agent_error", errorSummary(error), { cause: error });
+  if (error instanceof SmokeVerificationError || isAbortError(error))
+    throw error;
+  const timedOut =
+    error !== null &&
+    typeof error === "object" &&
+    "name" in error &&
+    error.name === "TimeoutError";
+  throw new SmokeVerificationError(
+    timedOut ? "agent_timeout" : "agent_error",
+    errorSummary(error),
+    { cause: error },
+  );
 }
 
 /** claude 会话思考投入级别(low 快速决策;默认由模型/CLI 决定,历史实测 high)。 */
@@ -108,10 +119,16 @@ const DEFAULT_TIMEOUT_MS = 120_000;
  * 无 apiKey(缺省/空/空白)→ 抛错且不调用 spawnClaude;
  * 非零退出码 → 抛错(含 stderr,见 SpawnClaude 结果上的可选 stderr 字段)。
  */
-export async function runClaude(prompt: string, options: ClaudeClientOptions = {}): Promise<string> {
+export async function runClaude(
+  prompt: string,
+  options: ClaudeClientOptions = {},
+): Promise<string> {
   const apiKey = options.apiKey ?? process.env.DEEPSEEK_API_KEY;
   if (!apiKey || apiKey.trim() === "") {
-    throw new SmokeVerificationError("agent_error", "DEEPSEEK_API_KEY is required for claude subprocess requests.");
+    throw new SmokeVerificationError(
+      "agent_error",
+      "DEEPSEEK_API_KEY is required for claude subprocess requests.",
+    );
   }
   const model = options.model ?? process.env.DEEPSEEK_MODEL ?? DEFAULT_MODEL;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -138,21 +155,35 @@ export async function runClaude(prompt: string, options: ClaudeClientOptions = {
   if (options.cwd) spawnOptions.cwd = options.cwd;
   if (options.addDirs) spawnOptions.addDirs = options.addDirs;
   if (options.readOnlyDirs) spawnOptions.readOnlyDirs = options.readOnlyDirs;
-  if (options.permissionMode) spawnOptions.permissionMode = options.permissionMode;
+  if (options.permissionMode)
+    spawnOptions.permissionMode = options.permissionMode;
   if (options.maxTurns !== undefined) spawnOptions.maxTurns = options.maxTurns;
   if (options.effort) spawnOptions.effort = options.effort;
   if (options.allowedTools) spawnOptions.allowedTools = options.allowedTools;
-  if (options.disallowedTools) spawnOptions.disallowedTools = options.disallowedTools;
+  if (options.disallowedTools)
+    spawnOptions.disallowedTools = options.disallowedTools;
   if (options.signal) spawnOptions.signal = options.signal;
-  if (options.deadlineAt !== undefined) spawnOptions.deadlineAt = options.deadlineAt;
+  if (options.deadlineAt !== undefined)
+    spawnOptions.deadlineAt = options.deadlineAt;
   if (options.onStdoutChunk) {
     spawnOptions.onStdoutChunk = (chunk) => {
-      try { options.onStdoutChunk!(chunk); } catch { /* Best-effort metadata only. */ }
+      try {
+        options.onStdoutChunk!(chunk);
+      } catch {
+        /* Best-effort metadata only. */
+      }
     };
   }
   const hasAutonomous = Object.keys(spawnOptions).length > 0;
   const args = options.onStdoutChunk
-    ? ["-p", prompt, "--output-format", "stream-json", "--verbose", "--include-partial-messages"]
+    ? [
+        "-p",
+        prompt,
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--include-partial-messages",
+      ]
     : ["-p", prompt, "--output-format", "text"];
   let result: Awaited<ReturnType<SpawnClaude>>;
   try {
@@ -163,13 +194,20 @@ export async function runClaude(prompt: string, options: ClaudeClientOptions = {
     throwSessionError(error, options.signal);
   }
   // 完整 stdout 走 content 通道(默认关闭;长度/状态保持 debug 级度量)。
-  logger.debug(`stdout ${result.stdout.length} chars, exitCode=${result.exitCode}`);
+  logger.debug(
+    `stdout ${result.stdout.length} chars, exitCode=${result.exitCode}`,
+  );
   logger.content(`stdout:\n${result.stdout}`);
   if (result.exitCode !== 0) {
     // Injected clients may also supply stderr; preserve the existing error contract.
     const stderr = (result as { stderr?: string }).stderr ?? "";
-    logger.error(`claude subprocess exited with code ${result.exitCode}: ${stderr}`);
-    throw new SmokeVerificationError("agent_error", `claude subprocess exited with code ${result.exitCode}: ${stderr}`);
+    logger.error(
+      `claude subprocess exited with code ${result.exitCode}: ${stderr}`,
+    );
+    throw new SmokeVerificationError(
+      "agent_error",
+      `claude subprocess exited with code ${result.exitCode}: ${stderr}`,
+    );
   }
   return result.stdout;
 }
@@ -192,15 +230,22 @@ export async function spawnClaudeProcess(
   const fullArgs = [...args];
   const addDirs = options.addDirs ?? [];
   // resolve 到绝对路径后去掉首斜杠:权限串为 "Edit(//refA/**)"(claude 约定的项目路径写法)。
-  const readOnlyDirs = (options.readOnlyDirs ?? []).map((d) => resolve(d).replace(/^\/+/, ""));
+  const readOnlyDirs = (options.readOnlyDirs ?? []).map((d) =>
+    resolve(d).replace(/^\/+/, ""),
+  );
   if (addDirs.length > 0) fullArgs.push("--add-dir", ...addDirs);
   // 合并只读目录派生的 Edit 权限串与显式禁用工具(如任务规划 TaskCreate/TaskUpdate)为同一条规则。
-  const disallowed = [...readOnlyDirs.map((d) => `Edit(//${d}/**)`), ...(options.disallowedTools ?? [])];
+  const disallowed = [
+    ...readOnlyDirs.map((d) => `Edit(//${d}/**)`),
+    ...(options.disallowedTools ?? []),
+  ];
   if (disallowed.length > 0) {
     fullArgs.push("--disallowedTools", ...disallowed);
   }
-  if (options.permissionMode === "acceptEdits") fullArgs.push("--permission-mode", "acceptEdits");
-  if (options.maxTurns !== undefined) fullArgs.push("--max-turns", String(options.maxTurns));
+  if (options.permissionMode === "acceptEdits")
+    fullArgs.push("--permission-mode", "acceptEdits");
+  if (options.maxTurns !== undefined)
+    fullArgs.push("--max-turns", String(options.maxTurns));
   if (options.effort) fullArgs.push("--effort", options.effort);
   // headless 下放行 Bash 编译/运行命令(如 "Bash(javac *)" "Bash(java *)");
   // 未配置时不加任何参数,与现状一致(权限保持默认)。
@@ -211,10 +256,18 @@ export async function spawnClaudeProcess(
   // 注入的 spawn 实现(测试断言用):直接委托,透传 cwd。
   try {
     if (options.spawn) {
-      return await options.spawn(fullArgs, env, timeoutMs, { cwd: options.cwd, ...(options.onStdoutChunk ? { onStdoutChunk: options.onStdoutChunk } : {}) });
+      return await options.spawn(fullArgs, env, timeoutMs, {
+        cwd: options.cwd,
+        ...(options.onStdoutChunk
+          ? { onStdoutChunk: options.onStdoutChunk }
+          : {}),
+      });
     }
     const now = Date.now();
-    const deadlineAt = Math.min(options.deadlineAt ?? Number.POSITIVE_INFINITY, now + timeoutMs);
+    const deadlineAt = Math.min(
+      options.deadlineAt ?? Number.POSITIVE_INFINITY,
+      now + timeoutMs,
+    );
     const effectiveTimeoutMs = Math.max(0, deadlineAt - now);
     const result = await runManagedProcess(
       {
@@ -228,10 +281,16 @@ export async function spawnClaudeProcess(
       options.signal,
     );
     if (result.timedOut) {
-      throw new SmokeVerificationError("agent_timeout", `claude subprocess timed out after ${effectiveTimeoutMs}ms`);
+      throw new SmokeVerificationError(
+        "agent_timeout",
+        `claude subprocess timed out after ${effectiveTimeoutMs}ms`,
+      );
     }
     if (result.exitCode !== 0) {
-      throw new SmokeVerificationError("agent_error", `claude subprocess exited with code ${result.exitCode}: ${result.stderr}`);
+      throw new SmokeVerificationError(
+        "agent_error",
+        `claude subprocess exited with code ${result.exitCode}: ${result.stderr}`,
+      );
     }
     return { stdout: result.stdout, exitCode: result.exitCode ?? 0 };
   } catch (error) {

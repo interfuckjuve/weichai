@@ -1,4 +1,8 @@
-import type { VerificationStrategy, VerificationStrategyDescriptor, VerificationStrategyProvider } from "../schemas/verification-types.js";
+import type {
+  VerificationStrategy,
+  VerificationStrategyDescriptor,
+  VerificationStrategyProvider,
+} from "../schemas/verification-types.js";
 
 export class VerificationStrategyFactory {
   readonly #providers = new Map<string, VerificationStrategyProvider>();
@@ -30,11 +34,15 @@ export class VerificationStrategyFactory {
   }
 
   list(): VerificationStrategyDescriptor[] {
-    return [...this.#providers.values()].map((provider) => ({ ...provider.descriptor }));
+    return [...this.#providers.values()].map((provider) => ({
+      ...provider.descriptor,
+    }));
   }
 }
 
-function requireDescriptor(descriptor: VerificationStrategyDescriptor): VerificationStrategyDescriptor {
+function requireDescriptor(
+  descriptor: VerificationStrategyDescriptor,
+): VerificationStrategyDescriptor {
   if (!isRecord(descriptor)) {
     throw new Error("Verification strategy provider descriptor is invalid.");
   }

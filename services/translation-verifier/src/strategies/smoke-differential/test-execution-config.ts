@@ -4,10 +4,10 @@ import { fileURLToPath } from "node:url";
 
 /** Package root for resolving the controlled command entry point. */
 export const packageRoot = resolve(
-  dirname(fileURLToPath(import.meta.url)),
-  "..",
-  "..",
-  "..",
+ dirname(fileURLToPath(import.meta.url)),
+ "..",
+ "..",
+ "..",
 );
 
 /**
@@ -18,9 +18,9 @@ export const DEFAULT_DISALLOWED_TOOLS = ["TaskCreate", "TaskUpdate"] as const;
 
 /** 受控命令代理入口;Bash 允许的唯一工具形态的绝对路径。 */
 export const VERIFIER_COMMAND_ENTRY = join(
-  packageRoot,
-  "src",
-  "strategies",
-  "smoke-differential",
-  "controlled-test-command.ts",
+ packageRoot,
+ "src",
+ "strategies",
+ "smoke-differential",
+ "controlled-test-command.ts",
 );
