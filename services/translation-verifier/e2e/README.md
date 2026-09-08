@@ -34,7 +34,7 @@ The `correct` output restores the selected class's TODO dependency closure: both
 
 ## Execution
 
-`npm run e2e` calls the official `VerificationService.verifyWithReceipt` entry point. It writes the complete framework result to `report.json` and a Host-only fixed-field comparison to `comparison.json` under `services/translation-verifier/test-results/verification-*/`. It does not call the private smoke driver directly and does not perform automatic LLM finding scoring.
+`npm run e2e` calls the official `VerificationService.verifyWithReceipt` entry point. The canonical output is verifier contract `2.0` (`differential-smoke@2.0.0` by default); legacy verifier `status` fields and old reports are rejected, not converted. It writes the complete framework result to `report.json` and a Host-only fixed-field comparison to `comparison.json` under `services/translation-verifier/test-results/verification-*/`. It does not call the private smoke driver directly and does not perform automatic LLM finding scoring.
 
 Run from the repository root. Model-backed runs require `claude`, `npx`/`tsx`, Java/Maven, Python and `DEEPSEEK_API_KEY`. The `missing-policy` and `missing-test-basis` variants run the official preflight without credentials or a model call, unless an explicit policy override supplies a valid basis. The existing DeepSeek Anthropic-compatible configuration is used; `DEEPSEEK_MODEL` defaults to `deepseek-v4-flash`, and `JAVA_HOME` is forwarded when set. Builds may use local dependency caches or the network.
 
@@ -80,7 +80,7 @@ npx tsx services/translation-verifier/e2e/run-fileupload-oracles.ts
 
 ## Workspaces and Results
 
-The service stages inputs through the framework workspace builder, applies the selected patch with original-hash validation, and retains `services/translation-verifier/test-results/verification-*/` when the service's `keepWorkspace` option preserves it. The E2E wrapper always writes its official result and comparison manifest in the result directory:
+The service stages inputs through the framework workspace builder, applies the selected patch with original-hash validation, and retains `services/translation-verifier/test-results/verification-*/` when the service's `keepWorkspace` option preserves it. The E2E wrapper always writes its official result and comparison manifest in the result directory. The private `runSmoke()` path is verify-only and accepts only a caller-prepared workspace layout; workspace creation, staging and cleanup remain outside that function.
 
 The Agent workspace layout remains under the outer `resultsRoot`:
 
@@ -112,7 +112,7 @@ Differential verify-only requires zero repair rounds, empty `targetFiles`, nonem
 | `1` | The official report was produced but fixed fields did not match. |
 | `2` | Invalid arguments, missing key or an uncaught setup/service exception. |
 
-Timing files are written best-effort in the outer `resultsRoot`, alongside `report.json` and `comparison.json`, not inside the Agent workspace. They include task/variant identity, dynamic Host spans, approximate Agent task occurrences and authoritative controlled-command durations. They exclude source, prompts, tool payloads and command output.
+Timing files are written best-effort in the outer `resultsRoot`, alongside `report.json` and `comparison.json`, not inside the Agent workspace. They include task/variant identity, dynamic Host spans, approximate Agent task occurrences and authoritative controlled-command durations. They exclude source, prompts, tool payloads and command output. Timing and diagnostic metadata are separate from command evidence and never make a report valid or establish a finding.
 
 Agent `[VERIFIER_STEP]` intervals are approximate Host receipt times, not model clocks. Missing markers have no invented durations; transport buffering can collapse intervals to zero. Host spans, Agent observations and controlled-command intervals can overlap: **do not sum them**. Markers are not command-execution evidence.
 
