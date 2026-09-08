@@ -14,7 +14,12 @@ import {
   parseObservations,
   parseTargetManifest,
 } from "./behavior-schema.js";
-import { projectHash, readTestFile } from "./behavior-workspace.js";
+import {
+  projectHash,
+  readTestFile,
+  captureProjectBaseline,
+  assertProjectBaseline,
+} from "./behavior-workspace.js";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -22,9 +27,9 @@ afterEach(() => {
     rmSync(dir, { recursive: true, force: true });
 });
 const manifest = () => ({
-  schemaVersion: "1.0",
+  schemaVersion: "2.0",
   notes: "Uses real project tests.",
-  testFiles: ["runner.py"],
+  testFiles: ["tests/runner.py"],
   cases: [{ caseId: "one", intent: "empty input", input: {} }],
   commands: {
     setup: [],
@@ -41,12 +46,36 @@ describe("behavior JSON boundaries", () => {
       testFiles: [".forexplore-tests/runner.py"],
     };
     expect(parseCollectionManifest(JSON.stringify(prefixed)).testFiles).toEqual(
-      ["runner.py"],
+      [".forexplore-tests/runner.py"],
     );
-    prefixed.testFiles.push("runner.py");
-    expect(() => parseCollectionManifest(JSON.stringify(prefixed))).toThrow(
-      "Duplicate canonical test file",
-    );
+    for (const path of [
+      "../outside.py",
+      "/tmp/outside.py",
+      "tests/../src/main.py",
+    ]) {
+      expect(() =>
+        parseCollectionManifest(
+          JSON.stringify({ ...manifest(), testFiles: [path] }),
+        ),
+      ).toThrow("project-relative");
+    }
+    for (const resultFile of [
+      ".forexplore-tests/inputs.json",
+      ".forexplore-tests/manifest.json",
+      ".forexplore-tests/../out.json",
+    ]) {
+      expect(() =>
+        parseCollectionManifest(JSON.stringify({ ...manifest(), resultFile })),
+      ).toThrow();
+    }
+    expect(
+      parseCollectionManifest(
+        JSON.stringify({
+          ...manifest(),
+          resultFile: ".forexplore-tests/observations.json",
+        }),
+      ).resultFile,
+    ).toBe(".forexplore-tests/observations.json");
     const value = manifest();
     value.cases.push(value.cases[0]);
     expect(() => parseCollectionManifest(JSON.stringify(value))).toThrow(
@@ -117,6 +146,62 @@ describe("caller-owned copies", () => {
     expect(projectHash(root)).toBe(first);
     writeFileSync(join(root, "project.py"), "changed");
     expect(projectHash(root)).not.toBe(first);
+  });
+  it("allows new project tests and regenerable builds but protects existing tests and dependencies", () => {
+    const root = directory();
+    mkdirSync(join(root, "src/test/java"), { recursive: true });
+    writeFileSync(join(root, "src/test/java/Original.java"), "original test");
+    writeFileSync(join(root, "pom.xml"), "original dependencies");
+    writeFileSync(join(root, "App.csproj"), "original dotnet project");
+    const baseline = captureProjectBaseline(root);
+    writeFileSync(join(root, "src/test/java/NewTest.java"), "new test");
+    for (const name of ["target", "bin", "obj"]) {
+      mkdirSync(join(root, name));
+      writeFileSync(join(root, name, "generated"), "build output");
+    }
+    expect(() => assertProjectBaseline(baseline)).not.toThrow();
+    writeFileSync(join(root, "src/test/java/Original.java"), "modified test");
+    expect(() => assertProjectBaseline(baseline)).toThrow("baseline changed");
+    writeFileSync(join(root, "src/test/java/Original.java"), "original test");
+    writeFileSync(join(root, "pom.xml"), "modified dependencies");
+    expect(() => assertProjectBaseline(baseline)).toThrow("baseline changed");
+    writeFileSync(join(root, "pom.xml"), "original dependencies");
+    writeFileSync(join(root, "shadow.py"), "production replacement");
+    expect(() => assertProjectBaseline(baseline)).toThrow(
+      "outside project test",
+    );
+  });
+  it("recognizes nested Maven/.NET project outputs without ignoring original module tests", () => {
+    const root = directory();
+    mkdirSync(join(root, "module/src/test/java"), { recursive: true });
+    mkdirSync(join(root, "module/target/classes"), { recursive: true });
+    writeFileSync(join(root, "module/pom.xml"), "module dependencies");
+    writeFileSync(
+      join(root, "module/src/test/java/Original.java"),
+      "original test",
+    );
+    writeFileSync(
+      join(root, "module/target/classes/Old.class"),
+      "old bytecode",
+    );
+    mkdirSync(join(root, "net"));
+    writeFileSync(join(root, "net/Library.csproj"), "project");
+    const baseline = captureProjectBaseline(root);
+    writeFileSync(
+      join(root, "module/target/classes/Old.class"),
+      "fresh bytecode",
+    );
+    writeFileSync(join(root, "module/src/test/java/NewTest.java"), "new test");
+    for (const name of ["bin", "obj"]) {
+      mkdirSync(join(root, "net", name));
+      writeFileSync(join(root, "net", name, "generated"), "output");
+    }
+    expect(() => assertProjectBaseline(baseline)).not.toThrow();
+    writeFileSync(
+      join(root, "module/src/test/java/Original.java"),
+      "changed test",
+    );
+    expect(() => assertProjectBaseline(baseline)).toThrow("baseline changed");
   });
   it("rejects symlinks and hard links instead of touching the original source", () => {
     const root = directory();

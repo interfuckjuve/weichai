@@ -20,13 +20,18 @@ const command = {
   },
 };
 const properties = {
-  schemaVersion: { const: "1.0" },
+  schemaVersion: { const: "2.0" },
   testFiles: {
     type: "array",
     minItems: 1,
     maxItems: 100,
     uniqueItems: true,
     items: { type: "string", minLength: 1, maxLength: 1024 },
+  },
+  resultFile: {
+    type: "string",
+    pattern: "^\\.forexplore-tests/[^\\\\]+\\.json$",
+    maxLength: 1024,
   },
   notes: { type: "string", maxLength: 16000 },
   commands: {
@@ -165,13 +170,29 @@ export function parseTargetManifest(text: string): BehaviorTargetManifest {
   return normalizeTestFiles(value);
 }
 function normalizeTestFiles<T extends BehaviorTargetManifest>(manifest: T): T {
-  const prefix = ".forexplore-tests/";
-  const testFiles = manifest.testFiles.map((path) =>
-    path.startsWith(prefix) ? path.slice(prefix.length) : path,
-  );
-  if (new Set(testFiles).size !== testFiles.length)
-    throw new Error("Duplicate canonical test file.");
-  return { ...manifest, testFiles };
+  for (const path of manifest.testFiles) {
+    if (
+      path.startsWith("/") ||
+      path.includes("\\") ||
+      path.split("/").some((part) => !part || part === "." || part === "..")
+    )
+      throw new Error("Test files must be canonical project-relative paths.");
+  }
+  if (
+    manifest.resultFile &&
+    ([
+      ".forexplore-tests/manifest.json",
+      ".forexplore-tests/inputs.json",
+    ].includes(manifest.resultFile) ||
+      manifest.testFiles.includes(manifest.resultFile) ||
+      manifest.resultFile
+        .split("/")
+        .some((part) => !part || part === "." || part === ".."))
+  )
+    throw new Error(
+      "Result file must be a dedicated JSON output, not a frozen input or test file.",
+    );
+  return manifest;
 }
 export function parseObservations(
   text: string,

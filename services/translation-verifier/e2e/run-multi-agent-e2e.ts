@@ -3,6 +3,10 @@ import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { applyHunksStrict, newFileContent } from "@forexplore/workflow-core";
+import {
+  runManagedProcess,
+  sanitizedBuildEnvironment,
+} from "../src/strategies/smoke-differential/manage-test-process.js";
 import { createVerificationArtifactStore } from "../src/run-output/verification-artifact-store.js";
 import { createVerificationResult } from "../src/schemas/materialize-verification-result.js";
 import { assertVerificationInput } from "../src/schemas/validate-verification-input.js";
@@ -36,6 +40,20 @@ export interface MultiAgentE2EDeps {
   workspaceRoot?: string;
   now?: () => string;
   input?: VerificationInput;
+  /** Explicit test seam; live runs default to the real Maven preflight. */
+  prepareProjects?: (input: {
+    targetRoot: string;
+    deadlineAt: number;
+    signal: AbortSignal;
+  }) => Promise<{
+    command: string;
+    cwd: string;
+    durationMs: number;
+    exitCode: number | null;
+    timedOut: boolean;
+    stdout: string;
+    stderr: string;
+  }>;
 }
 export interface MultiAgentE2EOptions {
   task: FileUploadTaskId;
@@ -53,6 +71,7 @@ export interface MultiAgentE2EResult {
   resultPath: string;
   workspaceRoot: string;
   targetReady: boolean;
+  preparationEvidencePath?: string;
 }
 
 const valueFlags = new Set([
@@ -189,6 +208,10 @@ export async function executeMultiAgentE2E(
     throw new Error(
       "Use --live for real Claude execution. Test runtimes must be explicitly injected; no mock fallback is installed.",
     );
+  if (options.live && deps.runtime && !deps.prepareProjects)
+    throw new Error(
+      "Live injected runtimes require an explicit prepareProjects seam; real Maven is never hidden behind injected-test mode.",
+    );
   const input = structuredClone(
     deps.input ?? fileUploadInput(options.variant, options.task),
   );
@@ -226,6 +249,96 @@ export async function executeMultiAgentE2E(
       .map((file) => ({ path: file.path!, content: file.content! })),
   );
   let targetReady = false;
+  let preparationEvidencePath: string | undefined;
+  let preparationPromise: Promise<void> | undefined;
+  const prepareTarget = async (signal: AbortSignal): Promise<void> => {
+    if (!options.live) return;
+    const startedAt = Date.now();
+    let evidence: {
+      command: string;
+      cwd: string;
+      durationMs: number;
+      exitCode: number | null;
+      timedOut: boolean;
+      stdout: string;
+      stderr: string;
+    };
+    try {
+      signal.throwIfAborted();
+      const deadlineAt = context.deadlineAt;
+      if (deps.prepareProjects) {
+        evidence = await deps.prepareProjects({
+          targetRoot,
+          deadlineAt,
+          signal,
+        });
+      } else {
+        const command = "mvn";
+        const args = ["-B", "-ntp", "-DskipTests", "test-compile"];
+        let stdout = "";
+        try {
+          const result = await runManagedProcess(
+            {
+              command,
+              args,
+              cwd: targetRoot,
+              env: sanitizedBuildEnvironment(),
+              deadlineAt,
+              onStdoutChunk: (chunk) => {
+                if (stdout.length < 1024 * 1024)
+                  stdout += chunk
+                    .toString()
+                    .slice(0, 1024 * 1024 - stdout.length);
+              },
+            },
+            signal,
+          );
+          evidence = {
+            command: [command, ...args].join(" "),
+            cwd: targetRoot,
+            ...result,
+          };
+        } catch (error) {
+          evidence = {
+            command: [command, ...args].join(" "),
+            cwd: targetRoot,
+            durationMs: Date.now() - startedAt,
+            exitCode: null,
+            timedOut:
+              signal.reason instanceof Error &&
+              signal.reason.name === "TimeoutError",
+            stdout,
+            stderr: error instanceof Error ? error.message : String(error),
+          };
+        }
+      }
+    } catch (error) {
+      evidence = {
+        command: deps.prepareProjects
+          ? "injected prepareProjects"
+          : "mvn -B -ntp -DskipTests test-compile",
+        cwd: targetRoot,
+        durationMs: Date.now() - startedAt,
+        exitCode: null,
+        timedOut:
+          signal.reason instanceof Error &&
+          signal.reason.name === "TimeoutError",
+        stdout: "",
+        stderr: error instanceof Error ? error.message : String(error),
+      };
+    }
+    const evidencePath = join(strategyRoot, "target-preparation.json");
+    await writeFile(
+      evidencePath,
+      `${JSON.stringify(evidence, null, 2)}\n`,
+      "utf8",
+    );
+    preparationEvidencePath = evidencePath;
+    if (evidence.exitCode !== 0 || evidence.timedOut)
+      throw new Error(
+        `Target project preparation failed (exit ${evidence.exitCode ?? "unknown"}).`,
+      );
+  };
   const applyTarget = async (signal: AbortSignal) => {
     if (targetReady) return;
     for (const patch of input.translation.files) {
@@ -245,6 +358,8 @@ export async function executeMultiAgentE2E(
       }
     }
     targetReady = true;
+    preparationPromise = prepareTarget(signal);
+    await preparationPromise;
   };
   const store = createVerificationArtifactStore({
     artifactRoot: deps.artifactRoot ?? join(root, "artifacts"),
@@ -274,9 +389,15 @@ export async function executeMultiAgentE2E(
       await applyTarget(signal);
     },
   };
-  const output = await new MultiAgentDifferentialStrategy(
-    strategyOptions,
-  ).verify(input, context);
+  let output;
+  try {
+    output = await new MultiAgentDifferentialStrategy(strategyOptions).verify(
+      input,
+      context,
+    );
+  } finally {
+    await preparationPromise?.catch(() => {});
+  }
   const result = createVerificationResult(
     input,
     MULTI_AGENT_DIFFERENTIAL_STRATEGY,
@@ -297,6 +418,7 @@ export async function executeMultiAgentE2E(
     resultPath,
     workspaceRoot: root,
     targetReady,
+    preparationEvidencePath,
   };
 }
 

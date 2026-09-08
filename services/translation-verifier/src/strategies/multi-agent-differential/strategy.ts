@@ -1,4 +1,4 @@
-import { realpathSync, writeFileSync } from "node:fs";
+import { existsSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
@@ -23,7 +23,7 @@ import type {
   BehaviorRuntime,
   BehaviorSide,
   BehaviorTargetManifest,
-  BehaviorSandbox,
+  BehaviorExecutionScope,
 } from "./behavior-types.js";
 import {
   parseBehaviorJson,
@@ -38,15 +38,19 @@ import {
   hashContent,
   persistBehaviorArtifact,
   prepareTestDirectory,
-  projectHash,
+  captureProjectBaseline,
+  assertProjectBaseline,
+  type BehaviorProjectBaseline,
+  TEST_DIRECTORY,
   readTestFile,
 } from "./behavior-workspace.js";
 import { createBehaviorRuntime } from "./claude-runtime.js";
+import { protectedSecrets, redact } from "./behavior-command.js";
 
 export const MULTI_AGENT_DIFFERENTIAL_STRATEGY: VerificationStrategyDescriptor =
   {
     id: "multi-agent-differential",
-    version: "1.0.0",
+    version: "2.0.0",
     displayName: "Multi-Agent Differential",
   };
 export interface MultiAgentDifferentialOptions {
@@ -91,11 +95,12 @@ export class MultiAgentDifferentialStrategy implements VerificationStrategy {
     );
     const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
     const report: BehaviorReport = {
-      schemaVersion: "1.0",
+      schemaVersion: "2.0",
       stage: "eligibility",
       caseStatus: "not-executed",
       cases: [],
       evidence: [],
+      repairs: [],
       limitations,
     };
     const artifacts: VerificationArtifact[] = [];
@@ -115,17 +120,19 @@ export class MultiAgentDifferentialStrategy implements VerificationStrategy {
       assertProjectRoots(context);
       const sourceRoot = context.workspace.sourceRoot;
       const targetRoot = context.workspace.targetRoot;
-      const sourceHash = projectHash(sourceRoot);
+      const sourceBaseline = captureProjectBaseline(sourceRoot);
+      const initialTargetBaseline = captureProjectBaseline(targetRoot);
       assertDeclaredSnapshot(input, sourceRoot, "source");
       report.stage = "source";
       const sourceTestRoot = prepareTestDirectory(sourceRoot);
       const sourceSandbox = {
         cwd: sourceRoot,
         readRoots: [sourceRoot, targetRoot],
-        writeRoots: [sourceTestRoot],
+        writeRoots: [sourceTestRoot, sourceRoot],
+        baseline: sourceBaseline,
       };
-      const source = (await measure("collect-source-tests", () =>
-        this.author(
+      const collected = await measure("collect-and-replay-source", () =>
+        this.authorAndReplay(
           "source",
           input,
           context,
@@ -135,47 +142,18 @@ export class MultiAgentDifferentialStrategy implements VerificationStrategy {
           artifacts,
           deadlineAt,
           combined,
-        ),
-      )) as BehaviorCollectionManifest;
-      assertHash(sourceRoot, sourceHash);
-      const frozenCases = JSON.stringify(source.cases);
-      const inputsPath = join(sourceTestRoot, "inputs.json");
-      writeFileSync(inputsPath, frozenCases, { flag: "wx" });
-      const sourceOutput = await measure("replay-source-tests", () =>
-        executeManifest(
-          source,
-          "source",
-          sourceSandbox,
-          inputsPath,
-          runtime,
-          report.evidence,
-          deadlineAt,
-          combined,
+          () => {
+            assertHash(sourceBaseline);
+            assertDeclaredSnapshot(input, sourceRoot, "source");
+          },
         ),
       );
-      assertHash(sourceRoot, sourceHash);
-      if (readTestFile(sourceTestRoot, "inputs.json") !== frozenCases)
-        throw new BehaviorFailure(
-          "workspace_integrity_violation",
-          "workspace-integrity-failed",
-          "Source harness modified frozen input cases.",
-        );
-      let observations;
-      try {
-        observations = parseObservations(
-          sourceOutput,
-          source.cases.map((item) => item.caseId),
-        );
-      } catch (cause) {
-        throw new BehaviorFailure(
-          "report_evidence_invalid",
-          "input-invalid",
-          errorText(cause),
-        );
-      }
+      const source = collected.manifest as BehaviorCollectionManifest;
+      const observations = collected.observations;
+      const frozenCases = JSON.stringify(source.cases);
       report.sourceSnapshot = {
-        schemaVersion: "1.0",
-        subjectHash: sourceHash,
+        schemaVersion: "2.0",
+        subjectHash: sourceBaseline.hash,
         casesHash: hashContent(frozenCases),
         manifest: source,
         observations,
@@ -200,20 +178,26 @@ export class MultiAgentDifferentialStrategy implements VerificationStrategy {
           waitForReady(this.options.waitForTarget!, combined),
         );
       combined.throwIfAborted();
-      assertHash(sourceRoot, sourceHash);
-      const targetHash = projectHash(targetRoot);
+      assertHash(sourceBaseline);
+      const targetBaseline = captureProjectBaseline(targetRoot);
+      assertTargetTransition(
+        initialTargetBaseline,
+        targetBaseline,
+        new Set(input.translation.files.map((file) => file.path)),
+      );
       assertDeclaredSnapshot(input, targetRoot, "target");
-      report.targetSubjectHash = targetHash;
+      report.targetSubjectHash = targetBaseline.hash;
       report.patchHash = input.translation.patchHash;
       report.stage = "target";
       const targetTestRoot = prepareTestDirectory(targetRoot);
       const targetSandbox = {
         cwd: targetRoot,
         readRoots: [sourceRoot, targetRoot],
-        writeRoots: [targetTestRoot],
+        writeRoots: [targetTestRoot, targetRoot],
+        baseline: targetBaseline,
       };
-      const target = await measure("author-target-tests", () =>
-        this.author(
+      const verified = await measure("author-and-replay-target", () =>
+        this.authorAndReplay(
           "target",
           input,
           context,
@@ -223,45 +207,15 @@ export class MultiAgentDifferentialStrategy implements VerificationStrategy {
           artifacts,
           deadlineAt,
           combined,
+          () => {
+            assertHash(sourceBaseline);
+            assertHash(targetBaseline);
+            assertDeclaredSnapshot(input, sourceRoot, "source");
+            assertDeclaredSnapshot(input, targetRoot, "target");
+          },
         ),
       );
-      assertHash(sourceRoot, sourceHash);
-      assertHash(targetRoot, targetHash);
-      const targetInputs = join(targetTestRoot, "inputs.json");
-      writeFileSync(targetInputs, frozenCases, { flag: "wx" });
-      const targetOutput = await measure("replay-target-tests", () =>
-        executeManifest(
-          target,
-          "target",
-          targetSandbox,
-          targetInputs,
-          runtime,
-          report.evidence,
-          deadlineAt,
-          combined,
-        ),
-      );
-      assertHash(sourceRoot, sourceHash);
-      assertHash(targetRoot, targetHash);
-      if (readTestFile(targetTestRoot, "inputs.json") !== frozenCases)
-        throw new BehaviorFailure(
-          "workspace_integrity_violation",
-          "workspace-integrity-failed",
-          "Target harness modified frozen input cases.",
-        );
-      let targetObservations;
-      try {
-        targetObservations = parseObservations(
-          targetOutput,
-          source.cases.map((item) => item.caseId),
-        );
-      } catch (cause) {
-        throw new BehaviorFailure(
-          "report_evidence_invalid",
-          "input-invalid",
-          errorText(cause),
-        );
-      }
+      const targetObservations = verified.observations;
       report.stage = "comparison";
       report.cases = observations.map((item) => {
         const targetCase = targetObservations.find(
@@ -337,16 +291,142 @@ export class MultiAgentDifferentialStrategy implements VerificationStrategy {
     };
   }
 
-  private async author(
+  private async authorAndReplay(
     side: BehaviorSide,
     input: VerificationInput,
     context: VerificationStrategyContext,
-    sandbox: BehaviorSandbox,
+    sandbox: BehaviorExecutionScope,
     runtime: BehaviorRuntime,
     report: BehaviorReport,
     artifacts: VerificationArtifact[],
     deadlineAt: number,
     signal: AbortSignal,
+    checkIntegrity: () => void,
+  ) {
+    const inputsPath = join(sandbox.cwd, TEST_DIRECTORY, "inputs.json");
+    let cases =
+      side === "target" ? report.sourceSnapshot!.manifest.cases : undefined;
+    let frozenCases = cases ? JSON.stringify(cases) : undefined;
+    if (frozenCases !== undefined)
+      writeFileSync(inputsPath, frozenCases, { flag: "wx" });
+    let feedback = "";
+    for (let attempt = 0; attempt < 2; attempt++) {
+      signal.throwIfAborted();
+      try {
+        const authorScope = {
+          ...sandbox,
+          readOnlyFiles:
+            frozenCases === undefined ? [] : [realpathSync(inputsPath)],
+        };
+        const manifest = await this.author(
+          side,
+          input,
+          context,
+          authorScope,
+          runtime,
+          report,
+          artifacts,
+          deadlineAt,
+          signal,
+          attempt,
+          feedback,
+        );
+        checkIntegrity();
+        if (side === "source") {
+          const collectedCases = (manifest as BehaviorCollectionManifest).cases;
+          if (
+            frozenCases !== undefined &&
+            JSON.stringify(collectedCases) !== frozenCases
+          )
+            throw new BehaviorFailure(
+              "workspace_integrity_violation",
+              "workspace-integrity-failed",
+              "A harness repair changed frozen source cases.",
+            );
+          cases = collectedCases;
+        }
+        if (frozenCases === undefined) {
+          frozenCases = JSON.stringify(cases!);
+          writeFileSync(inputsPath, frozenCases, { flag: "wx" });
+        }
+        if (
+          readTestFile(sandbox.cwd, `${TEST_DIRECTORY}/inputs.json`) !==
+          frozenCases
+        )
+          throw new BehaviorFailure(
+            "workspace_integrity_violation",
+            "workspace-integrity-failed",
+            "Frozen inputs changed.",
+          );
+        const stdout = await executeManifest(
+          manifest,
+          side,
+          sandbox,
+          inputsPath,
+          runtime,
+          report.evidence,
+          deadlineAt,
+          signal,
+          attempt,
+          protectedSecrets(this.options.apiKey ?? process.env.DEEPSEEK_API_KEY),
+        );
+        checkIntegrity();
+        try {
+          return {
+            manifest,
+            observations: parseObservations(
+              stdout,
+              cases!.map((item) => item.caseId),
+            ),
+          };
+        } catch (cause) {
+          throw new BehaviorFailure(
+            "report_evidence_invalid",
+            "input-invalid",
+            errorText(cause),
+          );
+        }
+      } catch (cause) {
+        checkIntegrity();
+        if (
+          frozenCases !== undefined &&
+          existsSync(inputsPath) &&
+          readTestFile(sandbox.cwd, `${TEST_DIRECTORY}/inputs.json`) !==
+            frozenCases
+        )
+          throw new BehaviorFailure(
+            "workspace_integrity_violation",
+            "workspace-integrity-failed",
+            "Frozen inputs changed.",
+          );
+        if (
+          attempt !== 0 ||
+          signal.aborted ||
+          !(cause instanceof BehaviorFailure) ||
+          !["report_schema_invalid", "report_evidence_invalid"].includes(
+            cause.code,
+          )
+        )
+          throw cause;
+        feedback = `Host rejected your test harness: ${cause.message}. Fix only your newly generated tests/manifest, never the implementation or frozen inputs. Run the existing inputs through your harness and validate stdout with a JSON parser before finishing. Prior Host execution evidence: ${JSON.stringify(report.evidence.filter((item) => item.side === side).map(({ command, exitCode, stdout, stderr }) => ({ command, exitCode, stdout, stderr }))).slice(0, 16000)}`;
+        report.repairs.push({ side, attempt: 1, reason: cause.message });
+      }
+    }
+    throw new Error("Unreachable harness attempt limit.");
+  }
+
+  private async author(
+    side: BehaviorSide,
+    input: VerificationInput,
+    context: VerificationStrategyContext,
+    sandbox: BehaviorExecutionScope,
+    runtime: BehaviorRuntime,
+    report: BehaviorReport,
+    artifacts: VerificationArtifact[],
+    deadlineAt: number,
+    signal: AbortSignal,
+    attempt = 0,
+    feedback = "",
   ): Promise<BehaviorCollectionManifest | BehaviorTargetManifest> {
     const prompt =
       buildBehaviorPrompt(
@@ -356,7 +436,11 @@ export class MultiAgentDifferentialStrategy implements VerificationStrategy {
       ) +
       (side === "target"
         ? `\n<source-collection-context>\n${JSON.stringify({ notes: report.sourceSnapshot?.manifest.notes, testFiles: report.sourceSnapshot?.manifest.testFiles, subjectHash: report.sourceSnapshot?.subjectHash, observations: report.sourceSnapshot?.observations })}\n</source-collection-context>`
+        : "") +
+      (feedback
+        ? `\n<host-repair-feedback>\n${feedback}\n</host-repair-feedback>`
         : "");
+    const sessionId = `${side}-agent${attempt ? `-repair-${attempt}` : ""}`;
     let partialOutput = "";
     let result;
     try {
@@ -369,7 +453,7 @@ export class MultiAgentDifferentialStrategy implements VerificationStrategy {
         onOutput: (text) => {
           partialOutput = text;
           writeFileSync(
-            join(context.workspace.strategyRoot, `${side}-agent-stream.jsonl`),
+            join(context.workspace.strategyRoot, `${sessionId}-stream.jsonl`),
             text,
             "utf8",
           );
@@ -377,7 +461,7 @@ export class MultiAgentDifferentialStrategy implements VerificationStrategy {
       });
     } catch (cause) {
       artifacts.push(
-        await persistBehaviorArtifact(context, `${side}-agent-session`, {
+        await persistBehaviorArtifact(context, `${sessionId}-session`, {
           side,
           prompt,
           stdout: partialOutput,
@@ -388,7 +472,7 @@ export class MultiAgentDifferentialStrategy implements VerificationStrategy {
       throw cause;
     }
     artifacts.push(
-      await persistBehaviorArtifact(context, `${side}-agent-session`, {
+      await persistBehaviorArtifact(context, `${sessionId}-session`, {
         side,
         prompt,
         ...result,
@@ -416,13 +500,17 @@ export class MultiAgentDifferentialStrategy implements VerificationStrategy {
           : parseTargetManifest(text);
       const files = manifest.testFiles.map((path) => ({
         path,
-        content: readTestFile(root, path),
+        content: readTestFile(sandbox.cwd, path),
       }));
       artifacts.push(
-        await persistBehaviorArtifact(context, `${side}-test-manifest`, {
-          manifest,
-          files,
-        }),
+        await persistBehaviorArtifact(
+          context,
+          `${side}-test-manifest${attempt ? `-repair-${attempt}` : ""}`,
+          {
+            manifest,
+            files,
+          },
+        ),
       );
       return manifest;
     } catch (cause) {
@@ -485,13 +573,34 @@ function assertEligibility(input: VerificationInput): void {
       "An accepted reference and explicit test basis are required. This strategy does not perform target-only validation.",
     );
 }
-function assertHash(root: string, expected: string): void {
-  if (projectHash(root) !== expected)
+function assertTargetTransition(
+  before: BehaviorProjectBaseline,
+  after: BehaviorProjectBaseline,
+  patchPaths: Set<string>,
+): void {
+  for (const path of new Set([
+    ...Object.keys(before.files),
+    ...Object.keys(after.files),
+  ])) {
+    if (!patchPaths.has(path) && before.files[path] !== after.files[path])
+      throw new BehaviorFailure(
+        "workspace_integrity_violation",
+        "workspace-integrity-failed",
+        `Target readiness contains an unauthorized change: ${path}`,
+      );
+  }
+}
+
+function assertHash(baseline: BehaviorProjectBaseline): void {
+  try {
+    assertProjectBaseline(baseline);
+  } catch (cause) {
     throw new BehaviorFailure(
       "workspace_integrity_violation",
       "workspace-integrity-failed",
-      "An implementation snapshot changed during verification.",
+      errorText(cause),
     );
+  }
 }
 function errorText(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
@@ -544,12 +653,14 @@ async function waitForReady(
 async function executeManifest(
   manifest: BehaviorTargetManifest,
   side: BehaviorSide,
-  sandbox: BehaviorSandbox,
+  sandbox: BehaviorExecutionScope,
   inputsPath: string,
   runtime: BehaviorRuntime,
   evidence: BehaviorExecutionEvidence[],
   deadlineAt: number,
   signal: AbortSignal,
+  attempt = 0,
+  secrets = protectedSecrets(),
 ): Promise<string> {
   const commands = [
     ...manifest.commands.setup,
@@ -558,9 +669,13 @@ async function executeManifest(
       args: [...manifest.commands.run.args, inputsPath],
     },
   ];
-  const testRoot = sandbox.writeRoots[0];
+  const testRoot = sandbox.cwd;
   const frozenPaths = [
-    ...new Set([...manifest.testFiles, "manifest.json", "inputs.json"]),
+    ...new Set([
+      ...manifest.testFiles,
+      `${TEST_DIRECTORY}/manifest.json`,
+      `${TEST_DIRECTORY}/inputs.json`,
+    ]),
   ];
   const frozen = frozenPaths.map((path) => ({
     path,
@@ -575,6 +690,14 @@ async function executeManifest(
   let stdout = "";
   for (const [index, command] of commands.entries()) {
     signal.throwIfAborted();
+    if (
+      index === commands.length - 1 &&
+      manifest.resultFile &&
+      existsSync(join(sandbox.cwd, manifest.resultFile))
+    ) {
+      readTestFile(sandbox.cwd, manifest.resultFile);
+      rmSync(join(sandbox.cwd, manifest.resultFile));
+    }
     const result = await runtime.runCommand({
       command,
       sandbox: executionSandbox,
@@ -590,7 +713,7 @@ async function executeManifest(
         );
     }
     evidence.push({
-      commandId: `${side}-${index + 1}`,
+      commandId: `${side}-${attempt}-${index + 1}`,
       side,
       phase: index === commands.length - 1 ? "run" : "setup",
       command,
@@ -610,6 +733,25 @@ async function executeManifest(
         `${side} command exited with ${result.exitCode}: ${result.stderr.slice(-2000)}`,
       );
     stdout = result.stdout;
+  }
+  if (manifest.resultFile) {
+    try {
+      stdout = readTestFile(sandbox.cwd, manifest.resultFile);
+      if (redact(stdout, secrets) !== stdout)
+        throw new Error(
+          "Protected credential material in result file; comparison refused.",
+        );
+      Object.assign(evidence.at(-1)!, {
+        resultFile: manifest.resultFile,
+        resultText: stdout,
+      });
+    } catch (cause) {
+      throw new BehaviorFailure(
+        "report_evidence_invalid",
+        "input-invalid",
+        `Invalid or missing result file: ${errorText(cause)}`,
+      );
+    }
   }
   return stdout;
 }

@@ -106,15 +106,17 @@ function fixture(delta = 0) {
 }
 function writeHarness(task: BehaviorAgentTask) {
   const root = task.sandbox.writeRoots[0];
+  const tests = join(task.sandbox.cwd, "tests");
+  mkdirSync(tests, { recursive: true });
   writeFileSync(
-    join(root, "runner.cjs"),
+    join(tests, "runner.cjs"),
     `const fs = require('node:fs'); const subject = require('../implementation.cjs'); const cases = JSON.parse(fs.readFileSync(process.argv[2], 'utf8')); process.stdout.write(JSON.stringify(cases.map(c => ({caseId:c.caseId,outcome:'return',value:subject(c.input)}))));`,
   );
   writeFileSync(
     join(root, "manifest.json"),
     JSON.stringify({
-      schemaVersion: "1.0",
-      testFiles: ["runner.cjs"],
+      schemaVersion: "2.0",
+      testFiles: ["tests/runner.cjs"],
       notes:
         "Trusted deterministic fixture harness invokes implementation module.",
       ...(task.side === "source"
@@ -129,7 +131,7 @@ function writeHarness(task: BehaviorAgentTask) {
         setup: [],
         run: {
           executable: process.execPath,
-          args: [".forexplore-tests/runner.cjs"],
+          args: ["tests/runner.cjs"],
         },
       },
     }),
@@ -175,7 +177,7 @@ describe("independent two-session differential strategy", () => {
     },
   );
   it("starts agent2 only after Host target readiness; wait never runs a coordinator model", async () => {
-    const f = fixture(1);
+    const f = fixture();
     const author = f.runtime.runAgent;
     f.runtime.runAgent = async (task) => {
       if (task.side === "target") {
@@ -190,10 +192,12 @@ describe("independent two-session differential strategy", () => {
       runtime: f.runtime,
       waitForTarget: async () => {
         expect(f.agents).toEqual(["source"]);
-        writeFileSync(
-          join(f.context.workspace.targetRoot, "implementation.cjs"),
-          "module.exports = value => value;",
-        );
+        expect(
+          readFileSync(
+            join(f.context.workspace.targetRoot, "implementation.cjs"),
+            "utf8",
+          ),
+        ).toContain("value + 0");
       },
     }).verify(f.input, f.context);
     expect(result.targetAssessment).toBe("no_bug_observed");
@@ -215,8 +219,8 @@ describe("independent two-session differential strategy", () => {
         attributes: {},
       },
     ];
-    const hash = workspace.projectHash;
-    vi.spyOn(workspace, "projectHash").mockImplementation((root) => {
+    const hash = workspace.captureProjectBaseline;
+    vi.spyOn(workspace, "captureProjectBaseline").mockImplementation((root) => {
       if (root === target)
         writeFileSync(path, "module.exports = value => value + 9;");
       return hash(root);
@@ -227,6 +231,26 @@ describe("independent two-session differential strategy", () => {
     expect(result.executionStatus).toBe("failed");
     expect(result.problems[0].message).toContain(
       "differs from the submitted snapshot",
+    );
+    expect(f.agents).toEqual(["source"]);
+  });
+  it("rejects source-side pollution of undeclared target helper files before agent2 starts", async () => {
+    const f = fixture();
+    const helper = join(f.context.workspace.targetRoot, "helper.cjs");
+    writeFileSync(helper, "original helper");
+    const author = f.runtime.runAgent;
+    f.runtime.runAgent = async (task) => {
+      const result = await author(task);
+      if (task.side === "source") writeFileSync(helper, "polluted helper");
+      return result;
+    };
+    const result = await new MultiAgentDifferentialStrategy({
+      runtime: f.runtime,
+    }).verify(f.input, f.context);
+    expect(result.executionStatus).toBe("failed");
+    expect(result.problems[0].code).toBe("workspace_integrity_violation");
+    expect(result.problems[0].message).toContain(
+      "unauthorized change: helper.cjs",
     );
     expect(f.agents).toEqual(["source"]);
   });
@@ -374,6 +398,118 @@ describe("independent two-session differential strategy", () => {
       result.issues.some((issue) => issue.kind === "behavioral-divergence"),
     ).toBe(false);
   });
+  it("feeds invalid target evidence back once without rerunning source collection", async () => {
+    const f = fixture();
+    const author = f.runtime.runAgent;
+    f.runtime.runAgent = async (task) => {
+      if (task.side === "target" && f.agents.includes("target")) {
+        expect(task.prompt).toContain("Host rejected your test harness");
+        expect(task.sandbox.baseline?.files).toHaveProperty(
+          "implementation.cjs",
+        );
+        expect(task.sandbox.readOnlyFiles).toContain(
+          join(task.sandbox.cwd, ".forexplore-tests/inputs.json"),
+        );
+      }
+      return author(task);
+    };
+    const command = f.runtime.runCommand;
+    let targetRuns = 0;
+    f.runtime.runCommand = async (task) => {
+      const result = await command(task);
+      return task.sandbox.cwd === f.context.workspace.targetRoot &&
+        ++targetRuns === 1
+        ? { ...result, stdout: result.stdout + "}" }
+        : result;
+    };
+    const result = await new MultiAgentDifferentialStrategy({
+      runtime: f.runtime,
+    }).verify(f.input, f.context);
+    expect(result.executionStatus).toBe("completed");
+    expect(f.agents).toEqual(["source", "target", "target"]);
+    expect(result.strategyReport).toMatchObject({
+      repairs: [{ side: "target", attempt: 1 }],
+    });
+    expect(
+      result.artifacts.some(
+        (item) => item.kind === "target-agent-repair-1-session",
+      ),
+    ).toBe(true);
+  });
+  it("reads fresh result files while preserving normal build logs", async () => {
+    const f = fixture();
+    const author = f.runtime.runAgent;
+    f.runtime.runAgent = async (task) => {
+      const result = await author(task);
+      const runner = join(task.sandbox.cwd, "tests/runner.cjs");
+      writeFileSync(
+        runner,
+        readFileSync(runner, "utf8").replace(
+          "process.stdout.write(",
+          "fs.writeFileSync('.forexplore-tests/observations.json', ",
+        ) + "console.log('normal build output');",
+      );
+      const path = join(task.sandbox.cwd, ".forexplore-tests/manifest.json");
+      const manifest = JSON.parse(readFileSync(path, "utf8"));
+      manifest.resultFile = ".forexplore-tests/observations.json";
+      writeFileSync(path, JSON.stringify(manifest));
+      writeFileSync(
+        join(task.sandbox.cwd, manifest.resultFile),
+        "stale output",
+      );
+      return result;
+    };
+    const result = await new MultiAgentDifferentialStrategy({
+      runtime: f.runtime,
+    }).verify(f.input, f.context);
+    expect(result.executionStatus).toBe("completed");
+    expect(result.targetAssessment).toBe("no_bug_observed");
+    expect(result.strategyReport).toMatchObject({
+      evidence: [
+        {
+          stdout: "normal build output\n",
+          resultFile: ".forexplore-tests/observations.json",
+        },
+        {
+          stdout: "normal build output\n",
+          resultFile: ".forexplore-tests/observations.json",
+        },
+      ],
+    });
+  });
+  it("never accepts a stale result file when the run produces no new observations", async () => {
+    const f = fixture();
+    const author = f.runtime.runAgent;
+    f.runtime.runAgent = async (task) => {
+      const result = await author(task);
+      const path = join(task.sandbox.cwd, ".forexplore-tests/manifest.json");
+      const manifest = JSON.parse(readFileSync(path, "utf8"));
+      manifest.resultFile = ".forexplore-tests/observations.json";
+      writeFileSync(path, JSON.stringify(manifest));
+      writeFileSync(
+        join(task.sandbox.cwd, manifest.resultFile),
+        JSON.stringify([
+          { caseId: "zero", outcome: "return", value: 0 },
+          { caseId: "negative", outcome: "return", value: -1 },
+        ]),
+      );
+      return result;
+    };
+    f.runtime.runCommand = async () => ({
+      exitCode: 0,
+      stdout: "normal logs",
+      stderr: "",
+      durationMs: 0,
+      timedOut: false,
+    });
+    const result = await new MultiAgentDifferentialStrategy({
+      runtime: f.runtime,
+    }).verify(f.input, f.context);
+    expect(result.executionStatus).toBe("failed");
+    expect(result.targetAssessment).not.toBe("no_bug_observed");
+    expect(result.problems[0].code).toBe("report_evidence_invalid");
+    expect(f.agents).toEqual(["source", "source"]);
+  });
   it("retains redacted incremental logs after cancellation", async () => {
     const f = fixture();
     const controller = new AbortController();
@@ -397,13 +533,13 @@ describe("independent two-session differential strategy", () => {
     const f = fixture();
     f.runtime.runCommand = async (task) => {
       expect(task.sandbox.readOnlyFiles).toContain(
-        join(task.sandbox.writeRoots[0], "runner.cjs"),
+        join(task.sandbox.cwd, "tests/runner.cjs"),
       );
       expect(task.sandbox.readOnlyFiles).toContain(
         join(task.sandbox.writeRoots[0], "inputs.json"),
       );
       writeFileSync(
-        join(task.sandbox.writeRoots[0], "runner.cjs"),
+        join(task.sandbox.cwd, "tests/runner.cjs"),
         "changed after capture",
       );
       return {
