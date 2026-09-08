@@ -326,6 +326,7 @@ function edgeForExport(
   request: SyntacticDependencyResolverRequest,
   exported: TreeSitterExport,
   filesByPath: ReadonlyMap<string, IndexedFileRecord>,
+  localSymbols: readonly SymbolRecord[],
 ): DependencyEdgeRecord {
   const kind: IndexDependencyKind = 'export';
   const reExport = exported.exportKind === 're-export' && Boolean(exported.targetReference);
@@ -343,7 +344,7 @@ function edgeForExport(
     : undefined;
   const localCandidates = imported
     ? []
-    : request.symbols
+    : localSymbols
       .filter((symbol) =>
         symbol.relativePath === exported.relativePath &&
         (!exported.targetReference ||
@@ -397,9 +398,14 @@ export function resolveSyntacticDependencies(
   request: SyntacticDependencyResolverRequest,
 ): DependencyEdgeRecord[] {
   const filesByPath = new Map(request.files.map((file) => [canonicalPath(file.relativePath), file]));
+  const symbolsByPath = new Map<string, SymbolRecord[]>();
+  for (const symbol of request.symbols) {
+    const symbols = symbolsByPath.get(symbol.relativePath) ?? [];
+    symbols.push(symbol); symbolsByPath.set(symbol.relativePath, symbols);
+  }
   const edges = [
     ...request.imports.map((imported) => edgeForImport(request, imported, filesByPath)),
-    ...(request.exports ?? []).map((exported) => edgeForExport(request, exported, filesByPath)),
+    ...(request.exports ?? []).map((exported) => edgeForExport(request, exported, filesByPath, symbolsByPath.get(exported.relativePath) ?? [])),
     ...(request.projectReferences ?? []).map((reference) => edgeForProjectReference(request, reference, filesByPath)),
   ];
   const unique = new Map<string, DependencyEdgeRecord>();

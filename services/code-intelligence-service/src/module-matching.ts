@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { indexModuleHierarchy } from '@forexplore/contracts';
 import type { ModuleTarget, ProjectAnalysisRecord, ProjectModule, RepositoryRevisionScope, SearchCandidate } from '@forexplore/contracts';
 import type { IndexStore } from './index-store.js';
 import { projectPlanHash } from './project-analysis.js';
@@ -71,21 +72,26 @@ async function searchModuleSnapshot(store: IndexStore, request: ModuleMatchReque
         !artifact.planHash || !record?.proposal || record.state !== 'ready' ||
         record.repositoryId !== repositoryId || record.analysisRevision !== scope.analysisRevision ||
         record.proposal.analysisHash !== revision.analysisHash || artifact.planHash !== projectPlanHash(record.proposal)) return [];
-      return [[artifact.moduleArtifactId, record] as const];
+      return [[artifact.moduleArtifactId, { ...record, planHash: artifact.planHash }] as const];
     }));
     const projects = new Map((await mapBounded([...new Set([...records.values()].map((r) => r.projectId))], 4,
       (id) => store.getProject!(scope, id, signal))).flatMap((project) => project ? [[project.projectId, project] as const] : []));
+    const trees = new Map([...records].map(([id, record]) => [id, indexModuleHierarchy(record.proposal!.modules)]));
     const byModule = new Map<string, ModuleHit>();
     documents.forEach((document, rank) => {
       if (document.repositoryId !== repositoryId || document.analysisRevision !== scope.analysisRevision || !document.moduleArtifactId) return;
       const record = records.get(document.moduleArtifactId);
       if (!record) return;
-      let identity: { projectId?: string; moduleId?: string };
+      let identity: { projectId?: string; moduleId?: string; planHash?: string };
       try { identity = JSON.parse(document.text); } catch { return; }
       if (!identity || identity.projectId !== record.projectId) return;
-      const module = record.proposal!.modules.find((item) => item.id === identity.moduleId);
+      if (identity.planHash !== undefined && identity.planHash !== record.planHash || record.proposal!.hierarchy && identity.planHash !== record.planHash) return;
+      const tree = trees.get(document.moduleArtifactId)!;
+      const node = tree.byId.get(identity.moduleId ?? '');
       const project = projects.get(record.projectId);
-      if (!module || !project || module.sourceFiles.length === 0) return;
+      if (!node || !project) return;
+      const module = { ...node, sourceFiles: tree.sourceFiles(node.id).files };
+      if (module.sourceFiles.length === 0) return;
       const available = new Set((module.coreApis ?? []).map(normalizedApi).filter(Boolean));
       const apiScore = requiredApis.length ? requiredApis.filter((api) => available.has(normalizedApi(api))).length / requiredApis.length : 0;
       const semantic = document.retrievalScore?.semantic;

@@ -1,0 +1,219 @@
+{
+  "passed": true,
+  "startedAt": "2026-09-08T10:33:17.427Z",
+  "url": "http://127.0.0.1:4042/",
+  "profile": "large",
+  "stage": "complete",
+  "screenshots": [
+    "logs/adaptive-hierarchy-large-desktop-initial.png",
+    "logs/adaptive-hierarchy-large-desktop-hierarchy.png",
+    "logs/adaptive-hierarchy-large-desktop-decision.png",
+    "logs/adaptive-hierarchy-large-mobile-initial.png",
+    "logs/adaptive-hierarchy-large-mobile-hierarchy.png",
+    "logs/adaptive-hierarchy-large-mobile-decision.png"
+  ],
+  "browserErrors": [],
+  "measurements": {
+    "initial": {
+      "bytes": 114712,
+      "selectProjectMs": 7087,
+      "readyMs": 7,
+      "rootNodes": 4,
+      "renderedRoots": 4,
+      "stats": {
+        "modules": 1277,
+        "files": 7702,
+        "types": 21532,
+        "methods": 93398,
+        "implemented": 0,
+        "unimplemented": 0,
+        "unknown": 113391,
+        "dependencies": 117420
+      }
+    },
+    "viewports": [
+      {
+        "name": "desktop",
+        "width": 1440,
+        "height": 1000,
+        "originalRoots": 4,
+        "expandedPathNodes": 10,
+        "moduleToSourceNavigation": true,
+        "refinementReasonVisible": true,
+        "moduleSelectionPreservesDeclarations": true,
+        "subsystemOptionMatchesPublishedNodes": true
+      },
+      {
+        "name": "mobile",
+        "width": 390,
+        "height": 844,
+        "originalRoots": 4,
+        "expandedPathNodes": 10,
+        "moduleToSourceNavigation": true,
+        "refinementReasonVisible": true,
+        "moduleSelectionPreservesDeclarations": true,
+        "subsystemOptionMatchesPublishedNodes": true
+      }
+    ]
+  },
+  "scope": {
+    "repositoryId": "vscode-scale",
+    "analysisRevision": "scale-1788853146362",
+    "projectId": "project-1133a0288d95fd93d6132ebf",
+    "repositoryName": "src",
+    "projectName": "未归属工程文件"
+  },
+  "hierarchy": {
+    "nodeCount": 1277,
+    "rootCount": 4,
+    "moduleCount": 1277,
+    "subsystemCount": 0,
+    "leafCount": 936,
+    "splitCount": 197,
+    "deferredCount": 144,
+    "unknownCount": 0,
+    "maxDepth": 7,
+    "terminalDepths": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "decisions": {
+      "version": 1,
+      "maxDepth": 8,
+      "algorithm": "adaptive-module-tree/v1",
+      "decisionCount": 1278,
+      "deferredCount": 144,
+      "modelDecisionCount": 0
+    },
+    "roots": [
+      {
+        "id": "module:module-6be7d45a16e7eb5b40d5aeb0",
+        "name": "Local files",
+        "files": 11,
+        "refinement": {
+          "state": "leaf",
+          "reason": "The source scope is small enough to inspect directly; additional structural levels are unnecessary.",
+          "decisionSource": "structural"
+        }
+      },
+      {
+        "id": "module:module-b65271a4167f43bdf262c423",
+        "name": "typings",
+        "files": 9,
+        "refinement": {
+          "state": "leaf",
+          "reason": "The source scope is small enough to inspect directly; additional structural levels are unnecessary.",
+          "decisionSource": "structural"
+        }
+      },
+      {
+        "id": "module:module-d837b5165d98cb7f127d09c4",
+        "name": "vs",
+        "files": 7505,
+        "refinement": {
+          "state": "split",
+          "reason": "Distinct directory boundaries provide smaller structural scopes.",
+          "decisionSource": "structural"
+        }
+      },
+      {
+        "id": "module:module-1ecddcf918a92f5fb44757e2",
+        "name": "vscode-dts",
+        "files": 177,
+        "refinement": {
+          "state": "deferred",
+          "reason": "Further functional refinement requires additional evidence.",
+          "decisionSource": "structural"
+        }
+      }
+    ],
+    "decisionSources": {
+      "model": 0,
+      "structural": 1275,
+      "budget": 2
+    },
+    "fullModuleTraversal": true,
+    "aggregateCountsMatch": true,
+    "requests": 1281
+  },
+  "navigation": {
+    "leaf": {
+      "id": "module:module-4a64b9128f444f50da3ea4e2",
+      "name": "Local files",
+      "refinement": {
+        "state": "deferred",
+        "reason": "Further functional refinement requires additional evidence.",
+        "decisionSource": "structural"
+      }
+    },
+    "chain": [
+      {
+        "id": "module:module-d837b5165d98cb7f127d09c4",
+        "name": "vs",
+        "kind": "module",
+        "depth": 0
+      },
+      {
+        "id": "module:module-3b03ed82f2f3fb1360e2bfd6",
+        "name": "base",
+        "kind": "module",
+        "depth": 1
+      },
+      {
+        "id": "module:module-2ef890d9cc9737f1efb296fc",
+        "name": "browser",
+        "kind": "module",
+        "depth": 2
+      },
+      {
+        "id": "module:module-4a64b9128f444f50da3ea4e2",
+        "name": "Local files",
+        "kind": "module",
+        "depth": 3
+      },
+      {
+        "id": "folder:[\"module-4a64b9128f444f50da3ea4e2\",\"vs\"]",
+        "name": "vs",
+        "kind": "folder",
+        "path": "vs"
+      },
+      {
+        "id": "folder:[\"module-4a64b9128f444f50da3ea4e2\",\"vs/base\"]",
+        "name": "base",
+        "kind": "folder",
+        "path": "vs/base"
+      },
+      {
+        "id": "folder:[\"module-4a64b9128f444f50da3ea4e2\",\"vs/base/browser\"]",
+        "name": "browser",
+        "kind": "folder",
+        "path": "vs/base/browser"
+      },
+      {
+        "id": "file:vs/base/browser/animatedValue.ts",
+        "name": "animatedValue.ts",
+        "kind": "file",
+        "path": "vs/base/browser/animatedValue.ts"
+      },
+      {
+        "id": "symbol:symbol:9bf89a765dda20d97262682c",
+        "name": "AnimatedValue",
+        "kind": "class",
+        "path": "vs/base/browser/animatedValue.ts"
+      },
+      {
+        "id": "symbol:symbol:ef067dfa0f446434c364b7ec",
+        "name": "const",
+        "kind": "method",
+        "path": "vs/base/browser/animatedValue.ts"
+      }
+    ]
+  },
+  "completedAt": "2026-09-08T10:33:35.305Z"
+}

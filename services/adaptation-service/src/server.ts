@@ -5,6 +5,8 @@ import { AdaptationAdapter } from './adaptation-adapter.js';
 import { ArchitectAgent } from './architect-agent.js';
 import { FileStaticAnalysisSnapshotStore } from './analysis-snapshot-store.js';
 import { HttpSemanticQueryPort } from './http-semantic-query-port.js';
+import { WorkspaceTranslationRuntime } from './workspace-translation-runtime.js';
+import { createWorkspaceTranslationModelClient } from './workspace-translation-agent.js';
 import {
   createDeepSeekToolCallingArchitectClient,
   ToolCallingArchitectRuntime,
@@ -19,8 +21,18 @@ const adapter = new AdaptationAdapter({
 });
 
 let server: ReturnType<typeof createHttpServer> | undefined;
+let workspaceTranslationRuntime: WorkspaceTranslationRuntime | undefined;
 
 async function main(): Promise<void> {
+  if (config.workspaceTranslation) {
+    workspaceTranslationRuntime = new WorkspaceTranslationRuntime({
+      workspaceRoot: config.projectRoot,
+      compileCommand: config.workspaceTranslation.compileCommand,
+      maxModelTurns: config.workspaceTranslation.maxModelTurns,
+      timeoutMs: config.workspaceTranslation.timeoutMs,
+      client: createWorkspaceTranslationModelClient({ apiKey: config.apiKey, temperature: 0 }),
+    });
+  }
   // Legacy /v1/module-plan remains snapshot-compatible. The semantic route is
   // explicitly opt-in and talks only to the VS Code host's read-only HTTP
   // SemanticQueryPort endpoint; this process never creates an index runtime.
@@ -37,6 +49,9 @@ async function main(): Promise<void> {
       analysisRoot: config.analysisRoot,
     }),
     ...(semanticArchitecturePort ? { semanticArchitecturePort } : {}),
+    ...(workspaceTranslationRuntime && config.workspaceTranslation ? {
+      workspaceTranslation: { runtime: workspaceTranslationRuntime, bearerToken: config.workspaceTranslation.bearerToken },
+    } : {}),
     corsOrigin: config.corsOrigin,
   });
   server = httpServer;
@@ -52,6 +67,7 @@ async function main(): Promise<void> {
 }
 
 async function shutdown(): Promise<void> {
+  await workspaceTranslationRuntime?.shutdown();
   const activeServer = server;
   if (!activeServer) return;
   await new Promise<void>((resolve, reject) => {

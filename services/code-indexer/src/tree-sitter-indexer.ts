@@ -540,7 +540,8 @@ function dedupeBy<T>(entries: readonly T[], key: (entry: T) => string): T[] {
 export function indexTreeSitterFile(request: TreeSitterIndexRequest): TreeSitterFileIndex {
   const parser = new Parser();
   parser.setLanguage(request.language.grammar as never);
-  const tree = parser.parse(request.content);
+  // The native binding's default input buffer cannot accept an entire large string.
+  const tree = parser.parse((offset) => request.content.slice(offset, offset + 8192));
   const declarations = collectDeclarations(tree.rootNode, request);
   return {
     declarations,

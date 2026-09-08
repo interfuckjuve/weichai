@@ -66,11 +66,11 @@
       },
       {
         "command": "forexplore.checkRepositories",
-        "title": "ForeXplore: 检查检索仓库"
+        "title": "ForeXplore: 检查参考工程"
       },
       {
         "command": "forexplore.reindex",
-        "title": "ForeXplore: 重新索引检索仓库"
+        "title": "ForeXplore: 重新索引参考工程"
       },
       {
         "command": "forexplore.refreshCodeIntelligence",
@@ -120,13 +120,13 @@
             "type": "string"
           },
           "default": [],
-          "description": "历史代码仓的本地目录。保存后由扩展建立版本化结构索引、项目模块 Summary 和模块内候选索引。"
+          "description": "参考工程的本地目录。保存后由扩展建立版本化结构索引、项目模块 Summary 和模块内候选索引。"
         },
         "forexplore.targetRepositoryPaths": {
           "type": "array",
           "items": { "type": "string" },
           "default": [],
-          "description": "通过目标项目选择器明确选择的目录。只有同时位于当前工作区中的目录会作为目标工程索引。"
+          "description": "通过目标工程选择器明确选择的目录。只有同时位于当前工作区中的目录会作为目标工程索引。"
         },
         "forexplore.topK": {
           "type": "number",

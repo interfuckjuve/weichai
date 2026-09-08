@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { RepositoryStaticAnalysis } from '@forexplore/contracts';
+import type { ContextPacket, RepositoryStaticAnalysis, TaskRetrievalRequest } from '@forexplore/contracts';
 import {
   CodeIntelligenceHost,
   codeIntelligenceRuntimeOptionsFromEnvironment,
@@ -203,6 +203,46 @@ async function temporaryRepository(name: string): Promise<string> {
   await writeFile(path.join(root, 'src', 'example.ts'), 'export const example = 1;\n');
   return root;
 }
+
+it('recovers persisted repository identities when a host starts without its identity cache', async () => {
+  const root = await temporaryRepository('reopen');
+  const runtime = createRuntime();
+  const initial = new CodeIntelligenceHost({ runtimeFactory: async () => runtime });
+  const first = await initial.synchronize({ repositories: [{ localPath: root, role: 'target' }] });
+  const repositoryId = first.presentation.repositories[0]!.repositoryId;
+  const activeRevision = first.presentation.repositories[0]!.activeRevision;
+  const register = runtime.registry.register.bind(runtime.registry);
+  const guarded = vi.spyOn(runtime.registry, 'register').mockImplementation(async (request) => {
+    if (request.repositoryId !== repositoryId) throw new Error('Persisted path belongs to another repository ID.');
+    return register(request);
+  });
+  const reopened = new CodeIntelligenceHost({ runtimeFactory: async () => runtime, identityStore: new MemoryIdentityStore() });
+  const result = await reopened.synchronize({ repositories: [{ localPath: root, role: 'target' }], scan: false });
+  expect(guarded).toHaveBeenCalledWith(expect.objectContaining({ repositoryId }));
+  expect(result.presentation.repositories).toEqual([expect.objectContaining({ repositoryId, activeRevision })]);
+  expect(await reopened.activeScopeForPath(root)).toEqual({ repositoryId, analysisRevision: activeRevision });
+  initial.dispose();
+  reopened.dispose();
+});
+
+it('uses lightweight revision metadata for presentation and rejects mismatched hashes', async () => {
+  const root = await temporaryRepository('metadata');
+  const runtime = createRuntime();
+  const host = new CodeIntelligenceHost({ runtimeFactory: async () => runtime });
+  const initial = await host.synchronize({ repositories: [{ localPath: root, role: 'target' }] });
+  const repository = initial.presentation.repositories[0]!;
+  const scope = { repositoryId: repository.repositoryId, analysisRevision: repository.activeRevision! };
+  const index = await runtime.store.getStructuralIndex(scope);
+  runtime.store.getStructuralIndexMetadata = vi.fn(async () => ({ ...scope, analysisHash: index!.analysisHash }));
+  const fullRead = vi.spyOn(runtime.store, 'getStructuralIndex').mockRejectedValue(new Error('Unexpected full index read.'));
+  expect((await host.presentation()).repositories[0]?.revisions).toHaveLength(1);
+  expect((await host.selectRevisionForDisplay(scope)).repositories[0]?.selectedRevision).toBe(scope.analysisRevision);
+  expect(fullRead).not.toHaveBeenCalled();
+  runtime.store.getStructuralIndexMetadata = vi.fn(async () => ({ ...scope, analysisHash: 'mismatched' }));
+  expect((await host.presentation()).repositories[0]?.revisions).toHaveLength(0);
+  await expect(host.selectRevisionForDisplay(scope)).rejects.toThrow('not available');
+  host.dispose();
+});
 
 async function availablePort(): Promise<number> {
   const server = createServer();
@@ -638,4 +678,77 @@ it('scopes module-first retrieval to this window historical repositories', async
     .filter((repository) => repository.role === 'history')
     .map((repository) => repository.repositoryId);
   expect(search).toHaveBeenCalledWith(expect.objectContaining({ repositoryIds: historicalIds }), undefined);
+});
+
+it('retrieves the selected historical snapshot and visible references without waiting for module analysis', async () => {
+  const target = await temporaryRepository('task-target');
+  const history = await temporaryRepository('task-history');
+  const hidden = await temporaryRepository('task-hidden');
+  const runtime = createRuntime();
+  const response = { packetId: 'host-packet' } as ContextPacket;
+  const search = vi.fn(async (_request: TaskRetrievalRequest, _signal?: AbortSignal) => response);
+  runtime.taskRetrieval = { search };
+  const host = new CodeIntelligenceHost({ runtimeFactory: async () => runtime });
+  const repositories = [{ localPath: target, role: 'target' as const }, { localPath: history, role: 'history' as const }];
+  await host.synchronize({ repositories });
+  const oldScope = await host.activeScopeForPath(target);
+  await host.synchronize({ repositories });
+  await runtime.registry.register({ repositoryId: 'hidden-repository', localPath: hidden, role: 'history' });
+  const fullRead = vi.spyOn(runtime.store, 'getStructuralIndex');
+  const wait = vi.spyOn(host, 'waitForProjects');
+  const signal = new AbortController().signal;
+  const result = await host.searchTaskContext('request-1', oldScope, {
+    requirement: '  限制上传大小  ', scope: 'all', granularity: 'function',
+  }, signal);
+  expect(result).toBe(response);
+  expect(search).toHaveBeenCalledWith(expect.objectContaining({
+    requestId: 'request-1', requirement: '限制上传大小', granularity: 'function',
+    budget: { maxTokens: 4000, maxLatencyMs: 30_000, maxFiles: 30, maxSourceLines: 600 },
+    scopes: [{ ...oldScope, role: 'target' }, { ...await host.activeScopeForPath(history), role: 'reference' }],
+  }), signal);
+  expect(fullRead).not.toHaveBeenCalled();
+  expect(wait).not.toHaveBeenCalled();
+  fullRead.mockRestore();
+  wait.mockRestore();
+  host.dispose();
+});
+
+it('rejects invisible repositories and mismatched projects before starting task retrieval', async () => {
+  const target = await temporaryRepository('task-scope');
+  const runtime = createRuntime();
+  const search = vi.fn(async () => ({ packetId: 'unused' }) as ContextPacket);
+  runtime.taskRetrieval = { search };
+  const host = new CodeIntelligenceHost({ runtimeFactory: async () => runtime });
+  await host.synchronize({ repositories: [{ localPath: target, role: 'target' }] });
+  const scope = await host.activeScopeForPath(target);
+  const request = { requirement: '限制上传大小', scope: 'target' as const, granularity: 'function' as const };
+  await expect(host.searchTaskContext('request-1', { ...scope, repositoryId: 'not-visible' }, request)).rejects.toThrow('检索范围');
+  await expect(host.searchTaskContext('request-2', { ...scope, projectId: 'missing-project' }, request)).rejects.toThrow('不属于');
+  expect(search).not.toHaveBeenCalled();
+  host.dispose();
+});
+
+it('limits the local task HTTP port to visible ready or superseded repository revisions', async () => {
+  const target = await temporaryRepository('task-http');
+  const runtime = createRuntime();
+  const search = vi.fn(async () => ({ packetId: 'packet-1' }) as ContextPacket);
+  runtime.taskRetrieval = { search };
+  let taskPort: CodeIntelligenceRuntime['taskRetrieval'];
+  const host = new CodeIntelligenceHost({ runtimeFactory: async () => runtime, semanticQueryServerFactory: (options) => {
+    taskPort = options.taskRetrieval;
+    const server = createServer();
+    const listen = server.listen.bind(server);
+    server.listen = ((_port: number, address: string, callback: () => void) => listen(0, address, callback)) as typeof server.listen;
+    return server;
+  } });
+  try {
+    await host.synchronize({ repositories: [{ localPath: target, role: 'target' }] });
+    const scope = await host.activeScopeForPath(target);
+    await host.startSemanticQueryServer({ port: 8790 });
+    const request = { requestId: 'request-1', requirement: 'quote', scopes: [scope], budget: { maxTokens: 4000 } };
+    expect(await taskPort!.search(request)).toMatchObject({ packetId: 'packet-1' });
+    await expect(taskPort!.search({ ...request, scopes: [{ ...scope, repositoryId: 'not-visible' }] })).rejects.toThrow('outside this window');
+    await expect(taskPort!.search({ ...request, scopes: [{ ...scope, analysisRevision: 'missing-revision' }] })).rejects.toThrow('not available');
+    expect(search).toHaveBeenCalledTimes(1);
+  } finally { host.dispose(); }
 });

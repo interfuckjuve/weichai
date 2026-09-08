@@ -143,7 +143,7 @@ export function RequirementStage({
         </div>
 
         <footer className="task-composer-footer">
-          <span>目标与需求将一起用于历史模块检索</span>
+          <span>目标与需求将一起用于参考模块检索</span>
           <button type="submit" className="primary-action" disabled={searching}>
             {searching ? <span className="spinner" /> : <Search size={15} />}
             {searching ? '正在检索相似实现…' : `查找 ${state.topK} 个候选方案`}

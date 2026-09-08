@@ -5,7 +5,9 @@ import { fileURLToPath } from 'node:url';
 
 const extensionDirectory = path.dirname(fileURLToPath(import.meta.url));
 const workspaceDirectory = path.resolve(extensionDirectory, '..', '..');
-const extensionOutputDirectory = path.join(extensionDirectory, 'dist', 'extension');
+const extensionOutputDirectory = process.env.FOREXPLORE_EXTENSION_OUTPUT_DIRECTORY
+  ? path.resolve(process.env.FOREXPLORE_EXTENSION_OUTPUT_DIRECTORY)
+  : path.join(extensionDirectory, 'dist', 'extension');
 const nativeRuntimePackages = [
   'node-gyp-build',
   'tree-sitter',
@@ -30,6 +32,18 @@ await esbuild.build({
   // packages beside the extension bundle below; bundling them would collapse
   // __dirname and make node-gyp-build load the wrong grammar binary.
   external: ['vscode', ...nativeRuntimePackages],
+  sourcemap: true,
+  logLevel: 'info',
+});
+
+await esbuild.build({
+  entryPoints: [path.join(workspaceDirectory, 'services', 'code-indexer', 'src', 'structural-parse-worker.ts')],
+  bundle: true,
+  outfile: path.join(extensionOutputDirectory, 'structural-parse-worker.cjs'),
+  format: 'cjs',
+  platform: 'node',
+  target: 'node18',
+  external: nativeRuntimePackages,
   sourcemap: true,
   logLevel: 'info',
 });

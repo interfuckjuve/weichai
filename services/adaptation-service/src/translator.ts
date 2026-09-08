@@ -36,6 +36,9 @@ export interface TranslatorTargetContext {
 export function projectTargetContext(
   context: TargetModuleContext,
 ): TranslatorTargetContext {
+  if (context.target.kind === "module") {
+    throw new Error("Module targets require the workspace translation workflow.");
+  }
   return {
     // Workspace symbols can omit modifiers present in the source declaration.
     // The collected declaration is the source of truth for a replacement method.

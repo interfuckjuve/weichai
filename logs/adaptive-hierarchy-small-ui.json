@@ -1,0 +1,140 @@
+{
+  "passed": true,
+  "startedAt": "2026-09-08T10:24:49.467Z",
+  "url": "http://127.0.0.1:4040/",
+  "profile": "small",
+  "stage": "complete",
+  "screenshots": [
+    "logs/adaptive-hierarchy-small-desktop-initial.png",
+    "logs/adaptive-hierarchy-small-desktop-hierarchy.png",
+    "logs/adaptive-hierarchy-small-desktop-decision.png",
+    "logs/adaptive-hierarchy-small-mobile-initial.png",
+    "logs/adaptive-hierarchy-small-mobile-hierarchy.png",
+    "logs/adaptive-hierarchy-small-mobile-decision.png"
+  ],
+  "browserErrors": [],
+  "measurements": {
+    "initial": {
+      "bytes": 158124,
+      "selectProjectMs": 88,
+      "readyMs": 7,
+      "rootNodes": 1,
+      "renderedRoots": 1,
+      "stats": {
+        "modules": 1,
+        "files": 5,
+        "types": 43,
+        "methods": 127,
+        "implemented": 0,
+        "unimplemented": 0,
+        "unknown": 170,
+        "dependencies": 57
+      }
+    },
+    "viewports": [
+      {
+        "name": "desktop",
+        "width": 1440,
+        "height": 1000,
+        "originalRoots": 1,
+        "expandedPathNodes": 5,
+        "moduleToSourceNavigation": true,
+        "refinementReasonVisible": true,
+        "moduleSelectionPreservesDeclarations": true,
+        "subsystemOptionMatchesPublishedNodes": true
+      },
+      {
+        "name": "mobile",
+        "width": 390,
+        "height": 844,
+        "originalRoots": 1,
+        "expandedPathNodes": 5,
+        "moduleToSourceNavigation": true,
+        "refinementReasonVisible": true,
+        "moduleSelectionPreservesDeclarations": true,
+        "subsystemOptionMatchesPublishedNodes": true
+      }
+    ]
+  },
+  "scope": {
+    "repositoryId": "repo-5d3a3666-bcc4-40ac-bfbb-4a6086735bc2",
+    "analysisRevision": "analysis-7f83867a-101c-4052-ae76-4f008c95cbb2",
+    "projectId": "project-e4b237732aca70e0c9ff85d5",
+    "repositoryName": "commons-fileupload-ts",
+    "projectName": "package"
+  },
+  "hierarchy": {
+    "nodeCount": 1,
+    "rootCount": 1,
+    "moduleCount": 1,
+    "subsystemCount": 0,
+    "leafCount": 1,
+    "splitCount": 0,
+    "deferredCount": 0,
+    "unknownCount": 0,
+    "maxDepth": 0,
+    "terminalDepths": [
+      0
+    ],
+    "decisions": {
+      "version": 1,
+      "maxDepth": 1,
+      "algorithm": "adaptive-module-tree/v1",
+      "decisionCount": 1,
+      "deferredCount": 0,
+      "modelDecisionCount": 0
+    },
+    "decisionSources": {
+      "model": 0,
+      "structural": 1,
+      "budget": 0
+    },
+    "fullModuleTraversal": true,
+    "aggregateCountsMatch": true,
+    "requests": 2
+  },
+  "navigation": {
+    "leaf": {
+      "id": "module:module-2aaaefc37a79c0798c8e3d6f",
+      "name": "package",
+      "refinement": {
+        "state": "leaf",
+        "reason": "The source scope is small enough to inspect directly; additional structural levels are unnecessary.",
+        "decisionSource": "structural"
+      }
+    },
+    "chain": [
+      {
+        "id": "module:module-2aaaefc37a79c0798c8e3d6f",
+        "name": "package",
+        "kind": "module",
+        "depth": 0
+      },
+      {
+        "id": "folder:[\"module-2aaaefc37a79c0798c8e3d6f\",\"src\"]",
+        "name": "src",
+        "kind": "folder",
+        "path": "src"
+      },
+      {
+        "id": "file:src/compatibility.ts",
+        "name": "compatibility.ts",
+        "kind": "file",
+        "path": "src/compatibility.ts"
+      },
+      {
+        "id": "symbol:symbol:fb3420954806fc9c49504c6b",
+        "name": "Base64Decoder",
+        "kind": "class",
+        "path": "src/compatibility.ts"
+      },
+      {
+        "id": "symbol:symbol:38304b47080357baa7edede4",
+        "name": "decode",
+        "kind": "method",
+        "path": "src/compatibility.ts"
+      }
+    ]
+  },
+  "completedAt": "2026-09-08T10:24:51.774Z"
+}

@@ -35,6 +35,9 @@ import {
 export interface StructuralSourceFile {
   content: string;
   relativePath: string;
+  sha256?: string;
+  sizeBytes?: number;
+  unavailableReason?: string;
 }
 
 export interface BuildStructuralIndexRequest {
@@ -45,6 +48,9 @@ export interface BuildStructuralIndexRequest {
    */
   changedPaths?: readonly string[];
   files: readonly StructuralSourceFile[];
+  /** Filesystem scans use lazy, immutable file contents and retain only facts. */
+  retainSourceTexts?: boolean;
+  signal?: AbortSignal;
   /** Optional test/host seam; normal callers use the real Tree-sitter indexer. */
   indexFile?: (request: TreeSitterIndexRequest) => TreeSitterFileIndex;
   languageRegistry?: LanguageRegistry;
@@ -62,10 +68,12 @@ export interface StructuralIndexBuild {
   changedPaths?: string[];
   index: StructuralIndex;
   sourceFiles: ReadonlyMap<string, string>;
+  sourceReader?: { read(relativePath: string): Promise<string | null>; dispose(): Promise<void> };
   stats: StructuralIndexBuildStats;
 }
 
 export interface StructuralIndexBuildStats {
+  parserResources?: { peakWorkerRss: number; peakCombinedRss: number; workers: number };
   changedFileCount: number;
   reparsedFileCount: number;
   rebuiltDependencyEdgeCount: number;
@@ -245,15 +253,21 @@ function analysisHash(input: {
     for (const key of keys) delete copy[key];
     return copy;
   };
-  const sort = (entries: readonly Record<string, unknown>[]): Record<string, unknown>[] =>
-    entries.map((entry) => ({ ...entry })).sort((left, right) => compareText(canonicalJson(left), canonicalJson(right)));
-  return hash(canonicalJson({
-    files: sort(input.files.map((entry) => withoutScope(entry, ['repositoryId', 'analysisRevision', 'fileId']))),
-    projects: sort(input.projects.map((entry) => withoutScope(entry, ['repositoryId', 'analysisRevision']))),
-    symbols: sort(input.symbols.map((entry) => withoutScope(entry, ['repositoryId', 'analysisRevision', 'symbolId']))),
-    dependencyEdges: sort(input.dependencyEdges.map((entry) => withoutScope(entry, ['repositoryId', 'analysisRevision', 'dependencyEdgeId']))),
-    diagnostics: sort(input.diagnostics.map((entry) => withoutScope(entry, ['repositoryId', 'analysisRevision', 'diagnosticId']))),
-  }));
+  const digest = createHash('sha256');
+  const ids: Record<keyof typeof input, string | undefined> = {
+    dependencyEdges: 'dependencyEdgeId', diagnostics: 'diagnosticId', files: 'fileId', projects: undefined, symbols: 'symbolId',
+  };
+  digest.update('{');
+  let first = true;
+  for (const name of Object.keys(ids).sort() as Array<keyof typeof input>) {
+    const omitted = ['repositoryId', 'analysisRevision', ...(ids[name] ? [ids[name]!] : [])];
+    const encoded = input[name].map((entry) => canonicalJson(withoutScope(entry, omitted))).sort(compareText);
+    digest.update(`${first ? '' : ','}${JSON.stringify(name)}:[`);
+    encoded.forEach((entry, index) => { if (index) digest.update(','); digest.update(entry); });
+    digest.update(']');
+    first = false;
+  }
+  return digest.update('}').digest('hex');
 }
 
 function dependencyEdgeId(
@@ -416,10 +430,12 @@ function edgeNeedsRebuild(input: {
 export function buildStructuralIndex(request: BuildStructuralIndexRequest): StructuralIndexBuild {
   const registry = request.languageRegistry ?? createDefaultLanguageRegistry();
   const sourceFiles = new Map<string, string>();
+  const sources = new Map<string, StructuralSourceFile>();
   for (const source of request.files) {
     const relativePath = canonicalPath(source.relativePath);
-    if (sourceFiles.has(relativePath)) throw new Error(`Structural index input has duplicate path: ${relativePath}`);
-    sourceFiles.set(relativePath, source.content);
+    if (sources.has(relativePath)) throw new Error(`Structural index input has duplicate path: ${relativePath}`);
+    sources.set(relativePath, source);
+    if (request.retainSourceTexts !== false && !source.unavailableReason) sourceFiles.set(relativePath, source.content);
   }
 
   const previous = request.previousIndex;
@@ -429,13 +445,14 @@ export function buildStructuralIndex(request: BuildStructuralIndexRequest): Stru
   const previousFilesByPath = new Map((previous?.files ?? []).map((file) => [file.relativePath, file]));
   const suppliedChanges = new Set((request.changedPaths ?? []).map(canonicalPath));
   const changed = new Set(suppliedChanges);
-  for (const [relativePath, content] of sourceFiles) {
-    if (previousFilesByPath.get(relativePath)?.sha256 !== hash(Buffer.from(content, 'utf8'))) {
+  for (const [relativePath, source] of sources) {
+    request.signal?.throwIfAborted();
+    if (previousFilesByPath.get(relativePath)?.sha256 !== (source.sha256 ?? hash(Buffer.from(source.content, 'utf8')))) {
       changed.add(relativePath);
     }
   }
   for (const relativePath of previousFilesByPath.keys()) {
-    if (!sourceFiles.has(relativePath)) changed.add(relativePath);
+    if (!sources.has(relativePath)) changed.add(relativePath);
   }
   const changedPaths = [...changed].sort(compareText);
   const changedPathSet = new Set(changedPaths);
@@ -443,9 +460,9 @@ export function buildStructuralIndex(request: BuildStructuralIndexRequest): Stru
   const discovery = discoverProjects({
     repositoryId: request.repositoryId,
     analysisRevision: request.analysisRevision,
-    files: [...sourceFiles.entries()].map(([relativePath, content]) => ({
+    files: [...sources.entries()].map(([relativePath, source]) => ({
       relativePath,
-      content,
+      content: isConfigurationPath(relativePath) ? source.content : '',
       languageId: registry.resolvePath(relativePath)?.languageId,
     })),
   });
@@ -469,7 +486,8 @@ export function buildStructuralIndex(request: BuildStructuralIndexRequest): Stru
   const indexFile = request.indexFile ?? indexTreeSitterFile;
   let reparsedFileCount = 0;
   let reusedFileCount = 0;
-  for (const [relativePath, content] of [...sourceFiles.entries()].sort(([left], [right]) => compareText(left, right))) {
+  for (const [relativePath, source] of [...sources.entries()].sort(([left], [right]) => compareText(left, right))) {
+    request.signal?.throwIfAborted();
     const registration = registry.resolvePath(relativePath);
     const project = projectForPath(discovery.projects, relativePath, registration?.languageId);
     const record: IndexedFileRecord = {
@@ -479,14 +497,23 @@ export function buildStructuralIndex(request: BuildStructuralIndexRequest): Stru
       relativePath,
       ...(registration ? { languageId: registration.languageId } : {}),
       role: roleForPath(relativePath, registration?.languageId),
-      sha256: hash(Buffer.from(content, 'utf8')),
-      sizeBytes: Buffer.byteLength(content, 'utf8'),
+      sha256: source.sha256 ?? hash(Buffer.from(source.content, 'utf8')),
+      sizeBytes: source.sizeBytes ?? Buffer.byteLength(source.content, 'utf8'),
       parseStatus: registration ? 'parsed' : 'unsupported',
       ...(project ? { projectId: project.projectId } : {}),
     };
+    if (source.unavailableReason) {
+      record.parseStatus = 'failed';
+      const diagnostic = failureDiagnostic(request.repositoryId, request.analysisRevision, relativePath, new Error(source.unavailableReason));
+      diagnostic.code = 'SOURCE_CONTENT_UNAVAILABLE';
+      diagnostics.push(diagnostic);
+      indexed.push({ file: record, reused: false });
+      continue;
+    }
     const previousFile = previousFilesByPath.get(relativePath);
     const reuse = Boolean(
       previousFile &&
+      previousFile.parseStatus !== 'failed' &&
       previousFile.sha256 === record.sha256 &&
       !changedPathSet.has(relativePath),
     );
@@ -508,7 +535,7 @@ export function buildStructuralIndex(request: BuildStructuralIndexRequest): Stru
       continue;
     }
     try {
-      const parserResult = indexFile({ content, language: registration, relativePath });
+      const parserResult = indexFile({ content: source.content, language: registration, relativePath });
       reparsedFileCount += 1;
       if (parserResult.diagnostics.length > 0) record.parseStatus = 'partial';
       diagnostics.push(...parserResult.diagnostics.map((diagnostic) =>

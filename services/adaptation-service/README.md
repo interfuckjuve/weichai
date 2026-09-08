@@ -122,6 +122,77 @@ approval authority; the VS Code extension host owns the selected target,
 original hash, validation gate, user confirmation and recovery point before it
 performs any local write.
 
+## In-place workspace translation
+
+The independent workspace workflow takes a development Spec and retrieved Context
+(source, interfaces, call chains, configuration, dependencies, summaries). Analyzer
+produces file/symbol mappings and ordered dependency steps. Translator reads current
+workspace files, writes multiple files, compiles the configured project and repairs
+compiler diagnostics. It can return to Analyzer to revise mappings or dependencies.
+This milestone accepts compilation only; it does not generate or run behavior tests.
+
+Enable `ADAPTATION_WORKSPACE_TRANSLATION_ENABLED=true`, set
+`ADAPTATION_PROJECT_ROOT`, and configure `ADAPTATION_WORKSPACE_TRANSLATION_TOKEN`
+(at least 32 characters) and `ADAPTATION_WORKSPACE_COMPILE_COMMAND`. The latter is a
+JSON object with `executable`, `args`, optional workspace-relative `cwd`, and optional
+`timeoutMs`. Use a compilation command such as `dotnet build --no-restore`, `tsc --noEmit`,
+`cargo check`, or a project-specific `javac` argument list. Dependencies must already
+be available. The compiler is launched with an argument array, without a shell.
+Neither HTTP requests nor model tools select the workspace root or compiler command.
+
+All routes below require `Authorization: Bearer <configured token>`:
+
+| Method | Path | Result |
+| --- | --- | --- |
+| POST | `/v1/workspace-translations` | Start a task, return its run record and ID (202) |
+| GET | `/v1/workspace-translations/:id` | Read status, plan, before/after changes and compiler results |
+| POST | `/v1/workspace-translations/:id/cancel` | Cancel execution and preserve changes |
+| POST | `/v1/workspace-translations/:id/resume` | Resume a failed, cancelled or interrupted task (202) |
+| POST | `/v1/workspace-translations/:id/rollback` | Restore original files or remove task-created files |
+
+The start request has this shape:
+
+```json
+{
+  "spec": "Translate the supplied payment gateway and service into the target project, preserving its interfaces.",
+  "sourceLanguage": "Java",
+  "targetLanguage": "C#",
+  "context": [
+    {
+      "id": "gateway-contract",
+      "kind": "interface",
+      "content": "public interface PaymentGateway { String charge(long cents); }",
+      "path": "src/PaymentGateway.java",
+      "repository": "payments-reference",
+      "revision": "reference-revision"
+    }
+  ],
+  "workspaceFiles": ["Payments.csproj", "AuthManager.cs"],
+  "writeFiles": ["PaymentGateway.cs", "PaymentService.cs"]
+}
+```
+
+Supply the actual retrieved implementation and Spec for a real translation. Context
+remains immutable evidence; `workspaceFiles` and `writeFiles` are exact relative
+paths for live reads, with writes restricted to `writeFiles` and the accepted plan.
+There is no glob expansion. A file must be read before it can be written, and its
+content hash must still match. Symbolic links, hard-linked files and paths outside
+the workspace are rejected. The service writes directly into the selected workspace.
+
+Records are persisted under `.forexplore/workspace-translations/<id>.json`, including
+original file contents. Resume checks those contents against disk and requires a
+fresh compilation before completion. Rollback checks all changes before restoring
+them and stops on subsequent user edits. The default execution budget is 80 model
+turns and 30 minutes per start/resume; exhaustion preserves the task for continuation.
+Use one adaptation service instance per workspace. Query the returned ID until a
+terminal status is reached; dropping the start HTTP connection does not cancel it.
+`completed` requires all steps plus a successful compiler exit after the latest
+changes, and the record explicitly reports `acceptance: "compilation-only"`.
+
+The same runtime can be embedded through the exported `WorkspaceTranslationRuntime`
+and `createWorkspaceTranslationModelClient` APIs. This backend does not yet connect
+the new flow to the module picker or SeekDB task persistence.
+
 ## Python POC
 
 ```powershell

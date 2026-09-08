@@ -1,0 +1,65 @@
+{
+  "passed": true,
+  "url": "http://127.0.0.1:4040",
+  "results": [
+    {
+      "name": "desktop",
+      "width": 1440,
+      "height": 1000,
+      "evidence": 6,
+      "tokens": 3957,
+      "snapshots": [
+        {
+          "repositoryId": "repo-5d3a3666-bcc4-40ac-bfbb-4a6086735bc2",
+          "analysisRevision": "analysis-7f83867a-101c-4052-ae76-4f008c95cbb2",
+          "projectId": "project-e4b237732aca70e0c9ff85d5",
+          "role": "target",
+          "repositoryName": "commons-fileupload-ts",
+          "analysisHash": "98db443599225ab13d045dbbc28b301e077a97f1c13e8368dcbef4d6c9bd1be0",
+          "sourceRevision": "c8ff22351d0ab5b6586b4a81da6e596ac209b120"
+        },
+        {
+          "repositoryId": "repo-8aebe03e-4e5a-4e85-a41c-1ae853476e9b",
+          "analysisRevision": "analysis-b39ffb1a-a410-42f6-8749-dbc913bafa08",
+          "role": "reference",
+          "repositoryName": "commons-fileupload",
+          "analysisHash": "703881cf9739849a95cf6482a59b5519b1315dfe3c9cc9ad1380acdb14dde6a7",
+          "sourceRevision": "1d9a750e5091b6e36aa81c2277200a4b2b5ecd8a"
+        }
+      ],
+      "downloadMatches": true,
+      "copyMatches": true,
+      "sourceMatches": true
+    },
+    {
+      "name": "mobile",
+      "width": 390,
+      "height": 844,
+      "evidence": 6,
+      "tokens": 3957,
+      "snapshots": [
+        {
+          "repositoryId": "repo-5d3a3666-bcc4-40ac-bfbb-4a6086735bc2",
+          "analysisRevision": "analysis-7f83867a-101c-4052-ae76-4f008c95cbb2",
+          "projectId": "project-e4b237732aca70e0c9ff85d5",
+          "role": "target",
+          "repositoryName": "commons-fileupload-ts",
+          "analysisHash": "98db443599225ab13d045dbbc28b301e077a97f1c13e8368dcbef4d6c9bd1be0",
+          "sourceRevision": "c8ff22351d0ab5b6586b4a81da6e596ac209b120"
+        },
+        {
+          "repositoryId": "repo-8aebe03e-4e5a-4e85-a41c-1ae853476e9b",
+          "analysisRevision": "analysis-b39ffb1a-a410-42f6-8749-dbc913bafa08",
+          "role": "reference",
+          "repositoryName": "commons-fileupload",
+          "analysisHash": "703881cf9739849a95cf6482a59b5519b1315dfe3c9cc9ad1380acdb14dde6a7",
+          "sourceRevision": "1d9a750e5091b6e36aa81c2277200a4b2b5ecd8a"
+        }
+      ],
+      "downloadMatches": true,
+      "copyMatches": true,
+      "sourceMatches": true
+    }
+  ],
+  "errors": []
+}

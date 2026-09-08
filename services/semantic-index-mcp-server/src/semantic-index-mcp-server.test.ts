@@ -1,4 +1,5 @@
-import type { SemanticQueryPort } from "@forexplore/workflow-core";
+import type { SemanticQueryPort, TaskRetrievalPort } from "@forexplore/workflow-core";
+import { formatContextMarkdown, type ContextPacket } from '@forexplore/contracts';
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -53,8 +54,8 @@ function createQueryPort(): SemanticQueryPort {
   } as unknown as SemanticQueryPort;
 }
 
-async function connectedClient(queryPort = createQueryPort()) {
-  const server = createSemanticIndexMcpServer({ queryPort });
+async function connectedClient(queryPort = createQueryPort(), taskRetrieval?: TaskRetrievalPort) {
+  const server = createSemanticIndexMcpServer({ queryPort, taskRetrieval });
   const client = new Client({ name: "semantic-index-test-client", version: "0.1.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   transports.push(clientTransport, serverTransport);
@@ -82,6 +83,48 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 describe("semantic-index MCP server", () => {
+  it('returns the measured task Markdown once and preserves explicit granularity and scope', async () => {
+    const request = { requestId: 'request-1', requirement: 'quote service', granularity: 'function' as const, scopes: [scope], budget: { maxTokens: 4000 } };
+    const packet = taskPacket();
+    const search = vi.fn(async () => packet);
+    const { client } = await connectedClient(createQueryPort(), { search });
+    const tools = await client.listTools();
+    expect(tools.tools.find((tool) => tool.name === 'search_task_context')?.annotations?.readOnlyHint).toBe(true);
+    const response = await client.callTool({ name: 'search_task_context', arguments: request });
+    expect(isToolError(response)).toBe(false);
+    expect(contentText(response)).toBe(packet.markdown);
+    expect(contentText(response).split('function quote()').length - 1).toBe(1);
+    expect(search).toHaveBeenCalledWith(request, expect.any(AbortSignal));
+  });
+
+  it('rejects task results from another revision and Markdown not backed by packet evidence', async () => {
+    const request = { requestId: 'request-1', requirement: 'quote service', scopes: [scope], budget: { maxTokens: 4000 } };
+    const packet = taskPacket();
+    packet.evidence[0]!.analysisRevision = 'another-revision';
+    packet.markdown = formatContextMarkdown(packet);
+    const search = vi.fn(async () => packet);
+    const { client } = await connectedClient(createQueryPort(), { search });
+    const response = await client.callTool({ name: 'search_task_context', arguments: request });
+    expect(isToolError(response)).toBe(true);
+    expect(contentText(response)).toContain('different repository revision');
+    const mismatch = taskPacket();
+    mismatch.markdown += '\nUnverified appended source';
+    search.mockResolvedValueOnce(mismatch);
+    const second = await client.callTool({ name: 'search_task_context', arguments: request });
+    expect(isToolError(second)).toBe(true);
+    expect(contentText(second)).toContain('does not match');
+  });
+
+  it('rejects task requests carrying arbitrary paths or unbounded budgets', async () => {
+    const search = vi.fn(async () => taskPacket());
+    const { client } = await connectedClient(createQueryPort(), { search });
+    const arguments_ = { requestId: 'request-1', requirement: 'quote service', scopes: [scope], budget: { maxTokens: 4000 } };
+    const result = await client.callTool({ name: 'search_task_context', arguments: { ...arguments_, localPath: '/tmp/private' } });
+    const oversized = await client.callTool({ name: 'search_task_context', arguments: { ...arguments_, budget: { maxTokens: 999999 } } });
+    expect(isToolError(result)).toBe(true);
+    expect(isToolError(oversized)).toBe(true);
+    expect(search).not.toHaveBeenCalled();
+  });
   it("exposes exactly the SSD read-only tool set", async () => {
     const { client } = await connectedClient();
 
@@ -263,3 +306,17 @@ describe("semantic-index MCP server", () => {
     expect(isToolError(response)).toBe(false);
   });
 });
+
+function taskPacket(): ContextPacket {
+  const packet: ContextPacket = {
+    packetId: 'packet-1', requestId: 'request-1', requirement: 'quote service', status: 'complete',
+    snapshots: [{ ...scope, repositoryName: 'Quotes', analysisHash: 'hash-1' }],
+    routing: { requestedGranularity: 'function', resolvedGranularities: ['function'], source: 'user', reason: 'Explicit function lookup' },
+    results: [], relations: [], gaps: [],
+    evidence: [{ ...scope, evidenceId: 'source:quote', name: 'quote', role: 'implementation', relativePath: 'src/quote.ts', sourceRange: range,
+      contentHash: 'content-1', fileHash: 'file-1', content: 'function quote() { return 1; }', reason: 'Selected implementation', provider: 'tree-sitter', evidenceLevel: 'structural', truncated: false }],
+    markdown: '', usage: { tokenizer: 'cl100k_base', tokens: 200, maxTokens: 4000, characters: 500, files: 1, sourceLines: 1, latencyMs: 15 },
+  };
+  packet.markdown = formatContextMarkdown(packet);
+  return packet;
+}

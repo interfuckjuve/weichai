@@ -9,6 +9,7 @@ import type {
   ValidationRecord,
 } from '@forexplore/contracts';
 import { requestSemanticModuleMigrationProposal } from './module-plan-client';
+import { HttpModuleHierarchyPlanner } from './module-hierarchy-client';
 import {
   applyHunksStrict,
   canApplyAdaptation,
@@ -28,7 +29,7 @@ import {
 import type { ModuleWaveExecutionPort } from './module-wave-execution-host';
 import type { ModuleMigrationWaveRecoveryPort } from './module-migration-recovery';
 import { TranslationPanel } from './panel';
-import { buildProjectExplorer } from './project-explorer';
+import { buildProjectExplorer, readExplorerChildren, type ExplorerChildrenIndex } from './project-explorer';
 import type {
   HostToWebviewMessage,
   WebviewToHostMessage,
@@ -81,7 +82,9 @@ interface LastCheckpoint {
 
 let activeRun: ActiveMigrationRun | null = null;
 let moduleExplorerTargets = new Map<string, ModuleTarget>();
+let moduleExplorerChildren: ExplorerChildrenIndex = new Map();
 let activeCodeIntelligenceHost: CodeIntelligenceHost | null = null;
+let activeTaskSearch: { requestId: string; controller: AbortController } | null = null;
 
 export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel('ForeXplore');
@@ -101,8 +104,10 @@ export function activate(context: vscode.ExtensionContext): void {
           port: positiveEnvironmentPort(process.env.FOREXPLORE_SEMANTIC_QUERY_PORT, 8790),
           bearerToken: process.env.SEMANTIC_QUERY_PORT_TOKEN?.trim() || undefined,
         });
-        return requestSemanticModuleMigrationProposal(loadSettings().adaptationApiUrl, scope);
+        return requestSemanticModuleMigrationProposal(loadSettings().adaptationApiUrl, scope, undefined, AbortSignal.timeout(300_000));
       },
+      hierarchyPlanner: process.env.FOREXPLORE_MODULE_HIERARCHY_URL
+        ? new HttpModuleHierarchyPlanner(process.env.FOREXPLORE_MODULE_HIERARCHY_URL) : undefined,
       onChange: () => { void publishProjectView(codeIntelligence).catch((error) => output.appendLine(String(error))); },
       identityStore: context.globalState,
       output,
@@ -253,6 +258,10 @@ export function activate(context: vscode.ExtensionContext): void {
   void Promise.all([
     services.refresh(),
     synchronizeCodeIntelligence(codeIntelligence),
+    codeIntelligence.startSemanticQueryServer({
+      port: positiveEnvironmentPort(process.env.FOREXPLORE_SEMANTIC_QUERY_PORT, 8790),
+      bearerToken: process.env.SEMANTIC_QUERY_PORT_TOKEN?.trim() || undefined,
+    }),
   ])
     .then(() => refreshRepositoryStatus(services, health))
     .catch((error) => {
@@ -261,8 +270,11 @@ export function activate(context: vscode.ExtensionContext): void {
 }
 
 export function deactivate(): void {
+  activeTaskSearch?.controller.abort();
+  activeTaskSearch = null;
   activeRun = null;
   moduleExplorerTargets = new Map();
+  moduleExplorerChildren = new Map();
   activeCodeIntelligenceHost?.dispose();
   activeCodeIntelligenceHost = null;
 }
@@ -286,7 +298,7 @@ async function showPanel(
     moduleExplorer: {
       generatedAt: new Date().toISOString(), history: [],
       target: {
-        id: 'target:unselected', mode: 'target', name: '选择目标项目', rootLabel: '', tree: [],
+        id: 'target:unselected', mode: 'target', name: '选择目标工程', rootLabel: '', tree: [],
         stats: { modules: 0, files: 0, types: 0, methods: 0, implemented: 0, unimplemented: 0, unknown: 0, dependencies: 0 },
         summary: { exists: false, path: '.forexplore/module-summary.json' },
       },
@@ -315,17 +327,32 @@ async function handlePanelMessage(
   message: WebviewToHostMessage,
 ): Promise<void> {
   switch (message.type) {
+    case 'LOAD_MODULE_CHILDREN':
+      try {
+        TranslationPanel.current?.post({ type: 'MODULE_CHILDREN', requestId: message.requestId,
+          page: readExplorerChildren(moduleExplorerChildren, message.request) });
+      } catch (error) {
+        TranslationPanel.current?.post({ type: 'MODULE_CHILDREN_ERROR', requestId: message.requestId,
+          message: errorMessage(error, '模块节点读取失败') });
+      }
+      return;
     case 'ADD_TARGET_WORKSPACE':
       try {
         if (await addTargetWorkspace(message.mode)) await refreshModuleExplorer(host.codeIntelligence, { scanNewOnly: true });
       } catch (error) {
-        publishError(errorMessage(error, '添加目标工作区失败'));
+        publishError(errorMessage(error, '添加目标工程失败'));
       }
       return;
     case 'READY':
       return;
     case 'START_SEARCH':
       await startSearch(host, message);
+      return;
+    case 'START_TASK_SEARCH':
+      await startTaskSearch(host, message);
+      return;
+    case 'CANCEL_TASK_SEARCH':
+      if (activeTaskSearch?.requestId === message.requestId) activeTaskSearch.controller.abort();
       return;
     case 'SELECT_CANDIDATE':
       selectCandidate(message.candidateId);
@@ -373,6 +400,29 @@ async function handlePanelMessage(
   }
 }
 
+async function startTaskSearch(host: ExtensionHost, message: Extract<WebviewToHostMessage, { type: 'START_TASK_SEARCH' }>): Promise<void> {
+  activeTaskSearch?.controller.abort();
+  const run = { requestId: message.requestId, controller: new AbortController() };
+  activeTaskSearch = run;
+  const panel = TranslationPanel.current;
+  const disposed = panel?.panel.onDidDispose(() => run.controller.abort());
+  const signal = AbortSignal.any([run.controller.signal, AbortSignal.timeout(35_000)]);
+  try {
+    const packet = await host.codeIntelligence.searchTaskContext(message.requestId, message.targetScope, message.request, signal);
+    signal.throwIfAborted();
+    if (activeTaskSearch === run && TranslationPanel.current === panel) {
+      panel?.post({ type: 'TASK_SEARCH_RESULT', requestId: message.requestId, packet });
+    }
+  } catch (error) {
+    if (!run.controller.signal.aborted && activeTaskSearch === run && TranslationPanel.current === panel) {
+      panel?.post({ type: 'TASK_SEARCH_ERROR', requestId: message.requestId, message: errorMessage(error, '任务检索失败') });
+    }
+  } finally {
+    disposed?.dispose();
+    if (activeTaskSearch === run) activeTaskSearch = null;
+  }
+}
+
 /**
  * A Webview can choose only an existing opaque repository/revision pair for
  * read-only display. CodeIntelligenceHost validates both IDs and never alters
@@ -407,7 +457,7 @@ async function selectCodeIntelligenceProject(
     publish({ type: 'CODE_INTELLIGENCE_STATUS', presentation });
     await publishProjectView(codeIntelligence);
   } catch (error) {
-    publishError(errorMessage(error, '切换目标项目失败'));
+    publishError(errorMessage(error, '切换目标工程失败'));
   }
 }
 
@@ -431,6 +481,7 @@ async function updatePanelSettings(
       buildProjectExplorer(host.codeIntelligence, activeRun?.target),
     ]);
     moduleExplorerTargets = explorer.targets;
+    moduleExplorerChildren = explorer.childrenByNodeId;
     publish({ type: 'REPOSITORY_STATUS', statuses });
     publish({ type: 'CODE_INTELLIGENCE_STATUS', presentation: codeIntelligence });
     publish({ type: 'MODULE_EXPLORER', explorer: explorer.presentation });
@@ -447,6 +498,7 @@ async function refreshModuleExplorer(
     const presentation = await synchronizeCodeIntelligence(codeIntelligence, options);
     const result = await buildProjectExplorer(codeIntelligence, activeRun?.target);
     moduleExplorerTargets = result.targets;
+    moduleExplorerChildren = result.childrenByNodeId;
     publish({ type: 'MODULE_EXPLORER', explorer: result.presentation });
     publish({ type: 'CODE_INTELLIGENCE_STATUS', presentation });
   } catch (error) {
@@ -462,7 +514,7 @@ async function selectWorkspaceTarget(targetId: string): Promise<void> {
     const selected = (await activeCodeIntelligenceHost.explorerData()).find((item) => item.selectedTarget);
     const workspaceFolder = vscode.workspace.workspaceFolders?.find((folder) =>
       path.resolve(folder.uri.fsPath).toLowerCase() === path.resolve(selected?.repository.localPath ?? '').toLowerCase());
-    if (!workspaceFolder) throw new Error('所选项目不属于已打开的目标工作区。');
+    if (!workspaceFolder) throw new Error('所选工程不属于已打开的 VS Code 工作区。');
     const canonicalPath = canonicalWorkspacePath(workspaceFolder.uri.fsPath, target.path);
     const targetUri = vscode.Uri.joinPath(workspaceFolder.uri, ...canonicalPath.split('/'));
     const openDocument = vscode.workspace.textDocuments.find(
@@ -843,7 +895,7 @@ function publishError(message: string): void {
 function summarizeRepositoryStatus(statuses: RepositoryStatus[]): string | null {
   if (statuses.length === 0) return null;
   const unavailable = statuses.filter((status) => !status.exists || !status.readable).length;
-  return `本地历史仓库：${statuses.length} 个，${unavailable} 个不可用。`;
+  return `本地参考工程：${statuses.length} 个，${unavailable} 个不可用。`;
 }
 
 function summarizeCodeIntelligence(presentation: CodeIntelligencePresentation): string | null {
@@ -881,6 +933,7 @@ function publishProjectView(host: CodeIntelligenceHost): Promise<void> {
     publish({ type: 'CODE_INTELLIGENCE_STATUS', presentation: await host.presentation() });
     const explorer = await buildProjectExplorer(host, activeRun?.target);
     moduleExplorerTargets = explorer.targets;
+    moduleExplorerChildren = explorer.childrenByNodeId;
     publish({ type: 'MODULE_EXPLORER', explorer: explorer.presentation });
     publish({ type: 'CODE_INTELLIGENCE_STATUS', presentation: await host.presentation() });
   });

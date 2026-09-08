@@ -3,12 +3,17 @@ import type {
   ApplyResult,
   ModuleTarget,
   SearchCandidate,
+  ContextPacket,
+  TaskRetrievalRequest,
+  RepositoryRevisionScope,
 } from '@forexplore/contracts';
 import type {
   ModuleExplorerPresentation,
   RepositoryStatus,
   ServiceStatus,
   CodeIntelligencePresentation,
+  ModuleChildrenPage,
+  ModuleChildrenRequest,
 } from '../ui-types';
 
 /** Snapshot sent by the trusted extension host when the panel is created. */
@@ -30,16 +35,28 @@ export interface PanelSettingsPresentation {
   topK: number;
 }
 
+export interface TaskSearchIntent {
+  requirement: string;
+  scope: 'target' | 'all';
+  granularity: NonNullable<TaskRetrievalRequest['granularity']>;
+}
+
+export type TaskSearchTargetScope = RepositoryRevisionScope & { projectId?: string };
+
 /** Messages the extension host posts into the Webview. */
 export type HostToWebviewMessage =
   | { type: 'INIT'; payload: PanelInitPayload }
   | { type: 'SEARCH_RESULT'; candidates: SearchCandidate[] }
+  | { type: 'TASK_SEARCH_RESULT'; requestId: string; packet: ContextPacket }
+  | { type: 'TASK_SEARCH_ERROR'; requestId: string; message: string }
   | { type: 'ADAPT_RESULT'; result: AdaptationResult }
   | { type: 'APPLY_RESULT'; result: ApplyResult }
   | { type: 'REPOSITORY_STATUS'; statuses: RepositoryStatus[] }
   | { type: 'CODE_INTELLIGENCE_STATUS'; presentation: CodeIntelligencePresentation }
   | { type: 'SERVICE_STATUS'; status: ServiceStatus }
   | { type: 'MODULE_EXPLORER'; explorer: ModuleExplorerPresentation }
+  | { type: 'MODULE_CHILDREN'; requestId: string; page: ModuleChildrenPage }
+  | { type: 'MODULE_CHILDREN_ERROR'; requestId: string; message: string }
   | { type: 'TARGET_SELECTED'; target: ModuleTarget }
   | { type: 'TARGET_CLEARED' }
   | { type: 'SETTINGS_UPDATED'; settings: PanelSettingsPresentation }
@@ -51,6 +68,9 @@ export type HostToWebviewMessage =
  */
 export type WebviewToHostMessage =
   | { type: 'READY' }
+  | { type: 'START_TASK_SEARCH'; requestId: string; targetScope: TaskSearchTargetScope; request: TaskSearchIntent }
+  | { type: 'CANCEL_TASK_SEARCH'; requestId: string }
+  | { type: 'LOAD_MODULE_CHILDREN'; requestId: string; request: ModuleChildrenRequest }
   | { type: 'ADD_TARGET_WORKSPACE'; mode: 'browse' | 'input' | 'workspace' }
   | {
       type: 'START_SEARCH';
@@ -79,12 +99,16 @@ export type WebviewToHostMessage =
 const hostMessageTypes = new Set<string>([
   'INIT',
   'SEARCH_RESULT',
+  'TASK_SEARCH_RESULT',
+  'TASK_SEARCH_ERROR',
   'ADAPT_RESULT',
   'APPLY_RESULT',
   'REPOSITORY_STATUS',
   'CODE_INTELLIGENCE_STATUS',
   'SERVICE_STATUS',
   'MODULE_EXPLORER',
+  'MODULE_CHILDREN',
+  'MODULE_CHILDREN_ERROR',
   'TARGET_SELECTED',
   'TARGET_CLEARED',
   'SETTINGS_UPDATED',
@@ -96,6 +120,22 @@ export function isWebviewToHostMessage(value: unknown): value is WebviewToHostMe
   if (typeof value !== 'object' || value === null) return false;
   const message = value as Record<string, unknown>;
   switch (message.type) {
+    case 'LOAD_MODULE_CHILDREN': {
+      if (!hasOnlyKeys(message, ['type', 'requestId', 'request']) || !isOpaqueIdentifier(message.requestId) ||
+        typeof message.request !== 'object' || message.request === null) return false;
+      const request = message.request as Record<string, unknown>;
+      return Object.keys(request).every((key) => ['repositoryId', 'analysisRevision', 'projectId', 'nodeId', 'offset', 'query', 'status'].includes(key)) &&
+        [request.repositoryId, request.analysisRevision, request.projectId].every(isOpaqueIdentifier) &&
+        typeof request.nodeId === 'string' && request.nodeId.length > 0 && request.nodeId.length <= 4096 &&
+        Number.isSafeInteger(request.offset) && typeof request.offset === 'number' && request.offset >= 0 &&
+        (request.query === undefined || (typeof request.query === 'string' && request.query.length <= 200)) &&
+        (request.status === undefined || ['all', 'implemented', 'unimplemented', 'unknown'].includes(request.status as string));
+    }
+    case 'START_TASK_SEARCH':
+      return hasOnlyKeys(message, ['type', 'requestId', 'targetScope', 'request']) &&
+        isOpaqueIdentifier(message.requestId) && isTaskSearchScope(message.targetScope) && isTaskSearchIntent(message.request);
+    case 'CANCEL_TASK_SEARCH':
+      return hasOnlyKeys(message, ['type', 'requestId']) && isOpaqueIdentifier(message.requestId);
     case 'ADD_TARGET_WORKSPACE':
       return hasOnlyKeys(message, ['type', 'mode']) && typeof message.mode === 'string' && ['browse', 'input', 'workspace'].includes(message.mode);
     case 'READY':
@@ -162,6 +202,23 @@ export function isWebviewToHostMessage(value: unknown): value is WebviewToHostMe
     default:
       return false;
   }
+}
+
+function isTaskSearchScope(value: unknown): value is TaskSearchTargetScope {
+  if (typeof value !== 'object' || value === null) return false;
+  const scope = value as Record<string, unknown>;
+  return Object.keys(scope).every((key) => ['repositoryId', 'analysisRevision', 'projectId'].includes(key)) &&
+    isOpaqueIdentifier(scope.repositoryId) && isOpaqueIdentifier(scope.analysisRevision) &&
+    (scope.projectId === undefined || isOpaqueIdentifier(scope.projectId));
+}
+
+function isTaskSearchIntent(value: unknown): value is TaskSearchIntent {
+  if (typeof value !== 'object' || value === null) return false;
+  const request = value as Record<string, unknown>;
+  return hasOnlyKeys(request, ['requirement', 'scope', 'granularity']) &&
+    typeof request.requirement === 'string' && Boolean(request.requirement.trim()) && request.requirement.length <= 8_000 &&
+    ['target', 'all'].includes(String(request.scope)) &&
+    ['auto', 'function', 'class', 'module', 'subsystem'].includes(String(request.granularity));
 }
 
 /** IDs are looked up by the host; this rejects control data, not local paths. */

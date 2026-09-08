@@ -27,6 +27,8 @@ import {
 } from './semantic-query-service.js';
 import { ModuleImplementationSearchService } from './module-implementation-search.js';
 import { LocalModuleReranker, type ModuleRerankerConfig } from './module-reranker.js';
+import { ProjectAnalysisCoordinator, type ProjectAnalysisOptions } from './project-analysis.js';
+import { TaskRetrievalService } from './task-retrieval.js';
 
 export { LocalModuleReranker, type ModuleReranker, type ModuleRerankerConfig } from './module-reranker.js';
 
@@ -96,6 +98,7 @@ export interface CreateCodeIntelligenceRuntimeOptions {
   queryOptions?: Omit<SemanticQueryServiceOptions, 'languageCapabilities' | 'semanticProviders'>;
   registryOptions?: RepositoryRegistryOptions;
   coordinatorOptions?: AnalysisCoordinatorOptions;
+  projectAnalysis?: Omit<ProjectAnalysisOptions, 'store'>;
   initialize?: boolean;
 }
 
@@ -108,6 +111,8 @@ export interface CodeIntelligenceRuntime {
   javaCsharpSpecializedProvider: JavaCsharpSpecializedProvider;
   queryPort: SemanticQueryPort;
   moduleImplementationSearch: ModuleImplementationSearchService;
+  projectAnalysis: ProjectAnalysisCoordinator;
+  taskRetrieval: TaskRetrievalService;
   close(): Promise<void>;
 }
 
@@ -157,6 +162,8 @@ export async function createCodeIntelligenceRuntime(
     semanticProviders,
   });
   const moduleImplementationSearch = new ModuleImplementationSearchService(store, moduleReranker);
+  const projectAnalysis = new ProjectAnalysisCoordinator({ store, ...options.projectAnalysis });
+  const taskRetrieval = new TaskRetrievalService(store);
   const coordinator = new AnalysisCoordinator(
     registry,
     store,
@@ -172,7 +179,10 @@ export async function createCodeIntelligenceRuntime(
     javaCsharpSpecializedProvider,
     queryPort,
     moduleImplementationSearch,
+    projectAnalysis,
+    taskRetrieval,
     async close(): Promise<void> {
+      await projectAnalysis.idle();
       if (ownsStore) await store.close?.();
     },
   };
@@ -180,3 +190,7 @@ export async function createCodeIntelligenceRuntime(
 
 export const runtimeInternals = { languageCapabilities };
 export { ProjectAnalysisCoordinator, projectAnalysisProfile, projectAnalysisObjective, projectPlanHash, validateProjectResult } from './project-analysis.js';
+export { buildAdaptiveModuleProposal, adaptiveModuleAlgorithm, type AdaptiveModuleOptions } from './module-hierarchy.js';
+export { buildProjectModuleProposal, moduleModelingAlgorithm } from './module-modeling.js';
+export { TaskRetrievalService, validateTaskRetrievalRequest } from './task-retrieval.js';
+export { contextTokenCount } from './context-compiler.js';

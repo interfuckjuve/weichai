@@ -1,5 +1,5 @@
-import { isStableRepositoryIdentifier } from "@forexplore/contracts";
-import type { SemanticQueryPort } from "@forexplore/workflow-core";
+import { formatContextMarkdown, isStableRepositoryIdentifier, type ContextPacket, type TaskRetrievalRequest } from "@forexplore/contracts";
+import type { SemanticQueryPort, TaskRetrievalPort } from "@forexplore/workflow-core";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
 
@@ -49,6 +49,7 @@ export interface SemanticIndexMcpServerOptions {
    * a filesystem root, LSP session, index store, or SeekDB connection.
    */
   queryPort: SemanticQueryPort;
+  taskRetrieval?: TaskRetrievalPort;
 }
 
 const repositoryIdSchema = z.string()
@@ -157,6 +158,20 @@ const sourceExcerptSchema = scopeSchema.extend({
   maxChars: z.number().int().min(1).max(32_000).optional(),
 }).strict();
 
+const taskSearchSchema = z.object({
+  requestId: repositoryIdSchema,
+  requirement: z.string().trim().min(1).max(MAX_QUERY_CHARS),
+  granularity: z.enum(["auto", "function", "class", "module", "subsystem"]).optional(),
+  scopes: z.array(scopeSchema.extend({ projectId: repositoryIdSchema.optional(), role: z.enum(["target", "reference"]).optional() }).strict()).min(1).max(8),
+  budget: z.object({
+    maxTokens: z.number().int().min(256).max(32000),
+    maxLatencyMs: z.number().int().min(100).max(60000).optional(),
+    maxFiles: z.number().int().min(1).max(40).optional(),
+    maxSourceLines: z.number().int().min(1).max(4000).optional(),
+  }).strict(),
+  knownEvidence: z.array(z.object({ evidenceId: z.string().min(1).max(512), contentHash: z.string().min(1).max(512) }).strict()).max(200).optional(),
+}).strict();
+
 /**
  * Creates a strictly read-only MCP facade over SemanticQueryPort.  All tool
  * inputs are repository/revision scoped and paths are relative-only; the
@@ -168,6 +183,21 @@ export function createSemanticIndexMcpServer(
   const server = new McpServer({
     name: "forexplore-semantic-index",
     version: "0.1.0",
+  });
+
+  if (options.taskRetrieval) server.registerTool("search_task_context", {
+    title: "Search Task Context",
+    description: "Read task-related source context from the local host at an explicit or automatic granularity, with a token budget and fixed repository revisions.",
+    inputSchema: taskSearchSchema,
+    annotations: readOnlyAnnotations,
+  }, async (input, extra) => {
+    try {
+      const packet = await options.taskRetrieval!.search(input, extra.signal);
+      assertTaskPacketBoundary(packet, input);
+      return { content: [{ type: "text" as const, text: packet.markdown }] };
+    } catch (error) {
+      return { content: [{ type: "text" as const, text: toolErrorMessage(error) }], isError: true };
+    }
   });
 
   server.registerTool("list_repositories", {
@@ -330,6 +360,33 @@ function assertResultScope(
 function assertUnscopedResultBoundary(value: unknown): void {
   if (!isRecord(value)) throw new SemanticResultBoundaryError("SemanticQueryPort returned an invalid result.");
   assertNestedUnscopedResultBoundary(value);
+}
+
+function assertTaskPacketBoundary(value: ContextPacket, request: TaskRetrievalRequest): void {
+  assertUnscopedResultBoundary(value);
+  if (value.requestId !== request.requestId || !["complete", "partial", "unavailable"].includes(value.status) ||
+    !Array.isArray(value.snapshots) || !Array.isArray(value.results) || !Array.isArray(value.evidence) ||
+    !Array.isArray(value.relations) || !Array.isArray(value.gaps) || typeof value.markdown !== "string" ||
+    !value.usage || !Number.isInteger(value.usage.tokens) || value.usage.tokens < 0 || value.usage.tokens > request.budget.maxTokens) {
+    throw new SemanticResultBoundaryError("Task retrieval returned an invalid context packet.");
+  }
+  for (const item of [...value.snapshots, ...value.results, ...value.evidence, ...value.relations]) {
+    if (!request.scopes.some((scope) => scope.repositoryId === item.repositoryId && scope.analysisRevision === item.analysisRevision)) {
+      throw new SemanticResultBoundaryError("Task retrieval returned evidence from a different repository revision.");
+    }
+    assertPathFields(item as unknown as Record<string, unknown>);
+  }
+  for (const item of value.evidence) {
+    if (!sourceRangeSchema.safeParse(item.sourceRange).success || !evidenceProviders.has(item.provider) ||
+      !evidenceLevels.has(item.evidenceLevel) || typeof item.evidenceId !== "string" || !item.evidenceId ||
+      typeof item.content !== "string" || typeof item.contentHash !== "string" || !item.contentHash ||
+      typeof item.fileHash !== "string" || !item.fileHash) {
+      throw new SemanticResultBoundaryError("Task retrieval returned invalid source evidence.");
+    }
+  }
+  if (formatContextMarkdown(value) !== value.markdown) {
+    throw new SemanticResultBoundaryError("Task retrieval Markdown does not match its evidence.");
+  }
 }
 
 function assertNestedUnscopedResultBoundary(value: unknown): void {

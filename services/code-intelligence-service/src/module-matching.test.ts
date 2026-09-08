@@ -2,7 +2,7 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { ModuleTarget } from '@forexplore/contracts';
+import type { ModuleTarget, ProjectModuleProposal } from '@forexplore/contracts';
 import { createCodeIntelligenceRuntime, InMemoryIndexStore, ProjectAnalysisCoordinator, projectPlanHash, projectAnalysisObjective } from './index.js';
 
 const roots: string[] = [];
@@ -56,6 +56,32 @@ describe('module-to-module matching', () => {
     const list = vi.spyOn(store, 'listSearchDocuments').mockRejectedValue(new Error('No fallback'));
     expect(await runtime.moduleImplementationSearch.search({ target, requirement: 'payment', topK: 5, repositoryIds: ['history'] })).toEqual([]);
     expect(list).not.toHaveBeenCalled();
+  });
+
+  it('retains the entire descendant manifest when matching a parent module', async () => {
+    const { runtime, store, scope, index } = await setup();
+    const base = { kind: 'feature', description: 'Payment receipt implementation', language: 'TypeScript', symbolKeys: [], dependsOn: [], evidenceIds: [`project:${scope.projectId}`] };
+    const proposal: ProjectModuleProposal = { ...scope, analysisHash: index.analysisHash, objective: projectAnalysisObjective, summary: 'Payment hierarchy', modules: [
+      { ...base, id: 'parent', name: 'Payment subsystem', nodeKind: 'subsystem', sourceFiles: [], refinement: { state: 'split', reason: 'Separate implementation', decisionSource: 'structural' } },
+      { ...base, id: 'leaf', name: 'Payment implementation', parentId: 'parent', nodeKind: 'module', sourceFiles: index.files.map((file) => file.relativePath), refinement: { state: 'leaf', reason: 'Cohesive implementation', decisionSource: 'structural' } },
+    ] };
+    const analysis = new ProjectAnalysisCoordinator({ store, plan: async () => ({ proposal,
+      evidence: { ...scope, analysisHash: index.analysisHash, planHash: projectPlanHash(proposal), evidenceIds: [`project:${scope.projectId}`] } }) });
+    await analysis.ensure(scope, true);
+    const ready = await analysis.read(scope);
+    expect(ready.state, ready.error).toBe('ready');
+    const parentDocuments = (await store.listSearchDocuments(scope)).filter((document) => document.kind === 'summary' && JSON.parse(document.text).moduleId === 'parent');
+    vi.spyOn(store, 'searchSearchDocuments').mockResolvedValue(parentDocuments);
+    const previews = vi.spyOn(store, 'getSourcePreview');
+    const candidates = await runtime.moduleImplementationSearch.search({ target, requirement: 'payment', topK: 3, repositoryIds: ['history'] });
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]!.sourceModule?.sourceFiles).toEqual(index.files.map((file) => file.relativePath));
+    expect(candidates[0]!.sourceModule?.moduleId).toBe('parent');
+    expect(candidates[0]!.preview).toContain('submitPayment');
+    expect(previews).toHaveBeenCalledTimes(3);
+    const implementations = await runtime.moduleImplementationSearch.search({ target: { ...target, kind: 'function', name: 'submitPayment', signature: 'submitPayment()' }, requirement: 'payment', topK: 3, repositoryIds: ['history'] });
+    expect(implementations.some((candidate) => candidate.title === 'submitPayment' && candidate.sourceModule?.moduleId === 'parent')).toBe(true);
+    expect(implementations.every((candidate) => index.files.some((file) => file.relativePath === candidate.path))).toBe(true);
   });
 
   it('rejects an artifact whose proposal no longer matches its evidence hash', async () => {

@@ -8,9 +8,9 @@ ForeXplore 将企业已有实现作为迁移证据：在任意受支持语言的
 
 索引写入事务的单条 SQL 超时预算至少为 60 秒，包含提交阶段；若连接原值更大则保留原值，事务结束后恢复连接设置。此设置不修改数据库全局配置。`[forexplore:performance]` 的 `seekdb-transaction` 日志分别记录事务总耗时和 `commitMs`，便于区分批量写入与提交等待。
 
-项目 Agent 首轮预载目标项目元数据、文件清单、静态依赖和符号信息，先依据这些证据划分模块，再按需查询源码或更多索引信息。初始依赖最多读取 200 条，符号最多读取 100 条，各清单按字符预算保留完整记录，并附带省略数量和分页信息。信息充分时可直接输出；未解析依赖仍保留原状态。其他项目的文件清单不会进入首轮上下文。
+项目 Agent 首轮预载目标工程元数据、文件清单、静态依赖和符号信息，先依据这些证据划分模块，再按需查询源码或更多索引信息。初始依赖最多读取 200 条，符号最多读取 100 条，各清单按字符预算保留完整记录，并附带省略数量和分页信息。信息充分时可直接输出；未解析依赖仍保留原状态。其他项目的文件清单不会进入首轮上下文。
 
-扩展宿主将 `forexplore.repositoryPaths` 中的历史仓库和当前本地工作区目标工程注册到同一个版本化索引链路：`RepositoryRegistry → AnalysisCoordinator → Tree-sitter structural index → revision store → SemanticQueryPort`。运行 **ForeXplore: 刷新代码智能索引** 可增量复用未变文件；**ForeXplore: 重新索引检索仓库** 会重新检查全部文件；内容和解析器版本未变时保留原 revision。索引构建完成前，读者继续看到上一个 active revision。
+扩展宿主将 `forexplore.repositoryPaths` 中的参考工程和当前本地工作区目标工程注册到同一个版本化索引链路：`RepositoryRegistry → AnalysisCoordinator → Tree-sitter structural index → revision store → SemanticQueryPort`。运行 **ForeXplore: 刷新代码智能索引** 可增量复用未变文件；**ForeXplore: 重新索引参考工程** 会重新检查全部文件；内容和解析器版本未变时保留原 revision。索引构建完成前，读者继续看到上一个 active revision。
 
 设置面板展示仓库、项目、索引状态、active revision、语言能力等级和项目解析状态；不会接收索引数据库连接、源码或 `localPath`。它可切换查看宿主验证过的历史 revision，但此操作严格只读，绝不会改写 `activeRevision`；历史 Summary 会明确标为过期，不能当作当前结果。扩展宿主保留现有 Java/C# `RepositoryStaticAnalysis` 作为模块迁移兼容制品，不能把旧快照 Summary 强行标记为新结构索引 revision 的当前 Summary。新鲜的 Java/C# 编译器探测快照只有在其 Java/C# 文件哈希与 active structural revision 完全相符时，才由宿主绑定为该 revision 的专用语义证据；绑定失败不会影响旧迁移流程。
 
@@ -113,11 +113,41 @@ export CODE_INTELLIGENCE_SEEKDB_VECTOR_DIMENSION='384' # optional; default shown
 
 每项只允许 `id`、`label`、`executable`、`args`、`cwd`、`required` 和 `timeoutMs`。`id`、`label`、`executable` 必填；其余分别默认为空数组、`.`、`true` 和 10 分钟。最多配置 32 条命令，`timeoutMs` 必须在 1 秒到 30 分钟之间。`cwd` 必须是 worktree 内的相对路径；`executable` 可以是受 PATH 解析的简单命令名，或使用正斜杠的 worktree 内相对可执行文件，不能是绝对路径或使用反斜杠。任何必需检查失败或未验证都会阻止准备和后续审批提交。
 
+## 术语
+
+界面统一使用“目标工程”表示待开发或适配的工程，“参考工程”表示提供可借鉴实现的工程。检索结果称为“候选模块”，选定后用于分析与翻译的模块称为“参考模块”。“工作区”用于 VS Code 编辑环境，“代码仓库”用于仓库身份和版本管理。内部 `target` / `history` 角色值及配置键保持兼容。
+
+## 工作台入口
+
+顶部提供“任务检索 / 复用迁移”切换，左侧共用工程选择器与模块树，解析详情位于主操作区下方。复用迁移沿用已有需求、候选、翻译和回填流程。
+
+任务检索页已通过 Host 消息通道连接真实 `TaskRetrievalPort`，直接查询当前选中工程、项目和代码版本，不等待整个项目的 Agent 分析。支持“自动、函数 / 方法、类 / 接口、功能模块、子系统”五种粒度；尚未发布模块索引时模块选项禁用，当前子系统选项显示未建索引。显式粒度不会静默切换成其他粒度。历史 `ready/superseded` 快照可只读查询，参考范围由 Host 限定为本窗口可见工程。
+
+返回内容复用证据列表与源码预览，显示快照、部分结果和证据缺口。页面只需填写需求并选择范围与粒度，不提供 token 预算控件或用量计数；Host 使用内部默认预算。复制与下载默认使用服务端生成的同一份 Markdown；手动筛选证据后标记“已筛选”。修改需求、范围、粒度或取消检索都会撤销当前请求，迟到响应不会覆盖新结果。“复用迁移”携带开发需求进入原有流程，尚不向翻译后端传递选定证据。
+
+模块建模继续发布现有 `ProjectAnalysisRecord`，因此离线分组结果直接进入原有模块树、Summary、覆盖与依赖视图。界面分别标明“离线结构分析”或“Agent 分析”来源；基础源码检索可在模块说明发布前使用。
+
+大仓模块树初始只传模块摘要，展开后通过当前工程、项目和版本的节点 ID 每次读取 80 个子节点，可继续分页到最后一项。左侧搜索覆盖宿主的完整节点索引，包括未展开的符号；统计保留全量值。依赖、诊断和未归属文件的展示明细最多 200 条，页面同时标明展示数量与总量。函数和类粒度仅在当前检索范围已有对应符号时启用。
+
+在仓库根目录运行 `node scripts/preview-workbench.mjs`，生成可直接打开的 `logs/workbench-preview.html`。预览使用独立的示例消息桥和本地 FileUpload 源码片段，可体验检索、选择、预算、下载及工作流切换，不调用模型或数据库。`FOREXPLORE_UI_TOOLS` 可指向含本机可用 esbuild 的工具目录。
+
+### 本机 Agent 查询
+
+扩展启动后提供本机查询服务，默认 `http://127.0.0.1:8790`，可通过 `FOREXPLORE_SEMANTIC_QUERY_PORT` 调整。MCP 进程使用同一个服务：
+
+```bash
+SEMANTIC_QUERY_PORT_URL=http://127.0.0.1:8790 npm run start --workspace @forexplore/semantic-index-mcp-server
+```
+
+`search_task_context` 接收 `requestId`、`requirement`、`granularity`、固定 `scopes` 和 `budget.maxTokens`。Agent 先用已有 `list_repositories`、`list_projects` 获取身份，再调用任务检索；补查仍可使用 `get_symbol`、`get_dependencies`、`read_source_excerpt` 等原有工具。任务工具只返回一次已计量的 Markdown，不重复传输包含相同源码的 JSON。HTTP `POST /v1/task-search` 则返回完整 `ContextPacket`，`usage.tokens` 计量其 `markdown`，不是整个 HTTP 信封。
+
+新增任务 HTTP 适配器仅接受 `http://127.0.0.1` 或 `http://[::1]`，不接受远端主机、DNS 名称、URL 凭据或重定向；MCP 不注册或扫描工程。Host 在每次查询中核验窗口可见工程及可读版本。配置 `SEMANTIC_QUERY_PORT_TOKEN` 时，扩展和 MCP 使用相同本机 token。
+
 ## 运行方式
 
 1. 在仓库根目录运行 `npm run dev:extension`。脚本会启动 SeekDB、两个本地服务，并打开 Extension Development Host。
-2. 在面板左侧“目标工作区”的选择器中选择目标目录；已打开的 VS Code 工作区仅作为候选，不会自动作为目标工程。
-3. 运行 **ForeXplore: 打开翻译面板**，从目标项目的模块树中选择待实现的类或方法。
+2. 在面板左侧“目标工程”的选择器中选择目标目录；已打开的 VS Code 工作区仅作为候选，不会自动作为目标工程。
+3. 运行 **ForeXplore: 打开翻译面板**，从目标工程的模块树中选择待实现的类或方法。
 4. 输入需求并检索全部语料候选。任意已支持语言的候选均可继续生成目标语言补丁。
 
 插件只调用真实的 SeekDB 检索服务和语言无关的适配服务。任一服务不可用时，插件会报错，不会回退到本地样例。
@@ -154,7 +184,7 @@ npm run dev:adaptation
 }
 ```
 
-翻译面板右上角的“设置”界面可调整每次检索的候选方案数量，并添加或删除多个本地历史代码仓路径。首次使用且路径为空时，面板会提示进入该设置界面。每个已保存路径作为一个可切换的 01A 历史仓；未配置时不会使用机器相关的示例默认路径。`forexplore.repositoryPaths` 保存后会注册历史库并执行统一结构索引及按项目的 Agent 模块解析。代码理解结果存入 SeekDB；检索先选择相关模块，再只在这些模块拥有的符号中返回候选。
+翻译面板右上角的“设置”界面可调整每次检索的候选方案数量，并添加或删除多个本地参考工程路径。首次使用且路径为空时，面板会提示进入该设置界面。每个已保存路径作为一个可切换的 01A 参考工程；未配置时不会使用机器相关的示例默认路径。`forexplore.repositoryPaths` 保存后会注册参考工程并执行统一结构索引及按项目的 Agent 模块解析。代码理解结果存入 SeekDB；检索先选择相关模块，再只在这些模块拥有的符号中返回候选。
 
 ## 写回保护
 
@@ -185,19 +215,19 @@ npm run test:integration --workspace forexplore-vscode
 
 ## 消息协议
 
-Webview → 宿主：`READY`、`START_SEARCH`、`SELECT_CANDIDATE`、`START_ADAPT`、`APPLY_CURRENT_RUN`、`CHECK_REPOSITORIES`、`REFRESH_MODULE_EXPLORER`、`SAVE_SETTINGS`、`SELECT_CODE_INTELLIGENCE_REVISION`、`SELECT_WORKSPACE_TARGET`、`OPEN_TARGET`。模块树目标切换和 revision 查看只提交 Host 已发布的受限 ID，不提交路径或源码；设置保存只提交经过严格数量与长度校验的 Top K 和本地仓库路径列表。
+Webview → 宿主：`READY`、`START_TASK_SEARCH`、`CANCEL_TASK_SEARCH`、`START_SEARCH`、`SELECT_CANDIDATE`、`START_ADAPT`、`APPLY_CURRENT_RUN`、`CHECK_REPOSITORIES`、`REFRESH_MODULE_EXPLORER`、`SAVE_SETTINGS`、`SELECT_CODE_INTELLIGENCE_REVISION`、`SELECT_WORKSPACE_TARGET`、`OPEN_TARGET`。任务检索携带请求 ID、需求、粒度、预算及 Host 已发布的工程/版本/项目 ID；模块树目标切换和 revision 查看只提交受限 ID，不提交路径或源码；设置保存只提交经过严格数量与长度校验的 Top K 和本地仓库路径列表。
 
-宿主 → Webview：`INIT`、`MODULE_EXPLORER`、`TARGET_SELECTED`、`SETTINGS_UPDATED`、`SEARCH_RESULT`、`ADAPT_RESULT`、`APPLY_RESULT`、`REPOSITORY_STATUS`、`CODE_INTELLIGENCE_STATUS`、`SERVICE_STATUS`、`ERROR`。
+宿主 → Webview：`INIT`、`MODULE_EXPLORER`、`TARGET_SELECTED`、`SETTINGS_UPDATED`、`TASK_SEARCH_RESULT`、`TASK_SEARCH_ERROR`、`SEARCH_RESULT`、`ADAPT_RESULT`、`APPLY_RESULT`、`REPOSITORY_STATUS`、`CODE_INTELLIGENCE_STATUS`、`SERVICE_STATUS`、`ERROR`。任务响应按请求 ID 配对。
 
 共享类型和状态机在 monorepo 的 `@forexplore/contracts`、`@forexplore/workflow-core` 中维护；打包时 Webview 与扩展宿主会将所需代码纳入 VSIX 构建产物。
 
-## 历史库与目标项目解析
+## 参考工程与目标工程解析
 
-运行 **ForeXplore: 打开翻译面板** 即可配置仓库，无需先选择方法。添加多个历史路径并保存后，各项目自动进入模块解析；左侧“目标工作区 / 历史仓”各自的项目选择器切换当前项目，右侧展示模块树对应的 Summary、覆盖范围、依赖和诊断。选择方法后才进入后续代码翻译流程。
+运行 **ForeXplore: 打开翻译面板** 即可配置仓库，无需先选择方法。添加多个参考工程路径并保存后，各项目自动进入模块解析；左侧“目标工程 / 参考工程”各自的项目选择器切换当前项目，右侧展示模块树对应的 Summary、覆盖范围、依赖和诊断。选择方法后才进入后续代码翻译流程。
 
 目标选择器菜单提供已打开工作区、浏览目录和输入路径三个入口。选择保存在 `forexplore.targetRepositoryPaths`；只有明确选择且位于当前 VS Code 工作区的目录会作为目标工程。一个目录包含多个子项目时，结构索引完成后等待用户选择具体项目，再启动该项目的 Agent 解析。面板会逐仓库显示已完成结果。
 
-保存设置时只扫描新添加的仓库，已有仓库通过“刷新此仓库”检查变化。普通刷新在内容未变化时复用原 revision 和 Summary。“重新解析模块”明确要求再次调用 Agent；“重试解析 / 同步”在仅投影失败时不会重复调用模型。历史版本展示保持只读。本地 .forexplore/module-summary.json 不参与当前模块树构建。
+保存设置时只扫描新添加的仓库，已有仓库通过“刷新此仓库”检查变化。普通刷新在内容未变化时复用原 revision 和 Summary。“重新解析模块”按当前策略重新建模；小项目可使用已配置 Agent，大项目使用离线结构分组。“重试解析 / 同步”在仅投影失败时不重复建模。历史版本展示保持只读。本地 .forexplore/module-summary.json 不参与当前模块树构建。
 
 SeekDB 按行数和数据大小分批写入，项目 Summary 只替换自身的模块检索文档。宿主控制台中的 `[forexplore:performance]` 日志记录源码扫描、结构解析、数据库写入、检索投影和 Agent 分析耗时，以及文件、符号、依赖数量和 INSERT 次数。数据库写入验收可在仓库根目录运行 `npx tsx scripts/verify-indexing-performance.ts`，它使用本机 SeekDB 连接配置，创建独立临时数据库，验证索引一致性、Summary 更新范围及逐条/批量写入耗时，结束后删除测试数据库。
 
@@ -211,7 +241,7 @@ $env:CODE_INTELLIGENCE_SEEKDB_DATABASE = 'forexplore_code_intelligence'
 # 如需密码，在宿主环境中配置 CODE_INTELLIGENCE_SEEKDB_PASSWORD。
 ~~~
 
-适配服务需要 DEEPSEEK_API_KEY，以及 ADAPTATION_SEMANTIC_INDEX_ENABLED=true、SEMANTIC_QUERY_PORT_URL=http://127.0.0.1:8790。兼容服务可通过 DEEPSEEK_API_BASE 和 DEEPSEEK_MODEL 指定。查询服务由扩展宿主在项目解析时启动；端口可通过 FOREXPLORE_SEMANTIC_QUERY_PORT 调整，并同步修改适配服务地址。可选 SEMANTIC_QUERY_PORT_TOKEN 在两个进程中应一致。凭据仅保留在本地服务或宿主环境。
+适配服务需要 DEEPSEEK_API_KEY，以及 ADAPTATION_SEMANTIC_INDEX_ENABLED=true、SEMANTIC_QUERY_PORT_URL=http://127.0.0.1:8790。兼容服务可通过 DEEPSEEK_API_BASE 和 DEEPSEEK_MODEL 指定。查询服务随扩展宿主启动，不依赖 Agent 模块解析；端口可通过 FOREXPLORE_SEMANTIC_QUERY_PORT 调整，并同步修改适配服务地址。可选 SEMANTIC_QUERY_PORT_TOKEN 在两个进程中应一致。凭据仅保留在本地服务或宿主环境。
 
 模块任务使用 module_artifacts 中独立的 job 记录持久化，Summary 使用按项目和解析配置稳定定位的另一条记录。任务失败不删除上一份有效结果；扩展重启后中断任务可重试。Summary 的自动发布只代表代码理解完成，不批准代码迁移或写回。
 
@@ -223,4 +253,4 @@ $env:CODE_INTELLIGENCE_SEEKDB_DATABASE = 'forexplore_analysis_acceptance'
 npm run test:project-analysis:live
 ~~~
 
-该脚本建立两个历史库和一个目标库，通过实际 HTTP 查询与 Agent 工具调用发布 Summary，验证无变更刷新与重开宿主复用，最后移除本次测试仓库记录。单元和 Webview 链路测试运行 npm test；VS Code 集成测试运行 npm run test:integration --workspace forexplore-vscode。
+该脚本建立两个参考工程和一个目标工程，通过实际 HTTP 查询与 Agent 工具调用发布 Summary，验证无变更刷新与重开宿主复用，最后移除本次测试仓库记录。单元和 Webview 链路测试运行 npm test；VS Code 集成测试运行 npm run test:integration --workspace forexplore-vscode。

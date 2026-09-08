@@ -19,6 +19,7 @@ import type {
   RepositoryRecord,
   RepositoryRevisionScope,
   SearchDocumentRecord,
+  SourceRange,
   StructuralIndex,
   SymbolRecord,
 } from '@forexplore/contracts';
@@ -31,7 +32,16 @@ import {
   validateStructuralIndex,
   validateSourceTexts,
   validateSummaryReplacement,
+  validateLocalQuery,
+  sliceSourceText,
+  projectionFactLookup,
   type IndexStore,
+  type LocalDependencyQuery,
+  type LocalSymbolQuery,
+  type SourceSlice,
+  type SourceTextReader,
+  type ProjectionFactLookup,
+  type RevisionStatistics,
 } from './index-store.js';
 import {
   HashSearchEmbeddingProvider,
@@ -46,6 +56,7 @@ export interface SeekDbIndexStoreConfig {
   user: string;
   password: string;
   database: string;
+  structuralBatchRows?: number;
   /** Kept for the vector-capable search_documents projection. */
   vectorDimension?: number;
   /** Host-configured model embedding provider; deterministic hashing is the safe local fallback. */
@@ -164,6 +175,7 @@ interface SearchDocumentRow extends RowDataPacket {
   kind: SearchDocumentRecord['kind'];
   relative_path: string | null;
   symbol_key: string | null;
+  source_range?: string | object | null;
   module_artifact_id: string | Buffer | null;
   content_hash: string;
   title: string;
@@ -384,6 +396,7 @@ function toSearchDocument(scope: RepositoryRevisionScope, row: SearchDocumentRow
     kind: row.kind,
     relativePath: row.relative_path,
     ...(symbolKey ? { symbolKey } : {}),
+    ...(row.source_range ? { sourceRange: json<SourceRange | undefined>(row.source_range, undefined) } : {}),
     ...(moduleArtifactId ? { moduleArtifactId } : {}),
     contentHash: row.content_hash,
     title: row.title,
@@ -433,8 +446,8 @@ async function withTransaction<T>(pool: Pool, operation: (connection: PoolConnec
 
 type InsertRow = { values: unknown[]; vector?: string };
 
-function* insertRows<T>(rows: readonly T[], convert: (row: T) => InsertRow): Iterable<InsertRow> {
-  for (const row of rows) yield convert(row);
+function* insertRows<T>(rows: readonly T[], convert: (row: T, index: number) => InsertRow): Iterable<InsertRow> {
+  for (let index = 0; index < rows.length; index++) yield convert(rows[index]!, index);
 }
 
 // Limit both row count and escaped SQL size; a single large source stays intact.
@@ -467,6 +480,8 @@ async function insertBatches(connection: PoolConnection, sql: string, rows: Iter
  * is bound to one repository + analysis revision.
  */
 export class SeekDbIndexStore implements IndexStore {
+  readonly #projectionFacts = new WeakMap<StructuralIndex, ProjectionFactLookup>();
+  readonly #structuralBatchRows: number;
   readonly #database: string;
   readonly #tables: Record<string, string>;
   readonly #vectorDimension: number;
@@ -486,6 +501,8 @@ export class SeekDbIndexStore implements IndexStore {
     enableKeepAlive: true,
     decimalNumbers: true,
   } satisfies PoolOptions)) {
+    this.#structuralBatchRows = config.structuralBatchRows ?? 250;
+    if (!Number.isInteger(this.#structuralBatchRows) || this.#structuralBatchRows < 1 || this.#structuralBatchRows > 2048) throw new Error('Structural batch rows must be in 1..2048.');
     this.#database = identifier(config.database);
     this.#vectorDimension = config.vectorDimension ?? 384;
     if (!Number.isInteger(this.#vectorDimension) || this.#vectorDimension < 1) {
@@ -675,6 +692,7 @@ export class SeekDbIndexStore implements IndexStore {
         kind VARCHAR(64) NOT NULL,
         relative_path VARCHAR(4096) NULL,
         symbol_key VARCHAR(512) NULL,
+        source_range JSON NULL,
         module_artifact_id VARCHAR(256) NULL,
         content_hash CHAR(64) NOT NULL,
         title VARCHAR(2048) NOT NULL,
@@ -687,6 +705,19 @@ export class SeekDbIndexStore implements IndexStore {
           WITH (DISTANCE=cosine, TYPE=hnsw, LIB=vsag${supportsAsyncIndex ? ', SYNC_MODE=immediate' : ''})
       ) ORGANIZATION = HEAP
     `);
+    const [sourceRangeColumns] = await this.pool.query<RowDataPacket[]>(`SHOW COLUMNS FROM ${this.#tables.searchDocuments} LIKE 'source_range'`);
+    if (!sourceRangeColumns.length) await this.pool.query(`ALTER TABLE ${this.#tables.searchDocuments} ADD COLUMN source_range JSON NULL`);
+    for (const [table, name, columns] of [
+      [this.#tables.files, 'idx_files_project', 'repository_id, analysis_revision, project_id'],
+      [this.#tables.symbols, 'idx_symbols_path', 'repository_id, analysis_revision, relative_path(512)'],
+      [this.#tables.dependencyEdges, 'idx_dependencies_source_path', 'repository_id, analysis_revision, source_relative_path(512)'],
+      [this.#tables.dependencyEdges, 'idx_dependencies_target_path', 'repository_id, analysis_revision, target_relative_path(512)'],
+      [this.#tables.dependencyEdges, 'idx_dependencies_source_symbol', 'repository_id, analysis_revision, source_symbol_key'],
+      [this.#tables.dependencyEdges, 'idx_dependencies_target_symbol', 'repository_id, analysis_revision, target_symbol_key'],
+    ]) {
+      const [indexes] = await this.pool.query<RowDataPacket[]>(`SHOW INDEX FROM ${table} WHERE Key_name = ?`, [name]);
+      if (!indexes.length) await this.pool.query(`ALTER TABLE ${table} ADD INDEX ${name} (${columns})`);
+    }
     await this.pool.query(`CREATE TABLE IF NOT EXISTS ${this.#tables.embeddingConfiguration} (
       slot INT PRIMARY KEY, config_hash CHAR(64) NOT NULL
     ) ORGANIZATION = HEAP`);
@@ -716,12 +747,14 @@ export class SeekDbIndexStore implements IndexStore {
   }
 
   /** Reuse exact model inputs across revisions and process restarts. Model identity is bound during initialize. */
-  private async embedDocuments(texts: readonly string[]): Promise<number[][]> {
-    if (!this.#persistEmbeddings || texts.length === 0) return this.#embeddingProvider.embed(texts);
+  private async embedDocuments(texts: readonly string[], signal?: AbortSignal): Promise<number[][]> {
+    signal?.throwIfAborted();
+    if (!this.#persistEmbeddings || texts.length === 0) return this.#embeddingProvider.embed(texts, signal);
     const keys = texts.map((text) => createHash('sha256').update(this.#embeddingIdentity).update('\0').update(text).digest('hex'));
     const unique = [...new Map(keys.map((key, index) => [key, texts[index]!])).entries()];
     const vectors = new Map<string, number[]>();
     for (let offset = 0; offset < unique.length; offset += 128) {
+      signal?.throwIfAborted();
       const batch = unique.slice(offset, offset + 128);
       const [cached] = await this.pool.query<RowDataPacket[]>(`SELECT content_hash, embedding FROM ${this.#tables.embeddingCache}
         WHERE content_hash IN (${batch.map(() => '?').join(',')})`, batch.map(([key]) => key));
@@ -735,7 +768,7 @@ export class SeekDbIndexStore implements IndexStore {
       const missing = batch.filter(([key]) => !vectors.has(key));
       for (let start = 0; start < missing.length; start += 16) {
         const inputs = missing.slice(start, start + 16);
-        const encoded = await this.#embeddingProvider.embed(inputs.map(([, text]) => text));
+        const encoded = await this.#embeddingProvider.embed(inputs.map(([, text]) => text), signal);
         if (encoded.length !== inputs.length) throw new Error('Embedding provider returned an unexpected document count.');
         this.#embeddingProviderDocuments += inputs.length;
         const parameters = inputs.flatMap(([key], index) => {
@@ -912,6 +945,105 @@ export class SeekDbIndexStore implements IndexStore {
     };
   }
 
+  async getStructuralIndexMetadata(scope: RepositoryRevisionScope, signal?: AbortSignal): Promise<Pick<StructuralIndex, 'repositoryId' | 'analysisRevision' | 'analysisHash'> | null> {
+    const revision = await this.getRevision(scope, signal);
+    return revision ? { ...scope, analysisHash: revision.analysisHash } : null;
+  }
+
+  async getRevisionStatistics(scope: RepositoryRevisionScope, signal?: AbortSignal): Promise<RevisionStatistics | null> {
+    if (!await this.getRevision(scope, signal)) return null;
+    const tables = [this.#tables.projects, this.#tables.files, this.#tables.symbols, this.#tables.dependencyEdges, this.#tables.diagnostics];
+    const fields = ['projects', 'files', 'symbols', 'dependencies', 'diagnostics'];
+    const counts = await queryRows<RowDataPacket[]>(this.pool, `SELECT ${tables.map((table, index) =>
+      `(SELECT COUNT(*) FROM ${table} WHERE repository_id = ? AND analysis_revision = ?) AS ${fields[index]}`).join(', ')}`,
+    tables.flatMap(() => scopeParams(scope)), signal);
+    const rows = await queryRows<RowDataPacket[]>(this.pool, `SELECT language_id, COUNT(*) AS file_count, 0 AS has_semantic_symbols
+      FROM ${this.#tables.files} WHERE repository_id = ? AND analysis_revision = ? AND language_id IS NOT NULL GROUP BY language_id
+      UNION ALL SELECT language_id, 0 AS file_count, MAX(provider <> 'tree-sitter') AS has_semantic_symbols
+      FROM ${this.#tables.symbols} WHERE repository_id = ? AND analysis_revision = ? GROUP BY language_id`,
+    [...scopeParams(scope), ...scopeParams(scope)], signal);
+    const languages = new Map<string, RevisionStatistics['languages'][number]>();
+    for (const row of rows) {
+      const languageId = String(row.language_id);
+      const previous = languages.get(languageId) ?? { languageId, fileCount: 0, hasSemanticSymbols: false };
+      previous.fileCount += Number(row.file_count);
+      previous.hasSemanticSymbols ||= Boolean(Number(row.has_semantic_symbols));
+      languages.set(languageId, previous);
+    }
+    return { projects: Number(counts[0]!.projects), files: Number(counts[0]!.files), symbols: Number(counts[0]!.symbols),
+      dependencies: Number(counts[0]!.dependencies), diagnostics: Number(counts[0]!.diagnostics),
+      languages: [...languages.values()].filter(language => language.fileCount > 0).sort((a, b) => a.languageId.localeCompare(b.languageId)) };
+  }
+
+  async #writeBuilding(index: StructuralIndex, write: (connection: PoolConnection) => Promise<unknown>, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
+    await withTransaction(this.pool, async (connection) => {
+      const [rows] = await connection.query<RevisionRow[]>(`SELECT * FROM ${this.#tables.analysisRevisions}
+        WHERE repository_id = ? AND analysis_revision = ? FOR UPDATE`, scopeParams(index));
+      if (rows[0]?.status !== 'building' || rows[0].analysis_hash !== index.analysisHash) throw new Error('Index batches require their matching building revision.');
+      signal?.throwIfAborted();
+      await write(connection);
+      signal?.throwIfAborted();
+    });
+  }
+
+  async putStructuralIndexFromSource(index: StructuralIndex, source: SourceTextReader, signal?: AbortSignal): Promise<void> {
+    validateStructuralIndex(index);
+    const batchRows = this.#structuralBatchRows;
+    await this.#writeBuilding(index, (connection) => this.#deleteRevisionStructuralRecords(connection, index), signal);
+    for (let offset = 0; offset < index.projects.length; offset += batchRows) {
+      await this.#writeBuilding(index, (connection) => this.#insertProjects(connection, index.projects.slice(offset, offset + batchRows)), signal);
+    }
+    let files: IndexedFileRecord[] = [];
+    let texts = new Map<string, string>();
+    let bytes = 0;
+    const flush = async () => {
+      if (!files.length) return;
+      await this.#writeBuilding(index, (connection) => this.#insertFiles(connection, files, texts), signal);
+      files = []; texts = new Map(); bytes = 0;
+    };
+    for (const file of index.files) {
+      signal?.throwIfAborted();
+      const text = await source.read(file.relativePath);
+      if (text === null && file.parseStatus !== 'failed') throw new Error(`Captured source is unavailable: ${file.relativePath}`);
+      if (text !== null && createHash('sha256').update(text).digest('hex') !== file.sha256) throw new Error(`Source snapshot hash mismatch: ${file.relativePath}`);
+      if (files.length >= 64 || (files.length && bytes + file.sizeBytes > 2 * 1024 * 1024)) await flush();
+      files.push(file);
+      if (text !== null) { texts.set(file.relativePath, text); bytes += Buffer.byteLength(text, 'utf8'); }
+    }
+    await flush();
+    for (let offset = 0; offset < index.symbols.length; offset += batchRows) {
+      await this.#writeBuilding(index, (connection) => this.#insertSymbols(connection, index.symbols.slice(offset, offset + batchRows)), signal);
+    }
+    for (let offset = 0; offset < index.dependencyEdges.length; offset += batchRows) {
+      await this.#writeBuilding(index, (connection) => this.#insertDependencies(connection, index.dependencyEdges.slice(offset, offset + batchRows)), signal);
+    }
+    for (let offset = 0; offset < index.diagnostics.length; offset += batchRows) {
+      await this.#writeBuilding(index, (connection) => this.#insertDiagnostics(connection, index.diagnostics.slice(offset, offset + batchRows)), signal);
+    }
+  }
+
+  async appendSearchDocuments(index: StructuralIndex, documents: SearchDocumentRecord[], signal?: AbortSignal): Promise<void> {
+    if (documents.length > 2048 || documents.reduce((sum, document) => sum + Buffer.byteLength(document.text, 'utf8'), 0) > 8 * 1024 * 1024 || documents.some((document) => document.kind === 'summary')) throw new Error('Base projection batches accept at most 2048 symbol/source documents and 8 MiB.');
+    let facts = this.#projectionFacts.get(index);
+    if (!facts) { facts = projectionFactLookup(index); this.#projectionFacts.set(index, facts); }
+    validateSearchDocumentsAgainstIndex(index, documents, new Map(), null, facts);
+    const texts = documents.map((document) => [document.title, document.relativePath ?? '', document.text].join('\n'));
+    signal?.throwIfAborted();
+    const embeddings = await this.embedDocuments(texts, signal);
+    if (embeddings.length !== documents.length) throw new Error('Embedding provider returned an unexpected document count.');
+    await this.#writeBuilding(index, (connection) => insertBatches(connection, `INSERT INTO ${this.#tables.searchDocuments} (
+      repository_id, analysis_revision, search_document_id, kind, relative_path, symbol_key, source_range,
+      module_artifact_id, content_hash, title, document_text, search_text, embedding
+    )`, insertRows(documents, (document, position) => {
+      const embedding = embeddings[position]!;
+      assertEmbedding(embedding, this.#vectorDimension);
+      return { vector: vectorHex(embedding), values: [document.repositoryId, document.analysisRevision, document.searchDocumentId,
+        document.kind, document.relativePath, document.symbolKey ?? null, document.sourceRange ? JSON.stringify(document.sourceRange) : null,
+        null, document.contentHash, document.title, document.text, texts[position]!] };
+    })), signal);
+  }
+
   async getSourceText(scope: RepositoryRevisionScope, relativePath: string): Promise<string | null> {
     assertRelativePath(relativePath, 'Source text path');
     const [rows] = await this.pool.query<FileRow[]>(`
@@ -947,6 +1079,73 @@ export class SeekDbIndexStore implements IndexStore {
       WHERE repository_id = ? AND analysis_revision = ? AND relative_path = ? LIMIT 1`,
     [maxChars, maxChars, ...scopeParams(scope), relativePath], signal);
     return rows[0]?.preview == null ? null : { text: String(rows[0].preview), truncated: Boolean(Number(rows[0].truncated)) };
+  }
+
+  async queryFiles(scope: RepositoryRevisionScope, query: { projectId?: string; relativePaths?: readonly string[]; after?: string; limit: number }, signal?: AbortSignal): Promise<{ files: IndexedFileRecord[]; truncated: boolean }> {
+    validateLocalQuery(query, false);
+    const conditions = ['repository_id = ?', 'analysis_revision = ?'];
+    const values: unknown[] = scopeParams(scope);
+    if (query.projectId) { conditions.push('project_id = ?'); values.push(query.projectId); }
+    if (query.relativePaths?.length) { conditions.push(`relative_path IN (${query.relativePaths.map(() => '?').join(',')})`); values.push(...query.relativePaths); }
+    if (query.after) { conditions.push('relative_path > ?'); values.push(query.after); }
+    const rows = await queryRows<FileRow[]>(this.pool, `SELECT file_id, relative_path, language_id, role, sha256, size_bytes, parse_status, project_id
+      FROM ${this.#tables.files} WHERE ${conditions.join(' AND ')} ORDER BY relative_path LIMIT ?`, [...values, query.limit + 1], signal);
+    return { files: rows.slice(0, query.limit).map((row) => toFile(scope, row)), truncated: rows.length > query.limit };
+  }
+
+  async querySymbols(scope: RepositoryRevisionScope, query: LocalSymbolQuery, signal?: AbortSignal): Promise<{ symbols: SymbolRecord[]; truncated: boolean }> {
+    validateLocalQuery(query);
+    const anchors: string[] = [];
+    const values: unknown[] = scopeParams(scope);
+    if (query.symbolKeys?.length) { anchors.push(`symbol_key IN (${query.symbolKeys.map(() => '?').join(',')})`); values.push(...query.symbolKeys); }
+    if (query.relativePaths?.length) { anchors.push(`relative_path IN (${query.relativePaths.map(() => '?').join(',')})`); values.push(...query.relativePaths); }
+    const conditions = ['repository_id = ?', 'analysis_revision = ?', `(${anchors.join(' OR ')})`];
+    if (query.projectId) { conditions.push('project_id = ?'); values.push(query.projectId); }
+    if (query.kinds?.length) { conditions.push(`kind IN (${query.kinds.map(() => '?').join(',')})`); values.push(...query.kinds); }
+    const rows = await queryRows<SymbolRow[]>(this.pool, `SELECT symbol_id, symbol_key, ast_declaration_id, name, qualified_name, kind, language_id,
+      relative_path, source_range, signature, container_symbol_key, project_id, exported, provider, confidence, evidence_level
+      FROM ${this.#tables.symbols} WHERE ${conditions.join(' AND ')} ORDER BY symbol_key LIMIT ?`, [...values, query.limit + 1], signal);
+    return { symbols: rows.slice(0, query.limit).map((row) => toSymbol(scope, row)), truncated: rows.length > query.limit };
+  }
+
+  async queryDependencies(scope: RepositoryRevisionScope, query: LocalDependencyQuery, signal?: AbortSignal): Promise<{ dependencies: DependencyEdgeRecord[]; truncated: boolean }> {
+    validateLocalQuery(query);
+    if (query.direction && !['incoming', 'outgoing', 'both'].includes(query.direction)) throw new Error('Invalid dependency direction.');
+    const anchors: string[] = [];
+    const values: unknown[] = scopeParams(scope);
+    const sides = query.direction === 'incoming' ? ['target'] : query.direction === 'outgoing' ? ['source'] : ['source', 'target'];
+    for (const side of sides) {
+      if (query.symbolKeys?.length) { anchors.push(`d.${side}_symbol_key IN (${query.symbolKeys.map(() => '?').join(',')})`); values.push(...query.symbolKeys); }
+      if (query.relativePaths?.length) { anchors.push(`d.${side}_relative_path IN (${query.relativePaths.map(() => '?').join(',')})`); values.push(...query.relativePaths); }
+    }
+    const conditions = ['d.repository_id = ?', 'd.analysis_revision = ?', `(${anchors.join(' OR ')})`];
+    if (query.projectId) {
+      conditions.push(`EXISTS (SELECT 1 FROM ${this.#tables.files} f WHERE f.repository_id = d.repository_id AND f.analysis_revision = d.analysis_revision
+        AND f.project_id = ? AND (f.relative_path = d.source_relative_path OR f.relative_path = d.target_relative_path))`);
+      values.push(query.projectId);
+    }
+    const rows = await queryRows<DependencyRow[]>(this.pool, `SELECT dependency_edge_id, kind, source_symbol_key, target_symbol_key, source_relative_path,
+      target_relative_path, target_reference, internal, resolution, provider, confidence, evidence_level, evidence_ranges
+      FROM ${this.#tables.dependencyEdges} d WHERE ${conditions.join(' AND ')} ORDER BY dependency_edge_id LIMIT ?`, [...values, query.limit + 1], signal);
+    return { dependencies: rows.slice(0, query.limit).map((row) => toDependency(scope, row)), truncated: rows.length > query.limit };
+  }
+
+  async getSourceSlice(scope: RepositoryRevisionScope, relativePath: string, range: SourceRange | undefined, maxChars: number, signal?: AbortSignal): Promise<SourceSlice | null> {
+    assertRelativePath(relativePath, 'Source slice path');
+    sliceSourceText('', range, maxChars);
+    const startLine = range?.startLine ?? 1;
+    const startColumn = range?.startColumn ?? 1;
+    if (startColumn > 128_000) throw new Error('Source slice columns exceed the local read budget.');
+    const limit = maxChars + startColumn + 1;
+    const rows = await queryRows<FileRow[]>(this.pool, `SELECT file_id, relative_path, language_id, role, sha256, size_bytes, parse_status, project_id,
+      SUBSTRING(source_text, IF(? = 1, 1, CHAR_LENGTH(SUBSTRING_INDEX(source_text, '\\n', ? - 1)) + 2), ?) AS source_text
+      FROM ${this.#tables.files} WHERE repository_id = ? AND analysis_revision = ? AND relative_path = ?
+      AND CHAR_LENGTH(source_text) - CHAR_LENGTH(REPLACE(source_text, '\\n', '')) >= ? - 1 LIMIT 1`,
+    [startLine, startLine, limit, ...scopeParams(scope), relativePath, startLine], signal);
+    const row = rows[0];
+    if (!row || row.source_text == null) return null;
+    const slice = sliceSourceText(row.source_text, range, maxChars, startLine, row.source_text.length >= limit);
+    return slice ? { file: toFile(scope, row), ...slice } : null;
   }
 
   async getModuleArtifacts(scope: RepositoryRevisionScope, ids: readonly string[], signal?: AbortSignal): Promise<ModuleArtifactRecord[]> {
@@ -1003,8 +1202,6 @@ export class SeekDbIndexStore implements IndexStore {
   }
 
   async putModuleArtifact(artifact: ModuleArtifactRecord): Promise<void> {
-    const index = await this.getStructuralIndex(artifact);
-    if (!index) throw new Error('Cannot write a module artifact before its structural index exists.');
     await withTransaction(this.pool, async (connection) => {
       const [revisions] = await connection.query<RevisionRow[]>(`
         SELECT * FROM ${this.#tables.analysisRevisions}
@@ -1020,7 +1217,7 @@ export class SeekDbIndexStore implements IndexStore {
       if (artifact.kind === 'module-summary' && artifact.status === 'current' && revision.status !== 'ready') {
         throw new Error('A current module summary requires a completed ready analysis revision.');
       }
-      validateModuleArtifact(artifact, index, toRepository(repository));
+      validateModuleArtifact(artifact, toRevision(revision), toRepository(repository));
       await connection.query<ResultSetHeader>(`
         INSERT INTO ${this.#tables.moduleArtifacts} (
           repository_id, analysis_revision, module_artifact_id, kind, status, analysis_hash, plan_hash,
@@ -1120,12 +1317,12 @@ export class SeekDbIndexStore implements IndexStore {
       const started = performance.now();
       const statements = await insertBatches(connection, `
           INSERT INTO ${this.#tables.searchDocuments} (
-            repository_id, analysis_revision, search_document_id, kind, relative_path, symbol_key,
+            repository_id, analysis_revision, search_document_id, kind, relative_path, symbol_key, source_range,
             module_artifact_id, content_hash, title, document_text, search_text, embedding
           )
         `, insertRows(projected, ({ document, searchText, embedding }) => ({ vector: vectorHex(embedding), values: [
           document.repositoryId, document.analysisRevision, document.searchDocumentId, document.kind,
-          document.relativePath, document.symbolKey ?? null, document.moduleArtifactId ?? null,
+          document.relativePath, document.symbolKey ?? null, document.sourceRange ? JSON.stringify(document.sourceRange) : null, document.moduleArtifactId ?? null,
           document.contentHash, document.title, document.text, searchText,
         ] })));
       console.info('[forexplore:performance]', JSON.stringify({ stage: 'search-insert', repositoryId: scope.repositoryId,
@@ -1135,7 +1332,7 @@ export class SeekDbIndexStore implements IndexStore {
 
   async listSearchDocuments(scope: RepositoryRevisionScope): Promise<SearchDocumentRecord[]> {
     const [rows] = await this.pool.query<SearchDocumentRow[]>(`
-      SELECT search_document_id, kind, relative_path, symbol_key, module_artifact_id, content_hash, title, document_text
+      SELECT search_document_id, kind, relative_path, symbol_key, source_range, module_artifact_id, content_hash, title, document_text
       FROM ${this.#tables.searchDocuments}
       WHERE repository_id = ? AND analysis_revision = ? ORDER BY search_document_id
     `, scopeParams(scope));
@@ -1148,7 +1345,7 @@ export class SeekDbIndexStore implements IndexStore {
    * symbol keys only to select authoritative records in the same scope.
    */
   async searchSearchDocuments(
-    scope: RepositoryRevisionScope,
+    scope: RepositoryRevisionScope & { projectId?: string },
     query: string,
     limit: number,
     kind: SearchDocumentRecord['kind'] = 'symbol',
@@ -1165,48 +1362,71 @@ export class SeekDbIndexStore implements IndexStore {
     assertEmbedding(embedding, this.#vectorDimension);
     const candidateLimit = Math.min(Math.max(boundedLimit * 4, 24), 800);
     const select = `
-      search_document_id, kind, relative_path, symbol_key, module_artifact_id, content_hash, title, document_text
+      search_document_id, kind, relative_path, symbol_key, source_range, module_artifact_id, content_hash, title, document_text
     `;
-    const textMatch = 'MATCH(search_text) AGAINST (? IN NATURAL LANGUAGE MODE)';
+    const textMatch = 'MATCH(d.search_text) AGAINST (? IN NATURAL LANGUAGE MODE)';
+    const projectFilter = !scope.projectId ? '' : kind === 'summary'
+      ? " AND JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(document_text), document_text, '{}'), '$.projectId')) = ?"
+      : ` AND relative_path IN (SELECT relative_path FROM ${this.#tables.files} WHERE repository_id = ? AND analysis_revision = ? AND project_id = ?)`;
+    const projectValues = !scope.projectId ? [] : kind === 'summary' ? [scope.projectId] : [...scopeParams(scope), scope.projectId];
+    // The explicit join lets full-text retrieval hash project ownership once instead of running a subquery per match.
+    const textProjectJoin = scope.projectId && kind !== 'summary'
+      ? ` JOIN ${this.#tables.files} f ON f.repository_id = d.repository_id AND f.analysis_revision = d.analysis_revision
+          AND f.relative_path = d.relative_path AND f.project_id = ?` : '';
+    const textProjectFilter = scope.projectId && kind === 'summary'
+      ? " AND JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(d.document_text), d.document_text, '{}'), '$.projectId')) = ?" : '';
     const [textRows, vectorRows] = await Promise.all([
-      queryRows<SearchDocumentRow[]>(this.pool, `
-        SELECT ${select}, ${textMatch} AS text_score
-        FROM ${this.#tables.searchDocuments}
-        WHERE repository_id = ? AND analysis_revision = ? AND kind = ? AND ${textMatch}
+      queryRows<RowDataPacket[]>(this.pool, `
+        SELECT d.search_document_id, ${textMatch} AS text_score
+        FROM ${this.#tables.searchDocuments} d${textProjectJoin}
+        WHERE d.repository_id = ? AND d.analysis_revision = ? AND d.kind = ?${textProjectFilter} AND ${textMatch}
         ORDER BY text_score DESC
         LIMIT ?
-      `, [text, ...scopeParams(scope), kind, text, candidateLimit], signal),
-      queryRows<SearchDocumentRow[]>(this.pool, `
-        SELECT ${select}, GREATEST(0, 1 - cosine_distance(embedding, ${vectorHex(embedding)})) AS semantic_score
+      `, [text, ...(textProjectJoin ? [scope.projectId] : []), ...scopeParams(scope), kind,
+        ...(textProjectFilter ? [scope.projectId] : []), text, candidateLimit], signal),
+      queryRows<RowDataPacket[]>(this.pool, `
+        SELECT search_document_id, GREATEST(0, 1 - cosine_distance(embedding, ${vectorHex(embedding)})) AS semantic_score
         FROM ${this.#tables.searchDocuments}
-        WHERE repository_id = ? AND analysis_revision = ? AND kind = ?
+        WHERE repository_id = ? AND analysis_revision = ? AND kind = ?${projectFilter}
         ORDER BY cosine_distance(embedding, ${vectorHex(embedding)})
         APPROXIMATE
         LIMIT ?
-      `, [...scopeParams(scope), kind, candidateLimit], signal),
+      `, [...scopeParams(scope), kind, ...projectValues, candidateLimit], signal),
     ]);
     signal?.throwIfAborted();
-    const byId = new Map<string, { document: SearchDocumentRecord; score: number }>();
-    const add = (rows: SearchDocumentRow[], rankWeight: number): void => {
+    const byId = new Map<string, { score: number; retrievalScore: NonNullable<SearchDocumentRecord['retrievalScore']> }>();
+    const add = (rows: RowDataPacket[], rankWeight: number): void => {
       rows.forEach((row, index) => {
-        const document = toSearchDocument(scope, row);
-        const existing = byId.get(document.searchDocumentId);
+        const searchDocumentId = stringValue(row.search_document_id)!;
+        const existing = byId.get(searchDocumentId);
         const score = (existing?.score ?? 0) + 1 / (60 + index + 1) * rankWeight;
-        document.retrievalScore = {
-          ...existing?.document.retrievalScore,
+        const retrievalScore = {
+          ...existing?.retrievalScore,
           ...(row.semantic_score !== undefined ? { semantic: numberValue(row.semantic_score) } : {}),
           ...(row.text_score !== undefined ? { lexical: numberValue(row.text_score) } : {}),
           fusion: score,
         };
-        byId.set(document.searchDocumentId, { document, score });
+        byId.set(searchDocumentId, { score, retrievalScore });
       });
     };
     add(textRows, 1);
     add(vectorRows, 1);
-    return [...byId.values()]
-      .sort((left, right) => right.score - left.score || left.document.searchDocumentId.localeCompare(right.document.searchDocumentId))
-      .slice(0, boundedLimit)
-      .map(({ document }) => document);
+    const selected = [...byId.entries()]
+      .sort(([leftId, left], [rightId, right]) => right.score - left.score || leftId.localeCompare(rightId))
+      .slice(0, boundedLimit);
+    if (!selected.length) return [];
+    // Retrieve long source text only after both ranked candidate sets have been bounded and fused.
+    const rows = await queryRows<SearchDocumentRow[]>(this.pool, `SELECT ${select} FROM ${this.#tables.searchDocuments}
+      WHERE repository_id = ? AND analysis_revision = ? AND search_document_id IN (${selected.map(() => '?').join(',')})
+      LIMIT ?`, [...scopeParams(scope), ...selected.map(([searchDocumentId]) => searchDocumentId), boundedLimit], signal);
+    const documents = new Map(rows.map(row => {
+      const document = toSearchDocument(scope, row);
+      return [document.searchDocumentId, document] as const;
+    }));
+    return selected.flatMap(([searchDocumentId, scores]) => {
+      const document = documents.get(searchDocumentId);
+      return document ? [{ ...document, retrievalScore: scores.retrievalScore }] : [];
+    });
   }
 
   async activateRevision(

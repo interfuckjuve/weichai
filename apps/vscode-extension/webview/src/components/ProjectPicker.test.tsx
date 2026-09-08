@@ -44,7 +44,7 @@ it('supports keyboard opening, navigation and escape with restored focus', async
   await act(async () => trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true })));
   expect(document.activeElement?.getAttribute('role')).toBe('menuitemradio');
   await act(async () => document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true })));
-  expect(document.activeElement?.textContent).toContain('管理历史仓库');
+  expect(document.activeElement?.textContent).toContain('管理参考工程');
   await act(async () => document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })));
   expect(document.querySelector('[role="menu"]')).toBeNull();
   expect(document.activeElement).toBe(trigger);

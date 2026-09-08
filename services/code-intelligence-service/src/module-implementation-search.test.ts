@@ -100,6 +100,6 @@ describe('module implementation search', () => {
       requirement: '',
       topK: 1,
       repositoryIds: [],
-    })).rejects.toThrow(/历史仓库/);
+    })).rejects.toThrow(/参考工程/);
   });
 });

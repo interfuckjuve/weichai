@@ -16,17 +16,17 @@ export async function addTargetWorkspace(mode: 'browse' | 'input' | 'workspace')
     const folders = (vscode.workspace.workspaceFolders ?? []).filter((folder) => folder.uri.scheme === 'file');
     const selected = await vscode.window.showQuickPick(folders.map((folder) => ({
       label: folder.name, description: folder.uri.fsPath, directory: folder.uri.fsPath,
-    })), { title: '选择目标工作区', placeHolder: '选择已打开的工程目录' });
+    })), { title: '选择目标工程', placeHolder: '选择已打开的工程目录' });
     directory = selected?.directory;
   } else if (mode === 'browse') {
     const selected = await vscode.window.showOpenDialog({
-      title: '添加目标工作区', openLabel: '添加目标目录',
+      title: '添加目标工程', openLabel: '添加目标目录',
       canSelectFolders: true, canSelectFiles: false, canSelectMany: false,
     });
     directory = selected?.[0]?.fsPath;
   } else {
     directory = await vscode.window.showInputBox({
-      title: '添加目标工作区', prompt: '目标工程的绝对目录路径',
+      title: '添加目标工程', prompt: '目标工程的绝对目录路径',
       ignoreFocusOut: true,
       validateInput: (value) => path.isAbsolute(value.trim()) ? undefined : '请输入绝对目录路径',
     });
