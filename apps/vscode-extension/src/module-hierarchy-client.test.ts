@@ -32,4 +32,20 @@ describe('module hierarchy client boundary', () => {
     const failed = vi.fn(async () => new Response('private provider body', { status: 502 }));
     await expect(new HttpModuleHierarchyPlanner('http://localhost:8788', failed).decide(snapshot)).rejects.toThrow(/^Module hierarchy service request failed with HTTP 502\.$/);
   });
+
+  it('resolves the current service address for each decision and forwards the request deadline', async () => {
+    let address = 'http://127.0.0.1:8788';
+    const fetcher = vi.fn(async () => Response.json({ action: 'stop', name: 'Parser', nodeKind: 'module',
+      description: 'Parses input.', reason: 'One coherent API.', evidenceIds: ['file:parser'] }));
+    const planner = new HttpModuleHierarchyPlanner(() => address, fetcher);
+    await planner.decide(snapshot);
+    address = 'http://127.0.0.1:8798/updated';
+    await planner.decide(snapshot);
+    const calls = fetcher.mock.calls as unknown as Array<[string, { signal: AbortSignal; body: string }]>;
+    expect(calls.map(([url]) => url)).toEqual([
+      'http://127.0.0.1:8788/module-hierarchy/decision', 'http://127.0.0.1:8798/updated/module-hierarchy/decision',
+    ]);
+    expect(calls[0]![1].signal).toBeInstanceOf(AbortSignal);
+    expect(JSON.parse(calls[1]![1].body)).toEqual(snapshot);
+  });
 });

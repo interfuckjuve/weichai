@@ -26,6 +26,8 @@ npm run dev:code-workbench -- --target /path/to/target --reference /path/to/refe
 
 小工程可通过 `--adaptation-url` 接入已有整项目 Agent 分析接口，大工程通过层级 planner 分支判断功能边界。没有可用分析服务时，功能模块会提示服务缺失，基础索引和源码检索仍可使用。仅在容量测试需要目录结构基线时显式添加 `--structural-baseline`；该模式不代表业务模块语义效果。已有库可使用 `--register-only` 读取已发布结果。
 
+扩展的层级 planner 默认复用 `adaptationApiUrl`。小工程的原 Agent 分析路径还要求适配服务设置 `ADAPTATION_SEMANTIC_INDEX_ENABLED=true`，并将 `SEMANTIC_QUERY_PORT_URL` 指向实际取证端口；本次浏览器服务使用 4051，VS Code 扩展默认使用 8790，可通过 `FOREXPLORE_SEMANTIC_QUERY_PORT` 调整。仅启动仍关闭语义索引的默认配置，不能完成小工程的自动规划。
+
 SeekDB 密码使用 `CODE_INTELLIGENCE_SEEKDB_PASSWORD`。未显式设置的连接参数可从已有 `services/retrieval-service/.env` 的 `SEEKDB_HOST/PORT/USER/PASSWORD` 读取。默认使用独立数据库 `forexplore_code_workbench`；更换 embedding 模型或维度时使用另一个数据库并重新建库。
 
 项目提供 `scripts/serve-local-embeddings.mjs` 用于本机 E5 推理，需要在独立工具目录安装 `@huggingface/transformers` 并准备对应模型缓存：
@@ -71,7 +73,7 @@ node scripts/serve-local-embeddings.mjs
 
 前端只把真正的根模块放在顶层，并保留“子模块 → 目录 → 文件 → 类或函数”的实际路径。展开仍按每页 80 个子节点读取；完整树保留在 Host 的版本化索引中，首屏只发送浅层页面及完整统计。参考模块目录区分顶层范围数与全树节点数，选中节点可查看细化状态、原因和判断来源。子系统粒度仅在已发布产物确有 `nodeKind: subsystem` 且对应检索投影就绪时启用。
 
-已接入层级模型决策接口与显式结构基线路径。当前没有获得将源码片段发送到 DeepSeek 的授权，前一轮自适应层级验收使用本机结构基线；本轮功能模块展示复用此前真实 Agent 产物，没有执行新的模型推理。模型接口的可调用性、协议测试与真实模型的业务边界判断质量分别记录。
+已接入层级模型决策接口与显式结构基线路径。前一轮未获源码外发授权时，自适应层级验收使用本机结构基线，功能模块展示复用此前真实 Agent 产物。用户现已授权本轮 DeepSeek 请求，新推理产物需独立核验模型来源、计划哈希、发布时间与检索投影，不能沿用旧产物的验收结论。模型接口的可调用性、协议测试与真实模型的业务边界判断质量分别记录。
 
 ## 查询契约
 
@@ -104,7 +106,8 @@ MCP 的 `search_task_context` 接入方法见 [扩展说明](../apps/vscode-exte
 - `scripts/verify-task-context-live.mts`：真实 HTTP 查询、中文需求、各粒度、取消、源码范围及哈希、精确 token 预算。
 - `scripts/verify-task-context-mcp.mts`：真实 MCP 客户端启动服务，验证原查询工具与任务工具、源码去重及范围校验。
 - `scripts/verify-task-workbench-ui.mjs`：真实页面桌面与移动端截图、模块展示、查询、复制和下载一致性。
-- `scripts/verify-task-search-controls-ui.mjs`：真实页面没有 token 控件、计数或高级设置；请求仅包含需求、范围和粒度，返回的 Context 可下载。启用 `TASK_CONTROLS_EXPECT_SEMANTIC=1` 时，对照原始恢复报告核验中文功能模块卡片和详情。
+- `scripts/verify-task-search-controls-ui.mjs`：真实页面没有 token 控件、计数或高级设置；请求仅包含需求、范围和粒度，返回的 Context 可下载。`TASK_CONTROLS_EXPECT_SEMANTIC=1` 对照原始恢复报告核验旧功能模块；`TASK_CONTROLS_EXPECT_FRESH_MODEL=1` 要求当前产物来源为 Agent、分析及投影就绪、计划哈希不同于旧产物且等于本次模型运行的产物哈希，并将中文模块卡片与当前服务数据逐项比较。新模型模式必须通过 `TASK_CONTROLS_EXPECTED_PLAN_HASH` 和 `TASK_CONTROLS_FRESH_AFTER` 指定真实模型运行报告中的产物哈希和开始时间。可用 `TASK_CONTROLS_MODEL_REPOSITORY`、`TASK_CONTROLS_MODEL_PROJECT` 选择参考工程，用 `TASK_CONTROLS_PREVIOUS_PLAN_HASH` 覆盖默认读取的旧产物哈希。
+- `scripts/verify-fresh-target-model-ui.mjs`：对目标工程独立验证新模型产物哈希、Agent 来源、投影就绪及桌面/手机上的模块树、功能摘要和项目总结，使用相同的哈希与时间环境参数；不将目标工程临时改为参考工程。
 - `scripts/verify-task-indexing-scale.mts`：真实大型源码库的容量、建库、模块覆盖和局部查询；使用 hash 向量的容量结果与模型语义质量分开记录。
 - `scripts/verify-task-large-workbench-ui.mjs`：大仓初始响应大小、根模块及子节点分页、未展开节点搜索、完整统计与桌面/移动端展示。
 - `scripts/verify-adaptive-hierarchy-ui.mjs`：真实层级产物的父子关系、全量模块遍历、父节点聚合计数、逐分支细化状态，以及桌面/手机的模块到源码展开。通过 `ADAPTIVE_UI_PROFILE=small` 和 `ADAPTIVE_UI_EXPECT_MAX_DEPTH=0` 可核验小项目直接停在叶模块；模型与异深断言分别由 `ADAPTIVE_UI_EXPECT_MODEL=1`、`ADAPTIVE_UI_EXPECT_UNEVEN=1` 显式启用。
@@ -112,6 +115,40 @@ MCP 的 `search_task_context` 接入方法见 [扩展说明](../apps/vscode-exte
 验收报告写入 `logs/task-context-live-report.json`、`logs/task-workbench-ui.json` 和 `logs/task-indexing-scale-20260908.json`。报告中的 `passed`、规模、耗时和资源峰值是本机实测结果，失败尝试也会保留。
 
 当前依赖图基于实际解析证据；语法解析不能代替编译器的完整类型解析、动态调用分析或跨语言接口绑定。结构元数据仍需驻留内存。Context 是预算内的候选实现和有限依赖证据，不保证全局最小或行为闭合；未匹配任务的拒答能力、排序质量和千万行规模需要独立基准验收。
+
+## DeepSeek 大仓实测（2026-09-08）
+
+用户授权后，本轮对 VS Code 主工程执行了新的 DeepSeek 层级判断并发布检索投影，复用原有 7,702 个文件的固定源码索引。模型运行开始于 `2026-09-08T14:05:37.586Z`，新计划哈希为 `sha256:18c9895fa845ef4068aa0249682bfe8debcc7745b4c4420f5fa479575e0958cf`。页面展示来源为 Agent 分析，模型与结构判断的节点来源分别保留。
+
+| 项目 | 本轮真实结果 |
+| --- | --- |
+| 模块层级 | 72 个节点、4 个根范围，其中 66 个模块、6 个子系统；终端节点深度覆盖 0 至 3，最多 4 层 |
+| 细化状态 | 14 个已拆分节点、1 个叶节点、57 个待细化节点；文件覆盖 7,702 / 7,702 不代表所有功能边界已完成细化 |
+| 模型判断 | 服务日志记录 `deepseek-v4-flash` 完成 24 次层级请求，产物采纳 16 个模型决策；树节点中 15 个标记模型来源、57 个保留结构来源，完成响应、有效决策和节点数分别统计 |
+| 发布耗时 | 本轮模块建模 73,842 ms，检索投影 24,139 ms；没有重新解析全部源码 |
+| 完整性 | 遍历全部 72 个模块节点，父子文件、类型与方法聚合计数一致，无重复文件计数 |
+| 首屏 | 114,516 字节，初始仅 4 个根节点；选择主工程 6,986 ms，后续 READY 7 ms |
+| 子系统检索 | 手动 `subsystem` 实际命中“会话”，7,917 ms，6 个文件的源码证据，状态为 `partial` |
+| 模块检索 | 手动 `module` 实际命中“CLI入口”，15,537 ms，6 个文件的源码证据，状态为 `partial` |
+| 自动检索 | `auto` 查询返回“会话”等结果，8,231 ms，5 个文件的源码证据，状态为 `partial` |
+
+在 1440×1000 桌面和 390×844 手机完成真实路径“启动引导 → 客户端引导 → CLI入口 → 主进程启动 → main.ts → configureCommandlineSwitchesSync”展开。选中模块后，中文功能说明、待细化状态和原因均保留，文件声明列表不被选择动作改变；子系统选项与 6 个真实子系统产物一致。两个视口无页面横向溢出或浏览器错误，截图已实际查看。页面仍只有需求、检索范围和粒度，没有 token 控制或用量计数。
+
+本轮大仓检索仍使用 64 维 hash 向量，需求包含模块名和真实 API 标识符。三项查询通过版本、范围及真实源码证据检查，验证模型模块已接入检索和 Context 交付；该单次结果不代表自然语言任务集的语义排序质量。57 个范围因模型决策失败、输入或运行预算限制等原因仍待细化，未解析依赖与有界源码截取也继续记录在结果缺口中。
+
+页面报告及截图位于 `logs/agent-hierarchy-live/adaptive-hierarchy-large-ui.json` 和同目录 `adaptive-hierarchy-large-*.png`；检索报告为 `logs/agent-hierarchy-live/adaptive-hierarchy-retrieval.json`，实际 Context 为同目录 `adaptive-hierarchy-context.md`。模型完成记录来自 `logs/agent-model-service-20260908.log` 中本次开始时间至 `14:07:04.790Z` 的层级请求，建模和投影耗时来自 `logs/agent-workbench-scale-live.log`。当前大仓工作台入口为 `http://127.0.0.1:4042`。
+
+## DeepSeek 小工程实测（2026-09-08）
+
+Java 目标工程 `commons-fileupload-java-skeleton` 的本次运行开始于 `2026-09-08T14:06:17.098Z`，已发布新的 Agent 功能模块提案。计划哈希为 `sha256:309411a1d166ec0485dbba11208c586b1ca42efdde502fd56cc326dfb9dda04c`，不同于原始恢复产物；`modeling.strategy=agent`、分析和检索投影均为 `ready`。本次仍为 8 个浅层功能模块，没有为小工程补充子系统或固定层数。模块分别为核心上传 API 与解析框架、磁盘文件条目实现、Servlet 容器集成、Portlet 容器集成、通用工具基础设施、MIME 编码解码、已废弃的旧版 API、测试支持与测试用例。
+
+新产物分配了 58 / 61 个文件，另 3 个文件逐项说明原因：`pom.xml` 为不支持解析的配置文件，`FileUploadBase.java` 和 `MultipartStream.java` 在原始结构索引中解析失败。因此本次模型没有将缺少直接结构证据的文件强行归属到模块。新覆盖结果与此前恢复产物的 60 / 61 分开记录，相关解析限制继续展示。
+
+真实 UI 验收独立读取当前产物与投影元数据，在 1440×1000 桌面和 390×844 手机逐项核对模块名称、选中模块的中文职责和项目总结；新哈希与本次完成结果完全一致，更新时间晚于本次运行开始时间。页面没有横向溢出或浏览器错误，截图已实际查看。检索、筛选和完整 Context 下载另行通过，桌面和手机查询各返回 4 条源码证据，服务耗时 967 ms 和 817 ms；需求请求无预算字段，控件、结果计数及设置中均无 token 配置。查询仍使用 hash 向量，仅作为真实接口回归。
+
+Rust 参考工程 `account-stream-rs` 的首次新提案因文件归属校验失败而未发布，继续保留原先 10 个功能模块；当前任务状态为 `failed`、投影为 `pending`。归属修复与相关测试已经完成；重新调用 DeepSeek 被自动审批拒绝，审批要求明确 `account-stream-rs` 的索引和源码片段发送至 DeepSeek 的授权，已向用户请求具体确认，当前暂停该重跑。本段不把保留的旧模块记为新的模型结果。
+
+工作台入口为 `http://127.0.0.1:4044`，当前查询端口为 4051。目标工程报告为 `logs/agent-semantic-live/fresh-target-model-ui.json`，对应截图为同目录 `fresh-target-model-*.png`；完整检索控件回归为同目录 `task-search-controls-ui.json`。上述 UI 验收只读取已发布结果，没有触发额外模型调用。
 
 ## 功能模块恢复与界面简化（2026-09-08）
 
@@ -124,17 +161,17 @@ MCP 的 `search_task_context` 接入方法见 [扩展说明](../apps/vscode-exte
 | `account-stream-rs` 参考工程 | 10 个原始功能模块，覆盖 15 / 16 文件；16 个文件磁盘哈希与快照一致；未归属项为配置文件 `Cargo.toml` |
 | `commons-fileupload-java-skeleton` 目标工程 | 8 个原始功能模块，覆盖 60 / 61 文件；59 个文件磁盘哈希一致，另 2 个测试文件仅工作区换行差异，使用原始快照验证并保留工作区；未归属项为 `pom.xml` |
 
-恢复过程只在副本库重建检索投影，使用 384 维 hash 向量，没有执行新的生成模型或 embedding 模型请求。当前没有获得新的源码外发授权，因此本轮证明旧功能分析结果和真实页面恢复，不作为新的模型推理效果或中文检索质量评测。此前 Java 产物中的解析失败与未解析依赖仍按原始诊断保留。
+该次恢复只在副本库重建检索投影，使用 384 维 hash 向量，没有执行新的生成模型或 embedding 模型请求。恢复发生于本轮新源码外发授权之前，仅证明旧功能分析结果和真实页面恢复，不作为新的模型推理效果或中文检索质量评测。此前 Java 产物中的解析失败与未解析依赖仍按原始诊断保留。
 
-真实工作台入口为 `http://127.0.0.1:4044`，对应查询端口为 4045。在 1440×1000 桌面和 390×844 手机完成真实查询、完整 Context 下载、筛选状态和设置检查，无浏览器错误或页面横向溢出。两次查询各返回 4 条源码证据，服务耗时分别为 1,102 ms 和 874 ms；这些观测仅用于接口验收。复用迁移中的 10 张参考模块卡片按顺序逐项对照原产物，中文功能名称、职责摘要和选中详情均一致，截图已实际查看。
+该次恢复验收的工作台入口为 `http://127.0.0.1:4044`，历史查询端口为 4045；当前新模型实测的查询端口已改为 4051，因为 Fetch 禁用 4045，导致模型无法通过该端口读取证据。在 1440×1000 桌面和 390×844 手机完成真实查询、完整 Context 下载、筛选状态和设置检查，无浏览器错误或页面横向溢出。两次查询各返回 4 条源码证据，服务耗时分别为 1,102 ms 和 874 ms；这些观测仅用于接口验收。复用迁移中的 10 张参考模块卡片按顺序逐项对照原产物，中文功能名称、职责摘要和选中详情均一致，截图已实际查看。
 
 回归分批执行：核心批次 143 个测试通过，后续补充批次 32 个测试通过；token 控件改动的 4 个聚焦测试文件、31 个测试也通过。各批次范围存在重叠，不把数字相加作为独立测试总数。扩展与 webview 类型检查、核心构建及 webview 构建通过。
 
 恢复证据见 `logs/agent-module-restore.json`；真实页面报告见 `logs/task-search-controls-ui.json`，卡片截图为 `logs/task-search-controls-semantic-catalog-desktop.png` 和 `logs/task-search-controls-semantic-catalog-mobile.png`。前一轮结构树与旧扁平容量数据仍在下方分别保留。
 
-## 自适应层级验证记录（2026-09-08）
+## 自适应层级结构基线（2026-09-08）
 
-本轮复用上述固定源码版本，只重建模块树及检索投影。真实建模全部使用本机结构判断，`modelDecisionCount=0`，没有把目录层级标为模型识别的业务子系统。
+以下保留调用 DeepSeek 之前的本机结构基线。该轮复用固定源码版本，只重建模块树及检索投影，`modelDecisionCount=0`，没有把目录层级标为模型识别的业务子系统；这些统计不代表上方新模型产物。
 
 | 项目 | 新层级实测 |
 | --- | --- |

@@ -12,16 +12,20 @@ export function moduleHierarchyEndpoint(adaptationApiUrl: string): string {
 }
 
 export class HttpModuleHierarchyPlanner implements ModuleHierarchyPlanner {
-  private readonly endpoint: string;
-  constructor(adaptationApiUrl: string, private readonly fetcher: typeof localFetch = localFetch) {
-    this.endpoint = moduleHierarchyEndpoint(adaptationApiUrl);
+  private readonly endpoint: () => string;
+  constructor(adaptationApiUrl: string | (() => string), private readonly fetcher: typeof localFetch = localFetch) {
+    if (typeof adaptationApiUrl === 'function') this.endpoint = () => moduleHierarchyEndpoint(adaptationApiUrl());
+    else {
+      const endpoint = moduleHierarchyEndpoint(adaptationApiUrl);
+      this.endpoint = () => endpoint;
+    }
   }
 
   async decide(request: ModuleHierarchyDecisionRequest, parentSignal?: AbortSignal): Promise<ModuleHierarchyDecision> {
     parentSignal?.throwIfAborted();
     const bounded = parseModuleHierarchyDecisionRequest(request);
     const signal = AbortSignal.any([...(parentSignal ? [parentSignal] : []), AbortSignal.timeout(45_000)]);
-    const response = await this.fetcher(this.endpoint, {
+    const response = await this.fetcher(this.endpoint(), {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(bounded), signal,
     });
     if (!response.ok) throw new Error(`Module hierarchy service request failed with HTTP ${response.status}.`);

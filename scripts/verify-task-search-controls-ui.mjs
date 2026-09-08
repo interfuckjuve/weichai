@@ -8,6 +8,7 @@ assert(origin.protocol === 'http:' && ['127.0.0.1', '[::1]'].includes(origin.hos
 const requireTools = createRequire(path.resolve(process.env.FOREXPLORE_UI_TOOLS ?? process.cwd(), 'package.json'));
 const { chromium, expect } = requireTools('@playwright/test');
 const output = process.env.TASK_CONTROLS_UI_OUTPUT ?? 'logs';
+const freshModel = process.env.TASK_CONTROLS_EXPECT_FRESH_MODEL === '1';
 const report = { passed: false, startedAt: new Date().toISOString(), url: origin.href, viewports: [], screenshots: [], errors: [] };
 let browser;
 let page;
@@ -93,29 +94,71 @@ try {
       resultHasTokenCounter: false, settingsHaveTokenControl: false, downloadMatches: true,
       evidence: packet.evidence.length, serviceLatencyMs: packet.usage.latencyMs });
   }
-  if (process.env.TASK_CONTROLS_EXPECT_SEMANTIC === '1') {
+  if (process.env.TASK_CONTROLS_EXPECT_SEMANTIC === '1' || freshModel) {
     const restoration = JSON.parse(await readFile(process.env.TASK_CONTROLS_RESTORE_REPORT ?? 'logs/agent-module-restore.json', 'utf8'));
     assert.equal(restoration.passed, true);
-    const original = restoration.repositories.find((repository) => repository.name === 'account-stream-rs' && repository.role === 'history');
-    assert(original?.projects[0]?.originalHashesAndPayloadUnchanged, 'Restored semantic output must match its original artifact.');
-    const reference = initial.codeIntelligence.repositories.find((repository) => repository.repositoryId === original.repositoryId);
-    const project = reference?.projects.find((project) => project.projectId === original.projects[0].projectId);
-    assert(reference && project, 'The verified original semantic reference project is not visible.');
-    assert.notEqual(project.analysis?.modeling?.strategy, 'structural');
-    assert(!project.analysis?.proposal?.hierarchy, 'This check must use the original flat semantic proposal.');
+    const repositoryName = process.env.TASK_CONTROLS_MODEL_REPOSITORY ?? 'account-stream-rs';
+    const original = restoration.repositories.find((repository) => repository.name === repositoryName && repository.role === 'history');
+    const reference = initial.codeIntelligence.repositories.find((repository) => repository.role === 'history' &&
+      (freshModel ? repository.displayName === repositoryName : repository.repositoryId === original?.repositoryId));
+    const project = reference?.projects.find((project) => process.env.TASK_CONTROLS_MODEL_PROJECT
+      ? project.projectId === process.env.TASK_CONTROLS_MODEL_PROJECT
+      : freshModel ? project.analysis?.modeling?.strategy === 'agent' : project.projectId === original?.projects[0]?.projectId);
+    assert(reference && project, 'The expected semantic reference project is not visible.');
+    const originalProject = original?.projects.find((candidate) => candidate.projectId === project.projectId) ??
+      (original?.projects.length === 1 ? original.projects[0] : undefined);
+    let previousPlanHash;
+    let expectedPlanHash;
+    let freshAfter;
+    if (freshModel) {
+      previousPlanHash = process.env.TASK_CONTROLS_PREVIOUS_PLAN_HASH ?? originalProject?.planHash;
+      expectedPlanHash = process.env.TASK_CONTROLS_EXPECTED_PLAN_HASH;
+      freshAfter = process.env.TASK_CONTROLS_FRESH_AFTER;
+      assert(previousPlanHash && expectedPlanHash && Number.isFinite(Date.parse(freshAfter)),
+        'The previous plan hash, completed model run plan hash and run start timestamp are required.');
+      assert.equal(project.analysis?.modeling?.strategy, 'agent');
+      assert.equal(project.analysis.state, 'ready');
+      assert.equal(project.analysis.projection, 'ready');
+      assert(project.analysis.planHash && project.analysis.planHash !== previousPlanHash, 'The model plan still matches the previous artifact.');
+      assert.equal(project.analysis.planHash, expectedPlanHash, 'The published artifact does not match the completed model run.');
+      assert(Date.parse(project.analysis.updatedAt) > Date.parse(freshAfter), 'The artifact predates the expected fresh model run.');
+    } else {
+      assert(originalProject?.originalHashesAndPayloadUnchanged, 'Restored semantic output must match its original artifact.');
+      assert.equal(project.analysis?.planHash, originalProject.planHash);
+      assert.notEqual(project.analysis?.modeling?.strategy, 'structural');
+      assert(!project.analysis?.proposal?.hierarchy, 'This check must use the original flat semantic proposal.');
+    }
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.goto(origin.href);
     await page.getByLabel('开发需求', { exact: true }).waitFor();
     await page.locator('.workbench-modes').getByRole('button', { name: '复用迁移', exact: true }).click();
     await page.locator('.workspace-switch').getByRole('tab', { name: /参考工程/ }).click();
     await page.getByRole('button', { name: '选择参考工程', exact: true }).click();
+    const selectionResponse = page.waitForResponse((response) => response.url().endsWith('/v1/workbench/message') &&
+      response.request().method() === 'POST' && response.request().postDataJSON()?.type === 'SELECT_CODE_INTELLIGENCE_PROJECT' &&
+      response.request().postDataJSON()?.projectId === project.projectId);
     await page.getByRole('group', { name: reference.displayName, exact: true }).getByRole('menuitemradio').filter({ hasText: project.displayName }).click();
+    const selectedMessages = await (await selectionResponse).json();
+    const selectedExplorer = selectedMessages.find((message) => message.type === 'MODULE_EXPLORER')?.explorer;
+    const workspace = selectedExplorer?.history.find((candidate) => candidate.repositoryId === reference.repositoryId && candidate.projectId === project.projectId);
+    assert(workspace, 'The real project selection did not return its module presentation.');
+    assert.equal(workspace.revision, reference.selectedRevision);
+    assert.equal(workspace.analysis?.state, 'ready');
+    assert.equal(workspace.analysis?.projection, 'ready');
+    assert.equal(workspace.analysis?.planHash, project.analysis?.planHash, 'The published artifact changed during UI verification.');
+    const expectedModules = workspace.tree.filter((node) => node.kind === 'module').slice(0, 24);
+    assert(expectedModules.length > 0);
     const cards = page.locator('.history-module-card');
-    await expect(cards.first()).toBeVisible();
+    await expect(cards.locator(':scope > strong')).toHaveText(expectedModules.map((module) => module.name));
+    await expect(cards.locator('.history-module-description')).toHaveText(expectedModules.map((module) => module.purpose ?? module.description));
     const titles = await cards.locator(':scope > strong').allTextContents();
     const descriptions = await cards.locator('.history-module-description').allTextContents();
-    assert.equal(titles.length, 10);
-    assert.deepEqual(titles, original.projects[0].modules.map((module) => module.name));
+    assert.deepEqual(titles, expectedModules.map((module) => module.name));
+    assert.deepEqual(descriptions, expectedModules.map((module) => module.purpose ?? module.description));
+    if (!freshModel) {
+      assert.equal(titles.length, 10);
+      assert.deepEqual(titles, originalProject.modules.map((module) => module.name));
+    }
     assert(titles.some((title) => /[\u3400-\u9fff]/.test(title)), 'The restored module cards contain no Chinese semantic name.');
     assert(descriptions.some((description) => /[\u3400-\u9fff]/.test(description)), 'The restored module cards contain no Chinese functional description.');
     await cards.first().scrollIntoViewIfNeeded();
@@ -131,8 +174,23 @@ try {
     await preview.scrollIntoViewIfNeeded();
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
     await screenshot('semantic-modules-mobile');
+    const summary = page.locator('.project-analysis .project-summary');
+    await expect(summary).toHaveText(workspace.analysis.proposal.summary);
+    assert(/[\u3400-\u9fff]/.test(workspace.analysis.proposal.summary), 'The published project summary contains no Chinese functional explanation.');
+    if (freshModel) await expect(page.getByLabel('项目解析结果', { exact: true })).toContainText('模块来源：Agent 分析');
+    await summary.scrollIntoViewIfNeeded();
+    await screenshot('semantic-summary-mobile');
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await summary.scrollIntoViewIfNeeded();
+    await screenshot('semantic-summary-desktop');
     report.semanticModules = { repositoryId: reference.repositoryId, projectId: project.projectId,
-      titles, descriptions, originalArtifactUnchanged: true, functionalDescriptionVisible: true };
+      analysisRevision: workspace.revision, planHash: workspace.analysis.planHash,
+      state: workspace.analysis.state, projection: workspace.analysis.projection,
+      modeling: workspace.analysis.modeling, updatedAt: workspace.analysis.updatedAt,
+      ...(freshModel ? { freshModel: true, previousPlanHash, expectedPlanHash, freshAfter } : { originalArtifactUnchanged: true }),
+      totalModuleNodes: workspace.stats.modules, totalRootModules: workspace.analysis.hierarchy?.rootCount,
+      displayedCards: titles.length, titles, descriptions, summary: workspace.analysis.proposal.summary,
+      functionalDescriptionVisible: true };
   }
   assert.deepEqual(report.errors, []);
   report.passed = true;

@@ -107,6 +107,26 @@ describe('adaptive module hierarchy builder', () => {
     expect(proposal.hierarchy?.maxDepth).toBe(3);
   });
 
+  it.each(['budget', 'failure'] as const)('keeps large model-assigned scopes intact after %s in semantic mode', async (mode) => {
+    const large = ['editor', 'storage'].flatMap((domain) => ['api', 'runtime'].flatMap((part) =>
+      Array.from({ length: 20 }, (_, i) => ({ relativePath: `${domain}/${part}/item${i}.ts`,
+        content: `export function item${i}() { return ${i}; }` }))));
+    const decide = vi.fn(async (request: ModuleHierarchyDecisionRequest) => {
+      if (!request.nodeId.startsWith('project:')) throw new Error('Unavailable');
+      return split(request);
+    });
+    const { proposal } = await build(large, { planner: { decide }, requireModel: true,
+      ...(mode === 'budget' ? { maxModelCalls: 1 } : {}) });
+    expect(proposal.modules.map((module) => module.name).sort()).toEqual(['editor', 'storage']);
+    for (const module of proposal.modules) {
+      expect(module.sourceFiles).toHaveLength(40);
+      expect(module.description).toBe(`Responsibility implemented in ${module.name}`);
+      expect(module.refinement?.state).toBe('deferred');
+    }
+    expect(proposal.hierarchy?.modelDecisionCount).toBe(1);
+    assertOwnership(proposal);
+  });
+
   it('rolls real internal dependency evidence up to disjoint ancestor scopes', async () => {
     const { proposal, tree, index } = await build(files, { planner: variablePlanner });
     const engine = proposal.modules.find((module) => module.name === 'engine')!;

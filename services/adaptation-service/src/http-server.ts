@@ -297,7 +297,10 @@ export function createHttpServer(options: HttpServerOptions): Server {
         json(
           response,
           200,
-          { status: "ok", provider: "deepseek" },
+          { status: "ok", provider: "deepseek", capabilities: {
+            semanticModulePlanning: Boolean(options.semanticArchitecturePort),
+            moduleHierarchyPlanning: Boolean(options.moduleHierarchyPlanner),
+          } },
           options.corsOrigin,
         );
         return;

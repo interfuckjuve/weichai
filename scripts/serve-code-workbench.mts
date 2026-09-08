@@ -27,6 +27,7 @@ const inputs = await Promise.all([
 ].map(async (input) => ({ ...input, localPath: await realpath(path.resolve(input.localPath)) })));
 const visiblePaths = new Set(inputs.map((input) => input.localPath));
 const environment = { ...process.env };
+const hierarchyUrl = values['hierarchy-url'] ?? values['adaptation-url'];
 try {
   const legacy = parseEnv(await readFile(path.join(root, 'services/retrieval-service/.env'), 'utf8'));
   for (const name of ['HOST', 'PORT', 'USER', 'PASSWORD']) environment[`CODE_INTELLIGENCE_SEEKDB_${name}`] ??= legacy[`SEEKDB_${name}`];
@@ -45,7 +46,7 @@ function changed(): void {
   }, 150);
 }
 const runtime = await createCodeIntelligenceRuntime({ ...runtimeOptions, projectAnalysis: {
-  onChange: changed, hierarchyPlanner: values['hierarchy-url'] ? new HttpModuleHierarchyPlanner(values['hierarchy-url']) : undefined,
+  onChange: changed, hierarchyPlanner: hierarchyUrl ? new HttpModuleHierarchyPlanner(hierarchyUrl) : undefined,
   allowStructuralFallback: values['structural-baseline'],
   plan: values['adaptation-url'] ? (scope) => requestSemanticModuleMigrationProposal(values['adaptation-url']!, scope, undefined, AbortSignal.timeout(300_000)) : undefined,
 } });
@@ -64,6 +65,33 @@ let failure: string | undefined = registrationFailed ? '部分工程注册失败
 let refreshing: Promise<void> | undefined;
 let cached: { version: number; payload: PanelInitPayload } | undefined;
 let loadingPayload: Promise<PanelInitPayload> | undefined;
+
+async function adaptationStatus(): Promise<PanelInitPayload['serviceStatus']['adaptation']> {
+  type PlanningCapability = 'semanticModulePlanning' | 'moduleHierarchyPlanning';
+  const requirements: Array<[string | undefined, PlanningCapability]> = [
+    [values['adaptation-url'], 'semanticModulePlanning'],
+    [hierarchyUrl, 'moduleHierarchyPlanning'],
+  ];
+  if (!requirements.some(([endpoint]) => endpoint)) return 'unconfigured';
+  try {
+    const endpoints = new Map<string, Set<PlanningCapability>>();
+    for (const [endpoint, capability] of requirements) {
+      if (!endpoint) continue;
+      const url = new URL(endpoint);
+      url.pathname = `${url.pathname.replace(/\/+$/, '')}/health`;
+      url.search = ''; url.hash = '';
+      const key = url.toString();
+      const capabilities = endpoints.get(key) ?? new Set<PlanningCapability>();
+      capabilities.add(capability); endpoints.set(key, capabilities);
+    }
+    const available = await Promise.all([...endpoints].map(async ([endpoint, capabilities]) => {
+      const response = await fetch(endpoint, { signal: AbortSignal.timeout(2000) });
+      const health = await response.json() as { capabilities?: Partial<Record<PlanningCapability, boolean>> };
+      return response.ok && [...capabilities].every((capability) => health.capabilities?.[capability] === true);
+    }));
+    return available.every(Boolean) ? 'connected' : 'error';
+  } catch { return 'error'; }
+}
 
 async function payload(): Promise<PanelInitPayload> {
   if (cached?.version === modelVersion) return cached.payload;
@@ -86,7 +114,7 @@ async function payload(): Promise<PanelInitPayload> {
       }),
       codeIntelligence: presentation,
       moduleExplorer: explorer.presentation,
-      serviceStatus: { retrieval: 'connected', adaptation: 'unconfigured', executionMode: 'real' },
+      serviceStatus: { retrieval: 'connected', adaptation: await adaptationStatus(), executionMode: 'real' },
       searchProvider: 'SeekDB', adaptationProvider: 'DeepSeek',
     };
     cached = { version, payload: result };

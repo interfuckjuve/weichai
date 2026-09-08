@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ModuleHierarchyDecisionRequest, ProjectAnalysisRecord, ProjectAnalysisResult, ProjectAnalysisScope, ProjectModule, StructuralIndex } from '@forexplore/contracts';
 import { createCodeIntelligenceRuntime, InMemoryIndexStore } from './index.js';
 import { ProjectAnalysisCoordinator, projectAnalysisObjective, projectPlanHash, validateProjectResult } from './project-analysis.js';
+import { parseModuleHierarchyDecisionRequest } from './module-hierarchy-planner.js';
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
@@ -64,6 +65,20 @@ function hierarchicalResult(index: StructuralIndex, scope: ProjectAnalysisScope)
 }
 
 describe('project understanding lifecycle', () => {
+  it('normalizes workbench retry messages before sending strict model evidence', async () => {
+    const { runtime, scopes } = await setup();
+    const scope = scopes[0]!;
+    const decide = vi.fn(async (request: ModuleHierarchyDecisionRequest) => coherentDecision(parseModuleHierarchyDecisionRequest(request)));
+    const projects = new ProjectAnalysisCoordinator({ store: runtime.store, hierarchyPlanner: { decide } });
+    const message = { ...scope, type: 'RETRY_PROJECT_ANALYSIS', force: true };
+    await projects.ensure(message, true);
+    expect(decide).toHaveBeenCalledTimes(1);
+    const record = await projects.read(scope);
+    expect(record).toMatchObject({ state: 'ready', projection: 'ready', modeling: { strategy: 'agent' } });
+    expect(record).not.toHaveProperty('type');
+    expect(record).not.toHaveProperty('force');
+  });
+
   it('explicitly rebuilds a persisted flat plan into a hierarchy without rescanning the repository', async () => {
     const { runtime, index, scopes } = await setup();
     const scope = scopes[0]!;

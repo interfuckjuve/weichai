@@ -12,6 +12,7 @@ import type { IndexStore } from './index-store.js';
 export const adaptiveModuleAlgorithm = 'adaptive-module-tree/v1' as const;
 export interface AdaptiveModuleOptions {
   planner?: ModuleHierarchyPlanner;
+  requireModel?: boolean;
   maxDepth?: number;
   maxNodes?: number;
   maxModelCalls?: number;
@@ -189,20 +190,20 @@ export async function buildAdaptiveModuleProposal(
         if (decision.action === 'stop' && decision.stopReason === 'insufficient-evidence') deferredReason = decision.reason;
       } catch {
         options.signal?.throwIfAborted();
-        deferredReason = 'Model decision was unavailable or invalid; structural boundaries are retained.';
+        deferredReason = 'Model decision was unavailable or invalid; further functional refinement remains pending.';
         risks.add(deferredReason);
       }
     } else if (options.planner && (modelCalls >= maxModelCalls || remainingMs <= 0)) {
-      deferredReason = 'Model refinement budget reached; this branch remains structurally modeled.';
+      deferredReason = 'Model refinement budget reached; further functional refinement remains pending.';
     } else if (options.planner && candidates.length > 64) {
-      deferredReason = 'Candidate inventory exceeds the bounded model input; structural child scopes are retained.';
+      deferredReason = 'Candidate inventory exceeds the bounded model input; further functional refinement remains pending.';
     } else if (!candidates.length) {
       deferredReason = 'A bounded candidate inventory could not establish smaller boundaries; functional refinement remains pending.';
     }
     if (!decision) {
       const small = facts.fileCount <= 24 && facts.sourceBytes <= 160 * 1024;
       const directorySplit = candidates.length >= 2 && candidates.some(candidate => candidate.files.length > 1);
-      const split = !small && directorySplit;
+      const split = !options.requireModel && !small && directorySplit;
       const name = work.node?.name ?? project.displayName;
       const description = work.node?.description ?? `${name}: ${facts.fileCount} files, ${facts.symbolCount} declarations.`;
       const evidenceIds = work.node?.evidenceIds ?? work.files.slice(0, 8).map(file => `file:${file.fileId}`);
@@ -212,7 +213,7 @@ export async function buildAdaptiveModuleProposal(
           nodeKind: 'module', groupIds: [candidate.id], evidenceIds: candidate.files.slice(0, 3).map(file => `file:${file.fileId}`) })) } :
         { action: 'stop', name, description, nodeKind: work.node?.nodeKind ?? 'module', evidenceIds,
           reason: small ? 'The source scope is small enough to inspect directly; additional structural levels are unnecessary.' : 'No smaller supported directory boundary was found.' };
-      if (!small && !split) deferredReason ??= 'Further functional refinement requires additional evidence.';
+      if (options.requireModel || !small && !split) deferredReason ??= 'Further functional refinement requires additional evidence.';
     }
     const childrenCount = decision.action === 'split' ? decision.children.length : 0;
     const depthLimited = work.depth >= maxDepth - 1;

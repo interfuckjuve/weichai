@@ -235,6 +235,7 @@ export class ToolCallingArchitectRuntime {
       [queryCacheKey('get_repository_overview', scope), overview],
     ]);
     let initialContext: Record<string, unknown> | undefined;
+    let projectPaths: Set<string> | undefined;
     if (request.projectId !== undefined) {
       const projects = await this.#queryPort.listProjects(scope, signal);
       assertNestedEvidenceScope(projects, scope);
@@ -263,6 +264,13 @@ export class ToolCallingArchitectRuntime {
         dependencyCursor = page.nextCursor;
       }
       const { files = [], ...metadata } = project.value as typeof project.value & { files?: unknown[] };
+      projectPaths = new Set();
+      for (const file of files) {
+        if (!isRecord(file) || typeof file.relativePath !== 'string' || !isSafeRelativePath(file.relativePath)) {
+          throw new Error('SemanticQueryPort returned an invalid selected-project file inventory.');
+        }
+        projectPaths.add(file.relativePath);
+      }
       const sectionBudget = Math.floor(this.#maxToolResultChars / 3);
       initialContext = {
         project: compactEvidence({ ...project, value: metadata }),
@@ -299,7 +307,7 @@ export class ToolCallingArchitectRuntime {
         let proposal: RevisionScopedModulePlanProposal;
         try {
           proposal = parseRevisionScopedModulePlan(raw, {
-            scope, analysisHash, objective: request.objective, evidence,
+            scope, analysisHash, objective: request.objective, evidence, projectPaths,
           });
         } catch (error) {
           if (proposalRepairs >= this.#maxProposalRepairs || raw.length > 64_000) throw error;
@@ -309,6 +317,7 @@ export class ToolCallingArchitectRuntime {
           messages.push({ role: 'user', content: [
             `Proposal validation failed: ${error instanceof Error ? error.message : String(error)}`,
             'Correct the entire proposal and return only JSON. Check every ID, not just the first reported error. Do not change the supplied scope, hash or objective.',
+            'Each selected-project file must appear exactly once: either in one module sourceFiles list or in unassignedFiles with a reason. Remove overlaps and duplicate declarations; do not assign files from dependency context outside the selected project. Include a nonempty project summary.',
             'For this correction, set symbolKeys to [] in EVERY module. Symbol references are optional for this file-level module plan. Keep the module descriptions and coreApis; retain exact evidenceIds to support them. Never invent or reconstruct IDs.',
             'You may use these previously supplied evidence IDs, grouped by file. Copy them exactly into evidenceIds only, choosing files relevant to each module. Preserve unresolved dependencies and list unassigned files with reasons.',
             JSON.stringify([...evidence.fileEvidence].map(([relativePath, evidenceId]) => ({ relativePath, evidenceId }))),
@@ -483,7 +492,7 @@ export function buildToolCallingArchitectMessages(
           "",
           "[SELECTED_PROJECT_ID]",
           request.projectId,
-          "Only assign files from the selected project. Include every project file either in a module or in unassignedFiles with a reason. Supply a project summary. Cross-project dependencies are context, not module ownership.",
+          "Only assign files from the selected project. Include every project file exactly once, either in one module sourceFiles list or in unassignedFiles with a reason, never both. Supply a project summary. Cross-project dependencies are context, not module ownership.",
         ]),
         ...(initialContext === undefined ? [] : [
           "",
@@ -970,6 +979,7 @@ interface RevisionScopedProposalValidationContext {
   analysisHash: string;
   objective: string;
   evidence: EvidenceCatalog;
+  projectPaths?: ReadonlySet<string>;
 }
 
 export function parseRevisionScopedModulePlan(
@@ -1022,6 +1032,9 @@ function validateRevisionScopedModulePlan(
     if (moduleIds.has(module.id)) throw new Error(`modules[${index}].id duplicates module ${module.id}.`);
     moduleIds.add(module.id);
     for (const path of module.sourceFiles) {
+      if (context.projectPaths && !context.projectPaths.has(path)) {
+        throw new Error(`modules[${index}].sourceFiles contains a file outside the selected project: ${path}.`);
+      }
       if (ownedPaths.has(path)) throw new Error(`modules[${index}].sourceFiles duplicates ownership of ${path}.`);
       ownedPaths.add(path);
     }
@@ -1049,12 +1062,27 @@ function validateRevisionScopedModulePlan(
     }
   }
   if (value.risks !== undefined) assertStringArray(value.risks, "RevisionScopedModulePlanProposal.risks", true);
-  if (value.summary !== undefined) assertNonEmptyString(value.summary, 'summary');
+  if (context.projectPaths || value.summary !== undefined) assertNonEmptyString(value.summary, 'summary');
+  const coveredPaths = new Set(ownedPaths);
   if (value.unassignedFiles !== undefined) {
     assertArray(value.unassignedFiles, 'unassignedFiles');
-    for (const item of value.unassignedFiles) {
+    for (const [index, item] of value.unassignedFiles.entries()) {
       if (!isRecord(item) || typeof item.path !== 'string' || !context.evidence.paths.has(item.path) ||
           typeof item.reason !== 'string' || !item.reason.trim()) throw new Error('Invalid unassigned file declaration.');
+      assertOnlyKeys(item, ['path', 'reason'], `unassignedFiles[${index}]`);
+      if (context.projectPaths && !context.projectPaths.has(item.path)) {
+        throw new Error(`unassignedFiles[${index}] contains a file outside the selected project: ${item.path}.`);
+      }
+      if (coveredPaths.has(item.path)) {
+        throw new Error(`unassignedFiles[${index}] duplicates an assigned or unassigned file: ${item.path}.`);
+      }
+      coveredPaths.add(item.path);
+    }
+  }
+  if (context.projectPaths) {
+    const missing = [...context.projectPaths].filter(path => !coveredPaths.has(path));
+    if (missing.length) {
+      throw new Error(`The proposal leaves ${missing.length} selected-project files without ownership or an unassignedFiles reason: ${missing.slice(0, 12).join(', ')}.`);
     }
   }
 }

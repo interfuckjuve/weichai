@@ -176,6 +176,7 @@ export class ProjectAnalysisCoordinator implements ProjectAnalysisPort {
   }
 
   ensure(scope: ProjectAnalysisScope, force = false): Promise<void> {
+    scope = { repositoryId: scope.repositoryId, analysisRevision: scope.analysisRevision, projectId: scope.projectId };
     const key = this.key(scope);
     const existing = this.running.get(key);
     if (existing) return existing;
@@ -224,7 +225,8 @@ export class ProjectAnalysisCoordinator implements ProjectAnalysisPort {
             throw new Error('Agent 功能模块分析服务未配置；基础索引和源码检索仍可使用。');
           }
           const proposal = await buildAdaptiveModuleProposal(index, scope, projectAnalysisObjective, {
-            ...this.options.hierarchy, planner: this.options.hierarchyPlanner, readSource: store.getSourceSlice?.bind(store),
+            ...this.options.hierarchy, requireModel: !this.options.allowStructuralFallback,
+            planner: this.options.hierarchyPlanner, readSource: store.getSourceSlice?.bind(store),
           });
           if (!this.options.allowStructuralFallback && !proposal.hierarchy!.modelDecisionCount) {
             throw new Error('Agent 未能完成有效的功能模块分析，请检查模型服务后重试。');

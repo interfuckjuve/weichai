@@ -106,8 +106,8 @@ export function activate(context: vscode.ExtensionContext): void {
         });
         return requestSemanticModuleMigrationProposal(loadSettings().adaptationApiUrl, scope, undefined, AbortSignal.timeout(300_000));
       },
-      hierarchyPlanner: process.env.FOREXPLORE_MODULE_HIERARCHY_URL
-        ? new HttpModuleHierarchyPlanner(process.env.FOREXPLORE_MODULE_HIERARCHY_URL) : undefined,
+      hierarchyPlanner: new HttpModuleHierarchyPlanner(() =>
+        process.env.FOREXPLORE_MODULE_HIERARCHY_URL?.trim() || loadSettings().adaptationApiUrl),
       onChange: () => { void publishProjectView(codeIntelligence).catch((error) => output.appendLine(String(error))); },
       identityStore: context.globalState,
       output,

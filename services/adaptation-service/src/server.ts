@@ -1,5 +1,9 @@
 import 'dotenv/config';
+import { ModelModuleHierarchyPlanner } from '@forexplore/code-intelligence-service/module-hierarchy-planner';
 import { loadConfig } from './config.js';
+import { completeWithDeepSeek } from './deepseek-client.js';
+import { deepSeekModelConfig } from './model-config.js';
+import { observeAgentModelCall } from './agent-model-observer.js';
 import { createHttpServer } from './http-server.js';
 import { AdaptationAdapter } from './adaptation-adapter.js';
 import { ArchitectAgent } from './architect-agent.js';
@@ -36,14 +40,26 @@ async function main(): Promise<void> {
   // Legacy /v1/module-plan remains snapshot-compatible. The semantic route is
   // explicitly opt-in and talks only to the VS Code host's read-only HTTP
   // SemanticQueryPort endpoint; this process never creates an index runtime.
+  const semanticModel = createDeepSeekToolCallingArchitectClient({ apiKey: config.apiKey, temperature: 0 });
   const semanticArchitecturePort = config.semanticQueryPort
     ? new ToolCallingArchitectRuntime({
       queryPort: new HttpSemanticQueryPort(config.semanticQueryPort),
-      client: createDeepSeekToolCallingArchitectClient({ apiKey: config.apiKey, temperature: 0 }),
+      client: { complete: (messages, tools, signal) => observeAgentModelCall({
+        strategy: 'semantic', model: deepSeekModelConfig.model, inputChars: JSON.stringify({ messages, tools }).length,
+      }, () => semanticModel.complete(messages, tools, signal), (result) => JSON.stringify(result).length, signal) },
     })
     : undefined;
   const httpServer = createHttpServer({
     adapter,
+    moduleHierarchyPlanner: new ModelModuleHierarchyPlanner({
+      timeoutMs: 45_000,
+      maxRepairs: 1,
+      complete: (messages, signal) => observeAgentModelCall({
+        strategy: 'hierarchy', model: deepSeekModelConfig.model, inputChars: JSON.stringify(messages).length,
+      }, () => completeWithDeepSeek(messages, {
+        apiKey: config.apiKey, temperature: 0, jsonMode: true,
+      }, signal), (result) => result.length, signal),
+    }),
     architecturePort: new ArchitectAgent({ apiKey: config.apiKey }),
     staticAnalysisSnapshots: new FileStaticAnalysisSnapshotStore({
       analysisRoot: config.analysisRoot,
