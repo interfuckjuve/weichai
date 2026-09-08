@@ -1,10 +1,18 @@
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { VerificationStrategyFactory } from "./workflow/select-strategy.js";
-import type { VerificationInput, VerificationReceipt, VerificationResult, VerificationStrategyDescriptor } from "./schemas/verification-types.js";
+import type { VerificationStrategyFactory } from "./workflow/strategy-registry.js";
+import type {
+  VerificationInput,
+  VerificationReceipt,
+  VerificationResult,
+  VerificationStrategyDescriptor,
+} from "./schemas/verification-types.js";
 import { runVerification } from "./workflow/run-verification.js";
 
-export type { VerificationResultArtifact, VerificationReceipt } from "./schemas/verification-types.js";
+export type {
+  VerificationResultArtifact,
+  VerificationReceipt,
+} from "./schemas/verification-types.js";
 
 export interface VerificationServiceOptions {
   factory: VerificationStrategyFactory;

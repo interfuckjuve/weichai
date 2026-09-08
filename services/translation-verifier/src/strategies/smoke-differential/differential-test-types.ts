@@ -1,8 +1,8 @@
 /**
  * smoke 差分验证类型定义(src/strategies 模块与 e2e 共享的 SmokeReport schema)。
  *
- * Per-case expected observations are derived from the Host-confirmed basis and
- * reviewed separately from actual runner output; both sides are assessed independently.
+ * The Agent derives case expectations from the Host-confirmed basis; Host checks
+ * enforce evidence consistency, not independent approval of those expectations.
  */
 import type { VerificationAssessment } from "../../schemas/verification-types.js";
 
@@ -49,10 +49,7 @@ export interface CommandEvidence extends SmokeExecutionEvidence {
  stderr: string;
 }
 
-/**
- * 工作区文件基线(声明只在 smoke-types.ts;workspace-baseline.ts 负责实现并导入本类型)。
- * Task 2 实现文件系统助手,本任务不新增。
- */
+/** File baseline created and checked by protect-project-files.ts. */
 export interface WorkspaceBaseline {
  schemaVersion: "1.0";
  workspaceRoot: string;
@@ -66,20 +63,20 @@ export interface WorkspaceBaseline {
  artifactDirectoryNames: string[];
 }
 
-/** agent 声明的 runner / 修复文件(相对路径 + 完整内容)。 */
+/** Agent-declared runner file with a relative path and complete content. */
 export interface RunnerFile {
  path: string;
  content: string;
 }
 
-/** LLM 语义裁决的四种决策。 */
+/** Legacy model annotation; never used as the Host verification verdict. */
 export type SmokeDecision =
  | "pass"
  | "translation-bug"
  | "accepted-diff"
  | "unclear";
 
-/** 机械差分(compareCases)的三种 verdict。 */
+/** Agent-reported mechanical comparison annotation; not a Host verdict. */
 export type SmokeMechanicalVerdict = "pass" | "fail" | "divergent";
 
 // ---------------------------------------------------------------------------
@@ -111,19 +108,16 @@ export interface SmokeCaseVerdict {
 }
 
 export interface SmokeReport {
- /** true = 差分收敛(所有差异已裁决/修复)。 */
+ /** Legacy Agent convergence annotation; does not establish verification success. */
  converged: boolean;
  /** 已执行步骤数。 */
  steps: number;
- /** 目标侧修复轮数。 */
+ /** Must be zero in verify-only mode; target repair belongs to the translator. */
  rounds: number;
  cases: SmokeCaseVerdict[];
- /** 修复后的目标文件全文(未采纳不落盘,由调用方决定是否写回用户目录)。 */
+ /** Must be empty in verify-only mode; target implementation edits are rejected. */
  targetFiles: RunnerFile[];
- /**
-  * 双侧 runner/driver 文件(可选):收敛无修复的常见路径下 targetFiles 为空,
-  * 由本字段携带双侧可编译 runner 文件(含 driver 入口)。
-  */
+ /** Agent-declared runners for the permitted sides, including driver entry points. */
  runnerFiles?: {
   side: SmokeSide;
   language: VerifierLanguage;

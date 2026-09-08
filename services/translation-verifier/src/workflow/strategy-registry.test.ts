@@ -5,7 +5,7 @@ import type {
   VerificationStrategyDescriptor,
   VerificationStrategyProvider,
 } from "../schemas/verification-types.js";
-import { VerificationStrategyFactory } from "./select-strategy.js";
+import { VerificationStrategyFactory } from "./strategy-registry.js";
 
 const descriptor: VerificationStrategyDescriptor = {
   id: "fixture",

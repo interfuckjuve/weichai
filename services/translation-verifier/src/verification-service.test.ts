@@ -20,7 +20,7 @@ import {
 } from "./run-output/measure-legacy-run.js";
 import * as recording from "./run-output/record-run.js";
 import { VerificationService } from "./verification-service.js";
-import { VerificationStrategyFactory } from "./workflow/select-strategy.js";
+import { VerificationStrategyFactory } from "./workflow/strategy-registry.js";
 import { resolveVerificationPolicy } from "./schemas/verification-assessment.js";
 import type { VerificationAssessment } from "./schemas/verification-types.js";
 import { createVerificationResult } from "./schemas/materialize-verification-result.js";

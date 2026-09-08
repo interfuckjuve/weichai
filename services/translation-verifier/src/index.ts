@@ -15,7 +15,7 @@ export {
   validateRunSchema,
   validateRunEventSchema,
 } from "./schemas/compile-schema-validators.js";
-export { VerificationStrategyFactory } from "./workflow/select-strategy.js";
+export { VerificationStrategyFactory } from "./workflow/strategy-registry.js";
 export { VerificationService } from "./verification-service.js";
 export { createDefaultVerificationService } from "./create-default-verifier.js";
 export { DIFFERENTIAL_SMOKE_STRATEGY } from "./strategies/smoke-differential/strategy.js";

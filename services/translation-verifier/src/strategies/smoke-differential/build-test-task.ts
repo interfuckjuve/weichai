@@ -8,7 +8,7 @@ import {
   buildSmokeTaskPrompt,
   type SmokeTaskInput,
 } from "./build-differential-test-prompt.js";
-import type { RunLayout } from "./prepare-projects.js";
+import type { RunLayout } from "./prepare-smoke-workspace.js";
 import type { SmokeRunOptions } from "./run-smoke-verification.js";
 
 export function prepareAgentTask(

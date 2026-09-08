@@ -3,7 +3,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { VerificationService } from "../src/verification-service.js";
-import { VerificationStrategyFactory } from "../src/workflow/select-strategy.js";
+import { VerificationStrategyFactory } from "../src/workflow/strategy-registry.js";
 import { measureVerification } from "../src/run-output/measure-legacy-run.js";
 import { createDifferentialSmokeProvider } from "../src/strategies/smoke-differential/strategy.js";
 import { spawnClaudeProcess } from "../src/strategies/smoke-differential/claude-session.js";

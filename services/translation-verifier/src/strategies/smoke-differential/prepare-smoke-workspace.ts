@@ -26,6 +26,7 @@ const MUTABLE_FILES = [
   "agent/commands.jsonl",
 ] as const;
 
+/** Add smoke runner directories and a baseline to staged projects; the caller owns cleanup. */
 export function prepareCallerOwnedWorkspace(
   context: VerificationStrategyContext,
   differential: boolean,

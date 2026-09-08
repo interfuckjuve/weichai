@@ -117,8 +117,8 @@ function resolveAllowedCommand(
 }
 
 /**
- * 执行前基线复查,并把 Task 2 断言错误归一化为命令代理可见语义:
- * 既有文件变化 / 受保护文件被删 → /baseline/;runner 区外新文件 → /new source/。
+ * Normalize baseline assertion failures for command-proxy diagnostics:
+ * changed/deleted protected files use /baseline/; new files outside runners use /new source/.
  */
 function assertBaselineGated(
   workspaceRoot: string,

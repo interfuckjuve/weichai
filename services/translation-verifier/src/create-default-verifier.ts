@@ -1,14 +1,28 @@
-import { createDifferentialSmokeProvider, type DifferentialSmokeStrategyOptions, DIFFERENTIAL_SMOKE_STRATEGY } from "./strategies/smoke-differential/strategy.js";
-import { VerificationService, type VerificationServiceOptions } from "./verification-service.js";
-import { VerificationStrategyFactory } from "./workflow/select-strategy.js";
+import {
+  createDifferentialSmokeProvider,
+  type DifferentialSmokeStrategyOptions,
+  DIFFERENTIAL_SMOKE_STRATEGY,
+} from "./strategies/smoke-differential/strategy.js";
+import {
+  VerificationService,
+  type VerificationServiceOptions,
+} from "./verification-service.js";
+import { VerificationStrategyFactory } from "./workflow/strategy-registry.js";
 
 export type VerificationServiceRuntimeOptions = Pick<
   VerificationServiceOptions,
-  "workspaceRoot" | "artifactRoot" | "timeoutMs" | "now" | "runRoot" | "debug" | "onRunRecorded"
+  | "workspaceRoot"
+  | "artifactRoot"
+  | "timeoutMs"
+  | "now"
+  | "runRoot"
+  | "debug"
+  | "onRunRecorded"
 >;
 
 export function createDefaultVerificationService(
-  options: DifferentialSmokeStrategyOptions & VerificationServiceRuntimeOptions = {},
+  options: DifferentialSmokeStrategyOptions &
+    VerificationServiceRuntimeOptions = {},
 ): VerificationService {
   const factory = new VerificationStrategyFactory([
     createDifferentialSmokeProvider(options),
@@ -20,14 +34,24 @@ export function createDefaultVerificationService(
   });
 }
 
-function runtimeOptions(options: VerificationServiceRuntimeOptions): VerificationServiceRuntimeOptions {
+function runtimeOptions(
+  options: VerificationServiceRuntimeOptions,
+): VerificationServiceRuntimeOptions {
   return {
-    ...(options.workspaceRoot !== undefined ? { workspaceRoot: options.workspaceRoot } : {}),
-    ...(options.artifactRoot !== undefined ? { artifactRoot: options.artifactRoot } : {}),
-    ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+    ...(options.workspaceRoot !== undefined
+      ? { workspaceRoot: options.workspaceRoot }
+      : {}),
+    ...(options.artifactRoot !== undefined
+      ? { artifactRoot: options.artifactRoot }
+      : {}),
+    ...(options.timeoutMs !== undefined
+      ? { timeoutMs: options.timeoutMs }
+      : {}),
     ...(options.runRoot !== undefined ? { runRoot: options.runRoot } : {}),
     ...(options.debug !== undefined ? { debug: options.debug } : {}),
-    ...(options.onRunRecorded !== undefined ? { onRunRecorded: options.onRunRecorded } : {}),
+    ...(options.onRunRecorded !== undefined
+      ? { onRunRecorded: options.onRunRecorded }
+      : {}),
     ...(options.now !== undefined ? { now: options.now } : {}),
   };
 }

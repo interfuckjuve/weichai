@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import type { VerificationStrategyContext } from "../../schemas/verification-types.js";
 import { resolveVerificationPolicy } from "../../schemas/verification-assessment.js";
 import type { SmokeTaskInput } from "./build-differential-test-prompt.js";
-import { prepareCallerOwnedWorkspace } from "./prepare-projects.js";
+import { prepareCallerOwnedWorkspace } from "./prepare-smoke-workspace.js";
 
 /** Test caller owns staging and cleanup; the runner receives only prepared paths. */
 export function prepareSmokeWorkspaceFixture(

@@ -17,7 +17,7 @@ import { readReport, errorSummary } from "./read-test-report.js";
 import { assertSmokeReport } from "./validate-test-report.js";
 import type { SmokeReport } from "./differential-test-types.js";
 import type { SmokeResult } from "./run-smoke-verification.js";
-import type { RunLayout } from "./prepare-projects.js";
+import type { RunLayout } from "./prepare-smoke-workspace.js";
 
 export type SmokeOutcome = VerificationAssessment &
   Pick<SmokeResult, "summary" | "report"> &

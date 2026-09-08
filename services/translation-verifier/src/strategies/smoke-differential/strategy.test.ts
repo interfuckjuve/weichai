@@ -30,7 +30,7 @@ import {
   type RunSmokeImpl,
 } from "./strategy.js";
 import * as smokePreflight from "./prepare-smoke-input.js";
-import * as smokeWorkspace from "./prepare-projects.js";
+import * as smokeWorkspace from "./prepare-smoke-workspace.js";
 import type {
   VerificationArtifact,
   VerificationInput,

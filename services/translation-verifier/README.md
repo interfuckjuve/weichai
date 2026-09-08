@@ -80,12 +80,12 @@ The smoke E2E wrapper currently supports only `differential-smoke`; it is not a 
 
 ## Ownership and Files
 
-All paths below are relative to this package.
+All paths below are relative to this package. `schemas/` is the package-local contract layer: wire schemas, generated types, runtime strategy interfaces and pure semantic validation. It must not depend on workflow execution or concrete strategies.
 
 | Files | Responsibility |
 | --- | --- |
 | `src/verification-service.ts`, `src/create-default-verifier.ts` | Public entry and static default registration |
-| `src/workflow/select-strategy.ts` | Provider registry/factory; explicit unknown-ID failure |
+| `src/workflow/strategy-registry.ts` | Provider registry/factory; explicit unknown-ID failure |
 | `src/workflow/run-verification.ts`, `validate-input.ts`, `run-strategy.ts`, `save-report.ts` | Three external phases, cancellation/deadline and canonical result receipt |
 | `src/schemas/materialize-verification-result.ts`, `src/schemas/validate-verification-result.ts` | Pure output construction, schema materialization and result validation |
 | `src/workflow/prepare-strategy-workspace.ts` | Generic snapshots and patch staging, no smoke runner layout |
@@ -94,7 +94,7 @@ All paths below are relative to this package.
 | `src/schemas/*.schema.json`, `verification-schema-types.d.ts`, `verification-types.ts` | JSON wire contracts, generated types, runtime strategy interfaces |
 | `src/schemas/compile-schema-validators.ts`, `validate-*.ts` | Ajv validation plus hashes, identities and other semantic checks |
 | `src/strategies/smoke-differential/strategy.ts` | Input/context preflight and framework-to-smoke mapping |
-| `src/strategies/smoke-differential/run-smoke-verification.ts`, `prepare-projects.ts` | Prepared-workspace-only smoke orchestration and caller-owned layout |
+| `src/strategies/smoke-differential/run-smoke-verification.ts`, `prepare-smoke-workspace.ts` | Prepared-workspace-only smoke orchestration and caller-owned layout |
 | `src/strategies/smoke-differential/build-test-task.ts`, `build-differential-test-prompt.ts`, `run-agent-session.ts` | Task construction and one Agent session |
 | `src/strategies/smoke-differential/claude-session.ts`, `manage-test-process.ts` | Claude CLI options, live stdout observer, deadlines and process-tree cleanup |
 | `src/strategies/smoke-differential/observe-agent-steps.ts` | Bounded, strategy-private assistant marker parser; approximate receipt-time observations only |

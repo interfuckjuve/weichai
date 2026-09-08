@@ -13,7 +13,7 @@ flowchart TD
   S -. Host span .-> O
 ```
 
-`src/workflow/run-verification.ts` owns the three outer phases, request recorder and cleanup. `validate-input.ts` checks the generic input envelope and selects the provider from `select-strategy.ts`. `run-strategy.ts` owns provider execution, deadline/cancellation handling and strategy output validation. `save-report.ts` binds and persists the canonical result through `run-output/verification-artifact-store.ts`. The pure output constructor and schema materialization live in `src/schemas/materialize-verification-result.ts`; schema validation shares that contract without importing workflow execution. Timing never determines a verdict or rewrites a receipt/hash.
+`src/workflow/run-verification.ts` owns the three outer phases, request recorder and cleanup. `validate-input.ts` checks the generic input envelope and selects the provider from `strategy-registry.ts`. `run-strategy.ts` owns provider execution, deadline/cancellation handling and strategy output validation. `save-report.ts` binds and persists the canonical result through `run-output/verification-artifact-store.ts`. The pure output constructor and schema materialization live in `src/schemas/materialize-verification-result.ts`; schema validation shares that contract without importing workflow execution. Timing never determines a verdict or rewrites a receipt/hash.
 
 `prepare-strategy-workspace.ts` stages target snapshots and the translation patch, and stages source files only when the Host explicitly accepts the reference. It does not create smoke baselines, runner layouts or an Agent task sequence. A provider supplies `descriptor` and `create()`, and its strategy exposes `verify(input, context, signal)`. A strategy may have zero Agent calls, arbitrary steps and repeated or nested steps. `context.measureStep()` wraps existing work only; the recorder is not a workflow state machine.
 
@@ -38,6 +38,8 @@ flowchart TD
   C -. metadata copied after session, even on failure .-> Q
   Q -. no verdict authority .-> R[RunRecorder]
 ```
+
+`prepare-smoke-workspace.ts` adds runner directories and a file baseline to the already-staged workspace; it does not copy projects or own cleanup.
 
 The Host controls the mode and test basis. Missing basis is an explicit preflight failure, not authorization for Agent-invented acceptance criteria. In target-only mode, source observations must remain absent and source assessment is `not_checked`; the command proxy denies source execution. Valid reports may distinguish source-only, target-only or common-mode bugs. Invalid reports/evidence cannot establish code findings. A timeout can preserve previously validated findings as `partial`; cancellation is distinct from an ordinary failure. The Host allows a bounded 250 ms report-finalization window after either signal, then returns even if a strategy does not cooperate. A slower recovery may be omitted. Missing or malformed reports do not suppress separate baseline and command diagnostics. Successfully retried runner compile errors remain in execution history but do not make the final report partial; unresolved compile errors, failed runs and timeouts remain problems. Command evidence is validated by `command-evidence.ts`; diagnostic metadata and command timing are separate best-effort observations and never satisfy evidence predicates.
 

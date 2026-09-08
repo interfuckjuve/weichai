@@ -18,7 +18,7 @@ import type {
 import type { SmokeTaskInput } from "./build-differential-test-prompt.js";
 import { errorSummary } from "./read-test-report.js";
 import { prepareAgentTask } from "./build-test-task.js";
-import type { RunLayout } from "./prepare-projects.js";
+import type { RunLayout } from "./prepare-smoke-workspace.js";
 import { runAgentTests } from "./run-agent-session.js";
 import { evaluateEvidence } from "./evaluate-evidence.js";
 import { observeCommandTimings } from "./observe-command-timings.js";

@@ -15,7 +15,7 @@ import type {
   VerificationStrategyOutput,
   VerificationStrategyProvider,
 } from "../../schemas/verification-types.js";
-import { prepareCallerOwnedWorkspace } from "./prepare-projects.js";
+import { prepareCallerOwnedWorkspace } from "./prepare-smoke-workspace.js";
 import { prepareSmokeInput } from "./prepare-smoke-input.js";
 import {
   runSmoke,
