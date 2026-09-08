@@ -207,7 +207,7 @@ const output = await bundle({ entryPoints: [path.join(root, 'apps/vscode-extensi
   bundle: true, write: false, outfile: 'workbench.js', format: 'iife', platform: 'browser', jsx: 'automatic', minify: true,
   define: { 'process.env.NODE_ENV': '"production"' } });
 const assets = new Map(output.outputFiles!.map((file) => [`/${path.basename(file.path)}`, file.contents]));
-const html = '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ForeXplore 代码工作台</title><link rel="stylesheet" href="/workbench.css"></head><body><div id="root"></div><script src="/workbench.js"></script></body></html>';
+const html = '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>RECAST 智能开发工作台</title><link rel="stylesheet" href="/workbench.css"></head><body><div id="root"></div><script src="/workbench.js"></script></body></html>';
 
 async function readJson(request: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = []; let bytes = 0;

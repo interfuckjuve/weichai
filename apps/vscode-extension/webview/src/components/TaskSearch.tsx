@@ -140,7 +140,10 @@ export function TaskSearch({ project, search, availableGranularities, onMigrate 
         <div className="context-export-actions">
           <button type="button" className="icon-button" title={copied ? '已复制' : '复制上下文'} aria-label="复制上下文" disabled={!canExport} onClick={() => void copy()}>{copied ? <Check size={15} /> : <Copy size={15} />}</button>
           <button type="button" className="secondary-action" disabled={!canExport} onClick={download}><Download size={14} />导出上下文</button>
-          <button type="button" className="secondary-action" disabled={!canExport} onClick={() => onMigrate(requirement)}><GitBranch size={14} />复用迁移<ArrowRight size={13} /></button>
+          <button type="button" className="secondary-action" title="带入当前需求，继续选择复用方案"
+            disabled={!canExport} onClick={() => onMigrate(requirement)}>
+            <GitBranch size={14} />带入需求并选择参考方案<ArrowRight size={13} />
+          </button>
         </div>
       </footer>
       {packet?.gaps.length ? <details className="context-gaps" open={packet.status === 'unavailable'}>

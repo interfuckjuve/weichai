@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import type { ModuleRefinement, ProjectAnalysisRecord, ProjectAnalysisScope } from '@forexplore/contracts';
 import {
   AlertTriangle,
   Box,
@@ -7,7 +8,6 @@ import {
   ChevronRight,
   Database,
   FileCode2,
-  FileJson2,
   Folder,
   FolderOpen,
   GitBranch,
@@ -37,7 +37,7 @@ interface ModuleWorkspaceProps {
   onSelectProject?: ProjectPickerProps['onSelect'];
   onRefreshRepository?: ProjectPickerProps['onRefresh'];
   onAddTarget?: ProjectPickerProps['onAdd'];
-  onRetry?(scope: import('@forexplore/contracts').ProjectAnalysisScope, force: boolean): void;
+  onRetry?(scope: ProjectAnalysisScope, force: boolean): void;
   onLoadChildren?: ModuleChildrenProvider;
   explorer: ModuleExplorerPresentation;
   mode: ModuleExplorerMode;
@@ -89,7 +89,6 @@ export function ModuleWorkspace({
   const rootData = rootPage.key === rootPageKey ? rootPage : { nodes: workspace.tree, loading: false, error: '' };
   const rootTotal = workspace.rootTotal ?? rootData.nodes.length;
   const noTarget = mode === 'target' && !workspace.projectId && workspace.id === 'target:unselected';
-  const analyzing = ['queued', 'analyzing', 'validating'].includes(workspace.analysis?.state ?? '');
   const filteredTree = useMemo(
     () => filterTree(rootData.nodes, query.trim().toLocaleLowerCase(), status),
     [rootData.nodes, query, status],
@@ -302,47 +301,11 @@ export function ModuleWorkspace({
           {settingsOpen || primaryContent || (mode === 'target' && !noTarget) ? children : null}
           {!settingsOpen && selectedNode?.kind === 'module' && (primaryContent || mode === 'target')
             ? <HistorySelectionPreview node={selectedNode} /> : null}
-          {!settingsOpen && workspace.projectId ? (
-            <section className="project-analysis" aria-label="项目解析结果">
-              <h2>{workspace.name}</h2>
-              <p role="status">模块解析：{analysisState(workspace.analysis?.state)} · 检索同步：{workspace.analysis?.projection ?? 'pending'}</p>
-              {workspace.analysis?.modeling ? <p>模块来源：{workspace.analysis.modeling.strategy === 'structural' ? '离线结构分析' : 'Agent 分析'}</p> : null}
-              {workspace.analysis?.hierarchy ? <div className="hierarchy-summary" aria-label="模块层级统计">
-                <span>{workspace.analysis.hierarchy.rootCount} 个顶层范围</span>
-                <span>{workspace.analysis.hierarchy.moduleCount} 个模块</span>
-                {workspace.analysis.hierarchy.subsystemCount > 0 ? <span>{workspace.analysis.hierarchy.subsystemCount} 个子系统</span> : null}
-                <span>叶模块 {workspace.analysis.hierarchy.leafCount}</span>
-                {workspace.analysis.hierarchy.deferredCount > 0 ? <span className="is-deferred">待细化 {workspace.analysis.hierarchy.deferredCount}</span> : null}
-                {workspace.analysis.hierarchy.unknownCount > 0 ? <span>细化状态未标注 {workspace.analysis.hierarchy.unknownCount}</span> : null}
-              </div> : null}
-              {workspace.analysis?.error ? <p role="alert">{workspace.analysis.error}</p> : null}
-              <p className="project-summary">{workspace.analysis?.proposal?.summary ?? '尚无有效模块摘要。可查看结构索引，或重试模块解析。'}</p>
-              {workspace.analysis?.state === 'stale' ? <p>正在浏览历史版本，以下结果不代表当前代码。</p> : null}
-              {workspace.analysis?.coverage ? <p>文件覆盖：{workspace.analysis.coverage.assigned} / {workspace.analysis.coverage.total}
-                {workspace.analysis.coverage.unassigned.map((item) => <span className="unassigned-file" key={item.path}>{item.path}：{item.reason}</span>)}
-                {(workspace.detailCounts?.unassigned ?? 0) > workspace.analysis.coverage.unassigned.length ? <span className="detail-preview-count">未归属明细：展示 {workspace.analysis.coverage.unassigned.length} / {workspace.detailCounts!.unassigned}</span> : null}
-              </p> : null}
-              {workspace.analysis?.proposal?.risks?.map((risk, i) => <p key={i}>{risk}</p>)}
-              {workspace.repositoryId && workspace.revision && workspace.analysis?.state !== 'stale' ? (
-                <div className="project-actions">
-                  <button type="button" className="secondary-action" disabled={analyzing || !onRetry} onClick={() => onRetry?.({ repositoryId: workspace.repositoryId!, analysisRevision: workspace.revision!, projectId: workspace.projectId! }, false)}><RefreshCw size={13} />重试解析 / 同步</button>
-                  <button type="button" className="secondary-action" disabled={analyzing || !onRetry} onClick={() => onRetry?.({ repositoryId: workspace.repositoryId!, analysisRevision: workspace.revision!, projectId: workspace.projectId! }, true)}><RotateCcw size={13} />重新解析模块</button>
-                </div>
-              ) : null}
-              <details><summary>依赖关系（{workspace.detailCounts?.dependencies ?? workspace.dependencies?.length ?? 0}）</summary>
-                {(workspace.detailCounts?.dependencies ?? 0) > (workspace.dependencies?.length ?? 0) ? <p className="detail-preview-count">展示前 {workspace.dependencies?.length ?? 0} 条 / 共 {workspace.detailCounts!.dependencies} 条</p> : null}
-                <ul>{workspace.dependencies?.map((edge) => <li key={edge.dependencyEdgeId}>
-                  {edge.sourceRelativePath} → {edge.targetRelativePath ?? edge.targetReference ?? '未知目标'} · {edge.kind} · {edge.resolution}
-                </li>)}</ul>
-              </details>
-              <details><summary>解析诊断（{workspace.detailCounts?.diagnostics ?? workspace.diagnostics?.length ?? 0}）</summary>
-                {(workspace.detailCounts?.diagnostics ?? 0) > (workspace.diagnostics?.length ?? 0) ? <p className="detail-preview-count">展示前 {workspace.diagnostics?.length ?? 0} 条 / 共 {workspace.detailCounts!.diagnostics} 条</p> : null}
-                <ul>{workspace.diagnostics?.map((diagnostic) => <li key={diagnostic.diagnosticId}>
-                  {diagnostic.relativePath} · {diagnostic.severity} · {diagnostic.message}
-                </li>)}</ul>
-              </details>
-              <details><summary>版本信息</summary><code>{workspace.repositoryId} / {workspace.projectId} / {workspace.revision}</code></details>
-            </section>
+          {!settingsOpen && workspace.projectId && (primaryContent || mode === 'target') ? (
+            <ProjectUnderstandingOverview workspace={workspace} onRetry={onRetry} />
+          ) : null}
+          {!settingsOpen && workspace.projectId && mode === 'history' && !primaryContent ? (
+            <ProjectEngineeringDetails workspace={workspace} onRetry={onRetry} />
           ) : null}
         </div>
       </section>
@@ -479,24 +442,12 @@ function HistoryOverview({
   onMoreModules?(): void;
   loadingModules?: boolean;
 }) {
-  const [expanded, setExpanded] = useState(false);
   const [visibleModules, setVisibleModules] = useState(24);
   const modules = workspace.tree.filter((node) => node.kind === 'module');
-  const catalogTotal = workspace.analysis?.hierarchy?.rootCount ?? (workspace.rootTotal === undefined ? modules.length : workspace.stats.modules);
-  const hierarchical = (workspace.analysis?.hierarchy?.maxDepth ?? 0) > 0 || (workspace.analysis?.hierarchy?.subsystemCount ?? 0) > 0;
-  const pipeline = [
-    { icon: <Database size={15} />, title: '静态索引', detail: `${workspace.stats.files} 文件 / ${workspace.stats.types + workspace.stats.methods} 符号`, complete: Boolean(workspace.snapshotId) },
-    { icon: <GitBranch size={15} />, title: '依赖分析', detail: `${workspace.stats.dependencies} 条依赖证据`, complete: Boolean(workspace.snapshotId) },
-    { icon: <Sparkles size={15} />, title: workspace.analysis?.modeling?.strategy === 'structural' ? '离线模块划分' : 'Agent 模块划分', detail: `${workspace.stats.modules} 个模块`, complete: workspace.stats.modules > 0 },
-    {
-      icon: <FileJson2 size={15} />,
-      title: 'summary.json',
-      detail: workspace.summary.error
-        ? '摘要无效'
-        : workspace.summary.exists ? `${workspace.summary.moduleCount ?? 0} 个模块摘要` : '尚未生成',
-      complete: workspace.summary.exists && !workspace.summary.error,
-    },
-  ];
+  const catalogTotal = workspace.analysis?.hierarchy?.rootCount ??
+    (workspace.rootTotal === undefined ? modules.length : workspace.stats.modules);
+  const hierarchical = (workspace.analysis?.hierarchy?.maxDepth ?? 0) > 0 ||
+    (workspace.analysis?.hierarchy?.subsystemCount ?? 0) > 0;
   return (
     <div className="module-overview history-overview">
       <section className="history-library-hero">
@@ -505,16 +456,17 @@ function HistoryOverview({
           <div>
             <span className="history-library-code">01A · 参考模块库</span>
             <h1>{workspace.name}</h1>
-            <p>浏览可复用模块，并选择本次需求需要参考的代码范围</p>
+            <p>系统已将工程组织为可检索的功能模块，选择模块可查看职责与关键接口</p>
           </div>
         </div>
         <div className={`history-library-state${workspace.snapshotId ? ' is-ready' : ''}`}>
-          <span><i />{workspace.snapshotId ? '模块库已就绪' : '等待分析'}</span>
+          <span><i />{workspace.snapshotId ? '工程理解已就绪' : '等待分析'}</span>
           <small title={workspace.rootLabel}>{workspace.rootLabel}</small>
         </div>
       </section>
 
       <HistoryStats workspace={workspace} />
+      <AnalysisPipeline workspace={workspace} />
 
       <section className="history-catalog" aria-label="参考模块目录">
         <div className="history-section-heading">
@@ -549,8 +501,15 @@ function HistoryOverview({
                   <span className="history-module-description">
                     {module.purpose ?? module.description ?? `包含 ${summary.files} 个代码文件，可作为需求实现的检索范围。`}
                   </span>
+                  {module.coreApis?.length ? (
+                    <span className="history-module-apis">
+                      {module.coreApis.slice(0, 2).map((api) => <code key={api}>{api}</code>)}
+                      {module.coreApis.length > 2 ? <small>+{module.coreApis.length - 2}</small> : null}
+                    </span>
+                  ) : null}
                   <span className="history-module-card-footer">
                     {module.domain ? <span>{module.domain}</span> : null}
+                    {module.refinement ? <span>{refinementLabel(module.refinement.state)}</span> : null}
                     <span>{summary.files} 文件</span>
                     <span>{summary.types} 类型</span>
                     <span>{summary.methods} 方法</span>
@@ -578,66 +537,161 @@ function HistoryOverview({
 
       <HistorySelectionPreview node={selectedNode} />
 
-      <div className="history-analysis-fold">
-        <button type="button" className="overview-toggle" onClick={() => setExpanded((value) => !value)}>
-          {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-          {expanded ? '收起分析信息' : '查看分析信息'}
-        </button>
-        {!expanded ? <span>4 项技术状态</span> : null}
-      </div>
-      {expanded ? (
-        <>
-          <div className="analysis-pipeline">
-            {pipeline.map((step, index) => (
-              <div key={step.title} className={`pipeline-step${step.complete ? ' is-complete' : ''}`}>
-                <span className="pipeline-number">{index + 1}</span>
-                <span className="pipeline-icon">{step.icon}</span>
-                <div><strong>{step.title}</strong><small>{step.detail}</small></div>
-                {step.complete ? <CheckCircle2 size={14} /> : <span className="pipeline-pending" />}
-              </div>
-            ))}
-          </div>
-          <div className="history-grid">
-            <section className="card summary-card">
-              <div className="card-heading"><span>模块知识摘要</span><FileJson2 size={14} /></div>
-              {workspace.summary.error ? (
-                <div className="summary-empty is-error">
-                  <AlertTriangle size={24} />
-                  <strong>module-summary.json 无法读取</strong>
-                  <span>{workspace.summary.error}</span>
-                </div>
-              ) : workspace.summary.exists ? (
-                <dl className="compact-definition-list">
-                  <div><dt>计划</dt><dd>{workspace.summary.planId}</dd></div>
-                  <div><dt>状态</dt><dd>{workspace.summary.status}</dd></div>
-                  <div><dt>模块</dt><dd>{workspace.summary.moduleCount}</dd></div>
-                  <div><dt>执行波次</dt><dd>{workspace.summary.waveCount}</dd></div>
-                  <div><dt>审批</dt><dd>{workspace.summary.approvalsCurrent ? '当前有效' : '需重新确认'}</dd></div>
-                </dl>
-              ) : (
-                <div className="summary-empty">
-                  <FileJson2 size={24} />
-                  <strong>未发现 module-summary.json</strong>
-                  <span>完成 Agent 模块计划和受信任审批后，由 Host 事务生成。</span>
-                </div>
-              )}
-            </section>
-          </div>
-        </>
-      ) : null}
     </div>
+  );
+}
+
+function ProjectUnderstandingOverview({
+  workspace,
+  onRetry,
+}: {
+  workspace: ModuleWorkspacePresentation;
+  onRetry?: ModuleWorkspaceProps['onRetry'];
+}) {
+  return (
+    <section className="project-understanding" aria-label="工程理解结果">
+      <header className="project-understanding-heading">
+        <div>
+          <span className="section-kicker">工程理解结果</span>
+          <h2>{workspace.name}</h2>
+          <p>{workspace.analysis?.proposal?.summary ?? '系统已将结构事实组织为可检索的模块与依赖证据。'}</p>
+        </div>
+        <span className={`project-result-state${workspace.analysis?.state === 'ready' ? ' is-ready' : ''}`}>
+          <i />{analysisState(workspace.analysis?.state)}
+        </span>
+      </header>
+      <HistoryStats workspace={workspace} />
+      <AnalysisPipeline workspace={workspace} />
+      <ProjectEngineeringDetails workspace={workspace} onRetry={onRetry} />
+    </section>
+  );
+}
+
+function AnalysisPipeline({ workspace }: { workspace: ModuleWorkspacePresentation }) {
+  const hierarchy = workspace.analysis?.hierarchy;
+  const projectionReady = workspace.analysis?.projection === 'ready';
+  const steps = [
+    {
+      icon: <Database size={15} />,
+      title: '静态解析',
+      detail: `${workspace.stats.files} 文件 · ${workspace.stats.types + workspace.stats.methods} 符号`,
+      complete: Boolean(workspace.snapshotId),
+    },
+    {
+      icon: <GitBranch size={15} />,
+      title: '依赖恢复',
+      detail: `${workspace.stats.dependencies} 条依赖证据`,
+      complete: Boolean(workspace.snapshotId),
+    },
+    {
+      icon: <Sparkles size={15} />,
+      title: '分层建模',
+      detail: hierarchy
+        ? `${hierarchy.rootCount} 顶层 · 叶模块 ${hierarchy.leafCount} · 深度 ${hierarchy.maxDepth}`
+        : `${workspace.stats.modules} 个模块节点`,
+      complete: workspace.stats.modules > 0,
+    },
+    {
+      icon: <Search size={15} />,
+      title: '多粒度检索',
+      detail: projectionReady ? '模块检索索引已发布' : projectionLabel(workspace.analysis?.projection),
+      complete: projectionReady,
+    },
+  ];
+  return (
+    <div className="analysis-pipeline" aria-label="工程理解技术阶段">
+      {steps.map((step, index) => (
+        <div key={step.title} className={`pipeline-step${step.complete ? ' is-complete' : ''}`}>
+          <span className="pipeline-number">{index + 1}</span>
+          <span className="pipeline-icon">{step.icon}</span>
+          <div><strong>{step.title}</strong><small>{step.detail}</small></div>
+          {step.complete ? <CheckCircle2 size={14} /> : <span className="pipeline-pending" />}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ProjectEngineeringDetails({
+  workspace,
+  onRetry,
+}: {
+  workspace: ModuleWorkspacePresentation;
+  onRetry?: ModuleWorkspaceProps['onRetry'];
+}) {
+  const dependencyCount = workspace.detailCounts?.dependencies ?? workspace.dependencies?.length ?? 0;
+  const diagnosticCount = workspace.detailCounts?.diagnostics ?? workspace.diagnostics?.length ?? 0;
+  const unassignedCount = workspace.detailCounts?.unassigned ?? workspace.analysis?.coverage?.unassignedTotal ??
+    workspace.analysis?.coverage?.unassigned.length ?? 0;
+  const analyzing = ['queued', 'analyzing', 'validating'].includes(workspace.analysis?.state ?? '');
+  return (
+    <details className="project-engineering-details">
+      <summary>
+        <span>工程详情</span>
+        <small>依赖 {dependencyCount} · 诊断 {diagnosticCount} · 未归属 {unassignedCount}</small>
+      </summary>
+      <div className="project-engineering-body">
+        <dl className="project-engineering-status">
+          <div><dt>模块来源</dt><dd>{workspace.analysis?.modeling?.strategy === 'structural' ? '离线结构分析' : 'Agent 分析'}</dd></div>
+          <div><dt>检索同步</dt><dd>{projectionLabel(workspace.analysis?.projection)}</dd></div>
+          <div><dt>文件归属</dt><dd>{workspace.analysis?.coverage
+            ? `${workspace.analysis.coverage.assigned} / ${workspace.analysis.coverage.total}` : '暂无统计'}</dd></div>
+          <div><dt>模块摘要</dt><dd>{workspace.summary.exists && !workspace.summary.error ? '已生成' : workspace.summary.error ? '读取失败' : '未生成'}</dd></div>
+        </dl>
+        {workspace.analysis?.error ? <p className="project-engineering-alert" role="alert">{workspace.analysis.error}</p> : null}
+        {workspace.analysis?.state === 'stale' ? <p className="project-engineering-alert">正在浏览历史版本，以下结果不代表当前代码。</p> : null}
+        {workspace.analysis?.proposal?.risks?.length ? (
+          <div className="project-engineering-risks"><strong>分析提示</strong><ul>
+            {workspace.analysis.proposal.risks.map((risk, index) => <li key={index}>{risk}</li>)}
+          </ul></div>
+        ) : null}
+        {workspace.analysis?.coverage?.unassigned.length ? (
+          <details><summary>未归属文件（{unassignedCount}）</summary><ul>
+            {workspace.analysis.coverage.unassigned.map((item) => <li key={item.path}><code>{item.path}</code> · {item.reason}</li>)}
+          </ul></details>
+        ) : null}
+        <details><summary>依赖关系（{dependencyCount}）</summary>
+          {(workspace.detailCounts?.dependencies ?? 0) > (workspace.dependencies?.length ?? 0)
+            ? <p className="detail-preview-count">展示前 {workspace.dependencies?.length ?? 0} 条 / 共 {dependencyCount} 条</p> : null}
+          <ul>{workspace.dependencies?.map((edge) => <li key={edge.dependencyEdgeId}>
+            {edge.sourceRelativePath} → {edge.targetRelativePath ?? edge.targetReference ?? '未知目标'} · {edge.kind} · {edge.resolution}
+          </li>)}</ul>
+        </details>
+        <details><summary>解析诊断（{diagnosticCount}）</summary>
+          {(workspace.detailCounts?.diagnostics ?? 0) > (workspace.diagnostics?.length ?? 0)
+            ? <p className="detail-preview-count">展示前 {workspace.diagnostics?.length ?? 0} 条 / 共 {diagnosticCount} 条</p> : null}
+          <ul>{workspace.diagnostics?.map((diagnostic) => <li key={diagnostic.diagnosticId}>
+            <code>{diagnostic.relativePath}</code> · {diagnostic.severity} · {diagnostic.message}
+          </li>)}</ul>
+        </details>
+        <details><summary>版本信息</summary><code>{workspace.repositoryId} / {workspace.projectId} / {workspace.revision}</code></details>
+        {workspace.repositoryId && workspace.revision && workspace.analysis?.state !== 'stale' ? (
+          <div className="project-actions">
+            <button type="button" className="secondary-action" disabled={analyzing || !onRetry}
+              onClick={() => onRetry?.({ repositoryId: workspace.repositoryId!, analysisRevision: workspace.revision!, projectId: workspace.projectId! }, false)}>
+              <RefreshCw size={13} />重试解析 / 同步
+            </button>
+            <button type="button" className="secondary-action" disabled={analyzing || !onRetry}
+              onClick={() => onRetry?.({ repositoryId: workspace.repositoryId!, analysisRevision: workspace.revision!, projectId: workspace.projectId! }, true)}>
+              <RotateCcw size={13} />重新解析模块
+            </button>
+          </div>
+        ) : null}
+      </div>
+    </details>
   );
 }
 
 function HistoryStats({ workspace }: { workspace: ModuleWorkspacePresentation }) {
   const stats = [
-    [workspace.analysis?.hierarchy ? '模块树节点' : '可复用模块', workspace.stats.modules, 'M'],
+    ['模块节点', workspace.analysis?.hierarchy?.nodeCount ?? workspace.stats.modules, 'M'],
     ['代码文件', workspace.stats.files, 'F'],
-    ['类 / 类型', workspace.stats.types, 'C'],
-    ['方法 / 函数', workspace.stats.methods, 'ƒ'],
+    ['依赖证据', workspace.stats.dependencies, 'D'],
+    ['文件归属', workspace.analysis?.coverage
+      ? `${workspace.analysis.coverage.assigned}/${workspace.analysis.coverage.total}` : '—', 'C'],
   ] as const;
   return (
-    <div className="history-stats" aria-label="参考工程规模">
+    <div className="history-stats" aria-label="工程理解结果统计">
       {stats.map(([label, value, glyph]) => (
         <div key={label}>
           <span>{glyph}</span>
@@ -654,7 +708,7 @@ function HistorySelectionPreview({ node }: { node?: ModuleExplorerNode }) {
     return (
       <section className="history-selection-preview is-empty">
         <Box size={16} />
-        <span>从模块卡片或左侧模块树中选择一项，查看它的检索范围。</span>
+        <span>选择一个模块，查看它的职责、核心接口与细化依据。</span>
       </section>
     );
   }
@@ -664,7 +718,7 @@ function HistorySelectionPreview({ node }: { node?: ModuleExplorerNode }) {
   return (
     <section className="history-selection-preview" aria-label="当前选择">
       <div className="history-selection-heading">
-        <span>当前选择</span>
+        <span>模块技术画像</span>
         <small>{node.nodeKind === 'subsystem' ? '子系统' : kindLabel(node.kind)}</small>
       </div>
       <div className="history-selection-body">
@@ -741,7 +795,7 @@ function emptyHistoryWorkspace(): ModuleWorkspacePresentation {
     id: 'history:empty',
     mode: 'history',
     name: '未配置参考工程',
-    rootLabel: '请在 ForeXplore 设置中配置 repositoryPaths',
+    rootLabel: '请在 RECAST 设置中配置 repositoryPaths',
     error: '未配置可分析的参考工程路径。',
     stats: { modules: 0, files: 0, types: 0, methods: 0, implemented: 0, unimplemented: 0, unknown: 0, dependencies: 0 },
     summary: { exists: false, path: '.forexplore/module-summary.json' },
@@ -798,6 +852,14 @@ function statusLabel(status?: ModuleImplementationStatus): string {
   return '待确认';
 }
 
-function analysisState(state?: import('@forexplore/contracts').ProjectAnalysisRecord['state']): string {
+function analysisState(state?: ProjectAnalysisRecord['state']): string {
   return ({ missing: '未解析', queued: '排队中', analyzing: '解析中', validating: '校验中', ready: '就绪', failed: '失败，可重试', stale: '历史结果' })[state ?? 'missing'];
+}
+
+function refinementLabel(state: ModuleRefinement['state']): string {
+  return ({ leaf: '叶模块', split: '已划分', deferred: '待细化' })[state];
+}
+
+function projectionLabel(projection?: ProjectAnalysisRecord['projection']): string {
+  return ({ pending: '等待发布', ready: '检索已就绪', failed: '发布失败' })[projection ?? 'pending'];
 }

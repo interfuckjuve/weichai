@@ -290,26 +290,6 @@ describe('ModuleWorkspace history configuration prompt', () => {
     expect(markup).not.toContain('目标工程模块划分');
   });
 
-  it('keeps history analysis workflow collapsed by default', () => {
-    const explorer: ModuleExplorerPresentation = {
-      generatedAt: '2026-09-01T00:00:00.000Z',
-      target: targetWorkspace,
-      history: [historyWorkspace],
-    };
-    const markup = renderWorkspace(explorer, 'history');
-
-    expect(markup).toContain('参考模块库');
-    expect(markup).toContain('模块目录');
-    expect(markup).toContain('支付模块');
-    expect(markup).toContain('负责支付发起、确认与退款复用入口');
-    expect(markup).toContain('支付');
-    expect(markup).toContain('1 文件');
-    expect(markup).toContain('1 类型');
-    expect(markup).toContain('1 方法');
-    expect(markup).toContain('查看分析信息');
-    expect(markup).not.toContain('静态索引');
-    expect(markup).not.toContain('模块知识摘要');
-  });
 
   it('highlights the containing module and previews a selection from the tree', () => {
     const explorer: ModuleExplorerPresentation = {

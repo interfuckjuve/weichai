@@ -87,7 +87,7 @@ let activeCodeIntelligenceHost: CodeIntelligenceHost | null = null;
 let activeTaskSearch: { requestId: string; controller: AbortController } | null = null;
 
 export function activate(context: vscode.ExtensionContext): void {
-  const output = vscode.window.createOutputChannel('ForeXplore');
+  const output = vscode.window.createOutputChannel('RECAST');
   const services = new ServiceManager(output);
   const health = new RepositoryHealthCheck();
   let codeIntelligence: CodeIntelligenceHost;
@@ -205,7 +205,7 @@ export function activate(context: vscode.ExtensionContext): void {
       const result = await vscode.window.withProgress(
         {
           location: vscode.ProgressLocation.Notification,
-          title: 'ForeXplore: 正在刷新版本化代码智能索引',
+          title: 'RECAST: 正在刷新版本化代码智能索引',
         },
         () => synchronizeCodeIntelligence(codeIntelligence, { forceFull: true }),
       );
@@ -219,7 +219,7 @@ export function activate(context: vscode.ExtensionContext): void {
       const result = await vscode.window.withProgress(
         {
           location: vscode.ProgressLocation.Notification,
-          title: 'ForeXplore: 正在增量刷新代码智能索引',
+          title: 'RECAST: 正在增量刷新代码智能索引',
         },
         () => synchronizeCodeIntelligence(codeIntelligence),
       );
@@ -663,7 +663,7 @@ async function restoreLastCheckpoint(context: vscode.ExtensionContext): Promise<
     return;
   }
   const choice = await vscode.window.showWarningMessage(
-    '将恢复最近一次 ForeXplore 写入前的文件内容；若文件后来又被编辑，恢复会被拒绝。确认继续？',
+    '将恢复最近一次 RECAST 写入前的文件内容；若文件后来又被编辑，恢复会被拒绝。确认继续？',
     { modal: true },
     '恢复检查点',
   );
@@ -717,7 +717,7 @@ async function copyTargetPath(): Promise<void> {
   try {
     const run = requireActiveRun();
     await vscode.env.clipboard.writeText(run.target.path);
-    vscode.window.setStatusBarMessage('ForeXplore: 已复制目标路径', 2_000);
+    vscode.window.setStatusBarMessage('RECAST: 已复制目标路径', 2_000);
   } catch (error) {
     publishError(errorMessage(error, '无法复制当前目标路径'));
   }

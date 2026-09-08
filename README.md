@@ -1,8 +1,9 @@
-# ForeXplore
+# RECAST
 
-ForeXplore combines task-driven code context retrieval and code reuse/migration
-in a VS Code workbench, backed by shared offline repository indexes. A local
-browser workbench runs the same UI and real indexing/query services. See the
+RECAST is the competition-facing product name for the ForeXplore codebase. It
+combines task-driven code context retrieval and code reuse/migration in a VS
+Code workbench, backed by shared offline repository indexes. A local browser
+workbench runs the same UI and real indexing/query services. See the
 [offline modeling and Context guide](docs/task-code-context-implementation.zh-CN.md)
 for `npm run dev:code-workbench`. The older `web/` application remains a workflow prototype.
 
