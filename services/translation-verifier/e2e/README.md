@@ -1,80 +1,119 @@
-# Smoke E2E
+# FileUpload E2E
 
-`run-smoke-e2e.ts` executes one real autonomous Claude session through the private smoke strategy. The wrapper currently accepts only `differential-smoke`; it is not a generic benchmark runner. Other experiments in this directory have their own entry points and are not executed by `npm run e2e`.
+All E2E translation tasks use actual TODO methods in the repository's Apache Commons FileUpload Java skeleton. There is no package-local `e2e/fixtures` directory and no synthetic MimeUtility or arithmetic project.
 
-## Modes and Fixtures
+## Dataset
 
-| Mode | Flag | Fixture and policy |
+Project roots, relative to the repository:
+
+- Source: `fixtures/code-corpus/commons-fileupload-python`
+- Target: `fixtures/target-system/commons-fileupload-java-skeleton`
+
+`fileupload-benchmark-fixture.ts` exports the absolute project roots, six-task catalog, and `fileUploadInput(variant, task)`. The builder produces the same `VerificationInput` shape an upstream translation module would submit: source and target snapshots, selected symbols, analysis report, migration plan, translation patch/hash, and an explicit `verificationPolicy` when reference trust is known.
+
+The executable request variants are finite and Host-labeled: `correct`, `count-plus-one`, `drop-output`, `source-count-plus-one`, `both-count-plus-one`, `target-only-correct`, `target-only-count-plus-one`, `missing-test-basis`, and `missing-policy`. Source mutations are applied only to the staged snapshot and recompute its content hash. The last two cases verify fail-closed policy handling. `fileupload-datasets.json` records the fixed expected report fields for these requests; `expected-findings.md` and the legacy `scenarios` array remain Host-only manual-review annotations.
+
+Every expected result compares only `mode`, `referenceDecision`, `referenceReason`, `executionStatus`, `sourceAssessment`, `targetAssessment`, and sorted `problems[].code`. It does not score natural-language findings, timestamps, content hashes, case IDs, or Agent claims. A matched `fail`-like assessment only means the official report classified the target; the complete report remains for human review.
+
+| Task ID | Python input method | Java output method |
 | --- | --- | --- |
-| `diagnostic-repair` | Default | MimeUtility C# source and Java translation under `fixtures/samples`; allows reporting proposed target repairs for diagnosis |
-| `verify-only` | `--verify-only` | Complete .NET solution and Maven reactor under `fixtures/dependencies`; read-only project snapshots, no target repairs |
+| `multipart-read-body` (default) | `MultipartStream.read_body_data` | `MultipartStream.readBodyData` |
+| `multipart-skip-preamble` | `MultipartStream.skip_preamble` | `MultipartStream.skipPreamble` |
+| `disk-get-input-stream` | `DiskFileItem.get_input_stream` | `DiskFileItem.getInputStream` |
+| `disk-get` | `DiskFileItem.get` | `DiskFileItem.get` |
+| `disk-write` | `DiskFileItem.write` | `DiskFileItem.write` |
+| `disk-get-output-stream` | `DiskFileItem.get_output_stream` | `DiskFileItem.getOutputStream` |
 
-The service and direct `runSmoke()` default to verify-only. Only this historical E2E wrapper defaults to diagnostic-repair. In both modes the actual project roots remain read-only; proposed diagnostic repairs are not an authorization to modify user projects.
+Inputs contain the selected source symbol, source project text files, original target project text files, requirements and a hashed target patch. The builder excludes build/cache directories and includes `.java`, `.py`, `.xml`, `.md`, `.toml`, `.txt`, LICENSE and NOTICE files. This is a filtered text snapshot, not an unrestricted directory copy. `VerificationInput` continues to carry file snapshots, not local project root fields.
 
-Verify-only requires `rounds === 0`, empty `targetFiles`, nonempty cases, runners for both sides and mandatory compile/run evidence. Command IDs must match the actual controlled-proxy evidence. A generated report is not enough to bypass these checks. Insufficient semantic evidence remains `unclear`/`unverified`.
+The `correct` output restores the selected class's TODO dependency closure: both MultipartStream methods or all four DiskFileItem methods. Other classes remain unchanged. These are controlled output samples derived from Apache Commons FileUpload 1.5, **not outputs from a live translator**. Target LICENSE/NOTICE are retained. Disk method provenance is recorded in `fileupload-disk-translation.ts`.
 
-Fixtures:
+`count-plus-one` and `drop-output` are seeded target-defect outputs available only for `multipart-read-body`. Unsupported task/variant combinations fail explicitly. `correct` identifies the upstream target control, not a claim that the Python source is universally equivalent. Requirements distinguish source limitations, allowed differences and target defects.
 
-- `fixtures/smoke-mime-util/requirement.txt`: diagnostic task requirement.
-- `fixtures/samples/mime-util-source.cs`, `mime-util-target.java`: diagnostic source/target samples.
-- `fixtures/dependencies/dotnet/`: solution with `Library` and `App`, using `ProjectReference`.
-- `fixtures/dependencies/maven/`: reactor with `library` and `app`, using a sibling module dependency.
+`fileupload-datasets.json` keeps the old 14 Host-only manual scenarios for review and adds nine executable request cases. The six selectable method tasks do **not** activate all designed mutation scenarios. Never stage these annotations, oracle drivers or unselected control outputs in the Agent workspace.
 
-Local fixture builds use installed tools and available dependency caches; they are not guaranteed network-free:
+## Execution
 
-```bash
-mvn -q -f services/translation-verifier/e2e/fixtures/dependencies/maven/pom.xml test
-dotnet build services/translation-verifier/e2e/fixtures/dependencies/dotnet/DependencyFixture.sln --nologo -v q
-```
+`npm run e2e` calls the official `VerificationService.verifyWithReceipt` entry point. It writes the complete framework result to `report.json` and a Host-only fixed-field comparison to `comparison.json` under `services/translation-verifier/test-results/verification-*/`. It does not call the private smoke driver directly and does not perform automatic LLM finding scoring.
 
-## Configuration
-
-Run from the repository root. Real runs require `claude`, `npx`/`tsx`, the relevant toolchains and a configured `DEEPSEEK_API_KEY`. The CLI connects through the existing DeepSeek Anthropic-compatible environment configuration; `DEEPSEEK_MODEL` defaults to `deepseek-v4-flash`. `JAVA_HOME` is forwarded when set. The wrapper uses at most 40 turns.
+Run from the repository root. Model-backed runs require `claude`, `npx`/`tsx`, Java/Maven, Python and `DEEPSEEK_API_KEY`. The `missing-policy` and `missing-test-basis` variants run the official preflight without credentials or a model call, unless an explicit policy override supplies a valid basis. The existing DeepSeek Anthropic-compatible configuration is used; `DEEPSEEK_MODEL` defaults to `deepseek-v4-flash`, and `JAVA_HOME` is forwarded when set. Builds may use local dependency caches or the network.
 
 ```bash
-# Entry-point check only: skips the model, does not replay verification.
+# Skip the Agent explicitly; not behavioral verification.
 npm run e2e --workspace @forexplore/translation-verifier -- --offline-only
 
-# One real verify-only run; ensure credentials and local tools are configured first.
-npm run e2e --workspace @forexplore/translation-verifier -- --verify-only --timeout-ms 600000
+# Run the official fail-closed preflight without a model or API key.
+npm run e2e --workspace @forexplore/translation-verifier -- --variant missing-policy --json
 
-# Machine-readable result stdout; timing directory information is on stderr.
-npx tsx services/translation-verifier/e2e/run-smoke-e2e.ts --verify-only --json --timeout-ms 600000
+# Verify a real request through the official service entry point.
+npm run e2e --workspace @forexplore/translation-verifier -- --task disk-write --variant correct --timeout-ms 600000
 
-# Explicit local unit tests for the wrapper/timing helper; no model calls.
-npx vitest run services/translation-verifier/e2e/smoke-e2e-timing.test.ts
+# Verify a seeded target defect; inspect report.json and comparison.json afterward.
+npm run e2e --workspace @forexplore/translation-verifier -- --task multipart-read-body --variant count-plus-one --json
+
+# Explicit target-only mode when the reference is rejected.
+npm run e2e --workspace @forexplore/translation-verifier -- --variant target-only-correct --reference-decision rejected --reference-reason "Candidate version is not trusted" --test-basis "Independent task requirement"
+
+# Same dataset through VerificationService with benchmark measurements.
+npx tsx services/translation-verifier/e2e/run-fileupload-benchmark.ts --task disk-get --variant correct
+
+# Local dataset/wrapper tests, including Maven control checks when installed; no model calls.
+npm run test:e2e-data --workspace @forexplore/translation-verifier
+
+# Independent fixed MultipartStream witnesses against all three variants; no model calls.
+npx tsx services/translation-verifier/e2e/run-fileupload-oracles.ts
 ```
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--fixture-dir <path>` | `e2e/fixtures/smoke-mime-util` | Diagnostic requirement directory; sibling `samples` supplies source/target. Ignored by verify-only, which uses `fixtures/dependencies`. |
-| `--api-key <key>` | `DEEPSEEK_API_KEY` | Optional credential override; prefer environment configuration to avoid shell-history exposure. |
-| `--timeout-ms <ms>` | `300000` | Single Claude session timeout. |
-| `--strategy <id>` | `differential-smoke` | Only this E2E strategy is supported; unknown IDs fail explicitly. |
-| `--verify-only` | Off | Use complete dependency fixtures and enforce no target repairs. |
-| `--offline-only` | Off | Skip the real session and exit zero; not behavioral verification. |
-| `--json` | Off | Print the original complete `SmokeResult` JSON, without prose or timing fields in stdout. |
+| `--variant <id>` | `correct` | Executable request case; target defects remain restricted to body reading. |
+| `--reference-decision <id>` | Input policy | Explicitly override the case policy with `accepted`, `rejected`, or `undetermined`; requires reason and test basis. |
+| `--reference-reason <text>` | Input policy | Host-supplied trust decision reason. |
+| `--test-basis <text>` | Input policy | Independent requirement/test basis for the explicit policy. |
+| `--task <id>` | `multipart-read-body` | One of the six real TODO methods above. |
+| `--api-key <key>` | `DEEPSEEK_API_KEY` | Optional override; environment configuration avoids shell-history exposure. |
+| `--timeout-ms <ms>` | `300000` | Positive integer session timeout. |
+| `--strategy <id>` | `differential-smoke` | Only this E2E strategy is supported. |
+| `--verify-only` | Always enabled | Accepted compatibility flag. |
+| `--offline-only` | Off | Skip the real session and exit zero. |
+| `--json` | Off | Emit the complete service receipt plus the Host comparison; timing remains in files. |
 
-## Outputs and Exit Codes
+## Workspaces and Results
 
-The wrapper keeps the existing workspace at `services/translation-verifier/test-results/smoke-*/` and displays its path. Available content includes `source/project/`, `target/project/`, both `.forexplore-tests/` runner areas, `baseline.json`, `agent/report.json` and `agent/commands.jsonl`. Failures may leave only some of these files.
+The service stages inputs through the framework workspace builder, applies the selected patch with original-hash validation, and retains `services/translation-verifier/test-results/verification-*/` when the service's `keepWorkspace` option preserves it. The E2E wrapper always writes its official result and comparison manifest in the result directory:
 
-A small `timing.json` and `timing.md` are written in that same `smoke-*` directory, best-effort. They contain strategy/version, model, mode, fixture ID, total duration, dynamic Host spans, approximate Agent task occurrences, authoritative controlled-command durations and omission diagnostics. They never include raw source, prompts, tool payloads or command stdout/stderr. Timing output failure cannot change the result or exit code. The helper is not a production run storage system; `runRoot`, `debug`, `onRunRecorded` are reserved, ignored service options.
+The Agent workspace layout remains under the outer `resultsRoot`:
+
+```text
+resultsRoot/                 # test-results/verification-<wrapper-id>/
+  report.json
+  comparison.json
+  timing.json
+  timing.md
+  artifacts/attempt-*/       # Durable strategy report and canonical result
+  workspaces/verification-*/
+    source/project/         # Source files staged only in differential mode
+    source/.forexplore-tests/ # Source runner area (differential only)
+    target/project/         # Target snapshot plus selected patch, read-only
+    target/.forexplore-tests/ # Writable target runner area
+    agent/                  # Agent cwd, report.json and commands.jsonl
+    baseline.json
+```
+
+Differential verify-only runs require both source and target runners, while target-only runs stage and execute only the target runner; source execution and source findings remain prohibited.
+
+Original repository projects are never patched. Runtime `source.root` and `target.root` point to the staged snapshots, not the original directories. The command proxy and baseline protections remain unchanged. This migration does not move Agent cwd into a project or broaden write permissions.
+
+Differential verify-only requires zero repair rounds, empty `targetFiles`, nonempty cases, both runners and actual controlled compile/run evidence. Target-only verify-only requires zero repair rounds, empty `targetFiles`, nonempty cases, only the target runner and actual target controlled compile/run evidence. Insufficient evidence remains unverified. A generated report alone does not satisfy verification.
 
 | Exit | Meaning |
 | --- | --- |
-| `0` | A non-error report was produced and verify-only invariants hold. A `fail` finding still returns zero: the detector successfully reported a discrepancy. Also used for explicit offline skip. |
-| `1` | Smoke status is `error`, or verify-only report invariants fail. |
-| `2` | Invalid arguments, missing key or an uncaught runner exception. |
+| `0` | The official report was produced and its fixed fields matched the Host expectation. This is not proof that the natural-language finding is correct. |
+| `1` | The official report was produced but fixed fields did not match. |
+| `2` | Invalid arguments, missing key or an uncaught setup/service exception. |
 
-## Timing Caveats
+Timing files are written best-effort in the outer `resultsRoot`, alongside `report.json` and `comparison.json`, not inside the Agent workspace. They include task/variant identity, dynamic Host spans, approximate Agent task occurrences and authoritative controlled-command durations. They exclude source, prompts, tool payloads and command output.
 
-The Agent emits `[VERIFIER_STEP]` start/end markers as standalone assistant text for tasks it actually performs, including repeated work and `finalize-report`. The final end marker is allowed after writing `report.json`, before stopping. The parser ignores thinking/tool output/fenced snippets, deduplicates partial text against assistant snapshots by message/block identity and never replays buffered stdout as live timestamps.
+Agent `[VERIFIER_STEP]` intervals are approximate Host receipt times, not model clocks. Missing markers have no invented durations; transport buffering can collapse intervals to zero. Host spans, Agent observations and controlled-command intervals can overlap: **do not sum them**. Markers are not command-execution evidence.
 
-Agent intervals are approximate Host receipt times (`agent-step-approximate`, `host-performance`), not model clocks. Missing starts/ends have no invented duration; absent telemetry remains unavailable. The parser drains overflow with explicit omission diagnostics: 1 MiB stream lines, 4 KiB text lines, 10,000 events and bounded message/block state. Transport buffering can collapse intervals to zero.
-
-Controlled-command process durations use their own `Date.now()` interval; proxy subspans use its child `performance.now()` clock. Host, Agent and command intervals can overlap or include each other. **Do not sum them.** Markers are not evidence of command execution. Available command timing can be retained after missing reports/session failures without satisfying mandatory evidence checks.
-
-Default logging under repository `logs/` excludes full content. `VERIFIER_LOG_CONTENT=1` separately enables bounded, redacted content logging. No automatic raw `PostToolUse` hook or `claude-steps.jsonl` telemetry subprocess is installed.
-
-This is local-process execution, not a sandbox. Dependency/network/cache state affects results. A single run is not a performance ranking, independent acceptance test or proof of business correctness. Compare alternative registered strategies through the generic service with identical inputs and explicit configuration, not by forcing their private steps to match smoke.
+This is local-process execution, not an OS sandbox. A successful run is neither proof of business correctness nor automatic mutant/control grading. The benchmark still requires independent replay before crediting a detected defect. Disk controls have local upstream JUnit and storage-observation checks; no automated six-task Agent scoring system is claimed.

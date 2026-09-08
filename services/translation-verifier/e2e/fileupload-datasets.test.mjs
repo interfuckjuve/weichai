@@ -14,6 +14,38 @@ const findings = dataset.scenarios.flatMap(
 const nonempty = (value) =>
   assert.ok(typeof value === "string" && value.trim().length > 0);
 
+test("executable cases are realistic requests with fixed report expectations", () => {
+  assert.equal(dataset.executableCases.length, 8);
+  assert.equal(new Set(dataset.executableCases.map((item) => item.id)).size, 8);
+  for (const item of dataset.executableCases) {
+    assert.equal(item.input, "fileUploadInput(variant, task)");
+    assert.equal(item.task, "multipart-read-body");
+    for (const key of [
+      "mode",
+      "referenceDecision",
+      "referenceReason",
+      "executionStatus",
+      "sourceAssessment",
+      "targetAssessment",
+    ])
+      nonempty(item.expected[key]);
+    assert.ok(Array.isArray(item.expected.problemCodes));
+  }
+  assert.deepEqual(
+    dataset.executableCases.map((item) => item.expected.targetAssessment),
+    [
+      "no_bug_observed",
+      "bug_found",
+      "bug_found",
+      "no_bug_observed",
+      "bug_found",
+      "no_bug_observed",
+      "bug_found",
+      "inconclusive",
+    ],
+  );
+});
+
 test("every existing scenario has complete host-only finding annotations", () => {
   assert.equal(dataset.scenarios.length, 14);
   assert.equal(scenarios.size, 14);

@@ -1,312 +1,333 @@
 #!/usr/bin/env node
-/**
- * 「冒烟差分验证」E2E 验收脚本(黑盒,不依赖 vitest)。
- *
- * 单次 claude 自主会话完成读码 → 设计冒烟用例 → 写双侧 runner → 经
- * verifier-command 代理真实编译运行 → 机械差分 + LLM 语义裁决 → 写 report.json
- * (SmokeReport)→ 归一化 status。
- *
- * 两种显式模式:
- * - 默认(diagnostic-repair):样本 fixture,允许报告诊断修复(旧实验行为);
- * - --verify-only:使用完整本地依赖 fixture 根(source=C# 项目,target=Java 项目),
- *   生产语义——rounds===0、targetFiles 为空、双侧 runnerFiles 与执行证据齐全。
- * 需要真实 claude(--api-key / DEEPSEEK_API_KEY);--offline-only 跳过真实会话。
- *
- * 退出码:0=策略报告生成成功(status 非 error);1=status=error 或 verify-only
- * 不变量不满足;2=参数错误/缺 key。
- */
+/** Real FileUpload VerificationInput requests; one official service call per invocation. */
+import { mkdirSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { readFileSync, realpathSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { basename, join, resolve } from "node:path";
-import { createRunRecorder, withRunRecorder } from "../src/run-output/record-run.js";
+import { join, resolve } from "node:path";
+import { createDefaultVerificationService } from "../src/create-default-verifier.js";
+import type { VerificationResult } from "../src/schemas/verification-types.js";
+import {
+  createRunRecorder,
+  withRunRecorder,
+} from "../src/run-output/record-run.js";
 import { writeSmokeTiming } from "./write-smoke-timing.js";
-import { runSmoke, type SmokeResult } from "../src/strategies/smoke-differential/run-smoke-verification.js";
-import type { SmokeTaskInput } from "../src/strategies/smoke-differential/build-differential-test-prompt.js";
-import type { SmokeReport } from "../src/strategies/smoke-differential/differential-test-types.js";
+import { DEFAULT_LOG_DIR } from "../src/run-output/verification-logger.js";
+import {
+  datasetVariants,
+  expectedVerificationFields,
+  fileUploadInput,
+  fileUploadTasks,
+  isDatasetVariant,
+  isFileUploadTask,
+  repositoryRoot,
+  type DatasetVariant,
+  type ExpectedVerificationFields,
+  type FileUploadTaskId,
+} from "./fileupload-benchmark-fixture.js";
 import { DIFFERENTIAL_SMOKE_STRATEGY } from "../src/strategies/smoke-differential/strategy.js";
-import { createLogger, DEFAULT_LOG_DIR } from "../src/run-output/verification-logger.js";
 
 export interface SmokeE2EOptions {
-  /** 任务输入目录(requirement.txt + 经 .. 定位 samples)。 */
-  fixtureDir: string;
+  task: FileUploadTaskId;
+  variant: DatasetVariant;
   apiKey?: string;
   timeoutMs: number;
-  /** 跳过真实 claude 子进程路径(自主模式必须有 key,离线路径不再存在)。 */
   offlineOnly: boolean;
-  /** 生产 verify-only 模式:完整本地依赖 fixture 根。 */
-  verifyOnly: boolean;
-  /** 静态注册策略 ID;当前 E2E suite 只覆盖 differential-smoke。 */
   strategyId: string;
   json: boolean;
+  referenceDecision?: "accepted" | "rejected" | "undetermined";
+  referenceReason?: string;
+  testBasis?: string;
 }
 
-const VALUE_FLAGS = new Set([
-  "--fixture-dir",
-  "--api-key",
-  "--timeout-ms",
-  "--strategy",
-]);
-const BOOLEAN_FLAGS = new Set(["--json", "--offline-only", "--verify-only"]);
+export interface VerificationComparison {
+  expected: ExpectedVerificationFields;
+  actual: ExpectedVerificationFields;
+  matched: boolean;
+  reportPath: string;
+}
+
+export interface SmokeE2EResult {
+  scenario: string;
+  receipt: { result: VerificationResult; resultArtifact?: unknown };
+  comparison: VerificationComparison;
+  reportPath: string;
+  manifestPath: string;
+  keptDir?: string;
+}
 
 export function parseArgs(argv: string[]): SmokeE2EOptions | { error: string } {
   const opts: SmokeE2EOptions = {
-    fixtureDir: fileURLToPath(
-      new URL("./fixtures/smoke-mime-util", import.meta.url),
-    ),
+    task: "multipart-read-body",
+    variant: "correct",
     timeoutMs: 300_000,
     offlineOnly: false,
-    verifyOnly: false,
     strategyId: DIFFERENTIAL_SMOKE_STRATEGY.id,
     json: false,
   };
+  const valueFlags = new Set([
+    "--task",
+    "--variant",
+    "--api-key",
+    "--timeout-ms",
+    "--strategy",
+    "--reference-decision",
+    "--reference-reason",
+    "--test-basis",
+  ]);
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
-    if (VALUE_FLAGS.has(flag)) {
-      const value = argv[i + 1];
-      if (value === undefined || value.startsWith("--"))
+    if (valueFlags.has(flag)) {
+      const value = argv[++i];
+      if (value === undefined || !value.trim() || value.startsWith("--"))
         return { error: `Missing value for ${flag}.` };
-      if (flag === "--fixture-dir") opts.fixtureDir = value;
-      else if (flag === "--api-key") opts.apiKey = value;
+      if (flag === "--task") {
+        if (!isFileUploadTask(value))
+          return {
+            error: `Unknown task: ${value}. Available: ${Object.keys(fileUploadTasks).join(", ")}`,
+          };
+        opts.task = value;
+      } else if (flag === "--variant") {
+        if (!isDatasetVariant(value))
+          return {
+            error: `Unknown variant: ${value}. Available: ${datasetVariants.join(", ")}`,
+          };
+        opts.variant = value;
+      } else if (flag === "--api-key") opts.apiKey = value;
       else if (flag === "--strategy") opts.strategyId = value;
-      else if (flag === "--timeout-ms") {
-        if (!/^\d+$/.test(value))
-          return { error: `Invalid --timeout-ms: "${value}".` };
-        opts.timeoutMs = Number(value);
-      }
-      i++;
-    } else if (BOOLEAN_FLAGS.has(flag)) {
-      if (flag === "--json") opts.json = true;
-      else if (flag === "--offline-only") opts.offlineOnly = true;
-      else if (flag === "--verify-only") opts.verifyOnly = true;
-    } else {
+      else if (flag === "--reference-decision") {
+        if (!["accepted", "rejected", "undetermined"].includes(value))
+          return { error: `Invalid --reference-decision: "${value}".` };
+        opts.referenceDecision = value as SmokeE2EOptions["referenceDecision"];
+      } else if (flag === "--reference-reason") opts.referenceReason = value;
+      else if (flag === "--test-basis") opts.testBasis = value;
+      else if (
+        !/^\d+$/.test(value) ||
+        !Number.isSafeInteger(Number(value)) ||
+        Number(value) <= 0
+      )
+        return { error: `Invalid --timeout-ms: "${value}".` };
+      else opts.timeoutMs = Number(value);
+    } else if (flag === "--json") opts.json = true;
+    else if (flag === "--offline-only") opts.offlineOnly = true;
+    else if (flag !== "--verify-only")
       return { error: `Unknown option: ${flag}` };
-    }
   }
+  if (
+    (opts.variant === "source-count-plus-one" ||
+      opts.variant === "both-count-plus-one" ||
+      opts.variant === "target-only-count-plus-one" ||
+      opts.variant === "count-plus-one" ||
+      opts.variant === "drop-output") &&
+    opts.task !== "multipart-read-body"
+  )
+    return {
+      error:
+        "Count defect variants are supported only for multipart-read-body.",
+    };
+  if (!opts.referenceDecision && (opts.referenceReason || opts.testBasis))
+    return {
+      error:
+        "--reference-reason and --test-basis require --reference-decision.",
+    };
+  if (opts.referenceDecision && !opts.referenceReason)
+    return { error: "--reference-decision requires --reference-reason." };
+  if (opts.referenceDecision && !opts.testBasis)
+    return { error: "--reference-decision requires --test-basis." };
   return opts;
 }
 
-function readFixture(fixtureDir: string, name: string): string {
-  return readFileSync(resolve(fixtureDir, name), "utf-8");
-}
+export function expectedForOptions(
+  opts: SmokeE2EOptions,
+): ExpectedVerificationFields {
+  const expected = expectedVerificationFields(opts.variant);
+  if (!opts.referenceDecision) return expected;
 
-/** 超长文本截断,附带截断标记。 */
-function truncate(text: string, max: number): string {
-  if (text.length <= max) return text;
-  return `${text.slice(0, max)}...[truncated ${text.length - max} chars]`;
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-/** 人类可读的 SmokeReport 摘要(逐 case 裁决)。 */
-export function summarizeReport(report: SmokeReport): string {
-  const lines = [
-    `converged=${report.converged} steps=${report.steps} rounds=${report.rounds} cases=${report.cases.length}`,
-  ];
-  for (const c of report.cases) {
-    lines.push(
-      `  [${c.caseId}] decision=${c.decision} mechanical=${c.mechanical} intent="${c.intent}"`,
-    );
-  }
-  return lines.join("\n");
-}
-
-/** verify-only 生产不变量:无目标修复、双侧 runner、非空 cases 与执行证据。 */
-function verifyOnlyViolations(report: SmokeReport): string[] {
-  const violations: string[] = [];
-  if (report.rounds !== 0)
-    violations.push(`rounds 必须为 0,实际 ${report.rounds}`);
-  if (report.targetFiles.length !== 0) {
-    violations.push(
-      `targetFiles 必须为空,实际 ${report.targetFiles.length} 个`,
-    );
-  }
-  if (report.cases.length === 0) violations.push("cases 不能为空");
-  const sides = report.runnerFiles?.map((group) => group.side) ?? [];
-  if (!sides.includes("source") || !sides.includes("target")) {
-    violations.push("runnerFiles 必须同时包含 source 与 target");
-  }
-  if (!report.executions || report.executions.length === 0) {
-    violations.push("executions 必须包含非空执行证据");
-  }
-  return violations;
-}
-
-/** 完整本地依赖 fixture 根的 verify-only 任务(C# → Java)。 */
-function verifyOnlyJob(): SmokeTaskInput {
-  const dependencies = fileURLToPath(
-    new URL("./fixtures/dependencies", import.meta.url),
-  );
+  // An explicit Host policy changes the execution mode. Rebuild the side
+  // expectations from the seeded mutation instead of carrying a contradictory
+  // target-only/source-only assessment across the override.
+  const sourceBug =
+    opts.variant === "source-count-plus-one" ||
+    opts.variant === "both-count-plus-one";
+  const targetBug =
+    opts.variant === "count-plus-one" ||
+    opts.variant === "drop-output" ||
+    opts.variant === "both-count-plus-one" ||
+    opts.variant === "target-only-count-plus-one";
+  const accepted = opts.referenceDecision === "accepted";
   return {
-    requirement:
-      "TargetService.value() 必须返回 MathDependency.doubleValue(21) 的语义结果(21 × 2 = 42)。",
-    source: {
-      language: "C#",
-      root: join(dependencies, "dotnet"),
-      candidatePath: "App/TargetService.cs",
-    },
-    target: {
-      language: "Java",
-      className: "fixture.TargetService",
-      method: "value",
-      isStatic: false,
-      root: join(dependencies, "maven"),
-      file: "app/src/main/java/fixture/TargetService.java",
-    },
+    ...expected,
+    mode: accepted ? "differential" : "target_only",
+    referenceDecision: opts.referenceDecision,
+    referenceReason: opts.referenceReason!,
+    executionStatus: "completed",
+    sourceAssessment: accepted
+      ? sourceBug
+        ? "bug_found"
+        : "no_bug_observed"
+      : "not_checked",
+    targetAssessment: targetBug ? "bug_found" : "no_bug_observed",
+    problemCodes: [],
   };
 }
 
-/** 默认诊断样例任务(MimeUtility C# → Java,允许报告修复轮)。 */
-function diagnosticJob(fixtureDir: string): SmokeTaskInput {
-  const samplesDir = join(fixtureDir, "..", "samples");
-  const sourceContent = readFixture(samplesDir, "mime-util-source.cs");
+function actualFields(result: VerificationResult): ExpectedVerificationFields {
   return {
-    requirement: readFixture(fixtureDir, "requirement.txt").trim(),
-    source: {
-      language: "C#",
-      root: samplesDir,
-      files: [{ relativePath: "mime-util-source.cs", content: sourceContent }],
-    },
-    target: {
-      language: "Java",
-      className: "org.apache.commons.fileupload.util.mime.MimeUtility",
-      method: "decodeText",
-      isStatic: true,
-      file: "mime-util-target.java",
-      root: samplesDir,
-    },
+    mode: result.mode,
+    referenceDecision: result.referenceDecision,
+    referenceReason: result.referenceReason,
+    executionStatus: result.executionStatus,
+    sourceAssessment: result.sourceAssessment,
+    targetAssessment: result.targetAssessment,
+    problemCodes: result.problems.map(({ code }) => code).sort(),
   };
+}
+
+export function compareVerificationFields(
+  expected: ExpectedVerificationFields,
+  result: VerificationResult,
+  reportPath: string,
+): VerificationComparison {
+  const actual = actualFields(result);
+  const matched =
+    expected.mode === actual.mode &&
+    expected.referenceDecision === actual.referenceDecision &&
+    expected.referenceReason === actual.referenceReason &&
+    expected.executionStatus === actual.executionStatus &&
+    expected.sourceAssessment === actual.sourceAssessment &&
+    expected.targetAssessment === actual.targetAssessment &&
+    JSON.stringify(expected.problemCodes) ===
+      JSON.stringify(actual.problemCodes);
+  return { expected, actual, matched, reportPath };
 }
 
 export async function runSmokeE2E(argv: string[]): Promise<number> {
-  // 统一使用 logger 根据模块位置解析出的仓库根 logs/,避免相对 cwd 产生多个日志目录。
   if (!process.env.VERIFIER_LOG_DIR)
     process.env.VERIFIER_LOG_DIR = DEFAULT_LOG_DIR;
   const parsed = parseArgs(argv);
   if ("error" in parsed) {
-    const logger = createLogger("smoke-e2e");
-    logger.error(parsed.error);
     console.error(`error: ${parsed.error}`);
     return 2;
   }
   if (parsed.json) process.env.VERIFIER_LOG_LEVEL = "ERROR";
-  const logger = createLogger("smoke-e2e");
   if (parsed.strategyId !== DIFFERENTIAL_SMOKE_STRATEGY.id) {
-    logger.error(`unknown smoke E2E strategy: ${parsed.strategyId}`);
     console.error(`error: unknown smoke E2E strategy: ${parsed.strategyId}`);
     return 2;
   }
-
-  // 自主模式必须有真实 claude:key 预检(无离线回放路径)。
-  const apiKey = parsed.apiKey ?? process.env.DEEPSEEK_API_KEY;
   if (parsed.offlineOnly) {
-    logger.info(
-      "skipping smoke E2E: autonomous mode requires a real claude session.",
-    );
     if (!parsed.json)
       console.log(
-        "跳过 smoke E2E:自主模式需要真实 claude(--offline-only 仅跳过)。",
+        "跳过 smoke E2E: --offline-only 不执行真实 Agent 会话或行为验证。",
       );
     return 0;
   }
-  if (!apiKey) {
-    logger.error(
-      "smoke E2E requires DEEPSEEK_API_KEY (or --api-key) for the autonomous strategy.",
-    );
-    console.error(
-      "error: smoke E2E requires DEEPSEEK_API_KEY (or --api-key) for the autonomous strategy.",
-    );
+  const apiKey = parsed.apiKey ?? process.env.DEEPSEEK_API_KEY;
+  const preflightOnly =
+    !parsed.referenceDecision &&
+    (parsed.variant === "missing-test-basis" ||
+      parsed.variant === "missing-policy");
+  if (!apiKey && !preflightOnly) {
+    console.error("error: DEEPSEEK_API_KEY (or --api-key) is required.");
     return 2;
   }
 
-  const fixtureDir = resolve(parsed.fixtureDir);
-  const mode = parsed.verifyOnly ? "verify-only" : "diagnostic-repair";
-  const job = parsed.verifyOnly ? verifyOnlyJob() : diagnosticJob(fixtureDir);
-
-  // 单次 claude 自主会话(keep 产物供验收与调试)。
-  let result: SmokeResult;
   const recorder = createRunRecorder({ runId: randomUUID() });
   const model = process.env.DEEPSEEK_MODEL ?? "deepseek-v4-flash";
+  const scenario = `${parsed.task}/${parsed.variant}`;
+  const resultsRoot = join(
+    repositoryRoot,
+    "services/translation-verifier/test-results",
+    `verification-${randomUUID()}`,
+  );
+  mkdirSync(resultsRoot, { recursive: true });
+  let output: SmokeE2EResult;
   try {
-    logger.info(
-      `run smoke ${parsed.strategyId} ${mode} session (fixture=${fixtureDir}, timeoutMs=${parsed.timeoutMs})`,
-    );
-    result = await withRunRecorder(recorder, () => runSmoke(job, {
-      mode,
-      model,
-      apiKey,
-      timeoutMs: parsed.timeoutMs,
-      keepGeneratedTests: true,
-      maxTurns: 40,
-    }));
+    output = await withRunRecorder(recorder, async () => {
+      const originalInput = fileUploadInput(parsed.variant, parsed.task);
+      const input = parsed.referenceDecision
+        ? {
+            ...originalInput,
+            verificationPolicy: {
+              referenceDecision: parsed.referenceDecision,
+              reason: parsed.referenceReason!,
+              testBasis: parsed.testBasis!,
+            },
+          }
+        : originalInput;
+      const service = createDefaultVerificationService({
+        apiKey,
+        model,
+        timeoutMs: parsed.timeoutMs,
+        workspaceRoot: join(resultsRoot, "workspaces"),
+        artifactRoot: join(resultsRoot, "artifacts"),
+      });
+      const receipt = await service.verifyWithReceipt(input, {
+        keepWorkspace: true,
+      });
+      const reportPath = join(resultsRoot, "report.json");
+      const manifestPath = join(resultsRoot, "comparison.json");
+      writeFileSync(
+        reportPath,
+        `${JSON.stringify(receipt.result, null, 2)}\n`,
+        "utf8",
+      );
+      const comparison = compareVerificationFields(
+        expectedForOptions(parsed),
+        receipt.result,
+        reportPath,
+      );
+      const manifest = {
+        schemaVersion: "1.0",
+        scenario,
+        expected: comparison.expected,
+        actual: comparison.actual,
+        matched: comparison.matched,
+        reportPath,
+      };
+      writeFileSync(
+        manifestPath,
+        `${JSON.stringify(manifest, null, 2)}\n`,
+        "utf8",
+      );
+      return {
+        scenario,
+        receipt,
+        comparison,
+        reportPath,
+        manifestPath,
+      };
+    });
   } catch (error) {
-    logger.error(`smoke strategy run failed: ${errorMessage(error)}`);
-    console.error(`error: smoke strategy run failed: ${errorMessage(error)}`);
+    console.error(
+      `error: ${error instanceof Error ? error.message : String(error)}`,
+    );
     return 2;
   }
-
   const timingRun = recorder.finish();
-  if (result.keptDir) {
-    const timingDirectory = writeSmokeTiming(result.keptDir, {
-      strategy: parsed.strategyId, strategyVersion: DIFFERENTIAL_SMOKE_STRATEGY.version,
-      model, mode, fixture: parsed.verifyOnly ? "dependencies" : basename(fixtureDir),
-    }, timingRun, recorder.events(), !parsed.json);
-    if (timingDirectory) {
-      const message = `Smoke workspace and timing: ${timingDirectory}`;
-      if (parsed.json) console.error(message);
-      else console.log(message);
-    } else console.error("Smoke timing output unavailable; verification result is unchanged.");
-  }
-  if (parsed.json) console.log(JSON.stringify(result, null, 2));
-
-  // 验收:报告生成成功即 status 非 error;converged=false 或检出 translation-bug
-  // 亦如实呈现(真实翻译产物不应有 bug,检出则警告),不据此判失败。
-  if (result.status === "error") {
-    logger.error(`smoke strategy returned error status: ${result.summary}`);
-    console.error(
-      `error: smoke strategy returned error status: ${truncate(result.summary, 2000)}`,
+  if (parsed.json) console.log(JSON.stringify(output, null, 2));
+  else {
+    console.log(
+      `${scenario}: matched=${output.comparison.matched} mode=${output.comparison.actual.mode} execution=${output.comparison.actual.executionStatus} target=${output.comparison.actual.targetAssessment}`,
     );
-    return 1;
+    console.log(`Report: ${output.reportPath}`);
+    console.log(`Comparison: ${output.manifestPath}`);
   }
-  const report = result.report;
-  if (!parsed.json) console.log(summarizeReport(report));
-  if (parsed.verifyOnly) {
-    const violations = verifyOnlyViolations(report);
-    if (violations.length > 0) {
-      logger.error(
-        `verify-only report violated production invariants:\n${violations.join("\n")}`,
-      );
-      console.error(
-        `error: verify-only 生产不变量不满足:\n${violations.join("\n")}`,
-      );
-      return 1;
-    }
-    if (!parsed.json) console.log(
-      `Smoke E2E VERIFY-ONLY OK:cases=${report.cases.length}, executions=${report.executions?.length}。`,
-    );
-    return 0;
-  }
-  const bugCases = report.cases.filter((c) => c.decision === "translation-bug");
-  const allPass =
-    report.converged &&
-    report.cases.every((c) => c.mechanical === "pass" && c.decision === "pass");
-  if (allPass) {
-    if (!parsed.json) console.log(
-      `Smoke E2E PASS:converged=true,${report.cases.length} 个 case 全 pass。`,
-    );
-    return 0;
-  }
-  if (bugCases.length > 0) {
-    logger.warn(
-      `smoke report found ${bugCases.length} translation-bug case(s): ${bugCases.map((c) => c.caseId).join(", ")}`,
-    );
-  }
-  logger.info(
-    `smoke E2E finished: status=${result.status} summary=${result.summary}`,
+  const timingDirectory = writeSmokeTiming(
+    resultsRoot,
+    {
+      strategy: parsed.strategyId,
+      strategyVersion: DIFFERENTIAL_SMOKE_STRATEGY.version,
+      model,
+      mode: output.comparison.actual.mode,
+      fixture: scenario,
+    },
+    timingRun,
+    recorder.events(),
+    false,
   );
-  return 0;
+  if (!timingDirectory)
+    console.error("Smoke timing unavailable; report unchanged.");
+  return output.comparison.matched ? 0 : 1;
 }
 
 function isModuleEntryPoint(): boolean {
@@ -318,8 +339,5 @@ function isModuleEntryPoint(): boolean {
     return resolve(process.argv[1]) === resolve(entryPath);
   }
 }
-
-if (isModuleEntryPoint()) {
-  const exitCode = await runSmokeE2E(process.argv.slice(2));
-  process.exitCode = exitCode;
-}
+if (isModuleEntryPoint())
+  process.exitCode = await runSmokeE2E(process.argv.slice(2));

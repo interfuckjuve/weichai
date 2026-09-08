@@ -6,6 +6,7 @@
   "scripts": {
     "build": "npm run check:schema-types && tsc -p tsconfig.json",
     "test": "npm run check:schema-types && vitest run src",
+    "test:e2e-data": "tsc -p e2e/tsconfig.json && vitest run e2e/*.test.ts && node --test e2e/fileupload-datasets.test.mjs",
     "generate:schema-types": "tsx scripts/generate-schema-types.ts",
     "check:schema-types": "tsx scripts/generate-schema-types.ts --check",
     "verify": "tsx src/verification-cli.ts",

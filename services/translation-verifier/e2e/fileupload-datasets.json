@@ -3,6 +3,128 @@
   "targetProject": "fixtures/target-system/commons-fileupload-java-skeleton",
   "sourceProject": "fixtures/code-corpus/commons-fileupload-python",
   "labelVisibility": "host-only; never stage this file, control patches, or hidden oracle in the agent workspace",
+  "executableCases": [
+    {
+      "id": "multipart-differential-correct",
+      "task": "multipart-read-body",
+      "variant": "correct",
+      "input": "fileUploadInput(variant, task)",
+      "expected": {
+        "mode": "differential",
+        "referenceDecision": "accepted",
+        "referenceReason": "Apache Commons FileUpload source is a versioned reference and the task has an independent byte-level requirement.",
+        "executionStatus": "completed",
+        "sourceAssessment": "no_bug_observed",
+        "targetAssessment": "no_bug_observed",
+        "problemCodes": []
+      }
+    },
+    {
+      "id": "multipart-target-count-defect",
+      "task": "multipart-read-body",
+      "variant": "count-plus-one",
+      "input": "fileUploadInput(variant, task)",
+      "expected": {
+        "mode": "differential",
+        "referenceDecision": "accepted",
+        "referenceReason": "Apache Commons FileUpload source is a versioned reference and the task has an independent byte-level requirement.",
+        "executionStatus": "completed",
+        "sourceAssessment": "no_bug_observed",
+        "targetAssessment": "bug_found",
+        "problemCodes": []
+      }
+    },
+    {
+      "id": "multipart-target-output-defect",
+      "task": "multipart-read-body",
+      "variant": "drop-output",
+      "input": "fileUploadInput(variant, task)",
+      "expected": {
+        "mode": "differential",
+        "referenceDecision": "accepted",
+        "referenceReason": "Apache Commons FileUpload source is a versioned reference and the task has an independent byte-level requirement.",
+        "executionStatus": "completed",
+        "sourceAssessment": "no_bug_observed",
+        "targetAssessment": "bug_found",
+        "problemCodes": []
+      }
+    },
+    {
+      "id": "multipart-source-defect",
+      "task": "multipart-read-body",
+      "variant": "source-count-plus-one",
+      "input": "fileUploadInput(variant, task)",
+      "expected": {
+        "mode": "differential",
+        "referenceDecision": "accepted",
+        "referenceReason": "Apache Commons FileUpload source is a versioned reference and the task has an independent byte-level requirement.",
+        "executionStatus": "completed",
+        "sourceAssessment": "bug_found",
+        "targetAssessment": "no_bug_observed",
+        "problemCodes": []
+      }
+    },
+    {
+      "id": "multipart-both-defective",
+      "task": "multipart-read-body",
+      "variant": "both-count-plus-one",
+      "input": "fileUploadInput(variant, task)",
+      "expected": {
+        "mode": "differential",
+        "referenceDecision": "accepted",
+        "referenceReason": "Apache Commons FileUpload source is a versioned reference and the task has an independent byte-level requirement.",
+        "executionStatus": "completed",
+        "sourceAssessment": "bug_found",
+        "targetAssessment": "bug_found",
+        "problemCodes": []
+      }
+    },
+    {
+      "id": "multipart-target-only-control",
+      "task": "multipart-read-body",
+      "variant": "target-only-correct",
+      "input": "fileUploadInput(variant, task)",
+      "expected": {
+        "mode": "target_only",
+        "referenceDecision": "rejected",
+        "referenceReason": "The retrieved source candidate is not trusted for differential execution; validate Java against the independent requirement.",
+        "executionStatus": "completed",
+        "sourceAssessment": "not_checked",
+        "targetAssessment": "no_bug_observed",
+        "problemCodes": []
+      }
+    },
+    {
+      "id": "multipart-target-only-defect",
+      "task": "multipart-read-body",
+      "variant": "target-only-count-plus-one",
+      "input": "fileUploadInput(variant, task)",
+      "expected": {
+        "mode": "target_only",
+        "referenceDecision": "rejected",
+        "referenceReason": "The retrieved source candidate is not trusted for differential execution; validate Java against the independent requirement.",
+        "executionStatus": "completed",
+        "sourceAssessment": "not_checked",
+        "targetAssessment": "bug_found",
+        "problemCodes": []
+      }
+    },
+    {
+      "id": "multipart-missing-policy",
+      "task": "multipart-read-body",
+      "variant": "missing-policy",
+      "input": "fileUploadInput(variant, task)",
+      "expected": {
+        "mode": "target_only",
+        "referenceDecision": "undetermined",
+        "referenceReason": "The Host has not accepted the reference implementation.",
+        "executionStatus": "failed",
+        "sourceAssessment": "not_checked",
+        "targetAssessment": "inconclusive",
+        "problemCodes": ["insufficient_test_basis"]
+      }
+    }
+  ],
   "scoring": {
     "truePositive": "Agent identifies the seeded target defect with a concrete executed counterexample; the same generated test exposes the mutant but not the corrected control.",
     "falseNegative": "Known target defect and adequate execution, but no supported diagnosis of that defect.",

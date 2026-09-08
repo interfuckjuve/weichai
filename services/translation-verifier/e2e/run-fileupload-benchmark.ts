@@ -7,24 +7,39 @@ import { VerificationStrategyFactory } from "../src/workflow/select-strategy.js"
 import { measureVerification } from "../src/run-output/measure-legacy-run.js";
 import { createDifferentialSmokeProvider } from "../src/strategies/smoke-differential/strategy.js";
 import { spawnClaudeProcess } from "../src/strategies/smoke-differential/claude-session.js";
-import { readCommandEvidence, runSmoke, type SmokeResult } from "../src/strategies/smoke-differential/run-smoke-verification.js";
 import {
+  readCommandEvidence,
+  runSmoke,
+  type SmokeResult,
+} from "../src/strategies/smoke-differential/run-smoke-verification.js";
+import { compareVerificationFields } from "./run-smoke-e2e.js";
+import {
+  expectedVerificationFields,
   fileUploadInput,
   repositoryRoot,
   sha256,
   variants,
+  fileUploadTasks,
+  isFileUploadTask,
   type Variant,
 } from "./fileupload-benchmark-fixture.js";
 
 const { values } = parseArgs({
   options: {
-    variant: { type: "string", default: "count-plus-one" },
+    task: { type: "string", default: "multipart-read-body" },
+    variant: { type: "string", default: "correct" },
     "timeout-ms": { type: "string", default: "600000" },
     output: { type: "string" },
   },
 });
 if (!variants.includes(values.variant as Variant))
   throw new Error(`Unknown variant: ${values.variant}`);
+if (!isFileUploadTask(values.task))
+  throw new Error(`Unknown task: ${values.task}`);
+if (values.task !== "multipart-read-body" && values.variant !== "correct")
+  throw new Error(
+    "Defect variants are supported only for multipart-read-body.",
+  );
 const timeoutMs = Number(values["timeout-ms"]);
 if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0)
   throw new Error("Invalid timeout-ms");
@@ -41,7 +56,7 @@ const output = resolve(
 );
 mkdirSync(output, { recursive: true });
 const preparedAt = performance.now();
-const input = fileUploadInput(values.variant as Variant);
+const input = fileUploadInput(values.variant as Variant, values.task);
 const inputPreparationMs = performance.now() - preparedAt;
 let smoke: SmokeResult | undefined;
 let commands: ReturnType<typeof readCommandEvidence> = [];
@@ -85,12 +100,36 @@ if (agentCwd) {
     /* No successful tools on early failure. */
   }
 }
-const report = smoke?.report;
-const claimedBugCases =
-  report?.cases?.filter((item) => item.decision === "translation-bug") ?? [];
+const reportPath = join(output, "report.json");
+writeFileSync(
+  reportPath,
+  `${JSON.stringify(measured.value.result, null, 2)}\n`,
+);
+const comparison = compareVerificationFields(
+  expectedVerificationFields(values.variant as Variant),
+  measured.value.result,
+  reportPath,
+);
+writeFileSync(
+  join(output, "comparison.json"),
+  `${JSON.stringify(
+    {
+      schemaVersion: "1.0",
+      scenario: `${values.task}/${values.variant}`,
+      expected: comparison.expected,
+      actual: comparison.actual,
+      matched: comparison.matched,
+      reportPath,
+    },
+    null,
+    2,
+  )}\n`,
+);
 const summary = {
   schemaVersion: "1.0",
   reportReadyAt,
+  task: values.task,
+  symbol: `${fileUploadTasks[values.task].container}.${fileUploadTasks[values.task].method}`,
   variant: values.variant,
   boundary:
     "VerificationService.verifyWithReceipt entry to promise resolution after receipt persistence and keepWorkspace cleanup policy",
@@ -115,25 +154,25 @@ const summary = {
   identity: {
     patchHash: input.translation.patchHash,
     sourceFiles: input.request.sourceBundle.files.map(
-      ({ path, contentHash }) => ({ path, contentHash }),
+      ({ path, contentHash }) => ({
+        path,
+        contentHash,
+      }),
     ),
     targetFiles: input.request.targetContext.sourceFiles.map(
-      ({ path, contentHash }) => ({ path, contentHash }),
+      ({ path, contentHash }) => ({
+        path,
+        contentHash,
+      }),
     ),
     requirementHash: sha256(input.request.requirement),
   },
   detection: {
-    expectedTargetDefect: values.variant !== "correct",
-    reportGenerated: !!report?.cases,
-    serviceStatus: measured.value.result.status,
-    agentClaimedBug: report?.cases ? claimedBugCases.length > 0 : null,
-    claimedCaseIds: claimedBugCases.map((item) => item.caseId),
-    independentlyConfirmed: null,
-    classification:
-      measured.value.result.status === "unverified"
-        ? "unverified"
-        : "pending-independent-replay",
-    note: "Report status and matching command IDs alone do not prove the seeded defect was exposed. Replay generated tests against mutant and corrected control before crediting detection.",
+    expected: comparison.expected,
+    actual: comparison.actual,
+    matched: comparison.matched,
+    reportPath,
+    note: "Only fixed report fields are compared automatically. Human review must assess findings, attribution and execution evidence in report.json.",
   },
   commands,
   receipt: measured.value,
@@ -157,4 +196,4 @@ console.log(
     2,
   ),
 );
-process.exitCode = measured.value.result.status === "unverified" ? 1 : 0;
+process.exitCode = comparison.matched ? 0 : 1;
