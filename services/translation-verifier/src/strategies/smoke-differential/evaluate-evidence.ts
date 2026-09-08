@@ -16,7 +16,7 @@ import type {
   SmokeMode,
   SmokeReport,
 } from "./differential-test-types.js";
-import type { SmokeResult, SmokeStatus } from "./run-smoke-verification.js";
+import type { SmokeResult } from "./run-smoke-verification.js";
 import type { RunLayout } from "./prepare-projects.js";
 
 const MAX_EVIDENCE_LINES = 400;
@@ -118,8 +118,8 @@ export function observeCommandTimings(path: string): void {
 }
 
 export type SmokeOutcome = VerificationAssessment &
-  Pick<SmokeResult, "status" | "summary" | "report"> &
-  Partial<Pick<SmokeResult, "passRate" | "evaluation" | "errorReason">>;
+  Pick<SmokeResult, "summary" | "report"> &
+  Partial<Pick<SmokeResult, "passRate" | "bugCases" | "errorReason">>;
 
 export async function evaluateEvidence(
   layout: RunLayout,
@@ -130,7 +130,7 @@ export async function evaluateEvidence(
   const handle = recorder?.startStep("evaluate-evidence", {
     scope: "strategy",
   });
-  let report = {} as SmokeReport;
+  let report: SmokeReport | null = null;
   let errorReason: SmokeOutcome["errorReason"] = "invalid-evidence";
   const problems: VerificationProblem[] = [];
   try {
@@ -168,7 +168,7 @@ export async function evaluateEvidence(
       message: errorSummary(error),
     });
   }
-  if (problems.length) {
+  if (problems.length || report === null) {
     // Report failure must not hide independent command or integrity diagnostics.
     for (const item of evidence) {
       if (
@@ -207,7 +207,6 @@ export async function evaluateEvidence(
     recorder?.endStep(handle, "failed", first.message);
     return {
       ...failureAssessment(input, first.code, first.message),
-      status: "error",
       summary: first.message,
       report,
       errorReason,
@@ -217,12 +216,6 @@ export async function evaluateEvidence(
   try {
     markVerificationPhase("evidence-evaluation-and-smoke-result");
     const evaluation = evaluateSmokeReport(report, evidence, mode, input);
-    const status: SmokeStatus =
-      evaluation.status === "pass"
-        ? "pass"
-        : evaluation.status === "fail"
-          ? "fail"
-          : "error";
     const passRate =
       report.cases.length === 0
         ? undefined
@@ -231,11 +224,9 @@ export async function evaluateEvidence(
     recorder?.endStep(handle, "completed");
     return {
       ...evaluation,
-      status,
       passRate,
       summary: evaluation.summary,
       report,
-      evaluation,
     };
   } catch (error) {
     recorder?.endStep(handle, "failed", error);
@@ -248,7 +239,6 @@ export async function evaluateEvidence(
           : "report_evidence_invalid",
         errorSummary(error),
       ),
-      status: "error",
       summary: errorSummary(error),
       report,
       errorReason: "invalid-evidence",

@@ -14,13 +14,12 @@ const descriptor: VerificationStrategyDescriptor = {
 };
 
 const result = {
-  schemaVersion: "1.0",
+  schemaVersion: "2.0",
   strategyId: descriptor.id,
   strategyVersion: descriptor.version,
   subjectHash: "a".repeat(64),
   inputHash: "c".repeat(64),
   round: 0,
-  status: "pass",
   summary: "ok",
   issues: [],
   artifacts: [],

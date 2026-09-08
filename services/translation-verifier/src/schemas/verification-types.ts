@@ -85,6 +85,7 @@ export interface VerificationInput
   };
 }
 
+/** Status-free output 2.0; workflow gate decisions belong to downstream consumers. */
 export interface VerificationResult
   extends Omit<
       DeclaredFields<Schema.VerificationResult>,

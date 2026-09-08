@@ -17,7 +17,6 @@ import {
 import { assertVerificationInput } from "../schemas/validate-verification-input.js";
 import {
   assertVerificationAssessment,
-  deriveCompatibilityStatus,
   failureAssessment,
 } from "../schemas/verification-assessment.js";
 import {
@@ -26,6 +25,7 @@ import {
   sha256Hex,
 } from "../schemas/validate-json-paths.js";
 
+/** Validate independent findings before hashing the output 2.0 envelope. */
 export function createVerificationResult(
   input: VerificationInput,
   descriptor: VerificationStrategyDescriptor,
@@ -40,10 +40,6 @@ export function createVerificationResult(
   );
   assertSchema(validateStrategyOutputSchema, output, "Verification result");
   assertVerificationAssessment(output, input);
-  if (output.status !== deriveCompatibilityStatus(output))
-    throw new Error(
-      "Verification compatibility status does not match the detailed assessments.",
-    );
   const issues = output.issues.map((issue) => materializeIssue(issue));
   const artifacts = output.artifacts.map((artifact) =>
     materializeArtifact(artifact),
@@ -68,13 +64,12 @@ export function createVerificationResult(
   }
 
   const payload: Omit<VerificationResult, "contentHash"> = {
-    schemaVersion: "1.0",
+    schemaVersion: "2.0",
     strategyId: descriptor.id,
     strategyVersion: descriptor.version,
     subjectHash: input.translation.patchHash,
     inputHash: sha256Hex(canonicalJson(input)),
     round: input.translation.round,
-    status: deriveCompatibilityStatus(output),
     mode: output.mode,
     referenceDecision: output.referenceDecision,
     referenceReason: output.referenceReason,
@@ -176,7 +171,6 @@ export function createUnverifiedResult(
               : "internal_error",
         message,
       ),
-      status: "unverified",
       summary: `Verification framework could not complete: ${message}`,
       issues: [
         {

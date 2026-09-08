@@ -55,7 +55,6 @@ describe("DifferentialSmokeStrategy", () => {
     const strategy = new DifferentialSmokeStrategy({
       runSmokeImpl: async () => ({
         ...validAssessment(),
-        status: "pass",
         summary: "same",
         durationMs: 0,
         generatedTestsKept: false,
@@ -65,7 +64,7 @@ describe("DifferentialSmokeStrategy", () => {
     const output = await recording.withRunRecorder(recorder, () =>
       strategy.verify(input(), context()),
     );
-    expect(output.status).toBe("pass");
+    expect(output.targetAssessment).toBe("no_bug_observed");
     expect(
       recorder.snapshot().stages.find((step) => step.id === handle!.id)?.state,
     ).toBe("running");
@@ -78,26 +77,92 @@ describe("DifferentialSmokeStrategy", () => {
     expect(recorder.finish().diagnostics).toEqual([]);
   });
 
+  it("publishes a structured failure artifact for an absent report", async () => {
+    const workspace = context();
+    const result = await new DifferentialSmokeStrategy({
+      runSmokeImpl: async () => ({
+        ...failureAssessment(input(), "report_missing", "Report absent"),
+        summary: "Report absent",
+        report: null,
+        durationMs: 0,
+        generatedTestsKept: false,
+      }),
+    }).verify(input(), workspace);
+    expect(result.strategyReport).toBeNull();
+    expect(result.issues).toEqual([
+      expect.objectContaining({ kind: "report_missing" }),
+    ]);
+    expect(
+      JSON.parse(
+        readFileSync(
+          join(
+            workspace.workspace.strategyRoot,
+            "reports/differential-smoke-report.json",
+          ),
+          "utf8",
+        ),
+      ),
+    ).toMatchObject({
+      executionStatus: "failed",
+      problems: [{ code: "report_missing" }],
+    });
+  });
+
+  it.each(["completed", "partial"] as const)(
+    "retains source-only findings during %s execution",
+    async (executionStatus) => {
+      const report = validSmokeReport({
+        cases: [validSmokeCase({ sourceAssessment: "bug_found" })],
+      });
+      const result = await new DifferentialSmokeStrategy({
+        runSmokeImpl: async () => ({
+          ...validAssessment(),
+          sourceAssessment: "bug_found",
+          executionStatus,
+          problems:
+            executionStatus === "partial"
+              ? [
+                  {
+                    code: "command_timeout",
+                    message: "Later command timed out",
+                  },
+                ]
+              : [],
+          summary: "Source finding only",
+          report,
+          bugCases: [],
+          durationMs: 0,
+          generatedTestsKept: false,
+        }),
+      }).verify(input(), context());
+      expect(result).toMatchObject({
+        executionStatus,
+        sourceAssessment: "bug_found",
+        targetAssessment: "no_bug_observed",
+      });
+      expect(
+        result.issues.filter((item) => item.kind === "source-bug"),
+      ).toHaveLength(1);
+      expect(
+        result.issues.some((item) => item.kind === "behavioral-divergence"),
+      ).toBe(false);
+      expect(result).not.toHaveProperty("status");
+    },
+  );
+
   it("maps the existing smoke result into strategy output", async () => {
     const report = validSmokeReport({
-      cases: [validSmokeCase("translation-bug")],
+      cases: [validSmokeCase({ targetAssessment: "bug_found" })],
     });
     const fakeRunSmoke = vi.fn(
       async () =>
         ({
           ...validAssessment("bug_found"),
-          status: "fail" as const,
           summary: "1/1 translation bug",
           durationMs: 10,
           generatedTestsKept: false,
           report,
-          evaluation: {
-            ...validAssessment("bug_found"),
-            status: "fail" as const,
-            reason: "behavioral-divergence" as const,
-            bugCases: report.cases,
-            summary: "different",
-          },
+          bugCases: report.cases,
         }) satisfies SmokeResult,
     );
     const workspace = context();
@@ -109,7 +174,7 @@ describe("DifferentialSmokeStrategy", () => {
 
     expect(fakeRunSmoke).toHaveBeenCalledOnce();
     expect(result).not.toHaveProperty("strategyId");
-    expect(result.status).toBe("fail");
+    expect(result.targetAssessment).toBe("bug_found");
     expect(result.issues[0]).toMatchObject({
       kind: "behavioral-divergence",
       caseId: "c1",
@@ -135,18 +200,12 @@ describe("DifferentialSmokeStrategy", () => {
       async () =>
         ({
           ...validAssessment(),
-          status: "pass" as const,
           summary: "1/1 case passed",
           durationMs: 10,
           generatedTestsKept: false,
           passRate: 1,
           report,
-          evaluation: {
-            ...validAssessment(),
-            status: "pass" as const,
-            bugCases: [],
-            summary: "same",
-          },
+          bugCases: [],
         }) satisfies SmokeResult,
     );
 
@@ -154,7 +213,7 @@ describe("DifferentialSmokeStrategy", () => {
       runSmokeImpl: fakeRunSmoke,
     }).verify(input(), context());
 
-    expect(result.status).toBe("pass");
+    expect(result.targetAssessment).toBe("no_bug_observed");
     expect(result.issues).toEqual([]);
   });
 
@@ -167,11 +226,11 @@ describe("DifferentialSmokeStrategy", () => {
             "report_invalid_json",
             "invalid JSON",
           ),
-          status: "error" as const,
+
           summary: "report.json is invalid",
           durationMs: 10,
           generatedTestsKept: false,
-          report: {} as SmokeResult["report"],
+          report: null,
           errorReason: "invalid-report" as const,
         }) satisfies SmokeResult,
     );
@@ -180,8 +239,8 @@ describe("DifferentialSmokeStrategy", () => {
       runSmokeImpl: fakeRunSmoke,
     }).verify(input(), context());
 
-    expect(result.status).toBe("unverified");
-    expect(result.issues[0]).toMatchObject({ kind: "invalid-report" });
+    expect(result.targetAssessment).toBe("inconclusive");
+    expect(result.issues[0]).toMatchObject({ kind: "report_invalid_json" });
   });
 
   it("returns canonical insufficient-context for analysis unresolved without calling runSmoke", async () => {
@@ -196,7 +255,7 @@ describe("DifferentialSmokeStrategy", () => {
     );
     expect(fakeRunSmoke).not.toHaveBeenCalled();
     expect(result).toMatchObject({
-      status: "unverified",
+      executionStatus: "failed",
       artifacts: [],
       issues: [
         {
@@ -249,17 +308,11 @@ describe("DifferentialSmokeStrategy", () => {
       async () =>
         ({
           ...validAssessment(),
-          status: "pass" as const,
           summary: "ok",
           durationMs: 1,
           generatedTestsKept: false,
           report: validSmokeReport(),
-          evaluation: {
-            ...validAssessment(),
-            status: "pass" as const,
-            bugCases: [],
-            summary: "same",
-          },
+          bugCases: [],
         }) satisfies SmokeResult,
     );
     await new DifferentialSmokeStrategy({ runSmokeImpl: fakeRunSmoke }).verify(
@@ -276,7 +329,7 @@ describe("DifferentialSmokeStrategy", () => {
     }).verify(input({ sourceLanguageId: "go" }), context());
 
     expect(fakeRunSmoke).not.toHaveBeenCalled();
-    expect(result.status).toBe("unverified");
+    expect(result.targetAssessment).toBe("inconclusive");
     expect(result.summary).toMatch(/unsupported/i);
   });
 
@@ -285,17 +338,11 @@ describe("DifferentialSmokeStrategy", () => {
       async () =>
         ({
           ...validAssessment(),
-          status: "pass" as const,
           summary: "ok",
           durationMs: 10,
           generatedTestsKept: false,
           report: validSmokeReport(),
-          evaluation: {
-            ...validAssessment(),
-            status: "pass" as const,
-            bugCases: [],
-            summary: "same",
-          },
+          bugCases: [],
         }) satisfies SmokeResult,
     );
     const workspace = context();
@@ -412,11 +459,13 @@ describe("createDefaultVerificationService", () => {
         if (outcome === "cancelled") {
           controller.abort(cancellation);
           await expect(pending).resolves.toMatchObject({
-            result: { executionStatus: "cancelled", status: "unverified" },
+            result: { executionStatus: "cancelled", targetAssessment: "inconclusive" },
           });
         } else {
           release();
-          expect((await pending).result.status).toBe("pass");
+          expect((await pending).result.targetAssessment).toBe(
+            "no_bug_observed",
+          );
         }
         const sessions = during.stages.filter(
           (step: { name: string }) => step.name === "run-agent-session",
@@ -500,7 +549,7 @@ describe("createDefaultVerificationService", () => {
         timeoutController.signal,
       );
       const report = validSmokeReport({
-        cases: [validSmokeCase("translation-bug")],
+        cases: [validSmokeCase({ targetAssessment: "bug_found" })],
       });
       const service = createDefaultVerificationService({
         workspaceRoot: join(root, "workspaces"),
@@ -550,7 +599,6 @@ describe("createDefaultVerificationService", () => {
         controller.signal,
       );
       expect(receipt.result).toMatchObject({
-        status: "fail",
         executionStatus: origin === "timeout" ? "partial" : "cancelled",
         targetAssessment: "bug_found",
         problems: expect.arrayContaining([
@@ -627,8 +675,8 @@ describe("createDefaultVerificationService", () => {
         spawnClaude,
       });
       const receipt = await service.verifyWithReceipt(input());
-      expect(receipt.result.status).toBe(
-        kind === "valid" ? "pass" : "unverified",
+      expect(receipt.result.executionStatus).toBe(
+        kind === "valid" ? "completed" : "failed",
       );
       const run = assertVerificationRun(
         recorder.mock.results[0]!.value.snapshot(),
@@ -674,7 +722,7 @@ describe("createDefaultVerificationService", () => {
       expect(
         (
           receipt.result.strategyReport as unknown as SmokeResult["report"]
-        ).executions?.map((entry) => entry.durationMs),
+        )?.executions?.map((entry) => entry.durationMs),
       ).toEqual(kind === "missing-report" ? undefined : [10, 10, 10, 10]);
       expect(run.diagnostics).toEqual([
         {

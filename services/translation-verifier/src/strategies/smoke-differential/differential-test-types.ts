@@ -101,9 +101,9 @@ export interface SmokeCaseVerdict {
  intent: string;
  source: CaseResult | null;
  target: CaseResult | null;
- /** 机械差分 verdict。 */
+ /** Non-authoritative mechanical annotation; never establishes code findings. */
  mechanical: SmokeMechanicalVerdict;
- /** LLM 语义裁决。 */
+ /** Non-authoritative model annotation; independent assessments and evidence are authoritative. */
  decision: SmokeDecision;
  /** LLM 裁决依据。 */
  reasoning: string;

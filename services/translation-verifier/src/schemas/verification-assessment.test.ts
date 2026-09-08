@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   assertVerificationAssessment,
-  deriveCompatibilityStatus,
   failureAssessment,
   resolveVerificationPolicy,
 } from "./verification-assessment.js";
@@ -52,21 +51,22 @@ describe("independent verification dimensions", () => {
   });
 
   it.each([
-    ["no_bug_observed", "no_bug_observed", "pass"],
-    ["bug_found", "no_bug_observed", "pass"],
-    ["no_bug_observed", "bug_found", "fail"],
-    ["bug_found", "bug_found", "fail"],
-    ["suspected_bug", "no_bug_observed", "unverified"],
-    ["no_bug_observed", "suspected_bug", "unverified"],
-    ["inconclusive", "no_bug_observed", "unverified"],
-  ] as const)(
-    "keeps source %s and target %s independent",
-    (source, target, legacy) => {
-      const value = assessment(source, target);
-      expect(() => assertVerificationAssessment(value, input)).not.toThrow();
-      expect(deriveCompatibilityStatus(value)).toBe(legacy);
-    },
-  );
+    ["no_bug_observed", "no_bug_observed"],
+    ["bug_found", "no_bug_observed"],
+    ["no_bug_observed", "bug_found"],
+    ["bug_found", "bug_found"],
+    ["suspected_bug", "no_bug_observed"],
+    ["no_bug_observed", "suspected_bug"],
+    ["inconclusive", "no_bug_observed"],
+  ] as const)("keeps source %s and target %s independent", (source, target) => {
+    const value = assessment(source, target);
+    expect(() => assertVerificationAssessment(value, input)).not.toThrow();
+    expect(value).toMatchObject({
+      sourceAssessment: source,
+      targetAssessment: target,
+    });
+    expect(value).not.toHaveProperty("status");
+  });
 
   it("retains confirmed target findings alongside a partial command timeout", () => {
     const value = assessment("inconclusive", "bug_found");
@@ -80,7 +80,7 @@ describe("independent verification dimensions", () => {
       },
     ];
     expect(() => assertVerificationAssessment(value, input)).not.toThrow();
-    expect(deriveCompatibilityStatus(value)).toBe("fail");
+    expect(value.targetAssessment).toBe("bug_found");
   });
 
   it("does not claim source results during target-only verification", () => {
@@ -98,7 +98,7 @@ describe("independent verification dimensions", () => {
       problems: [],
     };
     expect(value.sourceAssessment).toBe("not_checked");
-    expect(deriveCompatibilityStatus(value)).toBe("pass");
+    expect(value.targetAssessment).toBe("no_bug_observed");
     expect(() =>
       assertVerificationAssessment(value, targetInput),
     ).not.toThrow();
@@ -129,9 +129,10 @@ describe("independent verification dimensions", () => {
     expect(() => assertVerificationAssessment(value, input)).toThrow(
       "cannot establish code findings",
     );
-    expect(
-      deriveCompatibilityStatus(failureAssessment(input, code, code)),
-    ).toBe("unverified");
+    expect(failureAssessment(input, code, code)).toMatchObject({
+      executionStatus: "failed",
+      targetAssessment: "inconclusive",
+    });
   });
 
   it.each([

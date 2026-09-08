@@ -1,5 +1,4 @@
 import {
-  deriveCompatibilityStatus,
   failureAssessment,
   resolveVerificationPolicy,
 } from "../../schemas/verification-assessment.js";
@@ -36,7 +35,7 @@ import type { SmokeTaskInput } from "./build-differential-test-prompt.js";
 
 export const DIFFERENTIAL_SMOKE_STRATEGY: VerificationStrategyDescriptor = {
   id: "differential-smoke",
-  version: "1.0.0",
+  version: "2.0.0",
   displayName: "Differential Smoke",
 };
 
@@ -76,7 +75,6 @@ export class DifferentialSmokeStrategy implements VerificationStrategy {
       const summary = "Independent Host-confirmed test basis is missing.";
       return {
         ...failureAssessment(input, "insufficient_test_basis", summary),
-        status: "unverified",
         summary,
         issues: [],
         artifacts: [],
@@ -101,13 +99,12 @@ export class DifferentialSmokeStrategy implements VerificationStrategy {
           "unsupported_language",
           `Unsupported language route: ${sourceLanguageId} -> ${targetLanguageId}`,
         ),
-        status: "unverified",
         summary: `Unsupported differential smoke language route: ${sourceLanguageId} -> ${targetLanguageId}`,
         issues: [
           {
             id: "unsupported-language-route",
             kind: "unsupported-language",
-            message: `differential-smoke@1.0.0 does not support ${sourceLanguageId} -> ${targetLanguageId}`,
+            message: `differential-smoke@2.0.0 does not support ${sourceLanguageId} -> ${targetLanguageId}`,
             evidenceArtifactIds: [],
           },
         ],
@@ -126,7 +123,6 @@ export class DifferentialSmokeStrategy implements VerificationStrategy {
           "context_incomplete",
           insufficientContext.message,
         ),
-        status: "unverified",
         summary:
           "Differential smoke verification requires additional migration context.",
         issues: [
@@ -193,7 +189,6 @@ export class DifferentialSmokeStrategy implements VerificationStrategy {
         sourceAssessment: smoke.sourceAssessment,
         targetAssessment: smoke.targetAssessment,
         problems: smoke.problems,
-        status: deriveCompatibilityStatus(smoke),
         summary: smoke.summary,
         issues: smokeIssues(smoke, artifact.id),
         artifacts: [artifact],
@@ -281,7 +276,17 @@ async function writeSmokeReportArtifact(
   });
   writeFileSync(
     join(context.workspace.strategyRoot, path),
-    `${JSON.stringify(smoke.report, null, 2)}\n`,
+    `${JSON.stringify(
+      smoke.report ?? {
+        executionStatus: smoke.executionStatus,
+        sourceAssessment: smoke.sourceAssessment,
+        targetAssessment: smoke.targetAssessment,
+        problems: smoke.problems,
+        summary: smoke.summary,
+      },
+      null,
+      2,
+    )}\n`,
     "utf8",
   );
   return context.writeArtifact({
@@ -299,7 +304,7 @@ function smokeIssues(
 ): VerificationIssue[] {
   const sourceBugs =
     smoke.sourceAssessment === "bug_found"
-      ? (smoke.report.cases ?? []).filter(
+      ? (smoke.report?.cases ?? []).filter(
           (item) => item.sourceAssessment === "bug_found",
         )
       : [];
@@ -308,33 +313,31 @@ function smokeIssues(
     id: `source-bug-${index + 1}-${item.caseId}`,
     kind: "source-bug",
   }));
-  if (smoke.status === "pass") return sourceIssues;
-  if (smoke.status === "fail") {
-    const bugCases = smoke.evaluation?.bugCases ?? [];
-    if (bugCases.length === 0) {
-      return [
-        issue(
-          "smoke-fail",
-          smoke.evaluation?.reason ?? "behavioral-divergence",
-          smoke.summary,
-          artifactId,
-        ),
-      ];
-    }
-    return [
-      ...sourceIssues,
-      ...bugCases.map((caseVerdict, index) =>
-        caseIssue(caseVerdict, artifactId, index),
-      ),
-    ];
-  }
+  const targetIssues =
+    smoke.targetAssessment === "bug_found"
+      ? smoke.bugCases?.length
+        ? smoke.bugCases.map((item, index) =>
+            caseIssue(item, artifactId, index),
+          )
+        : [
+            issue(
+              "smoke-finding",
+              "behavioral-divergence",
+              smoke.summary,
+              artifactId,
+            ),
+          ]
+      : [];
   return [
     ...sourceIssues,
-    issue(
-      "smoke-error",
-      smoke.errorReason ?? "smoke-error",
-      smoke.summary,
-      artifactId,
+    ...targetIssues,
+    ...smoke.problems.map((problem, index) =>
+      issue(
+        `smoke-problem-${index + 1}`,
+        problem.code,
+        problem.message,
+        artifactId,
+      ),
     ),
   ];
 }

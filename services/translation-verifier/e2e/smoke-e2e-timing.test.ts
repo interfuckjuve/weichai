@@ -48,7 +48,7 @@ vi.mock("../src/create-default-verifier.js", () => ({
 
 const identifiers = {
   strategy: "differential-smoke",
-  strategyVersion: "1.0.0",
+  strategyVersion: "2.0.0",
   model: "fake-model",
   mode: "differential" as const,
   fixture: "multipart-read-body/correct",
@@ -63,26 +63,25 @@ function result(
   input: VerificationInput,
   fields: ExpectedVerificationFields,
 ): VerificationResult {
-  const status: VerificationStrategyOutput["status"] =
-    fields.targetAssessment === "bug_found"
-      ? "fail"
-      : fields.executionStatus === "completed" &&
-          fields.targetAssessment === "no_bug_observed" &&
-          (fields.mode === "target_only" ||
-            fields.sourceAssessment === "bug_found" ||
-            fields.sourceAssessment === "no_bug_observed")
-        ? "pass"
-        : "unverified";
   const { problemCodes, ...assessment } = fields;
   const output: VerificationStrategyOutput = {
     ...assessment,
-    status,
     summary: "mock",
     problems: problemCodes.map((code) => ({
       code: code as VerificationStrategyOutput["problems"][number]["code"],
       message: code,
     })),
-    issues: [],
+    issues:
+      fields.targetAssessment === "bug_found"
+        ? [
+            {
+              id: "target-bug",
+              kind: "behavioral-divergence",
+              message: "Independent target finding",
+              evidenceArtifactIds: [],
+            },
+          ]
+        : [],
     artifacts: [],
     strategyReport: {},
   };

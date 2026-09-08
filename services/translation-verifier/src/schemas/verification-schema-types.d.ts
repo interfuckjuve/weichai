@@ -109,12 +109,11 @@ export type FilePatchSchemaSubset = {
  */
 export type VerificationOutputSchema = VerificationResult;
 export type VerificationResult = VerificationStrategyOutput & {
-  schemaVersion: "1.0";
+  schemaVersion: "2.0";
   strategyId: string;
   strategyVersion: string;
   subjectHash: string;
   round: number;
-  status?: unknown;
   summary?: unknown;
   issues?: unknown;
   artifacts?: unknown;
@@ -348,10 +347,6 @@ export interface StagedFileSchemaSubset {
   [k: string]: unknown;
 }
 export interface VerificationStrategyOutput {
-  /**
-   * Deprecated compatibility projection only. Never compare this field without mode and the independent assessments. Host validates it against the detailed fields.
-   */
-  status: "pass" | "warn" | "fail" | "unverified";
   summary: string;
   issues: VerificationIssue[];
   artifacts: VerificationArtifact[];
@@ -424,7 +419,7 @@ export interface VerificationProblem {
   commandId?: string;
 }
 /**
- * resultArtifact may be absent only for an unverified artifact-persistence-failed result; the host enforces this cross-field rule and canonical-byte metadata.
+ * resultArtifact may be absent only for failed execution with an artifact_persistence_failed problem, no decisive findings and no retained artifacts; the host enforces this cross-field rule and canonical-byte metadata.
  *
  * This interface was referenced by `VerificationRun`'s JSON-Schema
  * via the `definition` "receipt".

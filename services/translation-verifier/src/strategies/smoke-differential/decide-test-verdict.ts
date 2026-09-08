@@ -1,6 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
 import {
-  deriveCompatibilityStatus,
   failureAssessment,
   resolveVerificationPolicy,
 } from "../../schemas/verification-assessment.js";
@@ -20,12 +19,6 @@ import type {
 
 type PolicyInput = Pick<VerificationInput, "verificationPolicy">;
 export interface SmokeEvaluation extends VerificationAssessment {
-  status: "pass" | "fail" | "unverified";
-  reason?:
-    | "behavioral-divergence"
-    | "unclear"
-    | "invalid-evidence"
-    | "no-cases";
   bugCases: SmokeCaseVerdict[];
   summary: string;
 }
@@ -37,8 +30,6 @@ function rejected(
 ): SmokeEvaluation {
   return {
     ...failureAssessment(input, code, summary),
-    status: "unverified",
-    reason: "invalid-evidence",
     bugCases: [],
     summary,
   };
@@ -100,10 +91,7 @@ export function evaluateSmokeReport(
       "insufficient_test_basis",
     );
   if (!report.cases.length)
-    return {
-      ...rejected(input, "Report contains no cases."),
-      reason: "no-cases",
-    };
+    return rejected(input, "Report contains no cases.");
   if (
     mode === "verify-only" &&
     (report.rounds !== 0 || report.targetFiles.length !== 0)
@@ -292,15 +280,8 @@ export function evaluateSmokeReport(
     targetAssessment: aggregate(report.cases, "target"),
     problems,
   };
-  const status = deriveCompatibilityStatus(assessment);
   return {
     ...assessment,
-    status,
-    ...(status === "fail"
-      ? { reason: "behavioral-divergence" as const }
-      : status === "unverified"
-        ? { reason: "unclear" as const }
-        : {}),
     bugCases: report.cases.filter(
       (item) => item.targetAssessment === "bug_found",
     ),

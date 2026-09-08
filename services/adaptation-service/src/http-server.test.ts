@@ -273,7 +273,6 @@ function deterministicAdapterV2(
           httpBehaviorStrategyDescriptor,
           {
             ...fixtureVerificationAssessment({}),
-            status: "pass",
             summary: "Controlled local test-fixture verifier passed.",
             issues: [],
             artifacts: [

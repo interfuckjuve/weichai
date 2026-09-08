@@ -996,7 +996,7 @@ function artifactRef(artifact: {
   };
 }
 
-function verificationResultEvidence(
+export function verificationResultEvidence(
   receipt: VerificationReceipt,
   input: VerificationInput,
   descriptor: VerificationStrategyDescriptor,
@@ -1010,17 +1010,27 @@ function verificationResultEvidence(
       };
     }
     const verified = assertVerificationReceipt(receipt, input, descriptor);
+    const result = verified.result;
+    const sourceResolved =
+      result.mode === "target_only" ||
+      result.sourceAssessment === "bug_found" ||
+      result.sourceAssessment === "no_bug_observed";
+    const status: MigrationValidationEvidenceV2["status"] =
+      result.executionStatus === "cancelled"
+        ? "unverified"
+        : result.targetAssessment === "bug_found"
+          ? "fail"
+          : result.executionStatus === "completed" &&
+              result.targetAssessment === "no_bug_observed" &&
+              sourceResolved
+            ? "pass"
+            : "unverified";
     return {
-      status:
-        verified.result.executionStatus === "cancelled"
-          ? "unverified"
-          : verified.result.status,
+      status,
       summary: `[${verified.result.mode}; source=${verified.result.sourceAssessment}; target=${verified.result.targetAssessment}; execution=${verified.result.executionStatus}] ${verified.result.summary}`,
       artifactPath: receipt.resultArtifact.path,
       artifact: artifactRef(receipt.resultArtifact),
-      ...((verified.result.status === "fail" ||
-        verified.result.status === "unverified") &&
-      verified.result.issues[0] !== undefined
+      ...(status !== "pass" && verified.result.issues[0] !== undefined
         ? { failureReason: verified.result.issues[0].kind }
         : {}),
     };
@@ -1086,7 +1096,9 @@ function repairIssues(
         record.artifact.contentHash === resultArtifact.contentHash,
     );
   const issues: MigrationRepairIssueV2[] =
-    hasValidatedBehaviorFailure && verification?.status === "fail"
+    hasValidatedBehaviorFailure &&
+    verification?.targetAssessment === "bug_found" &&
+    verification.executionStatus !== "cancelled"
       ? verification.issues
           .filter((issue) => issue.kind !== "source-bug")
           .map((issue) => ({

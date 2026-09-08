@@ -1,7 +1,6 @@
 import type {
   CommandEvidence,
   SmokeCaseVerdict,
-  SmokeDecision,
   SmokeReport,
 } from "./differential-test-types.js";
 import { VERIFIER_COMMAND_ENTRY } from "./test-execution-config.js";
@@ -26,9 +25,13 @@ export function validAssessment(
   };
 }
 
-export function validSmokeCase(
-  decision: SmokeDecision = "pass",
-): SmokeCaseVerdict {
+export function validSmokeCase({
+  sourceAssessment = "no_bug_observed",
+  targetAssessment = "no_bug_observed",
+}: Pick<
+  SmokeCaseVerdict,
+  "sourceAssessment" | "targetAssessment"
+> = {}): SmokeCaseVerdict {
   const result = {
     caseId: "c1",
     outcome: "return" as const,
@@ -37,22 +40,20 @@ export function validSmokeCase(
   return {
     caseId: "c1",
     intent: "正常输入",
-    source: result,
-    target:
-      decision === "translation-bug"
+    source:
+      sourceAssessment === "bug_found"
         ? { ...result, returnValue: { type: "string", value: "bad" } }
         : result,
-    sourceAssessment: "no_bug_observed",
-    targetAssessment:
-      decision === "translation-bug"
-        ? "bug_found"
-        : decision === "unclear"
-          ? "inconclusive"
-          : "no_bug_observed",
+    target:
+      targetAssessment === "bug_found"
+        ? { ...result, returnValue: { type: "string", value: "bad" } }
+        : result,
+    sourceAssessment,
+    targetAssessment,
     requirement: { basis: acceptedPolicy.testBasis, expected: result },
     commandIds: { source: "source-run", target: "target-run" },
-    mechanical: decision === "pass" ? "pass" : "fail",
-    decision,
+    mechanical: targetAssessment === "bug_found" ? "fail" : "pass",
+    decision: targetAssessment === "bug_found" ? "translation-bug" : "pass",
     reasoning: "实际执行证据完整",
   };
 }

@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "urn:forexplore:verification-output:1.0",
+  "$id": "urn:forexplore:verification-output:2.0",
   "title": "VerificationOutputSchema",
   "description": "Public verify()/CLI result. verifyWithReceipt() uses #/definitions/receipt. SHA-256 bindings, unique IDs, evidence references and canonical receipt metadata require host validation in addition to this schema.",
   "$comment": "The singleton allOf preserves the root result reference while allowing local schema type generation.",
@@ -89,7 +89,6 @@
       "title": "VerificationStrategyOutput",
       "type": "object",
       "required": [
-        "status",
         "summary",
         "issues",
         "artifacts",
@@ -102,16 +101,11 @@
         "targetAssessment",
         "problems"
       ],
+      "not": {
+        "properties": { "status": {} },
+        "required": ["status"]
+      },
       "properties": {
-        "status": {
-          "enum": [
-            "pass",
-            "warn",
-            "fail",
-            "unverified"
-          ],
-          "description": "Deprecated compatibility projection only. Never compare this field without mode and the independent assessments. Host validates it against the detailed fields."
-        },
         "summary": {
           "$ref": "#/definitions/nonEmptyString"
         },
@@ -169,12 +163,12 @@
       },
       "if": {
         "properties": {
-          "status": {
-            "const": "fail"
+          "targetAssessment": {
+            "const": "bug_found"
           }
         },
         "required": [
-          "status"
+          "targetAssessment"
         ]
       },
       "then": {
@@ -207,7 +201,7 @@
       ],
       "properties": {
         "schemaVersion": {
-          "const": "1.0"
+          "const": "2.0"
         },
         "strategyId": {
           "$ref": "#/definitions/nonEmptyString"
@@ -222,7 +216,6 @@
           "type": "integer",
           "minimum": 0
         },
-        "status": {},
         "summary": {},
         "issues": {},
         "artifacts": {},
@@ -316,7 +309,7 @@
           "$ref": "#/definitions/resultArtifact"
         }
       },
-      "description": "resultArtifact may be absent only for an unverified artifact-persistence-failed result; the host enforces this cross-field rule and canonical-byte metadata.",
+      "description": "resultArtifact may be absent only for failed execution with an artifact_persistence_failed problem, no decisive findings and no retained artifacts; the host enforces this cross-field rule and canonical-byte metadata.",
       "additionalProperties": true
     },
     "assessment": {

@@ -180,7 +180,7 @@ describe("runSmoke verify-only 内部暂存(files 输入)", () => {
             spawnClaude: fake.fake as unknown as SpawnClaude,
           }),
         );
-        expect(result.status).toBe("error");
+        expect(result.executionStatus).toBe("failed");
         const commands = recorder
           .events()
           .filter((event) => event.kind === "command");
@@ -242,7 +242,7 @@ describe("runSmoke verify-only 内部暂存(files 输入)", () => {
           expect(await pending).toMatchObject({ executionStatus: "cancelled" });
         else
           expect(await pending).toMatchObject({
-            status: "error",
+            executionStatus: "failed",
             errorReason:
               failure === "missing-report" ? "invalid-report" : "toolchain",
           });
@@ -272,7 +272,7 @@ describe("runSmoke verify-only 内部暂存(files 输入)", () => {
       }
     },
   );
-  it.each(["pass", "error"])(
+  it.each(["completed", "failed"])(
     "preserves a standalone caller's same-named occurrence during %s execution",
     async (kind) => {
       const root = makeTmpRoot();
@@ -283,7 +283,7 @@ describe("runSmoke verify-only 内部暂存(files 输入)", () => {
       try {
         const h = writingFake(validReport(), validEvidence());
         const spawnClaude =
-          kind === "pass"
+          kind === "completed"
             ? (h.fake as unknown as SpawnClaude)
             : async () => {
                 throw new Error("spawn failed");
@@ -295,13 +295,13 @@ describe("runSmoke verify-only 内部暂存(files 输入)", () => {
             spawnClaude,
           }),
         );
-        expect(result.status).toBe(kind);
+        expect(result.executionStatus).toBe(kind);
         const sessions = recorder
           .snapshot()
           .stages.filter((step) => step.name === "run-agent-session");
         expect(sessions.map((step) => step.state)).toEqual([
           "running",
-          kind === "pass" ? "completed" : "failed",
+          kind === "completed" ? "completed" : "failed",
         ]);
         expect(sessions[0].id).not.toBe(sessions[1].id);
         recorder.endStep(handle, "completed");
@@ -323,10 +323,11 @@ describe("runSmoke verify-only 内部暂存(files 输入)", () => {
         apiKey: "test-key",
         spawnClaude: h.fake as unknown as SpawnClaude,
       });
-      expect(result.status).toBe("pass");
-      expect(result.evaluation?.status).toBe("pass");
+      expect(result.targetAssessment).toBe("no_bug_observed");
+      expect(result).not.toHaveProperty("evaluation");
+      expect(result).not.toHaveProperty("status");
       expect(result.errorReason).toBeUndefined();
-      expect(result.report.rounds).toBe(0);
+      expect(result.report?.rounds).toBe(0);
       // 内部暂存布局:claude cwd = agent 目录。
       const cwd = h.cwd();
       expect(cwd).toBeTruthy();
@@ -378,8 +379,8 @@ describe("runSmoke verify-only 内部暂存(files 输入)", () => {
             apiKey: "k",
             spawnClaude: missingEvidence.fake as unknown as SpawnClaude,
           })
-        ).status,
-      ).toBe("error");
+        ).executionStatus,
+      ).toBe("failed");
 
       // 会话后 agent 区外出现影子源码(基线变化)→ invalid-evidence。
       const mutating = writingFake(
@@ -398,7 +399,7 @@ describe("runSmoke verify-only 内部暂存(files 输入)", () => {
         apiKey: "k",
         spawnClaude: mutating.fake as unknown as SpawnClaude,
       });
-      expect(changedAfterLastCommand.status).toBe("error");
+      expect(changedAfterLastCommand.executionStatus).toBe("failed");
       expect(changedAfterLastCommand.errorReason).toBe("invalid-evidence");
 
       // verify-only 报告携带 rounds>0 → invalid-report。
@@ -411,7 +412,7 @@ describe("runSmoke verify-only 内部暂存(files 输入)", () => {
         apiKey: "k",
         spawnClaude: repaired.fake as unknown as SpawnClaude,
       });
-      expect(repairResult.status).toBe("error");
+      expect(repairResult.executionStatus).toBe("failed");
       expect(repairResult.errorReason).toBe("invalid-report");
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -427,7 +428,7 @@ describe("runSmoke verify-only 内部暂存(files 输入)", () => {
         apiKey: "k",
         spawnClaude: h.fake as unknown as SpawnClaude,
       });
-      expect(result.status).toBe("error");
+      expect(result.executionStatus).toBe("failed");
       expect(result.errorReason).toBe("invalid-report");
       expect(result.summary).toContain("report.json");
     } finally {
@@ -446,7 +447,7 @@ describe("runSmoke verify-only 内部暂存(files 输入)", () => {
         apiKey: "k",
         spawnClaude: h.fake as unknown as SpawnClaude,
       });
-      expect(result.status).toBe("error");
+      expect(result.executionStatus).toBe("failed");
       expect(result.errorReason).toBe("invalid-report");
       expect(result.summary).toContain("report.json");
     } finally {
@@ -465,7 +466,7 @@ describe("runSmoke verify-only 内部暂存(files 输入)", () => {
         apiKey: "k",
         spawnClaude: timedOut,
       });
-      expect(result.status).toBe("error");
+      expect(result.executionStatus).toBe("failed");
       expect(result.errorReason).toBe("timeout");
       expect(result.summary).toContain("timed out");
     } finally {
@@ -529,7 +530,7 @@ describe("runSmoke 内部暂存(root 输入复制双侧项目)", () => {
         apiKey: "k",
         spawnClaude: h.fake as unknown as SpawnClaude,
       });
-      expect(result.status).toBe("pass");
+      expect(result.targetAssessment).toBe("no_bug_observed");
       // 复制内容在工作区存在时(会话内)捕获;成功后内部暂存默认清理。
       expect(copies.source).toContain("public class MimeUtility");
       expect(copies.target).toContain("public class MimeUtility");
@@ -628,8 +629,9 @@ describe("runSmoke caller-owned 生产工作区(workspaceDir)", () => {
         apiKey: "k",
         spawnClaude: h.fake as unknown as SpawnClaude,
       });
-      expect(result.status).toBe("pass");
-      expect(result.evaluation?.status).toBe("pass");
+      expect(result.targetAssessment).toBe("no_bug_observed");
+      expect(result).not.toHaveProperty("evaluation");
+      expect(result).not.toHaveProperty("status");
       expect(result.keptDir).toBeUndefined();
       // caller-owned 工作区保持存在。
       expect(existsSync(ws.root)).toBe(true);
@@ -675,7 +677,7 @@ describe("runSmoke caller-owned 生产工作区(workspaceDir)", () => {
         apiKey: "k",
         spawnClaude: mutating.fake as unknown as SpawnClaude,
       });
-      expect(result.status).toBe("error");
+      expect(result.executionStatus).toBe("failed");
       expect(result.errorReason).toBe("invalid-evidence");
     } finally {
       rmSync(parent, { recursive: true, force: true });
@@ -695,7 +697,7 @@ describe("runSmoke caller-owned 生产工作区(workspaceDir)", () => {
         apiKey: "k",
         spawnClaude: h.fake as unknown as SpawnClaude,
       });
-      expect(result.status).toBe("error");
+      expect(result.executionStatus).toBe("failed");
       expect(result.errorReason).toBe("internal");
     } finally {
       rmSync(parent, { recursive: true, force: true });
@@ -750,7 +752,7 @@ describe("runSmoke policy and classified outcomes", () => {
         mode: "target_only",
         sourceAssessment: "not_checked",
         targetAssessment: "no_bug_observed",
-        status: "pass",
+        executionStatus: "completed",
       });
       const { args, env, options } = h.lastCall();
       expect(args[1]).not.toContain("PRIVATE ANALYSIS");
@@ -804,6 +806,9 @@ describe("runSmoke policy and classified outcomes", () => {
           apiKey: "k",
           spawnClaude,
         });
+        if (["missing", "json", "schema"].includes(kind)) expect(result.report).toBeNull();
+        expect(result.bugCases ?? []).toEqual([]);
+        expect(result).not.toHaveProperty("status");
         const codes = {
           missing: "report_missing",
           json: "report_invalid_json",
@@ -863,7 +868,6 @@ describe("runSmoke policy and classified outcomes", () => {
           spawnClaude,
         });
         expect(result).toMatchObject({
-          status: "error",
           executionStatus: "failed",
           sourceAssessment: "inconclusive",
           targetAssessment: "inconclusive",
@@ -923,7 +927,7 @@ describe("runSmoke policy and classified outcomes", () => {
         const root = makeTmpRoot();
         try {
           const report = validReport({
-            cases: [validSmokeCase("translation-bug")],
+            cases: [validSmokeCase({ targetAssessment: "bug_found" })],
           });
           const spawnClaude: SpawnClaude = async (
             _args,
@@ -958,6 +962,8 @@ describe("runSmoke policy and classified outcomes", () => {
           expect(result.executionStatus).toBe(
             kind === "cancel" ? "cancelled" : corrupt ? "failed" : "partial",
           );
+          expect(result.bugCases?.map((item) => item.caseId) ?? []).toEqual(corrupt ? [] : ["c1"]);
+          expect(result).not.toHaveProperty("evaluation");
           expect(result.targetAssessment).toBe(
             corrupt ? "inconclusive" : "bug_found",
           );

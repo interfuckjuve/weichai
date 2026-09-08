@@ -31,7 +31,7 @@ const originalTargetContent =
 const translatedTargetContent = "def target():\n    return 1\n";
 const descriptor: VerificationStrategyDescriptor = {
   id: "differential-smoke",
-  version: "1.0.0",
+  version: "2.0.0",
   displayName: "Differential Smoke",
 };
 
@@ -65,7 +65,7 @@ describe("runVerificationCli", () => {
     );
 
     expect(code).toBe(0);
-    expect(output.join("\n")).toContain("differential-smoke\t1.0.0");
+    expect(output.join("\n")).toContain("differential-smoke\t2.0.0");
   });
 
   it("passes the explicit strategy and writes the result", async () => {
@@ -160,7 +160,7 @@ describe("runVerificationCli", () => {
     const service = fakeService();
     const errors: string[] = [];
     const result = createVerificationResult(input(), descriptor, {
-      status: "pass",
+
       summary: "ok",
       issues: [],
       artifacts: [],
@@ -174,10 +174,9 @@ describe("runVerificationCli", () => {
       targetAssessment: "no_bug_observed",
       problems: [],
     });
-    service.verify.mockResolvedValueOnce({
-      ...result,
-      status: "error" as never,
-    });
+    service.verify.mockResolvedValueOnce(
+      Object.assign({}, result, { status: "pass" }),
+    );
     mkdirSync(dirname(outputPath), { recursive: true });
     writeFileSync(outputPath, "original");
     expect(
@@ -186,7 +185,7 @@ describe("runVerificationCli", () => {
         dependencies(service, errors),
       ),
     ).toBe(1);
-    expect(errors.join("\n")).toMatch(/Verification result\.status/);
+    expect(errors.join("\n")).toContain("Verification result must NOT be valid.");
     expect(readFileSync(outputPath, "utf8")).toBe("original");
   });
 
@@ -351,7 +350,7 @@ function fakeService(strategyId = "differential-smoke") {
           inputValue,
           { ...descriptor, id: options.strategyId ?? strategyId },
           {
-            status: "pass",
+
             summary: "verified",
             issues: [],
             artifacts: [],

@@ -12,6 +12,7 @@ import {
 import { assertVerificationInput } from "./validate-verification-input.js";
 import { createVerificationResult } from "../run-output/create-verification-result.js";
 
+/** Rebuild the status-free envelope to verify exact input and result bindings. */
 export function assertVerificationResult(
   result: VerificationResult,
   input: VerificationInput,
@@ -48,7 +49,6 @@ export function assertVerificationResult(
     input,
     descriptor,
     {
-      status: result.status,
       mode: result.mode,
       referenceDecision: result.referenceDecision,
       referenceReason: result.referenceReason,

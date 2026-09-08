@@ -134,7 +134,7 @@ const summary = {
   boundary:
     "VerificationService.verifyWithReceipt entry to promise resolution after receipt persistence and keepWorkspace cleanup policy",
   configuration: {
-    strategy: "differential-smoke@1.0.0",
+    strategy: "differential-smoke@2.0.0",
     mode: "verify-only",
     effortRequested: "high",
     effortObserved,

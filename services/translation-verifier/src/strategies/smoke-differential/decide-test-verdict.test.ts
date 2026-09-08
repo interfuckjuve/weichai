@@ -43,7 +43,6 @@ describe("independent side assessments", () => {
       executionStatus: "completed",
       sourceAssessment: sourceBug ? "bug_found" : "no_bug_observed",
       targetAssessment: targetBug ? "bug_found" : "no_bug_observed",
-      status: targetBug ? "fail" : "pass",
     });
   });
   it("accepts explicitly justified language-specific exception expectations", () => {
@@ -68,7 +67,6 @@ describe("independent side assessments", () => {
     item.reasoning =
       "The independently supplied requirement permits different exception representations.";
     expect(evaluate(report)).toMatchObject({
-      status: "pass",
       sourceAssessment: "no_bug_observed",
       targetAssessment: "no_bug_observed",
     });
@@ -86,7 +84,6 @@ describe("independent side assessments", () => {
       const report = validSmokeReport();
       report.cases[0].targetAssessment = targetAssessment;
       expect(evaluate(report)).toMatchObject({
-        status: "unverified",
         targetAssessment,
         executionStatus: "completed",
       });
@@ -140,7 +137,6 @@ describe("independent side assessments", () => {
       mode: "target_only",
       sourceAssessment: "not_checked",
       targetAssessment: "no_bug_observed",
-      status: "pass",
     });
     item.sourceAssessment = "no_bug_observed";
     expect(
@@ -157,7 +153,7 @@ describe("independent side assessments", () => {
 describe("execution evidence gates", () => {
   const rejected = (report: SmokeReport, evidence: CommandEvidence[]) => {
     const result = evaluate(report, evidence);
-    expect(result.status).toBe("unverified");
+    expect(result.executionStatus).toBe("failed");
     expect(result.bugCases).toEqual([]);
     expect(result.targetAssessment).toBe("inconclusive");
     return result;
@@ -223,7 +219,7 @@ describe("execution evidence gates", () => {
     "preserves validated findings with a later timeout (declared=%s)",
     (declared) => {
       const report = validSmokeReport({
-        cases: [validSmokeCase("translation-bug")],
+        cases: [validSmokeCase({ targetAssessment: "bug_found" })],
       });
       const evidence = validCommandEvidence(report);
       const later = {
@@ -244,7 +240,6 @@ describe("execution evidence gates", () => {
       expect(evaluate(report, evidence)).toMatchObject({
         executionStatus: "partial",
         targetAssessment: "bug_found",
-        status: "fail",
         problems: [{ code: "command_timeout" }],
       });
     },
@@ -267,7 +262,6 @@ describe("execution evidence gates", () => {
     });
     expect(evaluate(report, evidence)).toMatchObject({
       executionStatus: "completed",
-      status: "pass",
       problems: [],
     });
     expect(report.executions![0].exitCode).toBe(1);
@@ -289,7 +283,6 @@ describe("execution evidence gates", () => {
       else evidence.unshift(failed);
       expect(evaluate(report, evidence)).toMatchObject({
         executionStatus: "partial",
-        status: "unverified",
         problems: [expect.objectContaining({ commandId: "unresolved" })],
       });
     },
@@ -304,8 +297,8 @@ describe("execution evidence gates", () => {
         validCommandEvidence(report),
         "diagnostic-repair",
         policy,
-      ).status,
-    ).toBe("pass");
+      ).executionStatus,
+    ).toBe("completed");
     report.rounds = 0;
     report.targetFiles = [{ path: "Target.cs", content: "changed" }];
     rejected(report, validCommandEvidence(report));

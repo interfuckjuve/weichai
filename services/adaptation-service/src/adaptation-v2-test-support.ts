@@ -54,33 +54,17 @@ export function fixtureVerificationInput(
 
 export function fixtureVerificationAssessment(
   input: Pick<VerificationInput, "verificationPolicy">,
-  status: "pass" | "fail" | "unverified" = "pass",
+  overrides: Partial<VerificationAssessment> = {},
 ): VerificationAssessment {
   const { testBasis: _basis, ...policy } = resolveVerificationPolicy(input);
   return {
     ...policy,
-    executionStatus: status === "unverified" ? "failed" : "completed",
+    executionStatus: "completed",
     sourceAssessment:
-      policy.mode === "target_only"
-        ? "not_checked"
-        : status === "unverified"
-          ? "inconclusive"
-          : "no_bug_observed",
-    targetAssessment:
-      status === "fail"
-        ? "bug_found"
-        : status === "pass"
-          ? "no_bug_observed"
-          : "inconclusive",
-    problems:
-      status === "unverified"
-        ? [
-            {
-              code: "insufficient_test_basis",
-              message: "Fixture evidence unavailable.",
-            },
-          ]
-        : [],
+      policy.mode === "target_only" ? "not_checked" : "no_bug_observed",
+    targetAssessment: "no_bug_observed",
+    problems: [],
+    ...overrides,
   };
 }
 

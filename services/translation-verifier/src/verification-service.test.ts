@@ -97,7 +97,7 @@ describe("VerificationService", () => {
       "custom",
     );
     const receipt = await service.verifyWithReceipt(input());
-    expect(receipt.result.status).toBe("pass");
+    expect(receipt.result.targetAssessment).toBe("no_bug_observed");
     expect(receipt.resultArtifact).toBeDefined();
     const run = recorders.mock.results[0]!.value.snapshot();
     expect(
@@ -155,7 +155,7 @@ describe("VerificationService", () => {
       );
       const pending = service.verifyWithReceipt(input());
       const receipt = await pending;
-      expect(receipt.result.status).toBe("unverified");
+      expect(receipt.result.targetAssessment).toBe("inconclusive");
       expect(receipt.result.executionStatus).toBe(
         kind === "abort" ? "cancelled" : "failed",
       );
@@ -206,10 +206,9 @@ describe("VerificationService", () => {
         ]),
       ),
     );
-    expect(measured.value.map((receipt) => receipt.result.status)).toEqual([
-      "pass",
-      "pass",
-    ]);
+    expect(
+      measured.value.map((receipt) => receipt.result.targetAssessment),
+    ).toEqual(["no_bug_observed", "no_bug_observed"]);
     expect(new Set(requests.map((recorder) => recorder.runId)).size).toBe(2);
     expect(requests.every((recorder) => recorder !== outer)).toBe(true);
     for (const recorder of requests) {
@@ -266,7 +265,7 @@ describe("VerificationService", () => {
       await observed;
       return result;
     });
-    expect(measured.value.status).toBe("unverified");
+    expect(measured.value.targetAssessment).toBe("inconclusive");
     expect(
       measured.timing.phases.some(
         (phase) => phase.phase === "late-provider-phase",
@@ -368,7 +367,6 @@ describe("VerificationService", () => {
               descriptor("first"),
               {
                 ...reportAssessment(),
-                status: "pass",
                 summary: "verified",
                 issues: [],
                 artifacts: [artifact],
@@ -386,7 +384,7 @@ describe("VerificationService", () => {
       const receipt = await service.verifyWithReceipt(input());
       expect(receipt.resultArtifact).toBeUndefined();
       expect(receipt.result).toMatchObject({
-        status: "unverified",
+        executionStatus: "failed",
         artifacts: [],
         issues: [{ kind: "artifact-persistence-failed" }],
       });
@@ -474,7 +472,6 @@ describe("VerificationService", () => {
             descriptor("first"),
             {
               ...reportAssessment(),
-              status: "pass",
               summary: "verified",
               issues: [],
               artifacts: [artifact],
@@ -489,7 +486,7 @@ describe("VerificationService", () => {
     const receipt = await service.verifyWithReceipt(input());
     expect(receipt.resultArtifact).toBeUndefined();
     expect(receipt.result).toMatchObject({
-      status: "unverified",
+      executionStatus: "failed",
       artifacts: [],
       issues: [{ kind: "artifact-persistence-failed" }],
     });
@@ -546,7 +543,7 @@ describe("VerificationService", () => {
         };
       const result = await serviceWith([p], "first").verifyWithReceipt(input());
       expect(result.result).toMatchObject({
-        status: "unverified",
+        executionStatus: "failed",
         issues: [{ kind: "strategy-timeout" }],
       });
       expect(result.resultArtifact).toBeDefined();
@@ -592,7 +589,7 @@ describe("VerificationService", () => {
         input(),
       );
       expect(receipt.result).toMatchObject({
-        status: "unverified",
+        executionStatus: "failed",
         issues: [{ kind: "framework-error", message: error.message }],
       });
       expect(receipt.resultArtifact).toBeDefined();
@@ -652,7 +649,7 @@ describe("VerificationService", () => {
       sameInput.translation.patchHash,
       sameInput.translation.patchHash,
     ]);
-    expect([first.status, second.status]).toEqual(["pass", "pass"]);
+    expect([first.targetAssessment, second.targetAssessment]).toEqual(["no_bug_observed", "no_bug_observed"]);
     expect(sameInput).toEqual(before);
     expect(service.listStrategies().map((descriptor) => descriptor.id)).toEqual(
       ["first", "second"],
@@ -683,7 +680,7 @@ describe("VerificationService", () => {
       ],
       "failing",
     );
-    expect((await failingService.verify(input())).status).toBe("unverified");
+    expect((await failingService.verify(input())).targetAssessment).toBe("inconclusive");
 
     const controller = new AbortController();
     controller.abort(new DOMException("cancelled", "AbortError"));
@@ -722,7 +719,7 @@ describe("VerificationService", () => {
       "empty-error",
     );
     const result = await emptyError.verify(input());
-    expect(result.status).toBe("unverified");
+    expect(result.targetAssessment).toBe("inconclusive");
     expect(result.summary).toBe(
       "Verification framework could not complete: Unknown verification error",
     );
@@ -757,7 +754,7 @@ describe("VerificationService", () => {
 
     const result = await service.verify(input(), {}, controller.signal);
 
-    expect(result.status).toBe("unverified");
+    expect(result.targetAssessment).toBe("inconclusive");
     expect(result.issues[0]?.message).toBe("caller stopped");
     expect(executed).toBe(false);
     expect(existsSync(workspaceRoot)).toBe(true);
@@ -768,7 +765,6 @@ describe("VerificationService", () => {
       [
         provider("first", async () => ({
           ...reportAssessment("bug_found"),
-          status: "fail",
           summary: "invalid",
           issues: [],
           artifacts: [],
@@ -778,7 +774,7 @@ describe("VerificationService", () => {
       "first",
     );
     const mismatch = await wrongResult.verify(input());
-    expect(mismatch.status).toBe("unverified");
+    expect(mismatch.targetAssessment).toBe("inconclusive");
     expect(mismatch.issues[0]).toMatchObject({
       id: "framework-error",
       kind: "framework-error",
@@ -799,7 +795,7 @@ describe("VerificationService", () => {
       { timeoutMs: 1 },
     );
     const timeout = await timeoutService.verify(input());
-    expect(timeout.status).toBe("unverified");
+    expect(timeout.targetAssessment).toBe("inconclusive");
     expect(timeout.strategyId).toBe("slow");
     expect(timeout.subjectHash).toBe(input().translation.patchHash);
     expect(timeout.summary).toBe(
@@ -824,7 +820,7 @@ describe("VerificationService", () => {
     const result = await service.verify(input());
 
     expect(Date.now() - startedAt).toBeLessThan(500);
-    expect(result.status).toBe("unverified");
+    expect(result.targetAssessment).toBe("inconclusive");
     expect(result.summary).toBe(
       "Verification framework could not complete: Verification strategy timed out",
     );
@@ -887,7 +883,6 @@ describe("VerificationService", () => {
         controller.signal,
       );
       expect(receipt.result).toMatchObject({
-        status: "unverified",
         executionStatus: origin === "timeout" ? "partial" : "cancelled",
         targetAssessment: "no_bug_observed",
         problems: [
@@ -929,8 +924,7 @@ describe("VerificationService", () => {
     );
     expect(Date.now() - startedAt).toBeLessThan(500);
     expect(receipt.result).toMatchObject({
-      status: "unverified",
-      executionStatus: "cancelled",
+            executionStatus: "cancelled",
       problems: [{ code: "cancelled", message: "caller stopped" }],
     });
     rejectLate(new Error("late failure"));
@@ -970,7 +964,7 @@ describe("VerificationService", () => {
     );
 
     const result = await service.verify(input(), { keepWorkspace: true });
-    expect(result.status).toBe("unverified");
+    expect(result.targetAssessment).toBe("inconclusive");
     expect(keptWorkspace).toBeDefined();
     expect(existsSync(keptWorkspace!)).toBe(true);
 
@@ -996,7 +990,6 @@ describe("VerificationService", () => {
             descriptor("first"),
             {
               ...reportAssessment(),
-              status: "pass",
               summary: "verified",
               issues: [],
               artifacts: [unwrittenArtifact],
@@ -1008,7 +1001,7 @@ describe("VerificationService", () => {
       ],
       "first",
     );
-    expect((await missing.verify(input())).status).toBe("unverified");
+    expect((await missing.verify(input())).targetAssessment).toBe("inconclusive");
 
     const altered = serviceWith(
       [
@@ -1026,7 +1019,6 @@ describe("VerificationService", () => {
             descriptor("first"),
             {
               ...reportAssessment(),
-              status: "pass",
               summary: "verified",
               issues: [],
               artifacts: [
@@ -1040,7 +1032,7 @@ describe("VerificationService", () => {
       ],
       "first",
     );
-    expect((await altered.verify(input())).status).toBe("unverified");
+    expect((await altered.verify(input())).targetAssessment).toBe("inconclusive");
   });
 
   it("cleans temporary workspaces unless keepWorkspace is requested", async () => {
@@ -1115,7 +1107,6 @@ function okResult(
     strategyDescriptor,
     {
       ...reportAssessment(),
-      status: "pass",
       summary: "verified",
       issues: [],
       artifacts: [],

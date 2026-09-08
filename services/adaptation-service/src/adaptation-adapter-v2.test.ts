@@ -30,6 +30,7 @@ import {
   validateAdaptationResultV2,
 } from "@forexplore/workflow-core";
 import {
+  verificationResultEvidence,
   AdaptationAdapterV2,
   DeepSeekMigrationTranslatorV2,
   type MigrationAnalysisV2,
@@ -145,7 +146,7 @@ const behaviorVerifier: MigrationBehaviorVerifierV2 = {
     ).trim();
     return sourceOutput === targetOutput
       ? validVerificationResult(input, {
-          status: "pass",
+          targetAssessment: "no_bug_observed",
           summary:
             "Controlled target fixture output matched the approved normalization examples.",
           issues: [],
@@ -161,7 +162,7 @@ const behaviorVerifier: MigrationBehaviorVerifierV2 = {
           strategyReport: { sourceOutput, targetOutput },
         })
       : validVerificationResult(input, {
-          status: "fail",
+          targetAssessment: "bug_found",
           summary: `Differential output mismatch: ${sourceOutput} != ${targetOutput}`,
           issues: [
             {
@@ -182,12 +183,10 @@ function validVerificationResult(
   input: MigrationBehaviorVerificationInputV2,
   output: Omit<
     Parameters<typeof createVerificationResult>[2],
-    keyof VerificationAssessment | "status"
+    keyof VerificationAssessment
   > &
-    Partial<VerificationAssessment> & {
-      status: "pass" | "fail" | "unverified";
-    } = {
-    status: "pass",
+    Partial<VerificationAssessment> = {
+    targetAssessment: "no_bug_observed",
     summary: "Verifier passed.",
     issues: [],
     artifacts: [],
@@ -199,9 +198,10 @@ function validVerificationResult(
     fixtureVerificationInput(input),
     descriptor,
     {
-      ...fixtureVerificationAssessment({}, output.status),
+      ...fixtureVerificationAssessment({}),
       ...output,
-      ...(output.status === "fail" && output.artifacts.length === 0
+      ...(output.targetAssessment === "bug_found" &&
+      output.artifacts.length === 0
         ? {
             artifacts: [
               {
@@ -217,6 +217,8 @@ function validVerificationResult(
     },
     () => adaptationV2TestNow,
   );
+  expect(result.schemaVersion).toBe("2.0");
+  expect(result).not.toHaveProperty("status");
   const path = "verification-result.json";
   const bytes = Buffer.from(canonicalJson(result), "utf8");
   return {
@@ -235,6 +237,150 @@ function validVerificationResult(
 type VerificationResultMutation = (
   input: MigrationBehaviorVerificationInputV2,
 ) => VerificationResult;
+
+describe("status-free adapter gate matrix", () => {
+  it.each([
+    ["source-only", "completed", "bug_found", "no_bug_observed", "pass"],
+    ["target bug", "completed", "no_bug_observed", "bug_found", "fail"],
+    ["partial target bug", "partial", "inconclusive", "bug_found", "fail"],
+    [
+      "cancelled target bug",
+      "cancelled",
+      "no_bug_observed",
+      "bug_found",
+      "unverified",
+    ],
+    [
+      "suspected",
+      "completed",
+      "no_bug_observed",
+      "suspected_bug",
+      "unverified",
+    ],
+    [
+      "inconclusive",
+      "completed",
+      "inconclusive",
+      "no_bug_observed",
+      "unverified",
+    ],
+  ] as const)(
+    "maps %s",
+    async (
+      _name,
+      executionStatus,
+      sourceAssessment,
+      targetAssessment,
+      expected,
+    ) => {
+      const fixture = createAdaptationV2TestFixture();
+      const providers = deterministicProviders();
+      let checked = false;
+      const verifier: MigrationBehaviorVerifierV2 = {
+        ...behaviorVerifier,
+        verifyWithReceipt: vi.fn(async (behaviorInput) => {
+          const input = fixtureVerificationInput(behaviorInput);
+          input.verificationPolicy = {
+            referenceDecision: "accepted",
+            reason: "Reviewed fixture",
+            testBasis: "Return normalized text",
+          };
+          const result = createVerificationResult(
+            input,
+            behaviorStrategyDescriptor,
+            {
+              mode: "differential",
+              referenceDecision: "accepted",
+              referenceReason: "Reviewed fixture",
+              executionStatus,
+              sourceAssessment,
+              targetAssessment,
+              problems:
+                executionStatus === "partial"
+                  ? [
+                      {
+                        code: "command_timeout",
+                        message: "Later command timed out",
+                      },
+                    ]
+                  : executionStatus === "cancelled"
+                    ? [{ code: "cancelled", message: "Caller cancelled" }]
+                    : [],
+              summary: "Independent findings",
+              issues: [
+                {
+                  id: "finding",
+                  kind:
+                    sourceAssessment === "bug_found"
+                      ? "source-bug"
+                      : "behavioral-divergence",
+                  message: "Observed finding",
+                  evidenceArtifactIds: [],
+                },
+              ],
+              artifacts: [],
+              strategyReport: null,
+            },
+          );
+          const path = "verification-result.json";
+          const bytes = Buffer.from(canonicalJson(result));
+          const receipt: VerificationReceipt = {
+            result,
+            resultArtifact: {
+              id: `verification-result:${path}`,
+              kind: "verification-result",
+              path,
+              contentHash: createHash("sha256").update(bytes).digest("hex"),
+              size: bytes.length,
+              mediaType: "application/json",
+            },
+          };
+          expect(
+            verificationResultEvidence(
+              receipt,
+              input,
+              behaviorStrategyDescriptor,
+            ),
+          ).toMatchObject({
+            status: expected,
+            artifact: {
+              id: receipt.resultArtifact!.id,
+              contentHash: receipt.resultArtifact!.contentHash,
+            },
+          });
+          expect(
+            verificationResultEvidence(
+              { ...receipt, resultArtifact: undefined },
+              input,
+              behaviorStrategyDescriptor,
+            ).status,
+          ).toBe("unverified");
+          expect(
+            verificationResultEvidence(
+              {
+                ...receipt,
+                resultArtifact: {
+                  ...receipt.resultArtifact!,
+                  contentHash: "0".repeat(64),
+                },
+              },
+              input,
+              behaviorStrategyDescriptor,
+            ).status,
+          ).toBe("unverified");
+          checked = true;
+          return validVerificationResult(behaviorInput);
+        }),
+      };
+      await new AdaptationAdapterV2({
+        runtimeCapabilities: fixture.serviceRuntime,
+        ...providers,
+        verifier,
+      }).adapt(fixture.request, fixture.validationContext);
+      expect(checked).toBe(true);
+    },
+  );
+});
 
 describe("AdaptationAdapterV2", () => {
   it.each(["source", "oversized-result", "abort", "signal-abort"])(
@@ -282,7 +428,6 @@ describe("AdaptationAdapterV2", () => {
                   DIFFERENTIAL_SMOKE_STRATEGY,
                   {
                     ...fixtureVerificationAssessment(input),
-                    status: "pass",
                     summary: "verified",
                     issues: [],
                     artifacts: [artifact],
@@ -402,8 +547,9 @@ describe("AdaptationAdapterV2", () => {
                 input,
                 DIFFERENTIAL_SMOKE_STRATEGY,
                 {
-                  ...fixtureVerificationAssessment(input, "fail"),
-                  status: "fail",
+                  ...fixtureVerificationAssessment(input, {
+                    targetAssessment: "bug_found",
+                  }),
                   summary: "Mismatch",
                   issues: [
                     {
@@ -776,7 +922,7 @@ describe("AdaptationAdapterV2", () => {
         .fn()
         .mockImplementationOnce(async (input) =>
           validVerificationResult(input, {
-            status: "fail",
+            targetAssessment: "bug_found",
             summary: "diverged",
             issues: [
               {
@@ -831,7 +977,7 @@ describe("AdaptationAdapterV2", () => {
       ...behaviorVerifier,
       verifyWithReceipt: vi.fn(async (input) =>
         validVerificationResult(input, {
-          status: "fail",
+          targetAssessment: "bug_found",
           summary: "fail",
           issues: [
             {
@@ -894,7 +1040,14 @@ describe("AdaptationAdapterV2", () => {
       ...behaviorVerifier,
       verifyWithReceipt: vi.fn(async (input) =>
         validVerificationResult(input, {
-          status: "unverified",
+          executionStatus: "failed",
+          targetAssessment: "inconclusive",
+          problems: [
+            {
+              code: "insufficient_test_basis",
+              message: "Fixture evidence unavailable.",
+            },
+          ],
           summary: "Required behavior evidence is unavailable.",
           issues: [],
           artifacts: [],
@@ -913,16 +1066,16 @@ describe("AdaptationAdapterV2", () => {
     expect(result.repairRounds).toEqual([]);
   });
 
-  it.each(["pass", "unverified"] as const)(
+  it.each(["no_bug_observed", "inconclusive"] as const)(
     "does not repair behavior %s",
-    async (status) => {
+    async (targetAssessment) => {
       const fixture = createAdaptationV2TestFixture();
       const verifier: MigrationBehaviorVerifierV2 = {
         ...behaviorVerifier,
         verifyWithReceipt: vi.fn(async (input) =>
           validVerificationResult(input, {
-            status,
-            summary: status,
+            targetAssessment,
+            summary: targetAssessment,
             issues: [],
             artifacts: [],
             strategyReport: {},
@@ -975,7 +1128,6 @@ describe("AdaptationAdapterV2", () => {
       ...behaviorVerifier,
       verifyWithReceipt: vi.fn(async (input) =>
         validVerificationResult(input, {
-          status: "fail",
           executionStatus: "cancelled",
           targetAssessment: "bug_found",
           problems: [
@@ -1020,7 +1172,7 @@ describe("AdaptationAdapterV2", () => {
       ...behaviorVerifier,
       verifyWithReceipt: vi.fn(async (input) => {
         const receipt = validVerificationResult(input, {
-          status: "fail",
+          targetAssessment: "bug_found",
           summary: "Target bug",
           issues: [
             {
@@ -1069,7 +1221,7 @@ describe("AdaptationAdapterV2", () => {
       ...behaviorVerifier,
       verifyWithReceipt: vi.fn(async (input) =>
         validVerificationResult(input, {
-          status: "fail",
+          targetAssessment: "bug_found",
           summary: "fail",
           issues: [
             {
@@ -1108,7 +1260,7 @@ describe("AdaptationAdapterV2", () => {
       ...behaviorVerifier,
       verifyWithReceipt: vi.fn(async (input) =>
         validVerificationResult(input, {
-          status: "fail",
+          targetAssessment: "bug_found",
           summary: "fail",
           issues: [
             {
@@ -1332,7 +1484,7 @@ describe("AdaptationAdapterV2", () => {
       verifyWithReceipt: vi.fn(async (input) => {
         inputs.push(input);
         return validVerificationResult(input, {
-          status: input.round < 2 ? "fail" : "pass",
+          targetAssessment: input.round < 2 ? "bug_found" : "no_bug_observed",
           summary: "s",
           issues:
             input.round < 2

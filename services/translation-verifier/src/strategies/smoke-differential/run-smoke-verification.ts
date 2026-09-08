@@ -8,14 +8,13 @@
  *   commandEvidencePath/runnerRoots 必须作为一套完整路径提供;
  * - 项目根只读,Bash 只允许精确的 verifier-command 形态;
  * - 会话结束后宿主:复查基线 → 读 report.json(verify-only 深校验)→ 读有界
- *   命令证据 → evaluateSmokeReport 归一 pass/fail/unverified;
- * - AbortError 原样上抛(取消不是可验证失败),非取消错误归一 status=error 并
- *   分类到 errorReason。
+ *   command evidence -> independent execution and side assessments.
+ * - Interrupted sessions retain validated partial findings; execution problems are
+ *   classified separately in problems and errorReason.
  * 兼容路径(无 workspaceDir):把旧 root/files 双侧输入内部暂存为 source/project +
  * target/project + 双侧 runner 根 + agent 目录并创建基线,同样只经命令代理。
  */
 import {
-  deriveCompatibilityStatus,
   failureAssessment,
   resolveVerificationPolicy,
 } from "../../schemas/verification-assessment.js";
@@ -32,8 +31,11 @@ import {
   type WorkspaceHandle,
 } from "./create-smoke-workspace.js";
 import type { EffortLevel, SpawnClaude } from "./claude-session.js";
-import type { SmokeEvaluation } from "./decide-test-verdict.js";
-import type { SmokeMode, SmokeReport } from "./differential-test-types.js";
+import type {
+  SmokeCaseVerdict,
+  SmokeMode,
+  SmokeReport,
+} from "./differential-test-types.js";
 import type { SmokeTaskInput } from "./build-differential-test-prompt.js";
 import { errorSummary } from "./read-test-report.js";
 import { prepareAgentTask } from "./build-test-task.js";
@@ -44,8 +46,6 @@ import {
   observeCommandTimings,
 } from "./evaluate-evidence.js";
 export { readCommandEvidence } from "./evaluate-evidence.js";
-
-export type SmokeStatus = "pass" | "fail" | "error";
 
 /**
  * error 状态的细分原因(供生产 adapter 映射 advisory unverified):
@@ -91,7 +91,6 @@ export interface SmokeRunOptions {
 }
 
 export interface SmokeResult extends VerificationAssessment {
-  status: SmokeStatus;
   /** cases 机械 pass 占比;cases 为空时缺省。 */
   passRate?: number;
   summary: string;
@@ -100,10 +99,10 @@ export interface SmokeResult extends VerificationAssessment {
   /** keepGeneratedTests=true(且内部暂存)时保留的工作目录路径。 */
   keptDir?: string;
   /** 校验/评估成功后 report.json 解析出的 SmokeReport。 */
-  report: SmokeReport;
-  /** 证据与决策评估(报告/证据均有效时存在;status 由其归一)。 */
-  evaluation?: SmokeEvaluation;
-  /** 硬失败分类(无有效 evaluation 时存在)。 */
+  report: SmokeReport | null;
+  /** Target bug cases validated against independent expectations and command evidence. */
+  bugCases?: SmokeCaseVerdict[];
+  /** Execution/report failure classification. */
   errorReason?: SmokeErrorReason;
 }
 
@@ -130,7 +129,7 @@ function classifyRunError(error: unknown): SmokeErrorReason {
 
 /**
  * 运行一次 smoke 差分验证(verify-only 生产路径)。
- * 任何非取消异常均归一 status=error 并带 errorReason;AbortError 清理后原样上抛。
+ * Exceptions become execution problems; validated partial findings survive interruption.
  */
 export async function runSmoke(
   job: SmokeTaskInput,
@@ -147,8 +146,8 @@ export async function runSmoke(
 
   const finish = (
     partial: VerificationAssessment &
-      Pick<SmokeResult, "status" | "summary" | "report"> &
-      Partial<Pick<SmokeResult, "passRate" | "evaluation" | "errorReason">>,
+      Pick<SmokeResult, "summary" | "report"> &
+      Partial<Pick<SmokeResult, "passRate" | "bugCases" | "errorReason">>,
   ): SmokeResult => {
     const result: SmokeResult = {
       ...partial,
@@ -157,7 +156,7 @@ export async function runSmoke(
       keptDir: ws !== null && keep ? ws.dir : undefined,
     };
     logger.info(
-      `smoke ${mode} finished: status=${result.status} durationMs=${Math.round(result.durationMs)}ms summary=${truncateForLog(result.summary, 200)}`,
+      `smoke ${mode} finished: execution=${result.executionStatus} source=${result.sourceAssessment} target=${result.targetAssessment} durationMs=${Math.round(result.durationMs)}ms summary=${truncateForLog(result.summary, 200)}`,
     );
     return result;
   };
@@ -168,9 +167,8 @@ export async function runSmoke(
       const summary = "Independent Host-confirmed test basis is missing.";
       return finish({
         ...failureAssessment(job, "insufficient_test_basis", summary),
-        status: "error",
         summary,
-        report: {} as SmokeReport,
+        report: null,
       });
     }
     layout = await measureStep("prepare-smoke-layout", () => {
@@ -220,11 +218,9 @@ export async function runSmoke(
           executionStatus: code === "cancelled" ? "cancelled" : "partial",
           problems: [...recovered.problems, { code, message: summary }],
         };
-        const status = deriveCompatibilityStatus(assessment);
         return finish({
           ...recovered,
           ...assessment,
-          status: status === "unverified" ? "error" : status,
           summary,
           errorReason: legacyReason,
         });
@@ -239,9 +235,8 @@ export async function runSmoke(
     }
     return finish({
       ...failureAssessment(job, code, summary),
-      status: "error",
       summary,
-      report: {} as SmokeReport,
+      report: null,
       errorReason: legacyReason,
     });
   } finally {

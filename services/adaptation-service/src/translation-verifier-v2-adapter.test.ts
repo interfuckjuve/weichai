@@ -97,7 +97,6 @@ describe("TranslationVerifierV2Adapter", () => {
       DIFFERENTIAL_SMOKE_STRATEGY,
       {
         ...fixtureVerificationAssessment({}),
-        status: "pass",
         summary: "verified",
         issues: [],
         artifacts: [],
@@ -118,6 +117,8 @@ describe("TranslationVerifierV2Adapter", () => {
         mediaType: "application/json" as const,
       },
     };
+    expect(receipt.result.schemaVersion).toBe("2.0");
+    expect(receipt.result).not.toHaveProperty("status");
     const service = {
       verifyWithReceipt: vi.fn<VerificationService["verifyWithReceipt"]>(
         async () => receipt,

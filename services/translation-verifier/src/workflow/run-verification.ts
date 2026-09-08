@@ -23,7 +23,6 @@ import {
   createVerificationResult,
   createUnverifiedResult,
 } from "../run-output/create-verification-result.js";
-import { deriveCompatibilityStatus } from "../schemas/verification-assessment.js";
 import { assertArtifactsMatch } from "../schemas/validate-verification-artifacts.js";
 import type {
   VerificationInput,
@@ -133,10 +132,7 @@ export async function runVerification(
               normalized = createVerificationResult(
                 input,
                 descriptor,
-                {
-                  ...interrupted,
-                  status: deriveCompatibilityStatus(interrupted),
-                },
+                interrupted,
                 config.now,
               );
             }

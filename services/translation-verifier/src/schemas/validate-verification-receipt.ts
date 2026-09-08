@@ -14,11 +14,14 @@ export function assertVerificationReceipt(
   assertVerificationResult(receipt.result, input, descriptor);
   if (receipt.resultArtifact === undefined) {
     if (
-      receipt.result.status !== "unverified" ||
-      !receipt.result.issues.some(
-        (issue) =>
-          issue.id === "artifact-persistence-failed" &&
-          issue.kind === "artifact-persistence-failed",
+      receipt.result.executionStatus !== "failed" ||
+      receipt.result.artifacts.length !== 0 ||
+      [receipt.result.sourceAssessment, receipt.result.targetAssessment].some(
+        (assessment) =>
+          assessment === "bug_found" || assessment === "no_bug_observed",
+      ) ||
+      !receipt.result.problems.some(
+        (problem) => problem.code === "artifact_persistence_failed",
       )
     ) {
       throw new Error(

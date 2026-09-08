@@ -1,9 +1,9 @@
-export const translationVerifierSchemaVersion = "1.0" as const;
+/** Current output contract version; input and run contracts remain 1.0. */
+export const translationVerifierSchemaVersion = "2.0" as const;
 
 export * from "./schemas/verification-types.js";
 export {
   resolveVerificationPolicy,
-  deriveCompatibilityStatus,
   failureAssessment,
 } from "./schemas/verification-assessment.js";
 export { assertVerificationInput } from "./schemas/validate-verification-input.js";

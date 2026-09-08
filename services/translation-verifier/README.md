@@ -4,6 +4,8 @@ A replaceable strategy baseline for translation verification: generic input -> r
 
 ## Public Contract
 
+Output schema `$id` is `urn:forexplore:verification-output:2.0`; `VerificationResult.schemaVersion` and `translationVerifierSchemaVersion` are `2.0`. The default strategy is `differential-smoke@2.0.0`. Input and run/timing schemas remain `1.0`. This is a breaking output change: strategy outputs and results explicitly reject legacy `status`, and `deriveCompatibilityStatus` is no longer exported. Unrelated strategy extension fields remain accepted.
+
 ```ts
 createDefaultVerificationService(options?).verify(input, { strategyId?, keepWorkspace? }, signal)
 createDefaultVerificationService(options?).verifyWithReceipt(input, { strategyId?, keepWorkspace? }, signal)
@@ -30,13 +32,12 @@ Only `accepted` authorizes source execution and selects `mode: "differential"`. 
 | `executionStatus` | `completed`, `partial`, `failed`, `cancelled`. Independent of code correctness. |
 | `sourceAssessment`, `targetAssessment` | `bug_found`, `no_bug_observed`, `suspected_bug`, `inconclusive`, `not_checked`. Target-only always reports source `not_checked`. |
 | `problems` | Structured execution/report problems with code, message and optional side/command ID. |
-| `status` | Deprecated compatibility projection for existing validation gates; not the primary report or E2E comparison key. |
 
 The four decisive differential combinations are no observed bugs, source-only bug, target-only bug, and bugs on both sides. Differential equality cannot override independent requirements; source-only bugs must not cause the target to reproduce them. An unresolved side is not silently treated as correct. `no_bug_observed` applies only to the executed checks.
 
 Problem codes distinguish `report_missing`, `report_invalid_json`, `report_schema_invalid`, `report_evidence_invalid`, `agent_timeout`, `command_timeout`, `agent_error`, `environment_unavailable`, `insufficient_test_basis`, `workspace_integrity_violation`, `context_incomplete`, `unsupported_language`, `input_invalid`, `artifact_persistence_failed`, `internal_error` and `cancelled`. Valid partial findings can survive a later timeout, but invalid report/evidence/baseline cannot establish code findings. A compiler failure is not automatically a target bug: dependency and runner failures do not prove translation defects.
 
-Compatibility `status` is derived: confirmed target bug -> `fail`; completed target checks with no observed target bug and a resolved source when differential -> `pass`; otherwise -> `unverified`. Source-only bugs do not trigger target repair. `warn` remains in the old schema vocabulary but is not produced by this projection. Consumers and E2E must inspect the detailed fields rather than treating all `pass` results as equivalent.
+The adaptation adapter alone maps a validated report to the existing workflow gate: missing durable receipt, invalid report or cancelled execution -> `unverified`; any valid noncancelled target `bug_found`, including partial findings -> `fail`; completed target `no_bug_observed` with target-only mode or resolved source -> `pass`; otherwise -> `unverified`. Source-only bugs do not trigger target repair. Repair requires a failing validation record bound to the exact canonical result artifact ID/hash, and excludes source-bug issues. No verifier or smoke compatibility status is retained.
 
 The framework has three external phases: **validate input**, **execute strategy**, **save report**. Strategy internals are arbitrary, repeatable and may use no Agent. There is no central six-stage smoke workflow. See [docs/flow.md](docs/flow.md) for ownership and execution flow.
 
@@ -46,7 +47,7 @@ The V2 adaptation runtime uses `TranslationVerifierV2Adapter` and the default se
 
 Register providers in the existing factory; each provider creates a strategy with `verify(input, context, signal)`. No Agent or step list is required. Registered providers are trusted Host code and remain responsible for establishing an independent test basis, which may come from fixed acceptance tests rather than smoke's policy text. Generic result validation checks envelope integrity and assessment consistency; it does not attest that a provider ran meaningful tests. A result claiming `insufficient_test_basis` cannot also claim decisive code findings, and unresolved execution problems cannot accompany `completed`.
 
-A minimal registration-only example deliberately returns `unverified`, not a fabricated pass:
+A minimal registration-only example deliberately returns failed execution with inconclusive findings:
 
 ```ts
 import {
@@ -61,8 +62,8 @@ const provider: VerificationStrategyProvider = {
       signal?.throwIfAborted();
       return {
         ...failureAssessment(input, "internal_error", "No verification implemented."),
-        status: "unverified", summary: "No verification implemented.",
-        issues: [], artifacts: [], strategyReport: {},
+        summary: "No verification implemented.",
+        issues: [], artifacts: [], strategyReport: null,
       };
     },
   }),
@@ -104,11 +105,13 @@ All paths below are relative to this package.
 
 ## Evidence and Safety
 
-The service and `runSmoke()` default to **verify-only**. Source/target project snapshots remain read-only, report `rounds` must be zero and `targetFiles` empty. Runner repairs are allowed, target implementation repairs belong to the external translator. Smoke checks report shape, mandatory command evidence and final file baseline before returning a decisive result. Evidence-insufficient decisions remain `unclear`/`unverified`. Compilation success and model self-assessment do not prove business semantics.
+The service and `runSmoke()` default to **verify-only**. Source/target project snapshots remain read-only, report `rounds` must be zero and `targetFiles` empty. Runner repairs are allowed, target implementation repairs belong to the external translator. Smoke checks report shape, mandatory command evidence and final file baseline before returning a decisive result. Evidence-insufficient assessments remain inconclusive or suspected, not confirmed findings. Compilation success and model self-assessment do not prove business semantics.
 
 Commands run only through the controlled proxy. It applies command/path restrictions, baseline checks, a credential-minimized build environment, bounded output, deadlines and process-tree termination. This is **local-process execution, not a security sandbox**. External isolation is required for hostile code. Same-user mutation and changing/restoring protected files within one command are not prevented by a kernel boundary.
 
-Artifact persistence preserves the existing cumulative **10 MiB per-attempt** budget, including canonical result bytes. Path/symlink/read/write/budget failures fail closed with `artifact_persistence_failed`, no synthetic receipt and no retained references from the abandoned attempt. Successful problem reports retain real evidence. Cleanup does not delete another attempt's artifacts. Invalid request envelopes and unknown strategies are rejected before execution. For valid requests, workspace/strategy failures and cancellation are normalized into a Host report; persistence failure returns a classified result without inventing an artifact path. After cancellation or a deadline, the framework allows up to 250 ms for a cooperative strategy to finish validating and persisting partial findings. Later results are not guaranteed to survive, including when process-tree cleanup exceeds that window. Caller cancellation is always reported as `cancelled`, never as a completed pass. An upstream adaptation caller still observes its external cancellation after the verifier report has been saved.
+An absent smoke report is explicitly `null`, never a fabricated empty report. Failure artifacts still persist structured execution problems. Smoke carries one authoritative assessment and validated bug-case metadata, without a nested duplicate evaluation.
+
+Artifact persistence preserves the existing cumulative **10 MiB per-attempt** budget, including canonical result bytes. Path/symlink/read/write/budget failures fail closed with `artifact_persistence_failed`, no synthetic receipt and no retained references from the abandoned attempt. A receipt may omit its result artifact only for failed execution with an explicit persistence problem, no decisive side findings and no retained artifacts. Successful problem reports retain real evidence. Cleanup does not delete another attempt's artifacts. Invalid request envelopes and unknown strategies are rejected before execution. For valid requests, workspace/strategy failures and cancellation are normalized into a Host report; persistence failure returns a classified result without inventing an artifact path. After cancellation or a deadline, the framework allows up to 250 ms for a cooperative strategy to finish validating and persisting partial findings. Later results are not guaranteed to survive, including when process-tree cleanup exceeds that window. Caller cancellation is always reported as `cancelled`, never as a completed pass. An upstream adaptation caller still observes its external cancellation after the verifier report has been saved.
 
 ## Outputs and Timing
 

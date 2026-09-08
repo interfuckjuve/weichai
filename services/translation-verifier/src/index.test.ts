@@ -8,7 +8,6 @@ const {
   VerificationService,
   VerificationStrategyFactory,
   resolveVerificationPolicy,
-  deriveCompatibilityStatus,
   failureAssessment,
 } = verifier;
 describe("translation-verifier entry", () => {
@@ -46,7 +45,6 @@ describe("translation-verifier entry", () => {
       (receipt: Receipt, input: Input, descriptor: Descriptor) => Receipt
     >();
     expectTypeOf(packageVerifier.resolveVerificationPolicy).toBeFunction();
-    expectTypeOf(packageVerifier.deriveCompatibilityStatus).toBeFunction();
     expectTypeOf(packageVerifier.failureAssessment).toBeFunction();
   });
   it("preserves every runtime package export after internal moves", () => {
@@ -61,7 +59,6 @@ describe("translation-verifier entry", () => {
         "assertVerificationRun",
         "createDefaultVerificationService",
         "createVerificationResult",
-        "deriveCompatibilityStatus",
         "failureAssessment",
         "resolveVerificationPolicy",
         "translationVerifierSchemaVersion",
@@ -83,10 +80,11 @@ describe("translation-verifier entry", () => {
   });
 
   it("exposes the schema version constant", () => {
-    expect(translationVerifierSchemaVersion).toBe("1.0");
+    expect(translationVerifierSchemaVersion).toBe("2.0");
   });
 
   it("keeps smoke internals out of the framework API", () => {
+    expect(verifier).not.toHaveProperty("deriveCompatibilityStatus");
     expect(verifier).not.toHaveProperty("runSmoke");
     expect(verifier).not.toHaveProperty("buildSmokeTaskPrompt");
     expect(verifier).not.toHaveProperty("evaluateSmokeReport");
@@ -97,7 +95,6 @@ describe("translation-verifier entry", () => {
     expect(typeof VerificationService).toBe("function");
     expect(typeof createDefaultVerificationService).toBe("function");
     expect(typeof resolveVerificationPolicy).toBe("function");
-    expect(typeof deriveCompatibilityStatus).toBe("function");
     expect(typeof failureAssessment).toBe("function");
   });
 

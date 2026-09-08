@@ -99,7 +99,6 @@ describe("createAdaptationV2Runtime", () => {
           DIFFERENTIAL_SMOKE_STRATEGY,
           {
             ...fixtureVerificationAssessment(input),
-            status: "pass",
             summary: "verified",
             issues: [],
             artifacts: [],

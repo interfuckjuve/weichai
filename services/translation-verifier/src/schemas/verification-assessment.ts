@@ -25,22 +25,6 @@ export function resolveVerificationPolicy(
   };
 }
 
-/** Compatibility with existing validation gates, never a replacement for the detailed report. */
-export function deriveCompatibilityStatus(
-  value: VerificationAssessment,
-): "pass" | "fail" | "unverified" {
-  if (value.targetAssessment === "bug_found") return "fail";
-  const sourceResolved =
-    value.mode === "target_only" ||
-    value.sourceAssessment === "bug_found" ||
-    value.sourceAssessment === "no_bug_observed";
-  return value.executionStatus === "completed" &&
-    value.targetAssessment === "no_bug_observed" &&
-    sourceResolved
-    ? "pass"
-    : "unverified";
-}
-
 export function failureAssessment(
   input: Pick<VerificationInput, "verificationPolicy">,
   code: VerificationProblem["code"],
