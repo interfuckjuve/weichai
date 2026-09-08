@@ -1,3 +1,4 @@
+import { isCommandEvidence } from "./command-evidence.js";
 import { isDeepStrictEqual } from "node:util";
 import {
   failureAssessment,
@@ -22,13 +23,17 @@ export interface SmokeEvaluation extends VerificationAssessment {
   summary: string;
 }
 
-function rejected(
+function rejectedAssessment(
   input: PolicyInput,
   summary: string,
   code: VerificationProblem["code"] = "report_evidence_invalid",
+  problems: VerificationProblem[] = [],
 ): SmokeEvaluation {
   return {
     ...failureAssessment(input, code, summary),
+    problems: problems.some((problem) => problem.code === code)
+      ? problems
+      : [{ code, message: summary }, ...problems],
     bugCases: [],
     summary,
   };
@@ -76,11 +81,60 @@ function aggregate(
   return "no_bug_observed";
 }
 
+/** Independent diagnostics survive report rejection; only trusted claims can supersede compile errors. */
+export function commandEvidenceProblems(
+  evidence: readonly unknown[],
+  claimed: ReadonlyMap<string, CommandEvidence> = new Map(),
+): VerificationProblem[] {
+  return evidence.flatMap((item, index): VerificationProblem[] => {
+    if (!isCommandEvidence(item))
+      return [
+        {
+          code: "report_evidence_invalid",
+          message: "Command evidence has an invalid structure.",
+        },
+      ];
+    const command = { side: item.side, commandId: item.commandId };
+    const problems: VerificationProblem[] = [];
+    if (!item.baselineValid)
+      problems.push({
+        ...command,
+        code: "workspace_integrity_violation",
+        message: "A command violated the workspace baseline.",
+      });
+    const superseded =
+      item.phase === "compile" &&
+      !item.timedOut &&
+      evidence
+        .slice(index + 1)
+        .some(
+          (retry) =>
+            isCommandEvidence(retry) &&
+            retry.side === item.side &&
+            retry.phase === "compile" &&
+            claimed.get(retry.commandId) === retry,
+        );
+    if ((item.timedOut || item.exitCode !== 0) && !superseded)
+      problems.push({
+        ...command,
+        code: item.timedOut ? "command_timeout" : "environment_unavailable",
+        message: `${item.side} ${item.phase} command did not complete successfully.`,
+      });
+    return problems;
+  });
+}
+
 export function evaluateSmokeReport(
   report: SmokeReport,
-  evidence: readonly CommandEvidence[],
+  evidence: readonly unknown[],
   input: PolicyInput = {},
 ): SmokeEvaluation {
+  const independentProblems = commandEvidenceProblems(evidence);
+  const rejected = (
+    input: PolicyInput,
+    summary: string,
+    code?: VerificationProblem["code"],
+  ) => rejectedAssessment(input, summary, code, independentProblems);
   const { testBasis, ...policy } = resolveVerificationPolicy(input);
   if (!testBasis?.trim())
     return rejected(
@@ -93,25 +147,7 @@ export function evaluateSmokeReport(
     return rejected(input, "verify-only report contains target repairs.");
   const sides: SmokeSide[] =
     policy.mode === "differential" ? ["source", "target"] : ["target"];
-  if (
-    evidence.some(
-      (item) =>
-        !item ||
-        typeof item !== "object" ||
-        !["source", "target"].includes(item.side) ||
-        !["compile", "run"].includes(item.phase) ||
-        typeof item.commandId !== "string" ||
-        !item.commandId.trim() ||
-        typeof item.stdout !== "string" ||
-        typeof item.stderr !== "string" ||
-        typeof item.baselineValid !== "boolean" ||
-        typeof item.timedOut !== "boolean" ||
-        !Number.isFinite(item.durationMs) ||
-        item.durationMs < 0 ||
-        (item.exitCode !== null &&
-          (!Number.isInteger(item.exitCode) || item.exitCode < 0)),
-    )
-  )
+  if (!evidence.every(isCommandEvidence))
     return rejected(input, "Command evidence has an invalid structure.");
   if (evidence.some((item) => item.baselineValid !== true))
     return rejected(
@@ -159,29 +195,7 @@ export function evaluateSmokeReport(
     if (record.timedOut || record.exitCode !== 0) continue;
     claimed.set(claim.commandId, record);
   }
-  const commandProblems: VerificationProblem[] = evidence
-    .filter((item, index) => {
-      if (!item.timedOut && item.exitCode === 0) return false;
-      // A successful claimed compile supersedes an earlier runner compile error, not a lost test run or timeout.
-      return (
-        item.phase !== "compile" ||
-        item.timedOut ||
-        !evidence
-          .slice(index + 1)
-          .some(
-            (retry) =>
-              retry.side === item.side &&
-              retry.phase === "compile" &&
-              claimed.has(retry.commandId),
-          )
-      );
-    })
-    .map((item) => ({
-      code: item.timedOut ? "command_timeout" : "environment_unavailable",
-      message: `${item.side} ${item.phase} command did not complete successfully.`,
-      side: item.side,
-      commandId: item.commandId,
-    }));
+  const commandProblems = commandEvidenceProblems(evidence, claimed);
   for (const side of sides) {
     for (const phase of ["compile", "run"] as const) {
       if (

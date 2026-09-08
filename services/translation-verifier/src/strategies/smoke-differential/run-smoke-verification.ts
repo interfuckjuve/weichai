@@ -20,19 +20,9 @@ import { errorSummary } from "./read-test-report.js";
 import { prepareAgentTask } from "./build-test-task.js";
 import type { RunLayout } from "./prepare-projects.js";
 import { runAgentTests } from "./run-agent-session.js";
-import {
-  evaluateEvidence,
-  observeCommandTimings,
-} from "./evaluate-evidence.js";
-export { readCommandEvidence } from "./evaluate-evidence.js";
-
-/**
- * error 状态的细分原因(供生产 adapter 映射 advisory unverified):
- * 报告读/深校验失败 invalid-report;证据/基线失败 invalid-evidence;
- * 会话 deadline 到期 timeout;claude/进程环境失败 toolchain;其余 internal。
- */
-export type SmokeErrorReason =
-  "invalid-report" | "invalid-evidence" | "timeout" | "toolchain" | "internal";
+import { evaluateEvidence } from "./evaluate-evidence.js";
+import { observeCommandTimings } from "./observe-command-timings.js";
+import { isAbortError, SmokeVerificationError } from "./smoke-errors.js";
 
 export interface SmokeRunOptions {
   layout: RunLayout;
@@ -58,29 +48,6 @@ export interface SmokeResult extends VerificationAssessment {
   report: SmokeReport | null;
   /** Target bug cases validated against independent expectations and command evidence. */
   bugCases?: SmokeCaseVerdict[];
-  /** Execution/report failure classification. */
-  errorReason?: SmokeErrorReason;
-}
-
-function isAbortError(error: unknown): boolean {
-  if (error instanceof DOMException) return error.name === "AbortError";
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    (error as { name?: unknown }).name === "AbortError"
-  );
-}
-
-/** 硬失败分类(报告/证据类错误在调用点已精确归类,此处兜底运行层失败)。 */
-function classifyRunError(error: unknown): SmokeErrorReason {
-  const message = errorSummary(error);
-  if (/^runSmoke[\s:：]/.test(message)) return "internal"; // 调用契约/暂存失败
-  if (/timed out|deadline|超时/i.test(message)) return "timeout";
-  if (/claude subprocess|DEEPSEEK_API_KEY|spawn/i.test(message))
-    return "toolchain";
-  if (/报告|report|证据|evidence|baseline|commands\.jsonl/i.test(message))
-    return "invalid-evidence";
-  return "internal";
 }
 
 /**
@@ -100,7 +67,7 @@ export async function runSmoke(
   const finish = (
     partial: VerificationAssessment &
       Pick<SmokeResult, "summary" | "report"> &
-      Partial<Pick<SmokeResult, "passRate" | "bugCases" | "errorReason">>,
+      Partial<Pick<SmokeResult, "passRate" | "bugCases">>,
   ): SmokeResult => {
     const result: SmokeResult = {
       ...partial,
@@ -136,18 +103,13 @@ export async function runSmoke(
       runError !== null &&
       "name" in runError &&
       runError.name === "TimeoutError";
-    const legacyReason = timedOut ? "timeout" : classifyRunError(runError);
     const code: VerificationProblem["code"] = timedOut
       ? "agent_timeout"
-      : signal?.aborted || isAbortError(error)
+      : signal?.aborted || isAbortError(runError)
         ? "cancelled"
-        : legacyReason === "timeout"
-          ? "agent_timeout"
-          : legacyReason === "toolchain"
-            ? "agent_error"
-            : legacyReason === "invalid-evidence"
-              ? "report_evidence_invalid"
-              : "internal_error";
+        : runError instanceof SmokeVerificationError
+          ? runError.code
+          : "internal_error";
     if (
       layout &&
       (code === "agent_timeout" ||
@@ -168,7 +130,6 @@ export async function runSmoke(
           ...recovered,
           ...assessment,
           summary,
-          errorReason: legacyReason,
         });
       }
       return finish({
@@ -176,14 +137,12 @@ export async function runSmoke(
         executionStatus: code === "cancelled" ? "cancelled" : "failed",
         problems: [...recovered.problems, { code, message: summary }],
         summary,
-        errorReason: legacyReason,
       });
     }
     return finish({
       ...failureAssessment(job, code, summary),
       summary,
       report: null,
-      errorReason: legacyReason,
     });
   } finally {
     if (layout) observeCommandTimings(layout.evidencePath);

@@ -10,6 +10,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
+import { SmokeVerificationError } from "./smoke-errors.js";
 import type { WorkspaceBaseline } from "./differential-test-types.js";
 
 /** 固定 runner 根(相对 workspaceRoot;双侧 runner 是唯一可写源码区)。 */
@@ -156,49 +157,53 @@ export function writeWorkspaceBaseline(path: string, baseline: WorkspaceBaseline
  * runner/产物/可变文件之外出现新文件都会抛错。baseline.json 自身被忽略。
  */
 export function assertWorkspaceBaseline(workspaceRoot: string, baselinePath: string): void {
-  const root = resolve(workspaceRoot);
-  const raw: unknown = JSON.parse(readFileSync(baselinePath, "utf8"));
-  const baseline =
-    typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : {};
-  const protectedFiles = baseline.protectedFiles;
-  if (!Array.isArray(protectedFiles)) {
-    throw new Error(
-      `invalid baseline ${slashRelative(root, baselinePath)}: missing protectedFiles array`,
-    );
-  }
-  const artifactNames = Array.isArray(baseline.artifactDirectoryNames)
-    ? (baseline.artifactDirectoryNames as string[])
-    : DEFAULT_ARTIFACT_DIRECTORY_NAMES;
-
-  const snapshot = new Map(
-    protectedFiles.map((entry: { relativePath?: string; sha256?: string }) => [
-      entry.relativePath ?? "",
-      entry.sha256 ?? "",
-    ]),
-  );
-
-  // 1) 既有受保护文件必须仍存在且内容一致。
-  for (const [rel, expectedHash] of snapshot) {
-    const file = join(root, ...rel.split("/"));
-    if (!existsSync(file)) {
-      throw new Error(`baseline mismatch: protected file removed: ${rel}`);
-    }
-    const actualHash = sha256(readFileSync(file));
-    if (actualHash !== expectedHash) {
+  try {
+    const root = resolve(workspaceRoot);
+    const raw: unknown = JSON.parse(readFileSync(baselinePath, "utf8"));
+    const baseline =
+      typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : {};
+    const protectedFiles = baseline.protectedFiles;
+    if (!Array.isArray(protectedFiles)) {
       throw new Error(
-        `baseline mismatch: protected file changed: ${rel} (${actualHash.slice(0, 12)} != ${expectedHash.slice(0, 12)})`,
+        `invalid baseline ${slashRelative(root, baselinePath)}: missing protectedFiles array`,
       );
     }
-  }
+    const artifactNames = Array.isArray(baseline.artifactDirectoryNames)
+      ? (baseline.artifactDirectoryNames as string[])
+      : DEFAULT_ARTIFACT_DIRECTORY_NAMES;
 
-  // 2) 未登记的新文件只允许出现在 runner 根/产物目录/固定可变文件。
-  for (const file of listFiles(root)) {
-    const rel = slashRelative(root, file);
-    if (rel === BASELINE_FILE_NAME || snapshot.has(rel)) continue;
-    if (isRunnerRootPath(rel) || isMutableFilePath(rel)) continue;
-    if (isArtifactPath(rel, artifactNames)) continue;
-    throw new Error(
-      `baseline violation: new file outside runner/artifact zones: ${rel}`,
+    const snapshot = new Map(
+      protectedFiles.map((entry: { relativePath?: string; sha256?: string }) => [
+        entry.relativePath ?? "",
+        entry.sha256 ?? "",
+      ]),
     );
+
+    // 1) 既有受保护文件必须仍存在且内容一致。
+    for (const [rel, expectedHash] of snapshot) {
+      const file = join(root, ...rel.split("/"));
+      if (!existsSync(file)) {
+        throw new Error(`baseline mismatch: protected file removed: ${rel}`);
+      }
+      const actualHash = sha256(readFileSync(file));
+      if (actualHash !== expectedHash) {
+        throw new Error(
+          `baseline mismatch: protected file changed: ${rel} (${actualHash.slice(0, 12)} != ${expectedHash.slice(0, 12)})`,
+        );
+      }
+    }
+
+    // 2) 未登记的新文件只允许出现在 runner 根/产物目录/固定可变文件。
+    for (const file of listFiles(root)) {
+      const rel = slashRelative(root, file);
+      if (rel === BASELINE_FILE_NAME || snapshot.has(rel)) continue;
+      if (isRunnerRootPath(rel) || isMutableFilePath(rel)) continue;
+      if (isArtifactPath(rel, artifactNames)) continue;
+      throw new Error(
+        `baseline violation: new file outside runner/artifact zones: ${rel}`,
+      );
+    }
+  } catch (error) {
+    throw new SmokeVerificationError("workspace_integrity_violation", error instanceof Error ? error.message : String(error), { cause: error });
   }
 }

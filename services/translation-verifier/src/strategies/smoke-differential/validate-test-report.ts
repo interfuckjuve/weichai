@@ -5,12 +5,13 @@
  * 重复 caseId、case 内外 ID 不一致、缺双侧 runner、路径逃逸、超限文本、verify-only
  * 下携带目标修复等),若不校验会静默错判或 TypeError 逃逸。assertSmokeReport 在
  * readReport 解析后立即逐字段递归校验,失败抛带 "report schema 校验失败" 前缀的
- * 明确错误 → runner catch 落成 status=error。
+ * 明确错误，并携带 report_schema_invalid problem code。
  *
  * 仅使用 Node 标准库,不新增 schema 依赖;错误消息约定:<字段路径> <原因>。
  */
 import type { VerificationInput } from "../../schemas/verification-types.js";
 import { resolveVerificationPolicy } from "../../schemas/verification-assessment.js";
+import { SmokeVerificationError } from "./smoke-errors.js";
 import type { SmokeReport } from "./differential-test-types.js";
 
 /** 大小/数量上限(防御 agent 超限输出)。 */
@@ -56,7 +57,7 @@ const TYPED_VALUE_TYPES: ReadonlySet<string> = new Set([
 
 /** 统一错误出口:带前缀的明确信息,错误消息含 <path> 便于定位。 */
 function fail(path: string, reason: string): never {
-  throw new Error(`${PREFIX}${path} ${reason}`);
+  throw new SmokeVerificationError("report_schema_invalid", `${PREFIX}${path} ${reason}`);
 }
 
 /** 断言值是非 null/非数组的普通对象。 */

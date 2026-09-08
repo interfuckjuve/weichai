@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SpawnClaude } from "./claude-session.js";
+import { SmokeVerificationError } from "./smoke-errors.js";
 import {
   acceptedPolicy,
   validCommandEvidence,
@@ -249,8 +250,9 @@ describe("runSmoke verify-only prepared fixtures", () => {
         else
           expect(await pending).toMatchObject({
             executionStatus: "failed",
-            errorReason:
-              failure === "missing-report" ? "invalid-report" : "toolchain",
+            problems: expect.arrayContaining([expect.objectContaining({
+              code: failure === "missing-report" ? "report_missing" : "agent_error",
+            })]),
           });
         const commands = recorder
           .events()
@@ -330,7 +332,7 @@ describe("runSmoke verify-only prepared fixtures", () => {
       expect(result.targetAssessment).toBe("no_bug_observed");
       expect(result).not.toHaveProperty("evaluation");
       expect(result).not.toHaveProperty("status");
-      expect(result.errorReason).toBeUndefined();
+      expect(result).not.toHaveProperty("errorReason");
       expect(result.report?.rounds).toBe(0);
       // 内部暂存布局:claude cwd = agent 目录。
       const cwd = h.cwd();
@@ -406,7 +408,7 @@ describe("runSmoke verify-only prepared fixtures", () => {
         },
       );
       expect(changedAfterLastCommand.executionStatus).toBe("failed");
-      expect(changedAfterLastCommand.errorReason).toBe("invalid-evidence");
+      expect(changedAfterLastCommand.problems[0].code).toBe("workspace_integrity_violation");
 
       // verify-only 报告携带 rounds>0 → invalid-report。
       const repaired = writingFake(
@@ -418,7 +420,7 @@ describe("runSmoke verify-only prepared fixtures", () => {
         spawnClaude: repaired.fake as unknown as SpawnClaude,
       });
       expect(repairResult.executionStatus).toBe("failed");
-      expect(repairResult.errorReason).toBe("invalid-report");
+      expect(repairResult.problems[0].code).toBe("report_schema_invalid");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -433,7 +435,7 @@ describe("runSmoke verify-only prepared fixtures", () => {
         spawnClaude: h.fake as unknown as SpawnClaude,
       });
       expect(result.executionStatus).toBe("failed");
-      expect(result.errorReason).toBe("invalid-report");
+      expect(result.problems[0].code).toBe("report_invalid_json");
       expect(result.summary).toContain("report.json");
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -451,7 +453,7 @@ describe("runSmoke verify-only prepared fixtures", () => {
         spawnClaude: h.fake as unknown as SpawnClaude,
       });
       expect(result.executionStatus).toBe("failed");
-      expect(result.errorReason).toBe("invalid-report");
+      expect(result.problems[0].code).toBe("report_schema_invalid");
       expect(result.summary).toContain("report.json");
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -462,15 +464,14 @@ describe("runSmoke verify-only prepared fixtures", () => {
     const root = makeTmpRoot();
     try {
       const timedOut = vi.fn(async () => {
-        throw new Error("claude subprocess timed out after 120000ms");
+        throw new SmokeVerificationError("agent_timeout", "Different wording");
       }) as unknown as SpawnClaude;
       const result = await runPreparedSmoke(root, fileBasedJob(), {
         apiKey: "k",
         spawnClaude: timedOut,
       });
       expect(result.executionStatus).toBe("failed");
-      expect(result.errorReason).toBe("timeout");
-      expect(result.summary).toContain("timed out");
+      expect(result.problems).toContainEqual({ code: "agent_timeout", message: "Different wording" });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -637,7 +638,7 @@ describe("runSmoke caller-owned prepared workspace", () => {
         spawnClaude: mutating.fake as unknown as SpawnClaude,
       });
       expect(result.executionStatus).toBe("failed");
-      expect(result.errorReason).toBe("invalid-evidence");
+      expect(result.problems[0].code).toBe("workspace_integrity_violation");
     } finally {
       rmSync(parent, { recursive: true, force: true });
     }
@@ -665,6 +666,21 @@ describe("runSmoke caller-owned prepared workspace", () => {
 });
 
 describe("runSmoke policy and classified outcomes", () => {
+  it("uses the coded session failure rather than arbitrary timeout/report wording", async () => {
+    const root = makeTmpRoot();
+    try {
+      const message = "ENOENT report baseline timed out";
+      const result = await runPreparedSmoke(root, fileBasedJob(), {
+        apiKey: "k",
+        spawnClaude: async () => { throw new Error(message); },
+      });
+      expect(result.problems.map((problem) => problem.code)).toEqual(["report_missing", "agent_error"]);
+      expect(result.summary).toBe(message);
+      expect(result).not.toHaveProperty("errorReason");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
   it("does not launch an Agent without an independent Host basis", async () => {
     const spawnClaude = vi.fn();
     const root = makeTmpRoot();
@@ -834,7 +850,6 @@ describe("runSmoke policy and classified outcomes", () => {
           executionStatus: "failed",
           sourceAssessment: "inconclusive",
           targetAssessment: "inconclusive",
-          errorReason: "invalid-report",
         });
         expect(result.problems.map((problem) => problem.code)).toEqual([
           kind === "missing"
@@ -914,7 +929,7 @@ describe("runSmoke policy and classified outcomes", () => {
               );
             throw kind === "cancel"
               ? new DOMException("cancelled", "AbortError")
-              : new Error("claude subprocess timed out");
+              : new SmokeVerificationError("agent_timeout", "Different wording");
           };
           const result = await runPreparedSmoke(root, fileBasedJob(), {
             apiKey: "k",

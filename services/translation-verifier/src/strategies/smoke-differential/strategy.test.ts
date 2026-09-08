@@ -284,7 +284,6 @@ describe("DifferentialSmokeStrategy", () => {
           summary: "report.json is invalid",
           durationMs: 10,
           report: null,
-          errorReason: "invalid-report" as const,
         }) satisfies SmokeResult,
     );
 

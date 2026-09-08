@@ -1,6 +1,16 @@
 import { resolve } from "node:path";
 import { createLogger, type Logger } from "../../run-output/verification-logger.js";
 import { runManagedProcess } from "./manage-test-process.js";
+import { isAbortError, SmokeVerificationError } from "./smoke-errors.js";
+import { errorSummary } from "./read-test-report.js";
+
+function throwSessionError(error: unknown, signal?: AbortSignal): never {
+  signal?.throwIfAborted();
+  if (error instanceof SmokeVerificationError || isAbortError(error)) throw error;
+  const timedOut = error !== null && typeof error === "object" &&
+    "name" in error && error.name === "TimeoutError";
+  throw new SmokeVerificationError(timedOut ? "agent_timeout" : "agent_error", errorSummary(error), { cause: error });
+}
 
 /** claude 会话思考投入级别(low 快速决策;默认由模型/CLI 决定,历史实测 high)。 */
 export type EffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
@@ -101,7 +111,7 @@ const DEFAULT_TIMEOUT_MS = 120_000;
 export async function runClaude(prompt: string, options: ClaudeClientOptions = {}): Promise<string> {
   const apiKey = options.apiKey ?? process.env.DEEPSEEK_API_KEY;
   if (!apiKey || apiKey.trim() === "") {
-    throw new Error("DEEPSEEK_API_KEY is required for claude subprocess requests.");
+    throw new SmokeVerificationError("agent_error", "DEEPSEEK_API_KEY is required for claude subprocess requests.");
   }
   const model = options.model ?? process.env.DEEPSEEK_MODEL ?? DEFAULT_MODEL;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -144,9 +154,14 @@ export async function runClaude(prompt: string, options: ClaudeClientOptions = {
   const args = options.onStdoutChunk
     ? ["-p", prompt, "--output-format", "stream-json", "--verbose", "--include-partial-messages"]
     : ["-p", prompt, "--output-format", "text"];
-  const result = hasAutonomous
-    ? await spawnClaude(args, env, timeoutMs, spawnOptions)
-    : await spawnClaude(args, env, timeoutMs);
+  let result: Awaited<ReturnType<SpawnClaude>>;
+  try {
+    result = hasAutonomous
+      ? await spawnClaude(args, env, timeoutMs, spawnOptions)
+      : await spawnClaude(args, env, timeoutMs);
+  } catch (error) {
+    throwSessionError(error, options.signal);
+  }
   // 完整 stdout 走 content 通道(默认关闭;长度/状态保持 debug 级度量)。
   logger.debug(`stdout ${result.stdout.length} chars, exitCode=${result.exitCode}`);
   logger.content(`stdout:\n${result.stdout}`);
@@ -154,7 +169,7 @@ export async function runClaude(prompt: string, options: ClaudeClientOptions = {
     // Injected clients may also supply stderr; preserve the existing error contract.
     const stderr = (result as { stderr?: string }).stderr ?? "";
     logger.error(`claude subprocess exited with code ${result.exitCode}: ${stderr}`);
-    throw new Error(`claude subprocess exited with code ${result.exitCode}: ${stderr}`);
+    throw new SmokeVerificationError("agent_error", `claude subprocess exited with code ${result.exitCode}: ${stderr}`);
   }
   return result.stdout;
 }
@@ -194,28 +209,32 @@ export async function spawnClaudeProcess(
   }
   if (options.settingsFile) fullArgs.push("--settings", options.settingsFile);
   // 注入的 spawn 实现(测试断言用):直接委托,透传 cwd。
-  if (options.spawn) {
-    return options.spawn(fullArgs, env, timeoutMs, { cwd: options.cwd, ...(options.onStdoutChunk ? { onStdoutChunk: options.onStdoutChunk } : {}) });
+  try {
+    if (options.spawn) {
+      return await options.spawn(fullArgs, env, timeoutMs, { cwd: options.cwd, ...(options.onStdoutChunk ? { onStdoutChunk: options.onStdoutChunk } : {}) });
+    }
+    const now = Date.now();
+    const deadlineAt = Math.min(options.deadlineAt ?? Number.POSITIVE_INFINITY, now + timeoutMs);
+    const effectiveTimeoutMs = Math.max(0, deadlineAt - now);
+    const result = await runManagedProcess(
+      {
+        command: "claude",
+        args: fullArgs,
+        cwd: options.cwd ?? process.cwd(),
+        env,
+        deadlineAt,
+        onStdoutChunk: options.onStdoutChunk,
+      },
+      options.signal,
+    );
+    if (result.timedOut) {
+      throw new SmokeVerificationError("agent_timeout", `claude subprocess timed out after ${effectiveTimeoutMs}ms`);
+    }
+    if (result.exitCode !== 0) {
+      throw new SmokeVerificationError("agent_error", `claude subprocess exited with code ${result.exitCode}: ${result.stderr}`);
+    }
+    return { stdout: result.stdout, exitCode: result.exitCode ?? 0 };
+  } catch (error) {
+    throwSessionError(error, options.signal);
   }
-  const now = Date.now();
-  const deadlineAt = Math.min(options.deadlineAt ?? Number.POSITIVE_INFINITY, now + timeoutMs);
-  const effectiveTimeoutMs = Math.max(0, deadlineAt - now);
-  const result = await runManagedProcess(
-    {
-      command: "claude",
-      args: fullArgs,
-      cwd: options.cwd ?? process.cwd(),
-      env,
-      deadlineAt,
-      onStdoutChunk: options.onStdoutChunk,
-    },
-    options.signal,
-  );
-  if (result.timedOut) {
-    throw new Error(`claude subprocess timed out after ${effectiveTimeoutMs}ms`);
-  }
-  if (result.exitCode !== 0) {
-    throw new Error(`claude subprocess exited with code ${result.exitCode}: ${result.stderr}`);
-  }
-  return { stdout: result.stdout, exitCode: result.exitCode ?? 0 };
 }

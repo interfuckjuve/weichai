@@ -7,8 +7,8 @@ import { VerificationStrategyFactory } from "../src/workflow/select-strategy.js"
 import { measureVerification } from "../src/run-output/measure-legacy-run.js";
 import { createDifferentialSmokeProvider } from "../src/strategies/smoke-differential/strategy.js";
 import { spawnClaudeProcess } from "../src/strategies/smoke-differential/claude-session.js";
+import { readCommandEvidence } from "../src/strategies/smoke-differential/command-evidence.js";
 import {
-  readCommandEvidence,
   runSmoke,
   type SmokeResult,
 } from "../src/strategies/smoke-differential/run-smoke-verification.js";

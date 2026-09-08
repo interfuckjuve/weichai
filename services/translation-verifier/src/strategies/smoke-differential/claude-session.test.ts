@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { SmokeVerificationError } from "./smoke-errors.js";
 import * as processManager from "./manage-test-process.js";
 import { runClaude, spawnClaudeProcess, type SpawnClaude } from "./claude-session.js";
 
@@ -28,6 +29,41 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 // ---- 测试 ----
+
+describe("coded Claude failures", () => {
+  it("does not classify arbitrary error prose as a timeout", async () => {
+    const cause = Object.assign(new Error("ENOENT report baseline timed out"), { code: "ENOENT" });
+    await expect(runClaude("p", { apiKey: "k", spawnClaude: async () => { throw cause; } })).rejects.toMatchObject({ code: "agent_error", cause });
+  });
+  it("preserves explicitly coded failures and their cause independent of wording", async () => {
+    const cause = new Error("original failure");
+    const error = new SmokeVerificationError("agent_timeout", "Different wording", { cause });
+    await expect(runClaude("p", { apiKey: "k", spawnClaude: async () => { throw error; } })).rejects.toBe(error);
+    expect(error.cause).toBe(cause);
+  });
+  it.each([true, false])("translates neutral managed process results at the Claude boundary (timeout=%s)", async (timedOut) => {
+    const result = { exitCode: timedOut ? null : 2, timedOut, durationMs: 1, stdout: "", stderr: "different wording" };
+    vi.spyOn(processManager, "runManagedProcess").mockResolvedValue(result);
+    await expect(spawnClaudeProcess([], {}, 1000)).rejects.toMatchObject({ code: timedOut ? "agent_timeout" : "agent_error" });
+    expect(result).not.toHaveProperty("code");
+  });
+  it("preserves spawn system errors as causes at the direct Claude boundary", async () => {
+    const cause = Object.assign(new Error("Different wording"), { code: "ENOENT" });
+    vi.spyOn(processManager, "runManagedProcess").mockRejectedValue(cause);
+    await expect(spawnClaudeProcess([], {}, 1000)).rejects.toMatchObject({ code: "agent_error", cause });
+  });
+  it.each([new Error("caller reason"), "caller reason", null, new DOMException("request expired", "TimeoutError")])("retains the exact AbortSignal reason %s", async (reason) => {
+    const controller = new AbortController();
+    controller.abort(reason);
+    await expect(runClaude("p", { apiKey: "k", signal: controller.signal, spawnClaude: async () => { throw reason; } })).rejects.toBe(reason);
+    vi.spyOn(processManager, "runManagedProcess").mockRejectedValue(reason);
+    await expect(spawnClaudeProcess([], {}, 1000, { signal: controller.signal })).rejects.toBe(reason);
+  });
+  it("codes missing credentials and nonzero injected exit codes", async () => {
+    await expect(runClaude("p", { apiKey: "" })).rejects.toMatchObject({ code: "agent_error" });
+    await expect(runClaude("p", { apiKey: "k", spawnClaude: fakeSpawn("", 1) })).rejects.toMatchObject({ code: "agent_error" });
+  });
+});
 
 describe("runClaude", () => {
   it("enables partial stream-json only for observed calls without replaying buffered stdout", async () => {
