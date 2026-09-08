@@ -70,3 +70,6 @@ docs/superpowers/
 
 # Smoke differential pipeline output
 test-results/
+
+# Ruff cache
+.ruff_cache/
