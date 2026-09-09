@@ -15,6 +15,10 @@ import {
   createSingleAgentDifferentialProvider,
   type SingleAgentDifferentialOptions,
 } from "./strategies/single-agent-differential/strategy.js";
+import {
+  createMultiAgentBlackBoxProvider,
+  type MultiAgentBlackBoxOptions,
+} from "./strategies/multi-agent-black-box/strategy.js";
 import { VerificationStrategyFactory } from "./workflow/strategy-registry.js";
 
 export type VerificationServiceRuntimeOptions = Pick<
@@ -33,6 +37,7 @@ export function createDefaultVerificationService(
   options: DifferentialSmokeStrategyOptions &
     VerificationServiceRuntimeOptions & {
       multiAgent?: MultiAgentDifferentialOptions;
+      blackBox?: MultiAgentBlackBoxOptions;
       singleAgent?: SingleAgentDifferentialOptions;
     } = {},
 ): VerificationService {
@@ -45,6 +50,14 @@ export function createDefaultVerificationService(
       maxTurns: options.maxTurns,
       effort: options.effort,
       ...options.multiAgent,
+    }),
+    createMultiAgentBlackBoxProvider({
+      apiKey: options.apiKey,
+      model: options.model,
+      timeoutMs: options.timeoutMs,
+      maxTurns: options.maxTurns,
+      effort: options.effort,
+      ...options.blackBox,
     }),
     createSingleAgentDifferentialProvider({
       apiKey: options.apiKey,

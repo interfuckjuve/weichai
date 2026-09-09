@@ -17,6 +17,7 @@ describe("translation-verifier entry", () => {
     ).toEqual([
       "differential-smoke",
       "multi-agent-differential",
+      "multi-agent-black-box",
       "single-agent-differential",
     ]);
   });
@@ -61,6 +62,9 @@ describe("translation-verifier entry", () => {
       [
         "DIFFERENTIAL_SMOKE_STRATEGY",
         "MULTI_AGENT_DIFFERENTIAL_STRATEGY",
+        "MULTI_AGENT_BLACK_BOX_STRATEGY",
+        "MultiAgentDifferentialStrategy",
+        "MultiAgentBlackBoxStrategy",
         "SINGLE_AGENT_DIFFERENTIAL_STRATEGY",
         "VerificationService",
         "VerificationStrategyFactory",

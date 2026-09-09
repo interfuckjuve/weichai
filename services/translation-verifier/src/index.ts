@@ -19,5 +19,12 @@ export { VerificationStrategyFactory } from "./workflow/strategy-registry.js";
 export { VerificationService } from "./verification-service.js";
 export { createDefaultVerificationService } from "./create-default-verifier.js";
 export { DIFFERENTIAL_SMOKE_STRATEGY } from "./strategies/smoke-differential/strategy.js";
-export { MULTI_AGENT_DIFFERENTIAL_STRATEGY } from "./strategies/multi-agent-differential/strategy.js";
+export {
+  MULTI_AGENT_DIFFERENTIAL_STRATEGY,
+  MultiAgentDifferentialStrategy,
+} from "./strategies/multi-agent-differential/strategy.js";
+export {
+  MULTI_AGENT_BLACK_BOX_STRATEGY,
+  MultiAgentBlackBoxStrategy,
+} from "./strategies/multi-agent-black-box/strategy.js";
 export { SINGLE_AGENT_DIFFERENTIAL_STRATEGY } from "./strategies/single-agent-differential/strategy.js";
