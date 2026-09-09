@@ -13,6 +13,7 @@ import type {
   VerificationStrategyOutput,
   VerificationStrategyProvider,
   VerificationArtifact,
+  VerificationPreparation,
 } from "../schemas/verification-types.js";
 
 export type StrategyExecutionOutcome =
@@ -32,16 +33,21 @@ export async function runStrategy(
   writtenArtifacts: () => VerificationArtifact[],
   callerSignal?: AbortSignal,
   shutdownTimeoutMs = 5_000,
+  preparation?: VerificationPreparation,
 ): Promise<StrategyExecutionOutcome> {
   try {
     signal.throwIfAborted();
-    const strategy = provider.create();
-    signal.throwIfAborted();
-    const settled = await waitForStrategy(
-      strategy.verify(input, context, signal),
-      signal,
-      shutdownTimeoutMs,
-    );
+    const execution = (() => {
+      if (provider.lifecycle === "two-phase") {
+        const strategy = provider.create();
+        signal.throwIfAborted();
+        return strategy.verifyTranslation(input, context, preparation, signal);
+      }
+      const strategy = provider.create();
+      signal.throwIfAborted();
+      return strategy.verify(input, context, signal);
+    })();
+    const settled = await waitForStrategy(execution, signal, shutdownTimeoutMs);
     if (!settled.confirmed) {
       return {
         ...strategyExecutionFailure(signal.reason, callerSignal),
@@ -120,7 +126,7 @@ function callerCancellation(signal: AbortSignal): DOMException {
   );
 }
 
-function waitForStrategy<T>(
+export function waitForStrategy<T>(
   strategyPromise: Promise<T>,
   signal: AbortSignal,
   shutdownTimeoutMs: number,

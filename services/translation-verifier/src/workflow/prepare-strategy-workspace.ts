@@ -1,5 +1,13 @@
 import { markVerificationPhase } from "../run-output/measure-legacy-run.js";
 import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
+import { Ajv } from "ajv";
+import type InputSchema from "../schemas/verification-input.schema.json";
+import { assertSchema } from "../schemas/compile-schema-validators.js";
+import {
+  assertJsonCompatible,
+  normalizeRepositoryRelativePath,
+} from "../schemas/validate-json-paths.js";
 import {
   lstatSync,
   realpathSync,
@@ -22,6 +30,7 @@ import { applyHunksStrict, newFileContent } from "@forexplore/workflow-core";
 import { assertVerificationInput } from "../schemas/validate-verification-input.js";
 import {
   type VerificationPreparedProjects,
+  type VerificationPreparationInput,
   type VerificationWorkspaceRequirements,
   type VerificationInput,
   type VerificationArtifact,
@@ -50,11 +59,78 @@ export interface VerificationWorkspaceHandle {
   cleanup(options?: { discardArtifacts?: boolean }): void;
 }
 
+const inputSchema: typeof InputSchema = createRequire(import.meta.url)(
+  "../schemas/verification-input.schema.json",
+);
+const validatePreparationSchema = new Ajv({
+  strict: true,
+  ownProperties: true,
+  coerceTypes: false,
+  useDefaults: false,
+  removeAdditional: false,
+}).compile<VerificationPreparationInput>({
+  ...inputSchema,
+  $id: "urn:forexplore:verification-preparation-input:1.0",
+  required: ["request", "analysisReport", "migrationPlan"],
+  properties: {
+    request: inputSchema.properties.request,
+    analysisReport: inputSchema.properties.analysisReport,
+    migrationPlan: inputSchema.properties.migrationPlan,
+  },
+  additionalProperties: false,
+});
+
+/** Project explicitly before dispatch so translated implementation fields never enter preparation. */
+export function projectVerificationPreparationInput(
+  input: VerificationPreparationInput,
+): VerificationPreparationInput {
+  const projected = {
+    request: input?.request,
+    analysisReport: input?.analysisReport,
+    migrationPlan: input?.migrationPlan,
+  };
+  assertJsonCompatible(projected, "Verification preparation input");
+  assertSchema(
+    validatePreparationSchema,
+    projected,
+    "Verification preparation input",
+  );
+  for (const file of [
+    ...projected.request.sourceBundle.files,
+    ...projected.request.targetContext.sourceFiles,
+  ]) {
+    normalizeRepositoryRelativePath(
+      file.path,
+      "Verification preparation file path",
+    );
+    if (file.contentHash !== sha256(file.content!))
+      throw new Error(
+        "Verification preparation file contentHash does not match sha256(content).",
+      );
+  }
+  return structuredClone(projected);
+}
+
+export function createVerificationPreparationWorkspace(
+  input: VerificationPreparationInput,
+  options: VerificationWorkspaceOptions,
+): VerificationWorkspaceHandle {
+  return createWorkspace(projectVerificationPreparationInput(input), options);
+}
+
 export function createVerificationWorkspace(
   input: VerificationInput,
   options: VerificationWorkspaceOptions,
 ): VerificationWorkspaceHandle {
   assertVerificationInput(input);
+  return createWorkspace(input, options, input.translation.files);
+}
+
+function createWorkspace(
+  input: VerificationPreparationInput,
+  options: VerificationWorkspaceOptions,
+  patches: VerificationInput["translation"]["files"] = [],
+): VerificationWorkspaceHandle {
   if (
     options.requirements !== undefined &&
     typeof options.requirements.source !== "boolean"
@@ -64,7 +140,7 @@ export function createVerificationWorkspace(
     );
   const supplied = options.preparedProjects;
   if (supplied !== undefined)
-    validatePreparedProjects(input, supplied, options);
+    validatePreparedProjects(input, supplied, options, patches);
   mkdirSync(options.workspaceRoot, { recursive: true });
   const root = mkdtempSync(resolve(options.workspaceRoot, "verification-"));
   const durablePrefix = `attempt-${basename(root).replace(/^verification-/, "")}`;
@@ -113,7 +189,7 @@ export function createVerificationWorkspace(
         }
       }
       markVerificationPhase("translation-patch-application");
-      for (const patch of input.translation.files) {
+      for (const patch of patches) {
         const targetPath = safePath(targetRoot, patch.path, "Patch path");
         if (patch.status === "created") {
           if (existsSync(targetPath))
@@ -193,9 +269,10 @@ export function assertPreparedArtifactStorage(
 }
 
 function validatePreparedProjects(
-  input: VerificationInput,
+  input: VerificationPreparationInput,
   projects: VerificationPreparedProjects,
   options: VerificationWorkspaceOptions,
+  patches: VerificationInput["translation"]["files"],
 ): void {
   if (
     !projects ||
@@ -239,7 +316,7 @@ function validatePreparedProjects(
       expected.set(file.path, file.content);
   }
   // Calculate expected translated bytes in memory; never apply a patch to supplied projects.
-  for (const patch of input.translation.files) {
+  for (const patch of patches) {
     if (patch.status === "created") {
       if (expected.has(patch.path))
         throw new Error(

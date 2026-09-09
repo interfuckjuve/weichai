@@ -14,8 +14,19 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDefaultVerificationService } from "./create-default-verifier.js";
 import { assertVerificationInput } from "./schemas/validate-verification-input.js";
-import { type VerificationInput, type VerificationResult, type VerificationStrategyDescriptor } from "./schemas/verification-types.js";
-import { assertSchema, validateResultSchema } from "./schemas/compile-schema-validators.js";
+import {
+  type VerificationInput,
+  type VerificationResult,
+  type VerificationStrategyDescriptor,
+  type VerificationPreparationInput,
+  type VerificationPreparation,
+  type VerificationRunOptions,
+} from "./schemas/verification-types.js";
+import { projectVerificationPreparationInput } from "./workflow/prepare-strategy-workspace.js";
+import {
+  assertSchema,
+  validateResultSchema,
+} from "./schemas/compile-schema-validators.js";
 
 const MAX_INPUT_BYTES = 10 * 1024 * 1024;
 
@@ -23,7 +34,17 @@ interface VerificationCliService {
   listStrategies(): VerificationStrategyDescriptor[];
   verify(
     input: VerificationInput,
-    options?: { strategyId?: string; keepWorkspace?: boolean },
+    options?: VerificationRunOptions,
+    signal?: AbortSignal,
+  ): Promise<VerificationResult>;
+  prepareTests?(
+    input: VerificationPreparationInput,
+    options?: VerificationRunOptions,
+    signal?: AbortSignal,
+  ): Promise<VerificationPreparation>;
+  verifyTranslation?(
+    input: VerificationInput,
+    options?: VerificationRunOptions,
     signal?: AbortSignal,
   ): Promise<VerificationResult>;
 }
@@ -41,11 +62,12 @@ type ParsedArgs = {
   outputPath?: string;
   strategyId?: string;
   keepWorkspace: boolean;
+  phase: "verify" | "prepare-tests" | "verify-translation";
+  preparationPath?: string;
 };
 
 type ParseResult =
-  | { ok: true; args: ParsedArgs }
-  | { ok: false; message: string };
+  { ok: true; args: ParsedArgs } | { ok: false; message: string };
 
 export async function runVerificationCli(
   argv: string[],
@@ -80,17 +102,50 @@ export async function runVerificationCli(
   }
 
   try {
-    const input = assertVerificationInput(
-      readVerificationInput(parsed.args.inputPath),
+    const options: VerificationRunOptions = {
+      strategyId: parsed.args.strategyId,
+      keepWorkspace: parsed.args.keepWorkspace,
+    };
+    if (parsed.args.phase === "prepare-tests") {
+      if (!service.prepareTests)
+        throw new Error(
+          "CLI prepare-tests phase is unsupported by this service.",
+        );
+      const input = readVerificationInput(parsed.args.inputPath, (value) =>
+        projectVerificationPreparationInput(
+          value as VerificationPreparationInput,
+        ),
+      );
+      const preparation = await service.prepareTests(
+        input,
+        options,
+        dependencies.signal,
+      );
+      writeJsonAtomic(parsed.args.outputPath, preparation);
+      return 0;
+    }
+    const input = readVerificationInput(parsed.args.inputPath, (value) =>
+      assertVerificationInput(value as VerificationInput),
     );
-    const result = await service.verify(
-      input,
-      {
-        strategyId: parsed.args.strategyId,
-        keepWorkspace: parsed.args.keepWorkspace,
-      },
-      dependencies.signal,
-    );
+    let result: VerificationResult;
+    if (parsed.args.phase === "verify-translation") {
+      if (!service.verifyTranslation)
+        throw new Error(
+          "CLI verify-translation phase is unsupported by this service.",
+        );
+      if (parsed.args.preparationPath)
+        options.preparation = readVerificationInput(
+          parsed.args.preparationPath,
+          (value) => value as VerificationPreparation,
+        );
+      result = await service.verifyTranslation(
+        input,
+        options,
+        dependencies.signal,
+      );
+    } else {
+      result = await service.verify(input, options, dependencies.signal);
+    }
     assertSchema(validateResultSchema, result, "Verification result");
     writeJsonAtomic(parsed.args.outputPath, result);
     return 0;
@@ -101,7 +156,11 @@ export async function runVerificationCli(
 }
 
 function parseArgs(argv: string[]): ParseResult {
-  const args: ParsedArgs = { listStrategies: false, keepWorkspace: false };
+  const args: ParsedArgs = {
+    listStrategies: false,
+    keepWorkspace: false,
+    phase: "verify",
+  };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
     if (flag === "--list-strategies") {
@@ -111,23 +170,45 @@ function parseArgs(argv: string[]): ParseResult {
     } else if (
       flag === "--input" ||
       flag === "--output" ||
-      flag === "--strategy"
+      flag === "--strategy" ||
+      flag === "--phase" ||
+      flag === "--preparation"
     ) {
       const value = argv[i + 1];
       if (value === undefined || value.startsWith("--"))
         return { ok: false, message: `Missing value for ${flag}.` };
       if (flag === "--input") args.inputPath = value;
       else if (flag === "--output") args.outputPath = value;
-      else args.strategyId = value;
+      else if (flag === "--preparation") args.preparationPath = value;
+      else if (flag === "--phase") {
+        if (
+          value !== "verify" &&
+          value !== "prepare-tests" &&
+          value !== "verify-translation"
+        )
+          return {
+            ok: false,
+            message: `Unsupported verification phase: ${value}`,
+          };
+        args.phase = value;
+      } else args.strategyId = value;
       i++;
     } else {
       return { ok: false, message: `Unknown option: ${flag}` };
     }
   }
+  if (args.preparationPath && args.phase !== "verify-translation")
+    return {
+      ok: false,
+      message: "--preparation requires --phase verify-translation.",
+    };
   return { ok: true, args };
 }
 
-function readVerificationInput(path: string): VerificationInput {
+function readVerificationInput<T>(
+  path: string,
+  parse: (value: unknown) => T,
+): T {
   const fd = openSync(path, "r");
   try {
     const stats = fstatSync(fd);
@@ -153,7 +234,7 @@ function readVerificationInput(path: string): VerificationInput {
       );
     }
     try {
-      return JSON.parse(buffer.toString("utf8", 0, total)) as VerificationInput;
+      return parse(JSON.parse(buffer.toString("utf8", 0, total)));
     } catch (error) {
       throw new Error(
         `Invalid verification input JSON: ${errorMessage(error)}`,

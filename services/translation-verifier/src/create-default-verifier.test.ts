@@ -92,7 +92,7 @@ describe("default service strategy integration", () => {
           },
         },
       });
-      const receipt = await service.verifyWithReceipt(request, {
+      const receipt = await service.verifyTranslationWithReceipt(request, {
         strategyId: MULTI_AGENT_DIFFERENTIAL_STRATEGY.id,
         preparedProjects: { targetRoot },
       });

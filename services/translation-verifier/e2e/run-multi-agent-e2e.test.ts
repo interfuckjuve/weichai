@@ -128,7 +128,7 @@ describe("multi-agent differential E2E", () => {
     const targetRuntime: BehaviorRuntime = {
       ...runtime,
       async runAgent(task) {
-        expect(events).toEqual(["ready"]);
+        expect(events).toEqual([]);
         events.push(task.side);
         expect(task.side).toBe("target");
         expect(task.sandbox.readRoots).toEqual([task.sandbox.cwd]);
@@ -187,12 +187,9 @@ describe("multi-agent differential E2E", () => {
         ...(await roots()),
         input,
         runtime: targetRuntime,
-        waitForTarget: async () => {
-          events.push("ready");
-        },
       },
     );
-    expect(events).toEqual(["ready", "target"]);
+    expect(events).toEqual(["target"]);
     expect(result.result, JSON.stringify(result.result.problems)).toMatchObject(
       {
         mode: "target_only",
@@ -205,21 +202,23 @@ describe("multi-agent differential E2E", () => {
     expect(result.result.strategyReport).toHaveProperty("targetPlan");
   });
 
-  it("keeps source and original fixtures untouched and applies target only after the barrier", async () => {
+  it("prepares source tests before fixture translation application and leaves original fixtures untouched", async () => {
     const paths = await roots();
     const sourceFixtureHash = projectHash(sourceProjectRoot);
     const targetFixtureHash = projectHash(targetProjectRoot);
-    let release!: () => void;
-    const barrier = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    let sourceStarted = false;
     const ordered: string[] = [];
     const observedRuntime: BehaviorRuntime = {
       ...runtime,
       async runAgent(task) {
         if (task.side === "source") {
-          sourceStarted = true;
+          const targetRoot = task.sandbox.readRoots.find((path) =>
+            path.endsWith("/target"),
+          )!;
+          const subject =
+            "src/main/java/org/apache/commons/fileupload/MultipartStream.java";
+          expect(await readFile(join(targetRoot, subject), "utf8")).toBe(
+            await readFile(join(targetProjectRoot, subject), "utf8"),
+          );
           ordered.push("agent1");
         }
         return runtime.runAgent(task);
@@ -242,18 +241,12 @@ describe("multi-agent differential E2E", () => {
       {
         ...paths,
         runtime: observedRuntime,
-        waitForTarget: async () => {
-          expect(sourceStarted).toBe(true);
-          expect(ordered).toEqual(["agent1", "source"]);
-          release();
-          await barrier;
-        },
       },
     );
     const result = await pending;
     expect(result.targetReady).toBe(true);
     expect(result.result.targetAssessment).toBe("no_bug_observed");
-    expect(ordered.at(-1)).toBe("target");
+    expect(ordered).toEqual(["agent1", "source", "target"]);
     const targetOriginal = await readFile(
       join(
         targetProjectRoot,
@@ -346,12 +339,14 @@ describe("multi-agent differential E2E", () => {
         ...paths,
         runtime: observedRuntime,
         prepareProjects: async ({ targetRoot }) => {
-          events.push("prepare");
+          const translated = events.includes("agent-source");
+          events.push(translated ? "prepare-translated" : "prepare-original");
           const subject =
             "src/main/java/org/apache/commons/fileupload/MultipartStream.java";
-          expect(await readFile(join(targetRoot, subject), "utf8")).not.toBe(
-            await readFile(join(targetProjectRoot, subject), "utf8"),
-          );
+          expect(
+            (await readFile(join(targetRoot, subject), "utf8")) ===
+              (await readFile(join(targetProjectRoot, subject), "utf8")),
+          ).toBe(!translated);
           await mkdir(join(targetRoot, "target/classes"), { recursive: true });
           await writeFile(
             join(targetRoot, "target/classes/output.bin"),
@@ -369,7 +364,12 @@ describe("multi-agent differential E2E", () => {
         },
       },
     );
-    expect(events).toEqual(["prepare", "agent-source", "agent-target"]);
+    expect(events).toEqual([
+      "prepare-original",
+      "agent-source",
+      "prepare-translated",
+      "agent-target",
+    ]);
     expect(targetSawInputs).toBe(true);
     expect(result.preparationEvidencePath).toBeDefined();
     expect(
@@ -427,6 +427,56 @@ describe("multi-agent differential E2E", () => {
     expect(
       JSON.parse(await readFile(result.preparationEvidencePath!, "utf8")),
     ).toMatchObject({ exitCode: 1, stderr: "BUILD FAILURE" });
+  });
+  it("retains the frozen source capsule when post-translation fixture preparation fails", async () => {
+    const paths = await roots();
+    const sides: string[] = [];
+    let preparations = 0;
+    const output = await executeMultiAgentE2E(
+      {
+        task: "multipart-read-body",
+        variant: "correct",
+        timeoutMs: 10_000,
+        live: true,
+        json: false,
+      },
+      {
+        ...paths,
+        runtime: {
+          ...runtime,
+          async runAgent(task) {
+            sides.push(task.side);
+            return runtime.runAgent(task);
+          },
+        },
+        prepareProjects: async ({ targetRoot }) => ({
+          command: "fixture compile",
+          cwd: targetRoot,
+          durationMs: 1,
+          exitCode: ++preparations === 1 ? 0 : 1,
+          timedOut: false,
+          stdout: "",
+          stderr: "fixture compile evidence",
+        }),
+      },
+    );
+    expect(sides).toEqual(["source"]);
+    expect(output.result.executionStatus).toBe("failed");
+    const artifact = output.result.artifacts.find(
+      (item) => item.kind === "fixture-verification-preparation",
+    )!;
+    expect(
+      JSON.parse(
+        await readFile(join(paths.artifactRoot, artifact.path), "utf8"),
+      ),
+    ).toMatchObject({
+      strategyVersion: "4.0.0",
+      payload: {
+        report: {
+          sourceSnapshot: { observations: [{ caseId: "case-1", value: 3 }] },
+        },
+      },
+    });
   });
   it("waits for an aborted preparation to finish and persist timed-out evidence", async () => {
     const paths = await roots();

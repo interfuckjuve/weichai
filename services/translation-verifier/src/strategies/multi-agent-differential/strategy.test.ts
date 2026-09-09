@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as workspace from "./behavior-workspace.js";
 import {
+  chmodSync,
+  cpSync,
+  existsSync,
+  symlinkSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -10,7 +14,12 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { MultiAgentDifferentialStrategy } from "./strategy.js";
+import {
+  BehaviorFailure,
+  MultiAgentDifferentialStrategy,
+  type MultiAgentDifferentialOptions,
+} from "./strategy.js";
+import { applyHunksStrict, newFileContent } from "@forexplore/workflow-core";
 import type { BehaviorAgentTask, BehaviorRuntime } from "./behavior-types.js";
 import type {
   VerificationInput,
@@ -37,10 +46,8 @@ function fixture(delta = 0) {
     join(sourceRoot, "implementation.cjs"),
     "module.exports = value => value;",
   );
-  writeFileSync(
-    join(targetRoot, "implementation.cjs"),
-    `module.exports = value => value + ${delta};`,
-  );
+  const originalTarget = "throw Error('untranslated');";
+  writeFileSync(join(targetRoot, "implementation.cjs"), originalTarget);
   const store = createVerificationArtifactStore({
     artifactRoot: join(root, "durable"),
     durablePrefix: "attempt",
@@ -60,8 +67,17 @@ function fixture(delta = 0) {
   const input: VerificationInput = {
     schemaVersion: "1.0",
     request: {
-      sourceBundle: { files: [] },
-      targetContext: { sourceFiles: [] },
+      sourceBundle: {
+        files: [
+          {
+            path: "implementation.cjs",
+            content: "module.exports = value => value;",
+          },
+        ],
+      },
+      targetContext: {
+        sourceFiles: [{ path: "implementation.cjs", content: originalTarget }],
+      },
     } as unknown as VerificationInput["request"],
     analysisReport: { applicability: { level: "direct" } },
     migrationPlan: {},
@@ -97,7 +113,72 @@ function fixture(delta = 0) {
         task.signal,
       ),
   };
+  setTranslation(input, `module.exports = value => value + ${delta};`);
   return { root, input, context, runtime, agents };
+}
+function setTranslation(input: VerificationInput, content: string) {
+  const original = input.request.targetContext.sourceFiles[0].content!;
+  input.translation.files = [
+    {
+      path: "implementation.cjs",
+      status: "modified",
+      expectedOriginalSha256: workspace.hashContent(original),
+      additions: 1,
+      deletions: 1,
+      hunks: [
+        {
+          header: "@@ -1 +1 @@",
+          lines: [
+            { type: "remove", content: original },
+            { type: "add", content },
+          ],
+        },
+      ],
+    },
+  ];
+}
+function applyTranslation(
+  input: VerificationInput,
+  context: VerificationStrategyContext,
+) {
+  for (const patch of input.translation.files) {
+    const path = join(context.workspace.targetRoot, patch.path);
+    writeFileSync(
+      path,
+      patch.status === "created"
+        ? newFileContent(patch.hunks)
+        : applyHunksStrict(readFileSync(path, "utf8"), patch.hunks),
+    );
+  }
+}
+async function runTwoPhase(
+  options: MultiAgentDifferentialOptions & {
+    betweenPhases?: (signal: AbortSignal) => Promise<void>;
+  },
+  input: VerificationInput,
+  context: VerificationStrategyContext,
+  signal?: AbortSignal,
+) {
+  const strategy = new MultiAgentDifferentialStrategy(options);
+  try {
+    const { request, analysisReport, migrationPlan } = input;
+    const preparation = await strategy.prepareTests(
+      { request, analysisReport, migrationPlan },
+      context,
+      signal,
+    );
+    await options.betweenPhases?.(signal ?? new AbortController().signal);
+    applyTranslation(input, context);
+    return await strategy.verifyTranslation(
+      input,
+      context,
+      preparation,
+      signal,
+    );
+  } catch (cause) {
+    if (cause instanceof BehaviorFailure && cause.output) return cause.output;
+    throw cause;
+  }
 }
 function independentFixture(delta = 1) {
   const f = fixture(delta);
@@ -203,6 +284,336 @@ function writeHarness(task: BehaviorAgentTask) {
 }
 
 describe("independent two-session differential strategy", () => {
+  it("accepts only explicitly submitted new target files alongside the translation", async () => {
+    const f = fixture();
+    const strategy = new MultiAgentDifferentialStrategy({ runtime: f.runtime });
+    const preparation = await strategy.prepareTests(f.input, f.context);
+    f.input.translation.files.push({
+      path: "new-helper.cjs",
+      status: "created",
+      expectedAbsent: true,
+      additions: 1,
+      deletions: 0,
+      hunks: [
+        {
+          header: "@@ -0,0 +1 @@",
+          lines: [{ type: "add", content: "module.exports = 1;" }],
+        },
+      ],
+    });
+    applyTranslation(f.input, f.context);
+    const result = await strategy.verifyTranslation(
+      f.input,
+      f.context,
+      preparation,
+    );
+    expect(result.targetAssessment, JSON.stringify(result.problems)).toBe(
+      "no_bug_observed",
+    );
+  });
+  it.each(["author", "replay"])(
+    "protects source implementation during preparation %s",
+    async (phase) => {
+      const f = fixture();
+      const corrupt = () =>
+        writeFileSync(
+          join(f.context.workspace.sourceRoot, "implementation.cjs"),
+          "module.exports = () => 999;",
+        );
+      const author = f.runtime.runAgent;
+      f.runtime.runAgent = async (task) => {
+        const result = await author(task);
+        if (phase === "author") corrupt();
+        return result;
+      };
+      const run = f.runtime.runCommand;
+      f.runtime.runCommand = async (task) => {
+        const result = await run(task);
+        if (phase === "replay") corrupt();
+        return result;
+      };
+      await expect(
+        new MultiAgentDifferentialStrategy({ runtime: f.runtime }).prepareTests(
+          f.input,
+          f.context,
+        ),
+      ).rejects.toMatchObject({ code: "workspace_integrity_violation" });
+      expect(f.agents).toEqual(["source"]);
+      expect(
+        existsSync(
+          join(
+            f.context.workspace.strategyRoot,
+            "preparation-failure-report.json",
+          ),
+        ),
+      ).toBe(true);
+    },
+  );
+  it("binds the initial preparation input even when the caller mutates its context during source work", async () => {
+    const f = fixture();
+    const author = f.runtime.runAgent;
+    f.runtime.runAgent = async (task) => {
+      f.input.migrationPlan = { changedDuringPreparation: true };
+      return author(task);
+    };
+    const strategy = new MultiAgentDifferentialStrategy({ runtime: f.runtime });
+    const preparation = await strategy.prepareTests(f.input, f.context);
+    applyTranslation(f.input, f.context);
+    const result = await strategy.verifyTranslation(
+      f.input,
+      f.context,
+      preparation,
+    );
+    expect(result.problems[0]?.message).toContain("Stale");
+    expect(f.agents).toEqual(["source"]);
+  });
+  it.each(["mutated", "stale", "different-strategy", "missing"])(
+    "rejects %s preparation before Agent2",
+    async (scenario) => {
+      const f = fixture();
+      const strategy = new MultiAgentDifferentialStrategy({
+        runtime: f.runtime,
+      });
+      const preparation = await strategy.prepareTests(f.input, f.context);
+      if (scenario === "mutated") preparation.payload = { changed: true };
+      if (scenario === "stale") f.input.migrationPlan = { changed: true };
+      if (scenario === "different-strategy") preparation.strategyId = "other";
+      applyTranslation(f.input, f.context);
+      const result = await strategy.verifyTranslation(
+        f.input,
+        f.context,
+        scenario === "missing" ? undefined : preparation,
+      );
+      expect(result.problems[0]?.code).toBe("workspace_integrity_violation");
+      expect(f.agents).toEqual(["source"]);
+    },
+  );
+  it.each([
+    "source",
+    "undeclared-target",
+    "new-target-test",
+    "wrong-translation",
+    "target-mode",
+  ])("rejects unauthorized %s drift between phases", async (scenario) => {
+    const f = fixture();
+    const strategy = new MultiAgentDifferentialStrategy({ runtime: f.runtime });
+    const preparation = await strategy.prepareTests(f.input, f.context);
+    applyTranslation(f.input, f.context);
+    if (scenario === "source")
+      writeFileSync(
+        join(f.context.workspace.sourceRoot, "implementation.cjs"),
+        "changed source",
+      );
+    if (scenario === "undeclared-target")
+      writeFileSync(
+        join(f.context.workspace.targetRoot, "helper.cjs"),
+        "unauthorized",
+      );
+    if (scenario === "new-target-test") {
+      mkdirSync(join(f.context.workspace.targetRoot, "tests"));
+      writeFileSync(
+        join(f.context.workspace.targetRoot, "tests/foreign.test.cjs"),
+        "unauthorized",
+      );
+    }
+    if (scenario === "wrong-translation")
+      writeFileSync(
+        join(f.context.workspace.targetRoot, "implementation.cjs"),
+        "module.exports = () => 9;",
+      );
+    if (scenario === "target-mode")
+      chmodSync(
+        join(f.context.workspace.targetRoot, "implementation.cjs"),
+        0o755,
+      );
+    const result = await strategy.verifyTranslation(
+      f.input,
+      f.context,
+      preparation,
+    );
+    expect(result.executionStatus).toBe("failed");
+    expect(result.targetAssessment).toBe("inconclusive");
+    expect(f.agents).toEqual(["source"]);
+  });
+  it.each(["same", "fresh"])(
+    "restores frozen source handoff in a %s workspace with a new strategy and artifact store",
+    async (workspaceKind) => {
+      const f = fixture();
+      const originalContext = f.context;
+      const preparation = JSON.parse(
+        JSON.stringify(
+          await new MultiAgentDifferentialStrategy({
+            runtime: f.runtime,
+          }).prepareTests(f.input, originalContext),
+        ),
+      );
+      if (workspaceKind === "fresh") {
+        const root = join(f.root, "fresh");
+        mkdirSync(root);
+        const sourceRoot = join(root, "source");
+        const targetRoot = join(root, "target");
+        cpSync(originalContext.workspace.sourceRoot, sourceRoot, {
+          recursive: true,
+        });
+        cpSync(originalContext.workspace.targetRoot, targetRoot, {
+          recursive: true,
+        });
+        f.context = {
+          ...originalContext,
+          workspace: {
+            ...originalContext.workspace,
+            root,
+            sourceRoot,
+            targetRoot,
+          },
+        };
+      }
+      rmSync(join(f.context.workspace.sourceRoot, ".forexplore-tests"), {
+        recursive: true,
+      });
+      rmSync(join(f.context.workspace.sourceRoot, "tests"), {
+        recursive: true,
+      });
+      const strategyRoot = join(f.root, "new-stage-artifacts");
+      mkdirSync(strategyRoot);
+      const store = createVerificationArtifactStore({
+        artifactRoot: join(f.root, "new-durable"),
+        durablePrefix: "verify",
+        agentRoot: strategyRoot,
+      });
+      f.context = {
+        ...f.context,
+        workspace: {
+          ...f.context.workspace,
+          strategyRoot,
+          evidenceRoot: strategyRoot,
+        },
+        writeArtifact: store.writeArtifact,
+      };
+      rmSync(originalContext.workspace.strategyRoot, { recursive: true });
+      rmSync(join(f.root, "durable"), { recursive: true });
+      applyTranslation(f.input, f.context);
+      const result = await new MultiAgentDifferentialStrategy({
+        runtime: f.runtime,
+      }).verifyTranslation(f.input, f.context, preparation);
+      expect(result.targetAssessment, JSON.stringify(result.problems)).toBe(
+        "no_bug_observed",
+      );
+      expect(
+        readFileSync(
+          join(f.context.workspace.sourceRoot, "tests/runner.cjs"),
+          "utf8",
+        ),
+      ).toContain("require('../implementation.cjs')");
+      for (const artifact of result.artifacts)
+        expect(existsSync(join(f.root, "new-durable", artifact.path))).toBe(
+          true,
+        );
+      expect(
+        result.artifacts.some(
+          (artifact) => artifact.kind === "verification-preparation",
+        ),
+      ).toBe(true);
+      expect(f.agents).toEqual(["source", "target"]);
+    },
+  );
+  it.each(["conflict", "linked-parent"])(
+    "refuses unsafe source handoff restoration: %s",
+    async (scenario) => {
+      const f = fixture();
+      const strategy = new MultiAgentDifferentialStrategy({
+        runtime: f.runtime,
+      });
+      const preparation = await strategy.prepareTests(f.input, f.context);
+      if (scenario === "conflict")
+        writeFileSync(
+          join(f.context.workspace.sourceRoot, "tests/runner.cjs"),
+          "conflicting existing helper",
+        );
+      else {
+        rmSync(join(f.context.workspace.sourceRoot, ".forexplore-tests"), {
+          recursive: true,
+        });
+        symlinkSync(
+          f.context.workspace.strategyRoot,
+          join(f.context.workspace.sourceRoot, ".forexplore-tests"),
+        );
+      }
+      applyTranslation(f.input, f.context);
+      const result = await strategy.verifyTranslation(
+        f.input,
+        f.context,
+        preparation,
+      );
+      expect(result.problems[0]?.code).toBe("workspace_integrity_violation");
+      expect(f.agents).toEqual(["source"]);
+    },
+  );
+  it("rejects an already translated target before Agent1 starts", async () => {
+    const f = fixture();
+    applyTranslation(f.input, f.context);
+    await expect(
+      new MultiAgentDifferentialStrategy({ runtime: f.runtime }).prepareTests(
+        f.input,
+        f.context,
+      ),
+    ).rejects.toThrow("before translation");
+    expect(f.agents).toEqual([]);
+  });
+  it.each(["cancel", "timeout"])(
+    "does not start Agent2 after %s between phases",
+    async (scenario) => {
+      const f = fixture();
+      const strategy = new MultiAgentDifferentialStrategy({
+        runtime: f.runtime,
+      });
+      const preparation = await strategy.prepareTests(f.input, f.context);
+      applyTranslation(f.input, f.context);
+      const controller = new AbortController();
+      if (scenario === "cancel") controller.abort();
+      else f.context.deadlineAt = Date.now() - 1;
+      const result = await strategy.verifyTranslation(
+        f.input,
+        f.context,
+        preparation,
+        controller.signal,
+      );
+      expect(result.executionStatus).toBe(
+        scenario === "cancel" ? "cancelled" : "failed",
+      );
+      expect(f.agents).toEqual(["source"]);
+      expect(
+        existsSync(
+          join(
+            f.context.workspace.strategyRoot,
+            "source-behavior-snapshot.json",
+          ),
+        ),
+      ).toBe(true);
+    },
+  );
+  it("prepares source observations without a translation and verifies with a fresh strategy instance", async () => {
+    const f = fixture();
+    const { request, analysisReport, migrationPlan } = f.input;
+    const preparation = await new MultiAgentDifferentialStrategy({
+      runtime: f.runtime,
+    }).prepareTests({ request, analysisReport, migrationPlan }, f.context);
+    expect(f.agents).toEqual(["source"]);
+    expect(preparation).toMatchObject({
+      schemaVersion: "1.0",
+      strategyVersion: "4.0.0",
+    });
+    applyTranslation(f.input, f.context);
+    const result = await new MultiAgentDifferentialStrategy({
+      runtime: f.runtime,
+    }).verifyTranslation(
+      f.input,
+      f.context,
+      JSON.parse(JSON.stringify(preparation)),
+    );
+    expect(result.targetAssessment).toBe("no_bug_observed");
+    expect(f.agents).toEqual(["source", "target"]);
+  });
   it.each(["reference", "reject"])(
     "skips Agent1 and source preparation for %s",
     async (level) => {
@@ -235,12 +646,10 @@ describe("independent two-session differential strategy", () => {
         writeFileSync(task.expectationFile!, frozenPlan);
         return { ...result, frozenPlan, commandEvidence: [targetRecord(task)] };
       };
+      applyTranslation(f.input, f.context);
       const result = await new MultiAgentDifferentialStrategy({
         runtime: f.runtime,
-        waitForTarget: async () => {
-          expect(f.agents).toEqual([]);
-        },
-      }).verify(f.input, f.context);
+      }).verifyTranslation(f.input, f.context);
       expect(f.agents).toEqual(["target"]);
       expect(result).toMatchObject({
         executionStatus: "completed",
@@ -265,9 +674,13 @@ describe("independent two-session differential strategy", () => {
     "independently compares target behavior against requirement expectations (delta=%s)",
     async (delta) => {
       const f = independentFixture(delta);
-      const result = await new MultiAgentDifferentialStrategy({
-        runtime: f.runtime,
-      }).verify(f.input, f.context);
+      const result = await runTwoPhase(
+        {
+          runtime: f.runtime,
+        },
+        f.input,
+        f.context,
+      );
       expect(result.targetAssessment).toBe(
         delta ? "no_bug_observed" : "bug_found",
       );
@@ -322,9 +735,13 @@ describe("independent two-session differential strategy", () => {
         commandEvidence: scenario === "no-records" ? [] : [record],
       };
     };
-    const result = await new MultiAgentDifferentialStrategy({
-      runtime: f.runtime,
-    }).verify(f.input, f.context);
+    const result = await runTwoPhase(
+      {
+        runtime: f.runtime,
+      },
+      f.input,
+      f.context,
+    );
     expect(result.executionStatus).toBe("failed");
     expect(result.targetAssessment).toBe("inconclusive");
     expect(result.sourceAssessment).toBe("not_checked");
@@ -365,9 +782,13 @@ describe("independent two-session differential strategy", () => {
           ? { ...result, stdout: "invalid" }
           : result;
       };
-      const result = await new MultiAgentDifferentialStrategy({
-        runtime: f.runtime,
-      }).verify(f.input, f.context);
+      const result = await runTwoPhase(
+        {
+          runtime: f.runtime,
+        },
+        f.input,
+        f.context,
+      );
       expect(result.problems[0]?.code).toBe("workspace_integrity_violation");
       expect(result.targetAssessment).toBe("inconclusive");
     },
@@ -380,38 +801,19 @@ describe("independent two-session differential strategy", () => {
       const result = await command(task);
       return ++runs === 1 ? { ...result, stdout: "invalid" } : result;
     };
-    const result = await new MultiAgentDifferentialStrategy({
-      runtime: f.runtime,
-    }).verify(f.input, f.context);
+    const result = await runTwoPhase(
+      {
+        runtime: f.runtime,
+      },
+      f.input,
+      f.context,
+    );
     expect(result.executionStatus).toBe("completed");
     expect(f.agents).toEqual(["target", "target"]);
     expect(result.strategyReport).toMatchObject({
       repairs: [{ side: "target", attempt: 1 }],
     });
   });
-  it.each(["cancel", "timeout", "failure"])(
-    "does not start independent Agent2 on readiness %s",
-    async (mode) => {
-      const f = independentFixture();
-      const controller = new AbortController();
-      const result = await new MultiAgentDifferentialStrategy({
-        runtime: f.runtime,
-        timeoutMs: 80,
-        waitForTarget: async () => {
-          if (mode === "cancel") controller.abort();
-          if (mode === "failure") throw new Error("not ready");
-          await new Promise<void>(() => {});
-        },
-      }).verify(f.input, f.context, controller.signal);
-      expect(result.executionStatus).toBe(
-        mode === "cancel" ? "cancelled" : "failed",
-      );
-      expect(f.agents).toEqual([]);
-      expect(
-        result.artifacts.some((item) => item.kind.startsWith("source-")),
-      ).toBe(false);
-    },
-  );
   it("preserves independent frozen plan and Host records when Agent2 is cancelled", async () => {
     const f = independentFixture();
     const controller = new AbortController();
@@ -420,9 +822,14 @@ describe("independent two-session differential strategy", () => {
       controller.abort();
       throw controller.signal.reason;
     };
-    const result = await new MultiAgentDifferentialStrategy({
-      runtime: f.runtime,
-    }).verify(f.input, f.context, controller.signal);
+    const result = await runTwoPhase(
+      {
+        runtime: f.runtime,
+      },
+      f.input,
+      f.context,
+      controller.signal,
+    );
     expect(result.executionStatus).toBe("cancelled");
     const session = result.artifacts.find(
       (item) => item.kind === "target-agent-session",
@@ -445,18 +852,26 @@ describe("independent two-session differential strategy", () => {
       );
       return result;
     };
-    const result = await new MultiAgentDifferentialStrategy({
-      runtime: f.runtime,
-    }).verify(f.input, f.context);
+    const result = await runTwoPhase(
+      {
+        runtime: f.runtime,
+      },
+      f.input,
+      f.context,
+    );
     expect(result.problems[0]?.code).toBe("report_evidence_invalid");
     expect(result.targetAssessment).toBe("inconclusive");
   });
   it("refuses independent target execution without caller authorization", async () => {
     const f = independentFixture();
-    const result = await new MultiAgentDifferentialStrategy({
-      runtime: f.runtime,
-      executionSides: [],
-    }).verify(f.input, f.context);
+    const result = await runTwoPhase(
+      {
+        runtime: f.runtime,
+        executionSides: [],
+      },
+      f.input,
+      f.context,
+    );
     expect(result.problems[0]?.code).toBe("context_incomplete");
     expect(f.agents).toEqual([]);
   });
@@ -471,9 +886,13 @@ describe("independent two-session differential strategy", () => {
       );
       return result;
     };
-    const result = await new MultiAgentDifferentialStrategy({
-      runtime: f.runtime,
-    }).verify(f.input, f.context);
+    const result = await runTwoPhase(
+      {
+        runtime: f.runtime,
+      },
+      f.input,
+      f.context,
+    );
     expect(result.problems[0]?.code).toBe("workspace_integrity_violation");
   });
   it.each(["adapt"])(
@@ -522,10 +941,14 @@ describe("independent two-session differential strategy", () => {
         expect(task.sandbox.cwd).toBe(f.context.workspace.targetRoot);
         return run(task);
       };
-      const result = await new MultiAgentDifferentialStrategy({
-        runtime: f.runtime,
-        executionSides: ["target"],
-      }).verify(f.input, f.context);
+      const result = await runTwoPhase(
+        {
+          runtime: f.runtime,
+          executionSides: ["target"],
+        },
+        f.input,
+        f.context,
+      );
       expect(f.agents).toEqual(["source", "target"]);
       expect(result).toMatchObject({
         executionStatus: "completed",
@@ -551,8 +974,8 @@ describe("independent two-session differential strategy", () => {
       const f = fixture();
       f.input.analysisReport = { applicability: { level: "adapt" } };
       f.input.request.requirement = "Preserve zero, increment negative inputs";
-      writeFileSync(
-        join(f.context.workspace.targetRoot, "implementation.cjs"),
+      setTranslation(
+        f.input,
         defect
           ? "module.exports = value => value;"
           : "module.exports = value => value === 0 ? 0 : value + 1;",
@@ -597,9 +1020,13 @@ describe("independent two-session differential strategy", () => {
         }
         return result;
       };
-      const result = await new MultiAgentDifferentialStrategy({
-        runtime: f.runtime,
-      }).verify(f.input, f.context);
+      const result = await runTwoPhase(
+        {
+          runtime: f.runtime,
+        },
+        f.input,
+        f.context,
+      );
       expect(result).toMatchObject({
         executionStatus: "completed",
         mode: "differential",
@@ -665,9 +1092,13 @@ describe("independent two-session differential strategy", () => {
           ],
         };
       };
-      const result = await new MultiAgentDifferentialStrategy({
-        runtime: f.runtime,
-      }).verify(f.input, f.context);
+      const result = await runTwoPhase(
+        {
+          runtime: f.runtime,
+        },
+        f.input,
+        f.context,
+      );
       expect(result.executionStatus).toBe("failed");
       expect(result.problems[0]?.code).toBe("report_evidence_invalid");
       expect(f.agents).not.toContain("target");
@@ -676,10 +1107,14 @@ describe("independent two-session differential strategy", () => {
   );
   it("does not promote direct applicability to caller execution authorization", async () => {
     const f = fixture();
-    const result = await new MultiAgentDifferentialStrategy({
-      runtime: f.runtime,
-      executionSides: ["target"],
-    }).verify(f.input, f.context);
+    const result = await runTwoPhase(
+      {
+        runtime: f.runtime,
+        executionSides: ["target"],
+      },
+      f.input,
+      f.context,
+    );
     expect(result.problems[0]?.code).toBe("context_incomplete");
     expect(f.agents).toEqual([]);
   });
@@ -715,15 +1150,19 @@ describe("independent two-session differential strategy", () => {
         writeFileSync(path, JSON.stringify(manifest));
         return result;
       };
-      const result = await new MultiAgentDifferentialStrategy({
-        runtime: f.runtime,
-      }).verify(f.input, f.context);
+      const result = await runTwoPhase(
+        {
+          runtime: f.runtime,
+        },
+        f.input,
+        f.context,
+      );
       expect(result.executionStatus).toBe("failed");
       expect(result.targetAssessment).toBe("inconclusive");
       expect(f.agents).not.toContain("target");
     },
   );
-  it.each(["waiting", "target"])(
+  it.each(["between-phases", "target"])(
     "rejects Agent1 handoff changes during %s",
     async (phase) => {
       const f = fixture();
@@ -741,12 +1180,16 @@ describe("independent two-session differential strategy", () => {
         if (phase === "target" && task.side === "target") corrupt();
         return result;
       };
-      const result = await new MultiAgentDifferentialStrategy({
-        runtime: f.runtime,
-        waitForTarget: async () => {
-          if (phase === "waiting") corrupt();
+      const result = await runTwoPhase(
+        {
+          runtime: f.runtime,
+          betweenPhases: async () => {
+            if (phase === "between-phases") corrupt();
+          },
         },
-      }).verify(f.input, f.context);
+        f.input,
+        f.context,
+      );
       expect(result.problems[0]?.code).toBe("workspace_integrity_violation");
       expect(result.targetAssessment).toBe("inconclusive");
     },
@@ -756,9 +1199,13 @@ describe("independent two-session differential strategy", () => {
     "replays generated tests through the actual implementations (delta=%s)",
     async (delta) => {
       const f = fixture(delta);
-      const result = await new MultiAgentDifferentialStrategy({
-        runtime: f.runtime,
-      }).verify(f.input, f.context);
+      const result = await runTwoPhase(
+        {
+          runtime: f.runtime,
+        },
+        f.input,
+        f.context,
+      );
       expect(f.agents).toEqual(["source", "target"]);
       expect(result.executionStatus).toBe("completed");
       expect(result.targetAssessment).toBe(
@@ -785,11 +1232,11 @@ describe("independent two-session differential strategy", () => {
         ),
       ).toBe(`module.exports = value => value + ${delta};`);
       expect(result.artifacts.map((item) => item.kind)).toContain(
-        "source-behavior-snapshot",
+        "prepared-source-behavior-snapshot",
       );
     },
   );
-  it("starts agent2 only after Host target readiness; wait never runs a coordinator model", async () => {
+  it("starts Agent2 after caller translation application with frozen source expectations", async () => {
     const f = fixture();
     const author = f.runtime.runAgent;
     f.runtime.runAgent = async (task) => {
@@ -801,22 +1248,26 @@ describe("independent two-session differential strategy", () => {
       }
       return author(task);
     };
-    const result = await new MultiAgentDifferentialStrategy({
-      runtime: f.runtime,
-      waitForTarget: async () => {
-        expect(f.agents).toEqual(["source"]);
-        expect(
-          readFileSync(
-            join(f.context.workspace.targetRoot, "implementation.cjs"),
-            "utf8",
-          ),
-        ).toContain("value + 0");
+    const result = await runTwoPhase(
+      {
+        runtime: f.runtime,
+        betweenPhases: async () => {
+          expect(f.agents).toEqual(["source"]);
+          expect(
+            readFileSync(
+              join(f.context.workspace.targetRoot, "implementation.cjs"),
+              "utf8",
+            ),
+          ).toContain("untranslated");
+        },
       },
-    }).verify(f.input, f.context);
+      f.input,
+      f.context,
+    );
     expect(result.targetAssessment).toBe("no_bug_observed");
     expect(f.agents).toEqual(["source", "target"]);
   });
-  it("rejects target drift between the ready barrier and declared snapshot binding", async () => {
+  it("rejects target drift before preparation snapshot binding", async () => {
     const f = fixture();
     const target = f.context.workspace.targetRoot;
     const path = join(target, "implementation.cjs");
@@ -838,9 +1289,13 @@ describe("independent two-session differential strategy", () => {
         writeFileSync(path, "module.exports = value => value + 9;");
       return hash(root);
     });
-    const result = await new MultiAgentDifferentialStrategy({
-      runtime: f.runtime,
-    }).verify(f.input, f.context);
+    const result = await runTwoPhase(
+      {
+        runtime: f.runtime,
+      },
+      f.input,
+      f.context,
+    );
     expect(result.executionStatus).toBe("failed");
     expect(result.problems[0].message).toContain(
       "differs from the submitted snapshot",
@@ -857,9 +1312,13 @@ describe("independent two-session differential strategy", () => {
       if (task.side === "source") writeFileSync(helper, "polluted helper");
       return result;
     };
-    const result = await new MultiAgentDifferentialStrategy({
-      runtime: f.runtime,
-    }).verify(f.input, f.context);
+    const result = await runTwoPhase(
+      {
+        runtime: f.runtime,
+      },
+      f.input,
+      f.context,
+    );
     expect(result.executionStatus).toBe("failed");
     expect(result.problems[0].code).toBe("workspace_integrity_violation");
     expect(result.problems[0].message).toContain(
@@ -873,9 +1332,13 @@ describe("independent two-session differential strategy", () => {
       const f = fixture();
       f.input.analysisReport =
         decision === "missing" ? {} : { migrationEligibility: { decision } };
-      const result = await new MultiAgentDifferentialStrategy({
-        runtime: f.runtime,
-      }).verify(f.input, f.context);
+      const result = await runTwoPhase(
+        {
+          runtime: f.runtime,
+        },
+        f.input,
+        f.context,
+      );
       expect(f.agents).toEqual([]);
       expect(result.executionStatus).toBe("failed");
       expect(result.strategyReport).toMatchObject({
@@ -889,42 +1352,17 @@ describe("independent two-session differential strategy", () => {
       referenceDecision: "rejected",
       reason: "Legacy only",
     };
-    const result = await new MultiAgentDifferentialStrategy({
-      runtime: f.runtime,
-    }).verify(f.input, f.context);
+    const result = await runTwoPhase(
+      {
+        runtime: f.runtime,
+      },
+      f.input,
+      f.context,
+    );
     expect(f.agents).toEqual(["source", "target"]);
     expect(result.mode).toBe("differential");
     expect(result.referenceDecision).toBe("accepted");
     expect(result.targetAssessment).toBe("no_bug_observed");
-  });
-  it("cancels a pending ready barrier and preserves the frozen source artifact", async () => {
-    const f = fixture();
-    const controller = new AbortController();
-    const result = await new MultiAgentDifferentialStrategy({
-      runtime: f.runtime,
-      waitForTarget: async () => {
-        controller.abort();
-        await new Promise<void>(() => {});
-      },
-    }).verify(f.input, f.context, controller.signal);
-    expect(result.executionStatus).toBe("cancelled");
-    expect(f.agents).toEqual(["source"]);
-    expect(
-      result.artifacts.some((item) => item.kind === "source-behavior-snapshot"),
-    ).toBe(true);
-  });
-  it("times out a ready barrier without spawning agent2", async () => {
-    const f = fixture();
-    const result = await new MultiAgentDifferentialStrategy({
-      runtime: f.runtime,
-      timeoutMs: 150,
-      waitForTarget: async () => new Promise<void>(() => {}),
-    }).verify(f.input, f.context);
-    expect(result.strategyReport).toMatchObject({
-      stage: "waiting-target",
-      caseStatus: "target-not-ready",
-    });
-    expect(f.agents).toEqual(["source"]);
   });
   it("rejects edits to the implementation even when the agent claims success", async () => {
     const f = fixture();
@@ -938,14 +1376,15 @@ describe("independent two-session differential strategy", () => {
         );
       return result;
     };
-    // Change to a distinct original so the unauthorized edit is observable.
-    writeFileSync(
-      join(f.context.workspace.targetRoot, "implementation.cjs"),
-      "module.exports = value => value + 7;",
+    // Submit a distinct translation so the unauthorized edit is observable.
+    setTranslation(f.input, "module.exports = value => value + 7;");
+    const result = await runTwoPhase(
+      {
+        runtime: f.runtime,
+      },
+      f.input,
+      f.context,
     );
-    const result = await new MultiAgentDifferentialStrategy({
-      runtime: f.runtime,
-    }).verify(f.input, f.context);
     expect(result.problems[0].code).toBe("workspace_integrity_violation");
     expect(result.targetAssessment).toBe("inconclusive");
   });
@@ -960,9 +1399,13 @@ describe("independent two-session differential strategy", () => {
           args: ["-e", "process.exit(9)"],
         },
       });
-    const result = await new MultiAgentDifferentialStrategy({
-      runtime: f.runtime,
-    }).verify(f.input, f.context);
+    const result = await runTwoPhase(
+      {
+        runtime: f.runtime,
+      },
+      f.input,
+      f.context,
+    );
     expect(result.executionStatus).toBe("failed");
     expect(result.strategyReport).toMatchObject({
       caseStatus: "command-failed",
@@ -984,9 +1427,13 @@ describe("independent two-session differential strategy", () => {
       timedOut: false,
       durationMs: 1,
     });
-    const result = await new MultiAgentDifferentialStrategy({
-      runtime: f.runtime,
-    }).verify(f.input, f.context);
+    const result = await runTwoPhase(
+      {
+        runtime: f.runtime,
+      },
+      f.input,
+      f.context,
+    );
     expect(result.problems[0].message).toContain(
       "error_max_turns: Reached maximum number of turns (50)",
     );
@@ -1001,9 +1448,13 @@ describe("independent two-session differential strategy", () => {
         ? { ...result, stdout: result.stdout + "}" }
         : result;
     };
-    const result = await new MultiAgentDifferentialStrategy({
-      runtime: f.runtime,
-    }).verify(f.input, f.context);
+    const result = await runTwoPhase(
+      {
+        runtime: f.runtime,
+      },
+      f.input,
+      f.context,
+    );
     expect(result.executionStatus).toBe("failed");
     expect(result.targetAssessment).toBe("inconclusive");
     expect(result.problems[0].code).toBe("report_evidence_invalid");
@@ -1039,9 +1490,13 @@ describe("independent two-session differential strategy", () => {
         ? { ...result, stdout: result.stdout + "}" }
         : result;
     };
-    const result = await new MultiAgentDifferentialStrategy({
-      runtime: f.runtime,
-    }).verify(f.input, f.context);
+    const result = await runTwoPhase(
+      {
+        runtime: f.runtime,
+      },
+      f.input,
+      f.context,
+    );
     expect(result.executionStatus).toBe("completed");
     expect(f.agents).toEqual(["source", "target", "target"]);
     expect(result.strategyReport).toMatchObject({
@@ -1076,9 +1531,13 @@ describe("independent two-session differential strategy", () => {
       );
       return result;
     };
-    const result = await new MultiAgentDifferentialStrategy({
-      runtime: f.runtime,
-    }).verify(f.input, f.context);
+    const result = await runTwoPhase(
+      {
+        runtime: f.runtime,
+      },
+      f.input,
+      f.context,
+    );
     expect(result.executionStatus).toBe("completed");
     expect(result.targetAssessment).toBe("no_bug_observed");
     expect(result.strategyReport).toMatchObject({
@@ -1119,9 +1578,13 @@ describe("independent two-session differential strategy", () => {
       durationMs: 0,
       timedOut: false,
     });
-    const result = await new MultiAgentDifferentialStrategy({
-      runtime: f.runtime,
-    }).verify(f.input, f.context);
+    const result = await runTwoPhase(
+      {
+        runtime: f.runtime,
+      },
+      f.input,
+      f.context,
+    );
     expect(result.executionStatus).toBe("failed");
     expect(result.targetAssessment).not.toBe("no_bug_observed");
     expect(result.problems[0].code).toBe("report_evidence_invalid");
@@ -1150,9 +1613,14 @@ describe("independent two-session differential strategy", () => {
       controller.abort();
       throw controller.signal.reason;
     };
-    const result = await new MultiAgentDifferentialStrategy({
-      runtime: f.runtime,
-    }).verify(f.input, f.context, controller.signal);
+    const result = await runTwoPhase(
+      {
+        runtime: f.runtime,
+      },
+      f.input,
+      f.context,
+      controller.signal,
+    );
     expect(result.executionStatus).toBe("cancelled");
     const artifact = result.artifacts.find(
       (item) => item.kind === "source-agent-session",
@@ -1177,9 +1645,14 @@ describe("independent two-session differential strategy", () => {
       controller.abort(new Error("cancelled for test"));
       throw controller.signal.reason;
     };
-    const result = await new MultiAgentDifferentialStrategy({
-      runtime: f.runtime,
-    }).verify(f.input, f.context, controller.signal);
+    const result = await runTwoPhase(
+      {
+        runtime: f.runtime,
+      },
+      f.input,
+      f.context,
+      controller.signal,
+    );
     expect(result.executionStatus).toBe("cancelled");
     const artifact = result.artifacts.find(
       (item) => item.kind === "source-agent-session",
@@ -1209,9 +1682,13 @@ describe("independent two-session differential strategy", () => {
         timedOut: false,
       };
     };
-    const result = await new MultiAgentDifferentialStrategy({
-      runtime: f.runtime,
-    }).verify(f.input, f.context);
+    const result = await runTwoPhase(
+      {
+        runtime: f.runtime,
+      },
+      f.input,
+      f.context,
+    );
     expect(result.problems[0].code).toBe("workspace_integrity_violation");
   });
   it("preserves valid deeply nested cases in the report envelope", async () => {
@@ -1240,13 +1717,14 @@ describe("independent two-session differential strategy", () => {
       }
       return result;
     };
-    writeFileSync(
-      join(f.context.workspace.targetRoot, "implementation.cjs"),
-      "module.exports = value => value;",
+    setTranslation(f.input, "module.exports = value => value;");
+    const result = await runTwoPhase(
+      {
+        runtime: f.runtime,
+      },
+      f.input,
+      f.context,
     );
-    const result = await new MultiAgentDifferentialStrategy({
-      runtime: f.runtime,
-    }).verify(f.input, f.context);
     expect(result.executionStatus).toBe("completed");
     expect(result.targetAssessment).toBe("no_bug_observed");
   });
@@ -1261,9 +1739,13 @@ describe("independent two-session differential strategy", () => {
           args: ["-e", "process.stdout.write('[]')"],
         },
       });
-    const result = await new MultiAgentDifferentialStrategy({
-      runtime: f.runtime,
-    }).verify(f.input, f.context);
+    const result = await runTwoPhase(
+      {
+        runtime: f.runtime,
+      },
+      f.input,
+      f.context,
+    );
     expect(result.problems[0].code).toBe("report_evidence_invalid");
     expect(result.targetAssessment).toBe("inconclusive");
   });

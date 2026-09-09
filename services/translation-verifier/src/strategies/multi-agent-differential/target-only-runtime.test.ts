@@ -225,7 +225,7 @@ describe("target-only Agent2 runtime controls", () => {
       const output = await new MultiAgentDifferentialStrategy({
         runtime: createBehaviorRuntime({ apiKey: "local-test-key" }),
         executionSides: ["target"],
-      }).verify(input, {
+      }).verifyTranslation(input, {
         deadlineAt: Date.now() + 10000,
         workspace: {
           root: f.root,

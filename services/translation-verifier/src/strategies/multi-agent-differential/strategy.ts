@@ -1,4 +1,11 @@
-import { existsSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type {
@@ -6,7 +13,9 @@ import type {
   VerificationAssessment,
   VerificationInput,
   VerificationProblem,
-  VerificationStrategy,
+  TwoPhaseVerificationStrategy,
+  VerificationPreparation,
+  VerificationPreparationInput,
   VerificationStrategyContext,
   VerificationStrategyDescriptor,
   VerificationStrategyOutput,
@@ -51,12 +60,21 @@ import {
   isProjectTestPath,
 } from "./behavior-workspace.js";
 import { createBehaviorRuntime } from "./claude-runtime.js";
+import {
+  assertPreparation,
+  assertUntranslatedTarget,
+  assertSourceSnapshot,
+  capturePreparationFiles,
+  restorePreparationFiles,
+  createPreparation,
+  type FrozenPreparationFile,
+} from "./preparation.js";
 import { protectedSecrets, redact } from "./behavior-command.js";
 
 export const MULTI_AGENT_DIFFERENTIAL_STRATEGY: VerificationStrategyDescriptor =
   {
     id: "multi-agent-differential",
-    version: "3.1.0",
+    version: "4.0.0",
     displayName: "Multi-Agent Differential",
   };
 export interface MultiAgentDifferentialOptions {
@@ -68,13 +86,9 @@ export interface MultiAgentDifferentialOptions {
   runtime?: BehaviorRuntime;
   /** Trusted caller authorization, separate from reference suitability. */
   executionSides?: BehaviorSide[];
-  /** Read-only readiness notification for an already-prepared target, not a preparation job.
-   * Must not write project files, launch processes, or own resources. The caller joins
-   * all preparation before verify(); cancellation may stop waiting for this notification.
-   */
-  waitForTarget?: (signal: AbortSignal) => Promise<void>;
 }
-class BehaviorFailure extends Error {
+export class BehaviorFailure extends Error {
+  output?: VerificationStrategyOutput;
   constructor(
     readonly code: VerificationProblem["code"],
     readonly caseStatus: BehaviorCaseStatus,
@@ -94,12 +108,255 @@ const limitations = [
   "Only explicit JSON cases are compared. Nondeterministic behavior and unmodeled side effects remain outside this evidence.",
 ];
 
-export class MultiAgentDifferentialStrategy implements VerificationStrategy {
+interface PreparedBehavior {
+  report: BehaviorReport;
+  assessment: VerificationAssessment;
+  sourceBaseline: Omit<BehaviorProjectBaseline, "root">;
+  sourceHandoffBaseline: Omit<BehaviorProjectBaseline, "root">;
+  targetBaseline: Omit<BehaviorProjectBaseline, "root">;
+  targetModes: Record<string, number>;
+  handoffFiles: FrozenPreparationFile[];
+  evidence: { id: string; content: unknown }[];
+}
+
+export class MultiAgentDifferentialStrategy implements TwoPhaseVerificationStrategy {
   constructor(private readonly options: MultiAgentDifferentialOptions = {}) {}
 
-  async verify(
+  async prepareTests(
+    input: VerificationPreparationInput,
+    context: VerificationStrategyContext,
+    signal?: AbortSignal,
+  ): Promise<VerificationPreparation> {
+    input = structuredClone({
+      request: input.request,
+      analysisReport: input.analysisReport,
+      migrationPlan: input.migrationPlan,
+    });
+    const deadlineAt = Math.min(
+      context.deadlineAt,
+      Date.now() + (this.options.timeoutMs ?? 300_000),
+    );
+    const timeout = AbortSignal.timeout(
+      Math.max(0, Math.min(2_147_483_647, Math.floor(deadlineAt - Date.now()))),
+    );
+    const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
+    const report: BehaviorReport = {
+      schemaVersion: "3.0",
+      stage: "eligibility",
+      caseStatus: "not-executed",
+      cases: [],
+      evidence: [],
+      repairs: [],
+      limitations,
+    };
+    const artifacts: VerificationArtifact[] = [];
+    const evidence: PreparedBehavior["evidence"] = [];
+    const preparationContext: VerificationStrategyContext = {
+      ...context,
+      writeArtifact: async (artifact) => {
+        evidence.push({
+          id: artifact.id,
+          content: parseBehaviorJson(
+            readFileSync(
+              join(context.workspace.strategyRoot, artifact.path),
+              "utf8",
+            ),
+            20 * 1024 * 1024,
+            32,
+          ),
+        });
+        return context.writeArtifact(artifact);
+      },
+    };
+    const measure =
+      context.measureStep ??
+      (async <T>(_name: string, fn: () => T | Promise<T>) => fn());
+    const runtime = this.options.runtime ?? createBehaviorRuntime(this.options);
+    let assessment: VerificationAssessment = {
+      mode: "target_only",
+      referenceDecision: "undetermined",
+      referenceReason: "No validated test basis is available.",
+      executionStatus: "failed",
+      sourceAssessment: "not_checked",
+      targetAssessment: "inconclusive",
+      problems: [],
+    };
+    try {
+      combined.throwIfAborted();
+      if (deadlineAt <= Date.now())
+        throw new BehaviorFailure(
+          "agent_timeout",
+          "timeout",
+          "Verification deadline exceeded.",
+        );
+      report.classification = classifyReuse(input);
+      const allowed = this.options.executionSides ?? ["source", "target"];
+      if (
+        !allowed.includes("target") ||
+        (report.classification === "direct" && !allowed.includes("source"))
+      )
+        throw new BehaviorFailure(
+          "context_incomplete",
+          "not-executed",
+          "Required execution side is not authorized.",
+        );
+      if (report.classification === "not_applicable")
+        return createPreparation(MULTI_AGENT_DIFFERENTIAL_STRATEGY, input, {
+          skipped: true,
+        });
+      assertProjectRoots(context);
+      const sourceRoot = context.workspace.sourceRoot;
+      const targetRoot = context.workspace.targetRoot;
+      const initialTargetBaseline = captureProjectBaseline(targetRoot);
+      assertUntranslatedTarget(input, targetRoot);
+      const sourceBaseline = captureProjectBaseline(sourceRoot);
+      assertSourceSnapshot(input, sourceRoot);
+      report.stage = "source";
+      const sourceTestRoot = prepareTestDirectory(sourceRoot);
+      const sourceSandbox = {
+        cwd: sourceRoot,
+        readRoots: [sourceRoot, targetRoot],
+        writeRoots: [sourceTestRoot, sourceRoot],
+        baseline: sourceBaseline,
+      };
+      const collected = await measure("collect-and-replay-source", () =>
+        this.authorAndReplay(
+          "source",
+          input,
+          preparationContext,
+          sourceSandbox,
+          runtime,
+          report,
+          artifacts,
+          deadlineAt,
+          combined,
+          () => {
+            assertHash(sourceBaseline);
+            assertSourceSnapshot(input, sourceRoot);
+            assertTargetTransition(
+              initialTargetBaseline,
+              captureProjectBaseline(targetRoot),
+              new Set(),
+            );
+            assertUntranslatedTarget(input, targetRoot);
+          },
+        ),
+      );
+      const source = collected.manifest as BehaviorCollectionManifest;
+      const observations = collected.observations;
+      const hasSource = observations.length > 0;
+      assessment = {
+        ...assessment,
+        mode: hasSource ? "differential" : "target_only",
+        referenceDecision: hasSource ? "accepted" : "rejected",
+        referenceReason: `Analyzer ${report.classification}; frozen cases use ${hasSource ? "replayed source observations and case-specific expectations" : "requirement-derived expectations only"}.`,
+        sourceAssessment: hasSource ? "inconclusive" : "not_checked",
+      };
+      assertTargetTransition(
+        initialTargetBaseline,
+        captureProjectBaseline(targetRoot),
+        new Set(),
+      );
+      const handoffFiles = capturePreparationFiles(sourceRoot, [
+        ".forexplore-tests/manifest.json",
+        ".forexplore-tests/inputs.json",
+        ...source.testFiles,
+        ...Object.keys(captureProjectBaseline(sourceRoot).files).filter(
+          (path) => !Object.hasOwn(sourceBaseline.files, path),
+        ),
+      ]);
+      const sourceHandoffBaseline = captureProjectBaseline(sourceRoot);
+      const frozenCases = JSON.stringify(source.cases);
+      report.sourceSnapshot = {
+        schemaVersion: "3.0",
+        subjectHash: sourceBaseline.hash,
+        casesHash: hashContent(frozenCases),
+        manifest: source,
+        observations,
+      };
+      artifacts.push(
+        await persistBehaviorArtifact(
+          preparationContext,
+          "source-behavior-snapshot",
+          report.sourceSnapshot,
+        ),
+      );
+      report.cases = source.cases.map((item) => ({
+        caseId: item.caseId,
+        caseStatus: "not-executed",
+        expectation: item.expectation,
+        source: observations.find((row) => row.caseId === item.caseId) ?? null,
+        target: null,
+      }));
+      combined.throwIfAborted();
+      assertSourceSnapshot(input, sourceRoot);
+      assertTargetTransition(
+        sourceHandoffBaseline,
+        captureProjectBaseline(sourceRoot),
+        new Set(),
+      );
+      for (const file of handoffFiles)
+        if (readTestFile(sourceRoot, file.path) !== file.content)
+          throw new BehaviorFailure(
+            "workspace_integrity_violation",
+            "workspace-integrity-failed",
+            "Frozen Agent1 handoff changed.",
+          );
+      assertTargetTransition(
+        initialTargetBaseline,
+        captureProjectBaseline(targetRoot),
+        new Set(),
+      );
+      assertUntranslatedTarget(input, targetRoot);
+      const baselineData = ({ files, hash }: BehaviorProjectBaseline) => ({
+        files,
+        hash,
+      });
+      const payload: PreparedBehavior = {
+        report,
+        assessment,
+        evidence,
+        sourceBaseline: baselineData(sourceBaseline),
+        sourceHandoffBaseline: baselineData(sourceHandoffBaseline),
+        targetBaseline: baselineData(initialTargetBaseline),
+        targetModes: Object.fromEntries(
+          Object.keys(initialTargetBaseline.files).map((path) => [
+            path,
+            lstatSync(join(targetRoot, path)).mode,
+          ]),
+        ),
+        handoffFiles,
+      };
+      return createPreparation(
+        MULTI_AGENT_DIFFERENTIAL_STRATEGY,
+        input,
+        parseBehaviorJson(JSON.stringify(payload), 20 * 1024 * 1024, 32),
+      );
+    } catch (cause) {
+      const failure = asFailure(cause, combined);
+      report.caseStatus = failure.caseStatus;
+      for (const item of report.cases) item.caseStatus = failure.caseStatus;
+      assessment = {
+        ...assessment,
+        executionStatus: failure.code === "cancelled" ? "cancelled" : "failed",
+        targetAssessment: "inconclusive",
+        problems: [{ code: failure.code, message: failure.message }],
+      };
+      failure.output = await finishReport(
+        context,
+        report,
+        assessment,
+        artifacts,
+        "preparation-failure-report",
+      );
+      throw failure;
+    }
+  }
+
+  async verifyTranslation(
     input: VerificationInput,
     context: VerificationStrategyContext,
+    preparation?: VerificationPreparation,
     signal?: AbortSignal,
   ): Promise<VerificationStrategyOutput> {
     const deadlineAt = Math.min(
@@ -110,7 +367,7 @@ export class MultiAgentDifferentialStrategy implements VerificationStrategy {
       Math.max(0, Math.min(2_147_483_647, Math.floor(deadlineAt - Date.now()))),
     );
     const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
-    const report: BehaviorReport = {
+    let report: BehaviorReport = {
       schemaVersion: "3.0",
       stage: "eligibility",
       caseStatus: "not-executed",
@@ -135,125 +392,147 @@ export class MultiAgentDifferentialStrategy implements VerificationStrategy {
     };
     try {
       combined.throwIfAborted();
-      report.classification = classifyReuse(input);
-      const allowed = this.options.executionSides ?? ["source", "target"];
+      if (deadlineAt <= Date.now())
+        throw new BehaviorFailure(
+          "agent_timeout",
+          "timeout",
+          "Verification deadline exceeded.",
+        );
+      const classification = classifyReuse(input);
+      const independentTarget = classification === "not_applicable";
       if (
-        !allowed.includes("target") ||
-        (report.classification === "direct" && !allowed.includes("source"))
+        !(this.options.executionSides ?? ["source", "target"]).includes(
+          "target",
+        )
       )
         throw new BehaviorFailure(
           "context_incomplete",
           "not-executed",
           "Required execution side is not authorized.",
         );
-      const independentTarget = report.classification === "not_applicable";
-      if (independentTarget)
+      assertProjectRoots(context, !independentTarget);
+      const sourceRoot = context.workspace.sourceRoot;
+      const targetRoot = realpathSync(context.workspace.targetRoot);
+      let checkHandoff = () => {};
+      if (independentTarget) {
+        if (preparation) {
+          const skipped = assertPreparation(
+            preparation,
+            MULTI_AGENT_DIFFERENTIAL_STRATEGY,
+            input,
+          );
+          if (
+            !skipped ||
+            typeof skipped !== "object" ||
+            Array.isArray(skipped) ||
+            skipped.skipped !== true
+          )
+            throw new BehaviorFailure(
+              "workspace_integrity_violation",
+              "workspace-integrity-failed",
+              "Expected skipped preparation.",
+            );
+        }
+        report.classification = classification;
         report.limitations = [
           "Agent2 derives requirement expectations and authors the tests in the same session. Host freezing prevents post-execution changes but does not prove the expectations or coverage correct. No source behavior was used as a reference.",
           ...limitations.slice(1),
         ];
-      assertProjectRoots(context, !independentTarget);
-      const sourceRoot = context.workspace.sourceRoot;
-      const targetRoot = independentTarget
-        ? realpathSync(context.workspace.targetRoot)
-        : context.workspace.targetRoot;
-      const initialTargetBaseline = captureProjectBaseline(targetRoot);
-      assertDeclaredSnapshot(input, targetRoot, "target");
-      let checkHandoff = () => {};
-      if (!independentTarget) {
-        const sourceBaseline = captureProjectBaseline(sourceRoot);
-        assertDeclaredSnapshot(input, sourceRoot, "source");
-        report.stage = "source";
-        const sourceTestRoot = prepareTestDirectory(sourceRoot);
-        const sourceSandbox = {
-          cwd: sourceRoot,
-          readRoots: [sourceRoot, targetRoot],
-          writeRoots: [sourceTestRoot, sourceRoot],
-          baseline: sourceBaseline,
-        };
-        const collected = await measure("collect-and-replay-source", () =>
-          this.authorAndReplay(
-            "source",
+      } else {
+        try {
+          // SAFETY: the capsule is produced above and its complete JSON payload and input binding were verified.
+          const payload = assertPreparation(
+            preparation,
+            MULTI_AGENT_DIFFERENTIAL_STRATEGY,
             input,
-            context,
-            sourceSandbox,
-            runtime,
-            report,
-            artifacts,
-            deadlineAt,
-            combined,
-            () => {
-              assertHash(sourceBaseline);
-              assertDeclaredSnapshot(input, sourceRoot, "source");
-            },
-          ),
-        );
-        const source = collected.manifest as BehaviorCollectionManifest;
-        const observations = collected.observations;
-        const hasSource = observations.length > 0;
-        assessment = {
-          ...assessment,
-          mode: hasSource ? "differential" : "target_only",
-          referenceDecision: hasSource ? "accepted" : "rejected",
-          referenceReason: `Analyzer ${report.classification}; frozen cases use ${hasSource ? "replayed source observations and case-specific expectations" : "requirement-derived expectations only"}.`,
-          sourceAssessment: hasSource ? "inconclusive" : "not_checked",
-        };
-        assertTargetTransition(
-          initialTargetBaseline,
-          captureProjectBaseline(targetRoot),
-          new Set(),
-        );
-        const handoffFiles = [
-          ".forexplore-tests/manifest.json",
-          ".forexplore-tests/inputs.json",
-          ...source.testFiles,
-        ].map((path) => ({ path, content: readTestFile(sourceRoot, path) }));
-        const sourceHandoffBaseline = captureProjectBaseline(sourceRoot);
-        checkHandoff = () => {
-          assertHash(sourceHandoffBaseline);
-          for (const file of handoffFiles)
-            if (readTestFile(sourceRoot, file.path) !== file.content)
-              throw new BehaviorFailure(
-                "workspace_integrity_violation",
-                "workspace-integrity-failed",
-                "Frozen Agent1 handoff changed.",
+          ) as unknown as PreparedBehavior;
+          if (
+            !payload.report.sourceSnapshot ||
+            payload.report.classification !== classification
+          )
+            throw new Error(
+              "Preparation has no matching frozen source snapshot.",
+            );
+          artifacts.push(
+            await persistBehaviorArtifact(
+              context,
+              "verification-preparation",
+              preparation,
+            ),
+          );
+          for (const item of payload.evidence) {
+            if (!/^[a-z0-9-]+$/.test(item.id))
+              throw new Error("Invalid preparation evidence identifier.");
+            artifacts.push(
+              await persistBehaviorArtifact(
+                context,
+                `prepared-${item.id}`,
+                item.content,
+              ),
+            );
+          }
+          report = payload.report;
+          assessment = payload.assessment;
+          assertSourceSnapshot(input, sourceRoot);
+          assertHash({ ...payload.sourceBaseline, root: sourceRoot });
+          restorePreparationFiles(sourceRoot, payload.handoffFiles);
+          checkHandoff = () => {
+            assertSourceSnapshot(input, sourceRoot);
+            assertTargetTransition(
+              { ...payload.sourceHandoffBaseline, root: sourceRoot },
+              captureProjectBaseline(sourceRoot),
+              new Set(),
+            );
+            for (const file of payload.handoffFiles)
+              if (
+                readTestFile(sourceRoot, file.path) !== file.content ||
+                lstatSync(join(sourceRoot, file.path)).mode !== file.mode
+              )
+                throw new BehaviorFailure(
+                  "workspace_integrity_violation",
+                  "workspace-integrity-failed",
+                  "Frozen Agent1 handoff changed.",
+                );
+          };
+          checkHandoff();
+          assertTargetTransition(
+            { ...payload.targetBaseline, root: targetRoot },
+            captureProjectBaseline(targetRoot),
+            new Set(input.translation.files.map((file) => file.path)),
+          );
+          for (const patch of input.translation.files) {
+            if (
+              patch.status === "created"
+                ? Object.hasOwn(payload.targetBaseline.files, patch.path)
+                : !Object.hasOwn(payload.targetBaseline.files, patch.path)
+            )
+              throw new Error(
+                "Translation does not match original target baseline.",
               );
-        };
-        const frozenCases = JSON.stringify(source.cases);
-        report.sourceSnapshot = {
-          schemaVersion: "3.0",
-          subjectHash: sourceBaseline.hash,
-          casesHash: hashContent(frozenCases),
-          manifest: source,
-          observations,
-        };
-        artifacts.push(
-          await persistBehaviorArtifact(
-            context,
-            "source-behavior-snapshot",
-            report.sourceSnapshot,
-          ),
-        );
-        report.cases = source.cases.map((item) => ({
-          caseId: item.caseId,
-          caseStatus: "not-executed",
-          expectation: item.expectation,
-          source:
-            observations.find((row) => row.caseId === item.caseId) ?? null,
-          target: null,
-        }));
+            const expectedMode = payload.targetModes[patch.path] ?? 0o100644;
+            if (lstatSync(join(targetRoot, patch.path)).mode !== expectedMode)
+              throw new Error("Translation changed target file permissions.");
+          }
+        } catch (cause) {
+          throw new BehaviorFailure(
+            "workspace_integrity_violation",
+            "workspace-integrity-failed",
+            errorText(cause),
+          );
+        }
       }
-      report.stage = "waiting-target";
-      report.caseStatus = "target-not-ready";
-      if (this.options.waitForTarget)
-        await measure("wait-target-ready", () =>
-          waitForReady(this.options.waitForTarget!, combined),
-        );
       combined.throwIfAborted();
       checkHandoff();
       const targetBaseline = captureProjectBaseline(targetRoot);
-      assertTargetTransition(initialTargetBaseline, targetBaseline, new Set());
-      assertDeclaredSnapshot(input, targetRoot, "target");
+      try {
+        assertDeclaredSnapshot(input, targetRoot, "target");
+      } catch (cause) {
+        throw new BehaviorFailure(
+          "workspace_integrity_violation",
+          "workspace-integrity-failed",
+          errorText(cause),
+        );
+      }
       report.targetSubjectHash = targetBaseline.hash;
       report.patchHash = input.translation.patchHash;
       report.stage = "target";
@@ -338,7 +617,7 @@ export class MultiAgentDifferentialStrategy implements VerificationStrategy {
         problems: [],
       };
     } catch (cause) {
-      const failure = asFailure(cause, combined, report);
+      const failure = asFailure(cause, combined);
       report.caseStatus = failure.caseStatus;
       for (const item of report.cases)
         if (item.target === null) item.caseStatus = failure.caseStatus;
@@ -349,47 +628,12 @@ export class MultiAgentDifferentialStrategy implements VerificationStrategy {
         problems: [{ code: failure.code, message: failure.message }],
       };
     }
-    const artifact = await persistBehaviorArtifact(
-      context,
-      "behavior-report",
-      report,
-    );
-    artifacts.push(artifact);
-    return {
-      ...assessment,
-      summary: `${report.stage}: ${report.caseStatus}; ${report.cases.length} recorded cases. Case-specific execution evidence only, not a proof of business correctness.`,
-      issues: [
-        ...report.cases
-          .filter((item) => item.caseStatus === "translation-divergence")
-          .map((item) => ({
-            id: `behavior-${item.caseId}`,
-            kind: "behavioral-divergence",
-            caseId: item.caseId,
-            message:
-              "Target observation differs from the frozen case-specific expectation. Return this evidence to the upstream translator; no repair was attempted.",
-            sourceObservation: parseBehaviorJson(JSON.stringify(item.source)),
-            targetObservation: parseBehaviorJson(JSON.stringify(item.target)),
-            evidenceArtifactIds: artifacts.map(({ id }) => id),
-          })),
-        ...assessment.problems.map((problem, index) => ({
-          id: `behavior-problem-${index}`,
-          kind: problem.code,
-          message: problem.message,
-          evidenceArtifactIds: [artifact.id],
-        })),
-      ],
-      artifacts,
-      strategyReport: parseBehaviorJson(
-        JSON.stringify(report),
-        10 * 1024 * 1024,
-        24,
-      ),
-    };
+    return finishReport(context, report, assessment, artifacts);
   }
 
   private async authorAndReplay(
     side: BehaviorSide,
-    input: VerificationInput,
+    input: VerificationPreparationInput,
     context: VerificationStrategyContext,
     sandbox: BehaviorExecutionScope,
     runtime: BehaviorRuntime,
@@ -575,7 +819,7 @@ export class MultiAgentDifferentialStrategy implements VerificationStrategy {
 
   private async author(
     side: BehaviorSide,
-    input: VerificationInput,
+    input: VerificationPreparationInput,
     context: VerificationStrategyContext,
     sandbox: BehaviorExecutionScope,
     runtime: BehaviorRuntime,
@@ -770,6 +1014,46 @@ export class MultiAgentDifferentialStrategy implements VerificationStrategy {
   }
 }
 
+async function finishReport(
+  context: VerificationStrategyContext,
+  report: BehaviorReport,
+  assessment: VerificationAssessment,
+  artifacts: VerificationArtifact[],
+  artifactId = "behavior-report",
+): Promise<VerificationStrategyOutput> {
+  const artifact = await persistBehaviorArtifact(context, artifactId, report);
+  artifacts.push(artifact);
+  return {
+    ...assessment,
+    summary: `${report.stage}: ${report.caseStatus}; ${report.cases.length} recorded cases. Case-specific execution evidence only, not a proof of business correctness.`,
+    issues: [
+      ...report.cases
+        .filter((item) => item.caseStatus === "translation-divergence")
+        .map((item) => ({
+          id: `behavior-${item.caseId}`,
+          kind: "behavioral-divergence",
+          caseId: item.caseId,
+          message:
+            "Target observation differs from the frozen case-specific expectation. Return this evidence to the upstream translator; no repair was attempted.",
+          sourceObservation: parseBehaviorJson(JSON.stringify(item.source)),
+          targetObservation: parseBehaviorJson(JSON.stringify(item.target)),
+          evidenceArtifactIds: artifacts.map(({ id }) => id),
+        })),
+      ...assessment.problems.map((problem, index) => ({
+        id: `behavior-problem-${index}`,
+        kind: problem.code,
+        message: problem.message,
+        evidenceArtifactIds: [artifact.id],
+      })),
+    ],
+    artifacts,
+    strategyReport: parseBehaviorJson(
+      JSON.stringify(report),
+      10 * 1024 * 1024,
+      24,
+    ),
+  };
+}
 function assertTargetPlan(state: TargetDesignState, root: string): void {
   if (state.frozenPlan === undefined)
     throw new BehaviorFailure(
@@ -847,7 +1131,9 @@ function agentFailureSummary(stdout: string, stderr: string): string {
   return stderr.slice(-2000);
 }
 
-function classifyReuse(input: VerificationInput): ReuseClassification {
+export function classifyReuse(
+  input: VerificationPreparationInput,
+): ReuseClassification {
   const report = input.analysisReport;
   const applicability =
     report && typeof report === "object" && !Array.isArray(report)
@@ -880,7 +1166,7 @@ function assertTargetTransition(
       throw new BehaviorFailure(
         "workspace_integrity_violation",
         "workspace-integrity-failed",
-        `Target readiness contains an unauthorized change: ${path}`,
+        `Project phase transition contains an unauthorized change: ${path}`,
       );
   }
 }
@@ -899,21 +1185,13 @@ function assertHash(baseline: BehaviorProjectBaseline): void {
 function errorText(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
-function asFailure(
-  cause: unknown,
-  signal: AbortSignal,
-  report: BehaviorReport,
-): BehaviorFailure {
+function asFailure(cause: unknown, signal: AbortSignal): BehaviorFailure {
   if (signal.aborted) {
     const timedOut =
       signal.reason instanceof Error && signal.reason.name === "TimeoutError";
     return new BehaviorFailure(
       timedOut ? "agent_timeout" : "cancelled",
-      timedOut
-        ? report.stage === "waiting-target"
-          ? "target-not-ready"
-          : "timeout"
-        : "not-executed",
+      timedOut ? "timeout" : "not-executed",
       timedOut ? "Verification deadline exceeded." : "Verification cancelled.",
     );
   }
@@ -925,26 +1203,7 @@ function asFailure(
         errorText(cause),
       );
 }
-async function waitForReady(
-  wait: (signal: AbortSignal) => Promise<void>,
-  signal: AbortSignal,
-): Promise<void> {
-  signal.throwIfAborted();
-  let abort: () => void = () => {};
-  try {
-    await Promise.race([
-      Promise.resolve().then(() => wait(signal)),
-      new Promise<never>((_resolve, reject) => {
-        abort = () => reject(signal.reason);
-        signal.addEventListener("abort", abort, { once: true });
-        if (signal.aborted) abort();
-      }),
-    ]);
-  } finally {
-    signal.removeEventListener("abort", abort);
-  }
-}
-async function executeManifest(
+export async function executeManifest(
   manifest: BehaviorTargetManifest | BehaviorCollectionManifest,
   side: BehaviorSide,
   sandbox: BehaviorExecutionScope,
@@ -1060,6 +1319,7 @@ export function createMultiAgentDifferentialProvider(
   options: MultiAgentDifferentialOptions = {},
 ): VerificationStrategyProvider {
   return {
+    lifecycle: "two-phase",
     descriptor: MULTI_AGENT_DIFFERENTIAL_STRATEGY,
     workspaceRequirements: (input) => ({
       source: classifyReuse(input) !== "not_applicable",

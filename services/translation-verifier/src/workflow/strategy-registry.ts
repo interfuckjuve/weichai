@@ -1,5 +1,6 @@
 import type {
   VerificationStrategy,
+  TwoPhaseVerificationStrategy,
   VerificationStrategyDescriptor,
   VerificationStrategyProvider,
 } from "../schemas/verification-types.js";
@@ -14,11 +15,8 @@ export class VerificationStrategyFactory {
         throw new Error(`Duplicate verification strategy: ${descriptor.id}`);
       }
       this.#providers.set(descriptor.id, {
+        ...provider,
         descriptor,
-        ...(provider.workspaceRequirements
-          ? { workspaceRequirements: provider.workspaceRequirements }
-          : {}),
-        create: provider.create,
       });
     }
   }
@@ -32,7 +30,9 @@ export class VerificationStrategyFactory {
     return { ...provider, descriptor: { ...provider.descriptor } };
   }
 
-  create(strategyId: string): VerificationStrategy {
+  create(
+    strategyId: string,
+  ): VerificationStrategy | TwoPhaseVerificationStrategy {
     return this.resolve(strategyId).create();
   }
 

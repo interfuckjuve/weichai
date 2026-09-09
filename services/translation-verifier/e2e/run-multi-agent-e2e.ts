@@ -17,11 +17,14 @@ import type {
   VerificationStrategyContext,
   VerificationResult,
   VerificationStrategyOutput,
+  VerificationPreparation,
 } from "../src/schemas/verification-types.js";
 import {
   MULTI_AGENT_DIFFERENTIAL_STRATEGY,
   MultiAgentDifferentialStrategy,
   type MultiAgentDifferentialOptions,
+  BehaviorFailure,
+  classifyReuse,
 } from "../src/strategies/multi-agent-differential/strategy.js";
 import type { BehaviorRuntime } from "../src/strategies/multi-agent-differential/behavior-types.js";
 import {
@@ -38,7 +41,6 @@ import {
 
 export interface MultiAgentE2EDeps {
   runtime?: BehaviorRuntime;
-  waitForTarget?: (signal: AbortSignal) => Promise<void>;
   artifactRoot?: string;
   workspaceRoot?: string;
   now?: () => string;
@@ -359,14 +361,31 @@ export async function executeMultiAgentE2E(
     model: options.model,
     effort: options.effort,
     timeoutMs: options.timeoutMs,
-    waitForTarget: async (signal) => {
-      await deps.waitForTarget?.(signal);
-      signal.throwIfAborted();
-    },
   };
+  const strategy = new MultiAgentDifferentialStrategy(strategyOptions);
+  const signal = AbortSignal.timeout(options.timeoutMs);
   let output: VerificationStrategyOutput | undefined;
+  let preparation: VerificationPreparation | undefined;
   try {
-    await applyTarget(AbortSignal.timeout(options.timeoutMs));
+    // Fixture scheduling only: no Translator model is executed by this runner.
+    preparationPromise = prepareTarget(signal);
+    await preparationPromise;
+    const { request, analysisReport, migrationPlan } = input;
+    preparation =
+      classifyReuse(input) === "not_applicable"
+        ? undefined
+        : await strategy.prepareTests(
+            { request, analysisReport, migrationPlan },
+            context,
+            signal,
+          );
+    await applyTarget(signal);
+    output = await strategy.verifyTranslation(
+      input,
+      context,
+      preparation,
+      signal,
+    );
   } catch (cause) {
     const message = redact(
       cause instanceof Error ? cause.message : String(cause),
@@ -377,29 +396,42 @@ export async function executeMultiAgentE2E(
       "project-preparation-failure",
       { message },
     );
-    output = {
-      mode: "target_only",
-      referenceDecision: "undetermined",
-      referenceReason:
-        "Project preparation failed before either Agent started.",
-      executionStatus: "failed",
-      sourceAssessment: "not_checked",
-      targetAssessment: "not_checked",
-      problems: [{ code: "environment_unavailable", message }],
-      summary: message,
-      issues: [],
-      artifacts: [artifact],
-      strategyReport: { stage: "preparation", message },
-    };
+    const artifacts = [artifact];
+    if (preparation)
+      artifacts.push(
+        await persistBehaviorArtifact(
+          context,
+          "fixture-verification-preparation",
+          preparation,
+        ),
+      );
+    output =
+      cause instanceof BehaviorFailure && cause.output
+        ? cause.output
+        : {
+            mode: "target_only",
+            referenceDecision: "undetermined",
+            referenceReason:
+              "Fixture preparation or translation application failed; inspect phase evidence for completed source work.",
+            executionStatus: "failed",
+            sourceAssessment: "not_checked",
+            targetAssessment: "not_checked",
+            problems: [
+              {
+                code:
+                  cause instanceof BehaviorFailure
+                    ? cause.code
+                    : "environment_unavailable",
+                message,
+              },
+            ],
+            summary: message,
+            issues: [],
+            artifacts,
+            strategyReport: { stage: "preparation", message },
+          };
   } finally {
     await preparationPromise?.catch(() => {});
-  }
-  if (!output) {
-    context.deadlineAt = Date.now() + options.timeoutMs;
-    output = await new MultiAgentDifferentialStrategy(strategyOptions).verify(
-      input,
-      context,
-    );
   }
   const result = createVerificationResult(
     input,

@@ -92,7 +92,9 @@ export async function runVerification(
                 workspaceRoot: config.workspaceRoot,
                 artifactRoot: config.artifactRoot,
                 keepWorkspace: options.keepWorkspace,
-                requirements: provider.workspaceRequirements?.(input),
+                requirements: provider.lifecycle === "two-phase"
+                  ? provider.workspaceRequirements?.(input, "verify-translation")
+                  : provider.workspaceRequirements?.(input),
                 preparedProjects: options.preparedProjects,
               }),
           );
@@ -120,6 +122,7 @@ export async function runVerification(
             workspace.writtenArtifacts,
             signal,
             config.shutdownTimeoutMs,
+            options.preparation,
           );
           if (execution.kind === "failure" && !execution.shutdownConfirmed) {
             cleanupUnconfirmed = new Error(

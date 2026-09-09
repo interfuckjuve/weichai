@@ -35,7 +35,7 @@ const result = {
   contentHash: "b".repeat(64),
 } satisfies VerificationResult;
 
-function provider(): VerificationStrategyProvider {
+function provider(): Extract<VerificationStrategyProvider, { lifecycle?: "single-phase" }> {
   return {
     descriptor,
     create: () =>
