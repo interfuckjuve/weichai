@@ -1,56 +1,49 @@
-# guochuang.pdf 技术部分修订说明
+# 计划书修订说明
 
-基线：`chiparon/weichai` 的 `9-8-v` 分支，提交 `c3f09d3`，2026-09-08 22:35:58 +0800。原 PDF：用户提供的 36 页 `guochuang.pdf`。原工作区有未提交修改，因此在独立 worktree `D:/CodeProjects/Weichai-guochuang`、分支 `huawei` 内完成。
+代码基础：`chiparon/weichai` 的 `9-8-v`（`c3f09d3`）和本次获取的最新分支 `codex/guochuang-ui`（`a02e903`）。计划书功能在 `huawei` 分支实现，测试与配置见 `docs/huawei-implementation.zh-CN.md`。
 
-## 结构重整
+## 本轮全文措辞修订
 
-| 新章 | 集中处理的内容 | 与原稿的关系 |
-| --- | --- | --- |
-| 四 面向大型工程理解的系统框架 | 系统边界、分层职责、两条业务链路、共同约束 | 合并原四的挑战与原五的总体方案，删除按技术逐项重复“问题—解决思路”的介绍 |
-| 五 依赖约束的分层建模与增量索引 | 源码事实、受限解析、Agent 提案、层级状态、依赖与更新 | 集中原六的离线建模机制；操作细节移至七 |
-| 六 任务驱动的级联检索与证据编译 | 范围校验、混合召回、有限扩展、上下文计量与补取 | 集中在线机制，避免原四、五、六、七反复解释检索与上下文 |
-| 七 Agent 协同开发与工程实现 | 工作台、用户操作、HTTP/MCP、IDE、翻译执行与运行 | 用输入、操作、输出和状态说明产品，不再逐项复述算法 |
-| 八 实验设计与阶段结果 | 最新实现状态、已有记录、证据口径、正式指标及实验计划 | 将原提纲补成正文，区分历史扁平基线、结构层级与最新 Agent 产物 |
+以用户提供的 `guochuang.pdf` 为正文来源，技术章节参考现有代码；写作方式参考《面向 Agent 记忆的向量检索系统IO优化-项目文档(1).pdf》。采用从具体问题解释处理方法、约束及验证方式的行文顺序，不引用参考文档的实验成果。
 
-## 技术论证与文风修订
+本轮通读第一至第十章已有文字，按语义重写模糊表达，不只做词语替换。例如：
 
-参考用户提供的《面向 Agent 记忆的向量检索系统IO优化-项目文档(1).pdf》，借鉴其从访问行为或成本矛盾推导技术机制、再解释正确性条件与验证方法的论证方式。未移植该文档的实验数据、算法成果或结论。
-
-本版补充流水线吞吐和内存分解、模块集合约束、任务身份与过期写入防护、增量失效闭包、排名融合、读取放大、覆盖收益及预算约束等 11 个公式，说明变量含义和适用边界。跨语言关系按构建上下文和证据端点解释，开发验证区分编译通过与行为保持。第八章集中列明基线已实现能力和待实现机制，避免各节反复插入状态声明打断技术论证。
-
-## 实现与数字核对入口
-
-| 正文内容 | 当前仓库依据 |
+| 原表达 | 修订方式 |
 | --- | --- |
-| Agent 默认要求、120 文件阈值、投影单独重试 | `services/code-intelligence-service/src/project-analysis.ts` |
-| 层级划分、细化原因和模型来源 | `services/code-intelligence-service/src/module-modeling.ts`、`module-hierarchy.ts`、`module-hierarchy-planner.ts` |
-| 模块协议 | `packages/contracts/src/project-analysis.ts`、`module-hierarchy.ts` |
-| 可回收解析进程 | `services/code-indexer/src/structural-parse-pool.ts`、`structural-parse-worker.ts` |
-| 版本与混合索引 | `services/code-intelligence-service/src/seekdb-index-store.ts`、`seekdb-projection.ts` |
-| 粒度、固定范围、受限候选及依赖 | `services/code-intelligence-service/src/task-retrieval.ts` |
-| 精确计量、范围去重、缺口 | `services/code-intelligence-service/src/context-compiler.ts` |
-| 页面预算移除与请求边界 | `apps/vscode-extension/webview/src/components/TaskSearch.tsx`、`apps/vscode-extension/src/protocol/messages.ts` |
-| HTTP 与 MCP | `services/code-intelligence-service/src/semantic-query-http-server.ts`、`services/semantic-index-mcp-server/src/semantic-index-mcp-server.ts` |
-| 翻译执行和 compilation-only | `services/adaptation-service/src/workspace-translation-runtime.ts`、`packages/contracts/src/workspace-translation.ts` |
-| 规模、模型与 UI 历史记录 | `docs/task-code-context-implementation.zh-CN.md` |
-| 早期两文件翻译记录 | `docs/session-handoff-translation-2026-09-08.zh-CN.md` |
+| 检索的交付单位是任务证据 | 直接说明返回相关源码、文件位置、版本、接口依赖及未解析信息 |
+| 证据构建 | 根据语境写为查找源码、补充依赖或整理模型输入 |
+| 证据编译、上下文编译 | 改为源码筛选与上下文整理，说明去重、片段选择及 token 计量步骤 |
+| 任务级交付契约 | 说明 ContextPacket 是 HTTP、MCP 和 IDE 共用的返回数据结构 |
+| 形成连续证据、开发闭环 | 说明具体执行哪些步骤、保存哪些记录、通过哪些测试 |
+| 输入指纹、执行身份、检索投影 | 分别说明内容哈希、执行编号和生成的全文或向量索引 |
 
-旧说明书关于“仅结构基线、模型仅可选”的实现描述已更新。保留真实 Agent 模块结果与待细化状态，注明一次模块检索 15.537 秒；没有将现有记录包装成三项命题指标已达标。正文引用的大仓和远程模型历史数字没有在本次任务中重跑。新增 huawei 代码的固定样例、实际命令及测试结果见 `docs/huawei-implementation.zh-CN.md`，第八章已区分新验证与历史记录。
+保留 AST、JNI、N-API、RRF、背压、增量失效等有明确技术含义的术语，并解释其处理对象或适用条件。保留 11 个公式、历史实验数字和已实现／待验证范围。读取放大率明确为源码读取字节数与返回字节数之比，不等同于数据库物理 I/O。
 
-## 交付与复现
+## 章节安排
 
-- `docs/guochuang-technical-chapters.zh-CN.md`：技术五章的可编辑主稿。
-- `docs/guochuang-technical-chapters.zh-CN.tex`：由主稿生成的 LaTeX 章节，可放入原工程并从第四章位置引用。
-- `docs/recast-project-description.zh-CN.tex`：仓库已有说明书，第四至第八章改为引用新章节；第一章只做必要的现状一致性更新。它的其他章节原本就与用户 PDF 不同，不能拿它直接编译替代完整整合版。
-- `output/pdf/guochuang-technical-revised.pdf`：技术部分独立阅读稿，页码从 13 开始，供替换原第四至第八章。
-- `output/pdf/guochuang-integrated-revised.pdf`：保留原封面、第一至第三章、第九至第十章页面，替换技术部分，重建到节一级的目录、书签和连续正文页码。
+- 第一至三章：项目、需求与竞品，删除重复宣传句，具体说明功能、限制和比较方法。
+- 第四章：工程索引、任务查询及版本一致性。
+- 第五章：多语言解析、资源控制、模块划分、跨语言依赖和增量更新。
+- 第六章：不同粒度的代码查找、候选合并、依赖补充及上下文整理。
+- 第七章：查询接口、多文件修改、行为测试和恢复。
+- 第八章：已有数据、本次验证与后续实验。
+- 第九章：教师与学生分工，保留原稿姓名、专业及资历信息，压缩套话。
+- 第十章：原稿只有七个小节标题，继续保留提纲，没有补造项目成果或后续承诺。
 
-原 PDF 非技术部分保留既有内容，包括原封面的重复字、团队图片占位文本和第十章提纲。它们不属于本次第四至第八章修订范围。原 PDF 的中文在 pypdf 直接提取时存在字体映射问题，因此保留页使用原页面对象，核对文字时使用 pdfplumber。
+封面重复的“面向面向”已校正。原团队表格没有实际照片，只有暴露的排版占位命令；修订版保留文字信息并去掉该无效照片列。全文重新排版，目录、书签及正文页码按实际页数生成。
 
-生成方式（依赖 `reportlab`、`pypdf`、`pdfplumber`、`matplotlib` 和中文字体）：
+## 可编辑来源与生成方式
+
+- `docs/guochuang-front-chapters.zh-CN.md`：第一至三章。
+- `docs/guochuang-technical-chapters.zh-CN.md`：第四至八章。
+- `docs/guochuang-closing-chapters.zh-CN.md`：第九至十章。
+- 三份同名 `.tex` 由构建脚本生成，编辑时以 Markdown 为准。
+- `docs/recast-project-description.zh-CN.tex` 引用上述三个文件，全文内容与 PDF 使用相同主稿。
 
 ```powershell
 python scripts/build-guochuang-pdf.py --original 'C:/Users/IcebearHound/Downloads/guochuang.pdf'
 ```
 
-默认使用 `C:/Windows/Fonts` 的宋体与微软雅黑，可通过 `--font-dir` 指向包含相同字体文件的目录。构建清单保存在 `tmp/pdfs/build-manifest.json`。PDF 使用 ReportLab 排版并拼接原页面；LaTeX 源码供继续编辑，本机未安装 XeLaTeX，未声称通过 LaTeX 编译。
+依赖 `reportlab`、`pypdf`、`matplotlib` 和中文字体。默认字体目录为 `C:/Windows/Fonts`，可用 `--font-dir` 修改。PDF 由 ReportLab 排版，TeX 为可编辑输出；本机没有 XeLaTeX，未进行 TeX 编译。
+
+输出为 `output/pdf/guochuang-integrated-revised.pdf`（30 页）和 `output/pdf/guochuang-technical-revised.pdf`（16 页，正文页码 9—24）。构建清单位于 `tmp/pdfs/build-manifest.json`。核对范围包括 255 个段落及标题、141 个表格单元、11 个公式与 61 项目录目标；同时渲染页面检查排版。

@@ -1,20 +1,19 @@
-"""Build the technical replacement and merge it with the user's original PDF.
+"""Build the revised full proposal and technical excerpt from Markdown.
 
 Usage: python scripts/build-guochuang-pdf.py --original PATH
 Dependencies: reportlab, pypdf, pdfplumber, matplotlib. Chinese fonts default to Windows fonts.
 """
 from pathlib import Path
 import argparse
-import copy
 import io
 import json
 import re
 from html import escape
 
-import pdfplumber
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import DictionaryObject, NameObject, NumberObject, ArrayObject
 from reportlab.lib import colors
+from reportlab.lib import textsplit
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.enums import TA_CENTER
 from reportlab.pdfbase import pdfmetrics
@@ -30,6 +29,8 @@ WIDTH, HEIGHT = 595.28, 841.89
 CONTENT = WIDTH - 144
 BLUE = colors.HexColor('#2255A4')
 GRAY = colors.HexColor('#53616D')
+# ReportLab's default CJK list omits several full-width Chinese punctuation marks.
+textsplit.ALL_CANNOT_START += '，。：；！？）》…'
 
 
 def register_fonts(font_dir):
@@ -41,6 +42,7 @@ styles = {
     'p': ParagraphStyle('p', fontName='Song', fontSize=10.5, leading=17.5, firstLineIndent=21, spaceAfter=7, wordWrap='CJK', allowWidows=0, allowOrphans=0),
     'h1': ParagraphStyle('h1', fontName='Hei', fontSize=20, leading=30, spaceBefore=17, spaceAfter=25, keepWithNext=True, wordWrap='CJK'),
     'h2': ParagraphStyle('h2', fontName='Hei', fontSize=13, leading=21, spaceBefore=12, spaceAfter=8, keepWithNext=True, wordWrap='CJK'),
+    'h3': ParagraphStyle('h3', fontName='Hei', fontSize=11, leading=18, spaceBefore=9, spaceAfter=6, keepWithNext=True, wordWrap='CJK'),
     'cell': ParagraphStyle('cell', fontName='Song', fontSize=9.3, leading=15, wordWrap='CJK'),
     'toc': ParagraphStyle('toc', fontName='Song', fontSize=10, leading=16, spaceAfter=3, wordWrap='CJK'),
     'tocchapter': ParagraphStyle('tocchapter', fontName='Hei', fontSize=11, leading=18, spaceBefore=8, spaceAfter=3, keepWithNext=True, wordWrap='CJK'),
@@ -55,7 +57,7 @@ class Pipeline(Flowable):
 
     def draw(self):
         c = self.canv
-        names = ['源码快照', '索引与建模', '任务检索', '上下文交付', '开发验证']
+        names = ['源码快照', '建立索引', '查找实现', '整理上下文', '修改与验证']
         for i, name in enumerate(names):
             x = i * 92
             c.setFillColor(colors.HexColor('#EDF3FA'))
@@ -72,25 +74,26 @@ class Pipeline(Flowable):
 
 class Doc(SimpleDocTemplate):
     def __init__(self, *args, **kwargs):
+        self.page_offset = kwargs.pop('page_offset', 0)
         super().__init__(*args, **kwargs)
         self.headings = []
 
     def afterFlowable(self, item):
         if hasattr(item, 'heading'):
             level, title = item.heading
-            self.headings.append((level, title, self.page + 12))
+            self.headings.append((level, title, self.page + self.page_offset))
 
 
 def footer(c, doc):
     c.setFont('Song', 9)
     c.setFillColor(GRAY)
     c.drawString(72, HEIGHT - 43, 'RECAST  项目说明书')
-    c.drawRightString(WIDTH - 72, HEIGHT - 43, '技术部分修订版 · 2026.09')
+    c.drawRightString(WIDTH - 72, HEIGHT - 43, '全文修订版 · 2026.09')
     c.setStrokeColor(colors.HexColor('#CCD7E2'))
     c.line(72, HEIGHT - 51, WIDTH - 72, HEIGHT - 51)
     c.setFillColor(colors.black)
     c.setFont('Song', 10)
-    c.drawCentredString(WIDTH / 2, 39, str(doc.page + 12))
+    c.drawCentredString(WIDTH / 2, 39, str(doc.page + doc.page_offset))
 
 
 def parse_md(text):
@@ -107,6 +110,10 @@ def parse_md(text):
             p = Paragraph(escape(block[3:]), styles['h2'])
             p.heading = (1, block[3:])
             story.append(p)
+        elif block.startswith('### '):
+            p = Paragraph(escape(block[4:]), styles['h3'])
+            p.heading = (2, block[4:])
+            story.append(p)
         elif block.startswith('$$'):
             stream = io.BytesIO()
             math_to_image('$' + block.strip()[2:-2] + '$', stream, dpi=300, format='png')
@@ -121,8 +128,13 @@ def parse_md(text):
         elif block.startswith('|'):
             rows = [[x.strip() for x in line.strip('|').split('|')] for line in block.splitlines()]
             rows.pop(1)
+            proportions = [.22, .37, .41]
+            if len(rows[0]) == 2:
+                proportions = [.21, .79]
+            elif rows[0][0] == '姓名':
+                proportions = [.13, .21, .66]
             table = Table([[Paragraph(escape(x), styles['cell']) for x in row] for row in rows],
-                          colWidths=[CONTENT * .22, CONTENT * .37, CONTENT * .41], repeatRows=1, hAlign='LEFT')
+                          colWidths=[CONTENT * value for value in proportions], repeatRows=1, hAlign='LEFT')
             table.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#EDF3FA')),
                 ('LINEABOVE', (0, 0), (-1, 0), 1, BLUE),
@@ -136,33 +148,38 @@ def parse_md(text):
             story.extend([table, Spacer(1, 10)])
         else:
             story.append(Paragraph(escape(block.replace('\n', ' ')), styles['p']))
-            if block.startswith('基于上述分析，RECAST'):
+            if block.startswith('RECAST 的处理过程分为四步'):
                 story.append(Pipeline())
     return story
 
 
-def to_latex(text):
+def to_latex(text, stem, labels):
     def tex(s):
         return ''.join({'\\': r'\textbackslash{}', '&': r'\&', '%': r'\%', '$': r'\$', '#': r'\#',
                         '_': r'\_', '{': r'\{', '}': r'\}', '~': r'\textasciitilde{}', '^': r'\textasciicircum{}'}.get(c, c) for c in s)
-    output = ['% Generated from guochuang-technical-chapters.zh-CN.md; edit the Markdown source.']
-    labels = ['architecture', 'indexing', 'methods', 'implementation', 'validation']
+    output = ['% Generated from ' + stem + '.md; edit the Markdown source.']
     chapter = 0
     for block in re.split(r'\n\s*\n', text.strip()):
         if block.startswith('# '):
-            title = re.sub(r'^第.章\s*', '', block[2:])
+            title = re.sub(r'^第[一二三四五六七八九十]+章\s*', '', block[2:])
             output += [r'\chapter{' + tex(title) + '}', r'\label{chap:' + labels[chapter] + '}']
-            if chapter == 0:
+            if labels[chapter] == 'architecture':
                 output.append(r'\label{chap:challenges}')
             chapter += 1
         elif block.startswith('## '):
             output.append(r'\section{' + tex(re.sub(r'^\d+\.\d+\s+', '', block[3:])) + '}')
+        elif block.startswith('### '):
+            output.append(r'\subsection{' + tex(re.sub(r'^\d+\.\d+\.\d+\s+', '', block[4:])) + '}')
         elif block.startswith('$$'):
             output += [r'\begin{equation}', block.strip()[2:-2], r'\end{equation}']
         elif block.startswith('|'):
             rows = [[x.strip() for x in line.strip('|').split('|')] for line in block.splitlines()]
             rows.pop(1)
-            output += [r'\begin{center}\small', r'\begin{longtable}{P{0.19\textwidth}P{0.33\textwidth}P{0.38\textwidth}}', r'\toprule']
+            widths = [.19, .33, .38] if len(rows[0]) == 3 else [.19, .71]
+            if rows[0][0] == '姓名':
+                widths = [.12, .19, .59]
+            columns = ''.join('P{' + str(w) + r'\textwidth}' for w in widths)
+            output += [r'\begin{center}\small', r'\begin{longtable}{' + columns + '}', r'\toprule']
             for i, row in enumerate(rows):
                 output.append(' & '.join(tex(x) for x in row) + r' \\')
                 if i == 0:
@@ -171,28 +188,7 @@ def to_latex(text):
         else:
             output.append(tex(block))
         output.append('')
-    (ROOT / 'docs/guochuang-technical-chapters.zh-CN.tex').write_text('\n'.join(output), encoding='utf-8')
-
-
-def original_toc(original, tech_pages, headings):
-    entries = []
-    with pdfplumber.open(original) as src:
-        for page in src.pages[1:7]:
-            for line in page.extract_text().splitlines():
-                chapter = re.match(r'^(第[一二三九十]章\s+.+?)\s+(\d+)$', line)
-                section = re.match(r'^((?:[1239]|10)\.\d+\s+.+?)\s+(\d+)$', line)
-                found = chapter or section
-                if found:
-                    title = re.sub(r'\s*\.\s*', ' ', found[1]) if not chapter else found[1]
-                    if section:
-                        number = re.match(r'^(\d+\.\d+)', line)[1]
-                        rest = re.sub(r'(?:\s*\.)+\s*$', '', line[len(number):].rsplit(None, 1)[0]).strip()
-                        title = number + ' ' + rest
-                    page_no = int(found[2])
-                    if page_no >= 25:
-                        page_no += tech_pages - 12
-                    entries.append((0 if chapter else 1, title, page_no))
-    return sorted(entries + headings, key=lambda x: x[2])
+    (ROOT / 'docs' / (stem + '.tex')).write_text('\n'.join(output), encoding='utf-8')
 
 
 def toc_pdf(entries):
@@ -209,24 +205,21 @@ def toc_pdf(entries):
     return PdfReader(path)
 
 
-def renumber(page, number, header=False):
-    buf = io.BytesIO()
-    c = canvas.Canvas(buf, pagesize=(WIDTH, HEIGHT))
-    c.setFillColor(colors.white)
-    if header:
-        c.rect(491, HEIGHT - 53, 38, 24, fill=1, stroke=0)
-        c.setFillColor(colors.black)
-        c.setFont('Song', 11)
-        c.drawRightString(519, HEIGHT - 47, str(number))
-    else:
-        c.rect(278, 32, 40, 23, fill=1, stroke=0)
-        c.setFillColor(colors.black)
-        c.setFont('Song', 11)
-        c.drawCentredString(WIDTH / 2, 42, str(number))
+def corrected_cover():
+    stream = io.BytesIO()
+    c = canvas.Canvas(stream, pagesize=(WIDTH, HEIGHT))
+    c.setFont('Hei', 26)
+    c.drawCentredString(WIDTH / 2, HEIGHT - 202, 'RECAST - 面向大型工业软件的')
+    c.drawCentredString(WIDTH / 2, HEIGHT - 252, '智能检索与自适应开发平台')
+    c.setFont('Hei', 24)
+    c.drawCentredString(WIDTH / 2, HEIGHT - 333, '项目说明书')
+    c.setFont('Song', 16)
+    c.drawCentredString(WIDTH / 2, HEIGHT - 395, 'RECAST')
+    c.setFont('Song', 14)
+    c.drawCentredString(WIDTH / 2, 160, '项目团队')
+    c.drawCentredString(WIDTH / 2, 120, '2026 年 9 月')
     c.save()
-    result = copy.deepcopy(page)
-    result.merge_page(PdfReader(buf).pages[0])
-    return result
+    return PdfReader(stream).pages[0]
 
 
 def main():
@@ -237,44 +230,52 @@ def main():
     OUT.mkdir(parents=True, exist_ok=True)
     TMP.mkdir(parents=True, exist_ok=True)
     register_fonts(args.font_dir)
-    text = (ROOT / 'docs/guochuang-technical-chapters.zh-CN.md').read_text(encoding='utf-8')
-    to_latex(text)
-    tech_path = OUT / 'guochuang-technical-revised.pdf'
-    doc = Doc(str(tech_path), pagesize=(WIDTH, HEIGHT), leftMargin=72, rightMargin=72,
-              topMargin=68, bottomMargin=65, title='RECAST 项目说明书 第四至第八章修订稿', author='RECAST 项目团队')
-    doc.build(parse_md(text), onFirstPage=footer, onLaterPages=footer)
-    tech = PdfReader(tech_path)
-    n = len(tech.pages)
-    entries = original_toc(args.original, n, doc.headings)
+    segments = [
+        ('guochuang-front-chapters.zh-CN', TMP / 'front-chapters.pdf', ['overview', 'requirements', 'market']),
+        ('guochuang-technical-chapters.zh-CN', OUT / 'guochuang-technical-revised.pdf',
+         ['architecture', 'indexing', 'methods', 'implementation', 'validation']),
+        ('guochuang-closing-chapters.zh-CN', TMP / 'closing-chapters.pdf', ['team', 'conclusion']),
+    ]
+    offset, entries, readers, counts = 0, [], [], []
+    for stem, path, labels in segments:
+        text = (ROOT / 'docs' / (stem + '.md')).read_text(encoding='utf-8')
+        to_latex(text, stem, labels)
+        doc = Doc(str(path), pagesize=(WIDTH, HEIGHT), leftMargin=72, rightMargin=72,
+                  topMargin=68, bottomMargin=65, page_offset=offset,
+                  title='RECAST 项目说明书', author='RECAST 项目团队')
+        doc.build(parse_md(text), onFirstPage=footer, onLaterPages=footer)
+        reader = PdfReader(path)
+        readers.append(reader)
+        counts.append(len(reader.pages))
+        entries.extend(item for item in doc.headings if item[0] < 2)
+        offset += len(reader.pages)
     toc = toc_pdf(entries)
-    src = PdfReader(args.original)
-    assert len(src.pages) == 36, 'Original page mapping expects the supplied 36-page guochuang.pdf.'
+    assert len(PdfReader(args.original).pages) == 36, 'Expected the supplied 36-page source proposal.'
     writer = PdfWriter()
-    writer.add_page(src.pages[0])
+    writer.add_page(corrected_cover())
     for page in toc.pages:
         writer.add_page(page)
     front = len(writer.pages)
-    for page in src.pages[7:19]:
-        writer.add_page(page)
-    for page in tech.pages:
-        writer.add_page(page)
-    for i, page in enumerate(src.pages[31:]):
-        writer.add_page(renumber(page, 13 + n + i, header=i in (1, 2, 3)))
+    for reader in readers:
+        for page in reader.pages:
+            writer.add_page(page)
     parent = None
     for level, title, page in entries:
         entry = writer.add_outline_item(title, front + page - 1, parent=parent if level else None)
         if not level:
             parent = entry
-    writer.add_metadata({'/Title': 'RECAST 项目说明书（技术部分重整版）', '/Author': 'RECAST 项目团队',
-                         '/Subject': '第四至第八章依据 chiparon/weichai 9-8-v c3f09d3 重整；其他正文保留原PDF'})
+    writer.add_metadata({'/Title': 'RECAST 项目说明书（全文措辞修订版）', '/Author': 'RECAST 项目团队',
+                         '/Subject': '基于上游 a02e903 与 huawei 实现；全文措辞修订'})
     writer._root_object[NameObject('/PageLabels')] = DictionaryObject({NameObject('/Nums'): ArrayObject([
         NumberObject(0), DictionaryObject({NameObject('/S'): NameObject('/r')}),
         NumberObject(front), DictionaryObject({NameObject('/S'): NameObject('/D'), NameObject('/St'): NumberObject(1)})])})
     full = OUT / 'guochuang-integrated-revised.pdf'
     writer.write(full)
-    manifest = {'source_commit': 'c3f09d3', 'technical_pages': n, 'full_pages': len(writer.pages),
-                'front_pages': front, 'headings': doc.headings, 'contents': entries,
-                'outputs': [str(full), str(tech_path)], 'original_body_pages_preserved': '8-19,32-36 (1-based); chapter 9-10 page numbers updated'}
+    tech_path = segments[1][1]
+    manifest = {'source_commit': 'a02e903', 'technical_pages': counts[1], 'full_pages': len(writer.pages),
+                'front_pages': front, 'body_segment_pages': counts, 'technical_start_page': counts[0] + 1,
+                'contents': entries, 'outputs': [str(full), str(tech_path)],
+                'original_pages_preserved': 'none; all chapters rebuilt from editable Markdown; duplicate cover wording corrected'}
     (TMP / 'build-manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8')
     print(json.dumps(manifest, ensure_ascii=False, indent=2))
 

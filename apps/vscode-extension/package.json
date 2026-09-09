@@ -1,7 +1,7 @@
 {
   "name": "forexplore-vscode",
-  "displayName": "ForeXplore Code Translation",
-  "description": "在 VSCode 中运行 ForeXplore 代码翻译工作流：检索相似实现、生成目标代码并以 diff 预览回填。",
+  "displayName": "RECAST Code Intelligence",
+  "description": "在 VS Code 中运行 RECAST 智能检索与代码复用工作流：定位实现、组织上下文、生成目标代码并审阅回填。",
   "version": "0.1.0",
   "publisher": "forexplore",
   "license": "MIT",
@@ -39,7 +39,7 @@
       "activitybar": [
         {
           "id": "forexplore",
-          "title": "ForeXplore",
+          "title": "RECAST",
           "icon": "media/forexplore.svg"
         }
       ]
@@ -48,7 +48,7 @@
       "forexplore": [
         {
           "id": "forexplore.launcher",
-          "name": "ForeXplore",
+          "name": "RECAST",
           "type": "tree"
         }
       ]
@@ -62,51 +62,51 @@
     "commands": [
       {
         "command": "forexplore.showPanel",
-        "title": "ForeXplore: 打开翻译面板"
+        "title": "RECAST: 打开智能开发工作台"
       },
       {
         "command": "forexplore.checkRepositories",
-        "title": "ForeXplore: 检查参考工程"
+        "title": "RECAST: 检查参考工程"
       },
       {
         "command": "forexplore.reindex",
-        "title": "ForeXplore: 重新索引参考工程"
+        "title": "RECAST: 重新索引参考工程"
       },
       {
         "command": "forexplore.refreshCodeIntelligence",
-        "title": "ForeXplore: 刷新代码智能索引"
+        "title": "RECAST: 刷新代码智能索引"
       },
       {
         "command": "forexplore.restoreLastCheckpoint",
-        "title": "ForeXplore: 恢复最近一次回填"
+        "title": "RECAST: 恢复最近一次回填"
       },
       {
         "command": "forexplore.indexModuleMigrationRepository",
-        "title": "ForeXplore: 索引模块迁移仓库"
+        "title": "RECAST: 索引模块迁移仓库"
       },
       {
         "command": "forexplore.reviewModuleMigrationPlan",
-        "title": "ForeXplore: 审阅模块迁移计划"
+        "title": "RECAST: 审阅模块迁移计划"
       },
       {
         "command": "forexplore.reviewModuleMigrationWave",
-        "title": "ForeXplore: 审阅下一迁移波次"
+        "title": "RECAST: 审阅下一迁移波次"
       },
       {
         "command": "forexplore.prepareModuleMigrationWave",
-        "title": "ForeXplore: 导入并准备下一迁移波次"
+        "title": "RECAST: 导入并准备下一迁移波次"
       },
       {
         "command": "forexplore.approveModuleMigrationWave",
-        "title": "ForeXplore: 审批并提交已准备迁移波次"
+        "title": "RECAST: 审批并提交已准备迁移波次"
       },
       {
         "command": "forexplore.recoverModuleMigrationReview",
-        "title": "ForeXplore: 恢复模块迁移审阅状态"
+        "title": "RECAST: 恢复模块迁移审阅状态"
       }
     ],
     "configuration": {
-      "title": "ForeXplore",
+      "title": "RECAST",
       "properties": {
         "forexplore.executionMode": {
           "type": "string",

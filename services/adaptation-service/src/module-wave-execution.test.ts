@@ -288,7 +288,7 @@ describe("ModuleWaveExecutionCoordinator", () => {
       preparedHash: prepared.transaction.preparedHash,
       baseCommit: prepared.transaction.baseCommit,
     })]);
-  });
+  }, 15_000); // Real Git worktree creation and commits can exceed 5 seconds on Windows.
 
   it("rejects missing or mismatched prepared-bundle approval without publishing a branch", async () => {
     const root = await repository();
