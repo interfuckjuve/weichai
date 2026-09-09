@@ -176,3 +176,17 @@ ForeXplore 不是通用代码生成器，也不只是代码搜索或代码翻译
 - 多语言迁移适配：`services/adaptation-service/src/adaptation-adapter.ts`
 - 编译验证：`services/adaptation-service/src/compiler.ts`
 - 回填实现：`services/adaptation-service/src/backfill-adapter.ts`
+
+## Agent skills
+
+### Issue tracker
+
+Before reading or publishing specs and tickets, read `docs/agents/issue-tracker.md`. This repo uses local Markdown.
+
+### Triage labels
+
+Before assigning triage status, read `docs/agents/triage-labels.md`. This repo uses the five default role names.
+
+### Domain docs
+
+Before exploring domain behavior, read `docs/agents/domain.md`. This repo uses a single root context and shared ADRs.
