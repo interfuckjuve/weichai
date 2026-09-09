@@ -2,7 +2,9 @@ import { Ajv } from "ajv";
 import type { RepositoryIngestionJsonValue as JsonValue } from "@forexplore/contracts";
 import type {
   BehaviorCollectionManifest,
+  BehaviorCaseInput,
   BehaviorTargetManifest,
+  BehaviorTargetPlan,
   BehaviorCaseResult,
 } from "./behavior-types.js";
 
@@ -99,6 +101,57 @@ export const collectionManifestSchema = {
     },
   },
 };
+export const targetPlanSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["schemaVersion", "testBasis", "cases"],
+  properties: {
+    schemaVersion: { const: "1.0" },
+    testBasis: {
+      type: "object",
+      additionalProperties: false,
+      required: ["summary", "evidence"],
+      properties: {
+        summary: { type: "string", pattern: "\\S", maxLength: 16000 },
+        evidence: {
+          type: "array",
+          minItems: 1,
+          maxItems: 100,
+          uniqueItems: true,
+          items: { type: "string", pattern: "\\S", maxLength: 4000 },
+        },
+      },
+    },
+    cases: {
+      ...collectionManifestSchema.properties.cases,
+      items: {
+        ...collectionManifestSchema.properties.cases.items,
+        properties: {
+          ...collectionManifestSchema.properties.cases.items.properties,
+          expectation: {
+            ...collectionManifestSchema.properties.cases.items.properties
+              .expectation,
+            properties: {
+              ...collectionManifestSchema.properties.cases.items.properties
+                .expectation.properties,
+              kind: { enum: ["requirement", "unresolved"] },
+            },
+            oneOf: [
+              {
+                properties: { kind: { const: "requirement" } },
+                required: ["expected"],
+              },
+              {
+                properties: { kind: { const: "unresolved" } },
+                not: { required: ["expected"] },
+              },
+            ],
+          },
+        },
+      },
+    },
+  },
+};
 export const targetManifestSchema = {
   type: "object",
   additionalProperties: false,
@@ -145,6 +198,7 @@ const ajv = new Ajv({ allErrors: true, strict: false });
 const sourceValidator = ajv.compile<BehaviorCollectionManifest>(
   collectionManifestSchema,
 );
+const planValidator = ajv.compile<BehaviorTargetPlan>(targetPlanSchema);
 const targetValidator =
   ajv.compile<BehaviorTargetManifest>(targetManifestSchema);
 const observationValidator =
@@ -187,16 +241,7 @@ export function parseCollectionManifest(
     throw new Error(
       `Invalid collection manifest: ${ajv.errorsText(sourceValidator.errors)}`,
     );
-  if (
-    new Set(value.cases.map((item) => item.caseId)).size !== value.cases.length
-  )
-    throw new Error("Duplicate caseId.");
-  for (const item of value.cases) {
-    if (item.expectation.kind === "requirement")
-      parseObservations(JSON.stringify([item.expectation.expected]), [
-        item.caseId,
-      ]);
-  }
+  validateCases(value.cases);
   const sourceCases = value.cases.some(
     (item) => item.expectation.kind === "source",
   );
@@ -208,6 +253,24 @@ export function parseCollectionManifest(
   )
     throw new Error("Design-only collections cannot declare source execution.");
   return normalizeTestFiles(value);
+}
+export function parseTargetPlan(text: string): BehaviorTargetPlan {
+  const value = parseBehaviorJson(text);
+  if (!planValidator(value))
+    throw new Error(
+      `Invalid target plan: ${ajv.errorsText(planValidator.errors)}`,
+    );
+  validateCases(value.cases);
+  return value;
+}
+function validateCases(cases: BehaviorCaseInput[]): void {
+  if (new Set(cases.map((item) => item.caseId)).size !== cases.length)
+    throw new Error("Duplicate caseId.");
+  for (const item of cases)
+    if (item.expectation.kind === "requirement")
+      parseObservations(JSON.stringify([item.expectation.expected]), [
+        item.caseId,
+      ]);
 }
 export function parseTargetManifest(text: string): BehaviorTargetManifest {
   const value = parseBehaviorJson(text);
@@ -233,6 +296,7 @@ function normalizeTestFiles<
     ([
       ".forexplore-tests/manifest.json",
       ".forexplore-tests/inputs.json",
+      ".forexplore-tests/target-plan.json",
     ].includes(manifest.resultFile) ||
       manifest.testFiles.includes(manifest.resultFile) ||
       manifest.resultFile

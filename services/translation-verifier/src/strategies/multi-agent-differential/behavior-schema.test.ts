@@ -13,6 +13,7 @@ import {
   parseCollectionManifest,
   parseObservations,
   parseTargetManifest,
+  parseTargetPlan,
 } from "./behavior-schema.js";
 import {
   projectHash,
@@ -48,6 +49,54 @@ const manifest = () => ({
   },
 });
 describe("behavior JSON boundaries", () => {
+  it("parses explicit target design v1 without accepting source handoffs or source expectations", () => {
+    const plan = {
+      schemaVersion: "1.0",
+      testBasis: {
+        summary: "Required identity",
+        evidence: ["request.requirement"],
+      },
+      cases: [
+        {
+          caseId: "one",
+          intent: "identity",
+          input: 1,
+          expectation: {
+            kind: "requirement",
+            rationale: "Requirement identity",
+            provenance: ["request.requirement"],
+            expected: { caseId: "one", outcome: "return", value: 1 },
+          },
+        },
+      ],
+    };
+    expect(parseTargetPlan(JSON.stringify(plan))).toEqual(plan);
+    expect(() => parseTargetPlan(JSON.stringify(manifest()))).toThrow();
+    expect(() =>
+      parseTargetPlan(JSON.stringify({ ...plan, cases: manifest().cases })),
+    ).toThrow();
+    expect(() =>
+      parseTargetPlan(JSON.stringify({ ...plan, schemaVersion: "3.0" })),
+    ).toThrow();
+    expect(() =>
+      parseTargetPlan(
+        JSON.stringify({ ...plan, cases: [...plan.cases, ...plan.cases] }),
+      ),
+    ).toThrow("Duplicate");
+  });
+  it("reserves the independently frozen target plan from result-file writes", () => {
+    expect(() =>
+      parseTargetManifest(
+        JSON.stringify({
+          schemaVersion: "2.0",
+          notes: "test",
+          testFiles: ["tests/runner.py"],
+          resultFile: ".forexplore-tests/target-plan.json",
+          commands: manifest().commands,
+        }),
+      ),
+    ).toThrow();
+  });
   it("accepts language-open commands and explicit inputs, but rejects duplicate cases", () => {
     expect(
       parseCollectionManifest(JSON.stringify(manifest())).cases,

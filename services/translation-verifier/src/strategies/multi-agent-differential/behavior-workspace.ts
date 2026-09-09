@@ -26,9 +26,16 @@ export function inside(root: string, path: string): boolean {
     (!isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`))
   );
 }
-export function assertProjectRoots(context: VerificationStrategyContext): void {
+export function assertProjectRoots(
+  context: VerificationStrategyContext,
+  sourceRequired = true,
+): void {
   const { sourceRoot, targetRoot, strategyRoot } = context.workspace;
-  const roots = [sourceRoot, targetRoot, strategyRoot].map((root) => {
+  const roots = [
+    ...(sourceRequired ? [sourceRoot] : []),
+    targetRoot,
+    strategyRoot,
+  ].map((root) => {
     if (
       !isAbsolute(root) ||
       !lstatSync(root).isDirectory() ||

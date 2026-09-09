@@ -99,6 +99,57 @@ function fixture(delta = 0) {
   };
   return { root, input, context, runtime, agents };
 }
+function independentFixture(delta = 1) {
+  const f = fixture(delta);
+  f.input.analysisReport = { applicability: { level: "reference" } };
+  f.input.request.requirement = "Increment input by one";
+  const author = f.runtime.runAgent;
+  f.runtime.runAgent = async (task) => {
+    const result = await author(task);
+    const frozenPlan = JSON.stringify(targetPlan());
+    writeFileSync(task.expectationFile!, frozenPlan);
+    return { ...result, frozenPlan, commandEvidence: [targetRecord(task)] };
+  };
+  return f;
+}
+function targetPlan() {
+  return {
+    schemaVersion: "1.0",
+    testBasis: {
+      summary: "Increment the input",
+      evidence: ["request.requirement"],
+    },
+    cases: [
+      {
+        caseId: "zero",
+        intent: "zero input",
+        input: 0,
+        expectation: {
+          kind: "requirement",
+          rationale: "Increment required",
+          provenance: ["request.requirement"],
+          expected: { caseId: "zero", outcome: "return", value: 1 },
+        },
+      },
+    ],
+  };
+}
+function targetRecord(task: BehaviorAgentTask) {
+  return {
+    commandId: "target-probe",
+    side: "target" as const,
+    cwd: task.sandbox.cwd,
+    command: { executable: process.execPath, args: ["tests/runner.cjs"] },
+    baselineValid: true,
+    credentialHit: false,
+    completed: true,
+    exitCode: 0,
+    timedOut: false,
+    durationMs: 1,
+    stdout: "[]",
+    stderr: "",
+  };
+}
 function writeHarness(task: BehaviorAgentTask) {
   const root = task.sandbox.writeRoots[0];
   const tests = join(task.sandbox.cwd, "tests");
@@ -152,7 +203,280 @@ function writeHarness(task: BehaviorAgentTask) {
 }
 
 describe("independent two-session differential strategy", () => {
-  it.each(["reference", "reject", "adapt"])(
+  it.each(["reference", "reject"])(
+    "skips Agent1 and source preparation for %s",
+    async (level) => {
+      const f = fixture(1);
+      f.input.analysisReport = {
+        applicability: { level },
+        sourceSecret: "SOURCE_CONTEXT_MUST_NOT_LEAK",
+      };
+      f.input.request.requirement = "Increment the input by one";
+      rmSync(f.context.workspace.sourceRoot, { recursive: true });
+      const author = f.runtime.runAgent;
+      f.runtime.runAgent = async (task) => {
+        expect(task.side).toBe("target");
+        expect(task.executionSides).toEqual(["target"]);
+        expect(task.sandbox.readRoots).toEqual([
+          f.context.workspace.targetRoot,
+        ]);
+        expect(task.additionalProjects).toBeUndefined();
+        expect(task.prompt).toContain(
+          "independent target verification (agent2)",
+        );
+        expect(task.prompt).not.toContain("<source-collection-context>");
+        expect(task.prompt).not.toContain("<frozen-input-cases>");
+        expect(task.prompt).not.toContain("SOURCE_CONTEXT_MUST_NOT_LEAK");
+        expect(task.expectationFile).toBe(
+          join(task.sandbox.cwd, ".forexplore-tests/target-plan.json"),
+        );
+        const result = await author(task);
+        const frozenPlan = JSON.stringify(targetPlan());
+        writeFileSync(task.expectationFile!, frozenPlan);
+        return { ...result, frozenPlan, commandEvidence: [targetRecord(task)] };
+      };
+      const result = await new MultiAgentDifferentialStrategy({
+        runtime: f.runtime,
+        waitForTarget: async () => {
+          expect(f.agents).toEqual([]);
+        },
+      }).verify(f.input, f.context);
+      expect(f.agents).toEqual(["target"]);
+      expect(result).toMatchObject({
+        executionStatus: "completed",
+        mode: "target_only",
+        sourceAssessment: "not_checked",
+        targetAssessment: "no_bug_observed",
+      });
+      expect(result.strategyReport).not.toHaveProperty("sourceSnapshot");
+      expect(result.strategyReport).toMatchObject({
+        targetPlan: { schemaVersion: "1.0" },
+        evidence: [{ side: "target" }],
+      });
+      expect(
+        result.artifacts.some((item) => item.kind.startsWith("source-")),
+      ).toBe(false);
+      expect(normalizeVerificationStrategyOutput(f.input, result)).toEqual(
+        result,
+      );
+    },
+  );
+  it.each([0, 1])(
+    "independently compares target behavior against requirement expectations (delta=%s)",
+    async (delta) => {
+      const f = independentFixture(delta);
+      const result = await new MultiAgentDifferentialStrategy({
+        runtime: f.runtime,
+      }).verify(f.input, f.context);
+      expect(result.targetAssessment).toBe(
+        delta ? "no_bug_observed" : "bug_found",
+      );
+      expect(result.strategyReport).toMatchObject({
+        cases: [
+          { source: null, expected: { value: 1 }, target: { value: delta } },
+        ],
+      });
+      expect(f.agents).toEqual(["target"]);
+    },
+  );
+  it.each([
+    "missing-plan",
+    "no-freeze",
+    "no-records",
+    "source-activity",
+    "wrong-cwd",
+    "invalid-baseline",
+    "credential",
+    "unresolved",
+    "uncited",
+    "blank-basis",
+    "source-expectation",
+  ])("fails closed for independent target %s", async (scenario) => {
+    const f = independentFixture();
+    const author = f.runtime.runAgent;
+    f.runtime.runAgent = async (task) => {
+      const result = await author(task);
+      const plan = targetPlan();
+      if (scenario === "unresolved") {
+        Object.assign(plan.cases[0].expectation, { kind: "unresolved" });
+        delete (plan.cases[0].expectation as { expected?: unknown }).expected;
+      }
+      if (scenario === "uncited") plan.cases[0].expectation.provenance = [" "];
+      if (scenario === "blank-basis") plan.testBasis.summary = " ";
+      if (scenario === "source-expectation") {
+        Object.assign(plan.cases[0].expectation, { kind: "source" });
+        delete (plan.cases[0].expectation as { expected?: unknown }).expected;
+      }
+      const frozenPlan = JSON.stringify(plan);
+      writeFileSync(task.expectationFile!, frozenPlan);
+      if (scenario === "missing-plan") rmSync(task.expectationFile!);
+      const record = targetRecord(task);
+      if (scenario === "source-activity")
+        Object.assign(record, { side: "source" });
+      if (scenario === "wrong-cwd") record.cwd = f.context.workspace.sourceRoot;
+      if (scenario === "invalid-baseline") record.baselineValid = false;
+      if (scenario === "credential") record.credentialHit = true;
+      return {
+        ...result,
+        frozenPlan: scenario === "no-freeze" ? undefined : frozenPlan,
+        commandEvidence: scenario === "no-records" ? [] : [record],
+      };
+    };
+    const result = await new MultiAgentDifferentialStrategy({
+      runtime: f.runtime,
+    }).verify(f.input, f.context);
+    expect(result.executionStatus).toBe("failed");
+    expect(result.targetAssessment).toBe("inconclusive");
+    expect(result.sourceAssessment).toBe("not_checked");
+    expect(f.agents).not.toContain("source");
+    expect(result.strategyReport).not.toHaveProperty("sourceSnapshot");
+  });
+  it.each(["during-session", "during-replay", "during-repair"])(
+    "rejects target plan mutation %s",
+    async (phase) => {
+      const f = independentFixture();
+      const author = f.runtime.runAgent;
+      f.runtime.runAgent = async (task) => {
+        const result = await author(task);
+        if (
+          phase === "during-session" ||
+          (phase === "during-repair" && f.agents.length > 1)
+        ) {
+          const plan = targetPlan();
+          plan.cases[0].input = 20;
+          writeFileSync(task.expectationFile!, JSON.stringify(plan));
+          if (phase === "during-repair")
+            return { ...result, frozenPlan: JSON.stringify(plan) };
+        }
+        return result;
+      };
+      const command = f.runtime.runCommand;
+      f.runtime.runCommand = async (task) => {
+        const result = await command(task);
+        expect(task.sandbox.readOnlyFiles).toContain(
+          join(task.sandbox.cwd, ".forexplore-tests/target-plan.json"),
+        );
+        if (phase === "during-replay")
+          writeFileSync(
+            join(task.sandbox.cwd, ".forexplore-tests/target-plan.json"),
+            "{}",
+          );
+        return phase === "during-repair"
+          ? { ...result, stdout: "invalid" }
+          : result;
+      };
+      const result = await new MultiAgentDifferentialStrategy({
+        runtime: f.runtime,
+      }).verify(f.input, f.context);
+      expect(result.problems[0]?.code).toBe("workspace_integrity_violation");
+      expect(result.targetAssessment).toBe("inconclusive");
+    },
+  );
+  it("retains one bounded target harness repair without changing its design", async () => {
+    const f = independentFixture();
+    const command = f.runtime.runCommand;
+    let runs = 0;
+    f.runtime.runCommand = async (task) => {
+      const result = await command(task);
+      return ++runs === 1 ? { ...result, stdout: "invalid" } : result;
+    };
+    const result = await new MultiAgentDifferentialStrategy({
+      runtime: f.runtime,
+    }).verify(f.input, f.context);
+    expect(result.executionStatus).toBe("completed");
+    expect(f.agents).toEqual(["target", "target"]);
+    expect(result.strategyReport).toMatchObject({
+      repairs: [{ side: "target", attempt: 1 }],
+    });
+  });
+  it.each(["cancel", "timeout", "failure"])(
+    "does not start independent Agent2 on readiness %s",
+    async (mode) => {
+      const f = independentFixture();
+      const controller = new AbortController();
+      const result = await new MultiAgentDifferentialStrategy({
+        runtime: f.runtime,
+        timeoutMs: 80,
+        waitForTarget: async () => {
+          if (mode === "cancel") controller.abort();
+          if (mode === "failure") throw new Error("not ready");
+          await new Promise<void>(() => {});
+        },
+      }).verify(f.input, f.context, controller.signal);
+      expect(result.executionStatus).toBe(
+        mode === "cancel" ? "cancelled" : "failed",
+      );
+      expect(f.agents).toEqual([]);
+      expect(
+        result.artifacts.some((item) => item.kind.startsWith("source-")),
+      ).toBe(false);
+    },
+  );
+  it("preserves independent frozen plan and Host records when Agent2 is cancelled", async () => {
+    const f = independentFixture();
+    const controller = new AbortController();
+    f.runtime.runAgent = async (task) => {
+      task.onEvidence?.([targetRecord(task)], JSON.stringify(targetPlan()));
+      controller.abort();
+      throw controller.signal.reason;
+    };
+    const result = await new MultiAgentDifferentialStrategy({
+      runtime: f.runtime,
+    }).verify(f.input, f.context, controller.signal);
+    expect(result.executionStatus).toBe("cancelled");
+    const session = result.artifacts.find(
+      (item) => item.kind === "target-agent-session",
+    )!;
+    expect(
+      JSON.parse(readFileSync(join(f.root, "durable", session.path), "utf8")),
+    ).toMatchObject({
+      frozenPlan: JSON.stringify(targetPlan()),
+      commandEvidence: [{ side: "target" }],
+    });
+  });
+  it("cannot hide an observed source command by returning only target records", async () => {
+    const f = independentFixture();
+    const author = f.runtime.runAgent;
+    f.runtime.runAgent = async (task) => {
+      const result = await author(task);
+      task.onEvidence?.(
+        [{ ...targetRecord(task), side: "source" }],
+        result.frozenPlan,
+      );
+      return result;
+    };
+    const result = await new MultiAgentDifferentialStrategy({
+      runtime: f.runtime,
+    }).verify(f.input, f.context);
+    expect(result.problems[0]?.code).toBe("report_evidence_invalid");
+    expect(result.targetAssessment).toBe("inconclusive");
+  });
+  it("refuses independent target execution without caller authorization", async () => {
+    const f = independentFixture();
+    const result = await new MultiAgentDifferentialStrategy({
+      runtime: f.runtime,
+      executionSides: [],
+    }).verify(f.input, f.context);
+    expect(result.problems[0]?.code).toBe("context_incomplete");
+    expect(f.agents).toEqual([]);
+  });
+  it("rejects independent Agent2 edits to the implementation", async () => {
+    const f = independentFixture();
+    const author = f.runtime.runAgent;
+    f.runtime.runAgent = async (task) => {
+      const result = await author(task);
+      writeFileSync(
+        join(task.sandbox.cwd, "implementation.cjs"),
+        "module.exports = () => 1;",
+      );
+      return result;
+    };
+    const result = await new MultiAgentDifferentialStrategy({
+      runtime: f.runtime,
+    }).verify(f.input, f.context);
+    expect(result.problems[0]?.code).toBe("workspace_integrity_violation");
+  });
+  it.each(["adapt"])(
     "uses a design-only Agent1 for %s and validates target requirements without Host policy",
     async (level) => {
       const f = fixture(1);
@@ -302,7 +626,7 @@ describe("independent two-session differential strategy", () => {
       );
     },
   );
-  it.each(["adapt", "reference"])(
+  it.each(["adapt"])(
     "rejects source activity hidden by a requirement-only %s collection",
     async (level) => {
       const f = fixture();

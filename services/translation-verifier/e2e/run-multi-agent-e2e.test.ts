@@ -121,6 +121,90 @@ async function roots() {
 }
 
 describe("multi-agent differential E2E", () => {
+  it("skips Agent1 and its handoff for a not-applicable target-only run", async () => {
+    const events: string[] = [];
+    const input = fileUploadInput("correct", "multipart-read-body");
+    input.analysisReport = { applicability: { level: "reject" } };
+    const targetRuntime: BehaviorRuntime = {
+      ...runtime,
+      async runAgent(task) {
+        expect(events).toEqual(["ready"]);
+        events.push(task.side);
+        expect(task.side).toBe("target");
+        expect(task.sandbox.readRoots).toEqual([task.sandbox.cwd]);
+        expect(task.executionSides).toEqual(["target"]);
+        expect(task.prompt).not.toContain("<source-collection-context>");
+        expect(task.expectationFile).toBe(
+          join(task.sandbox.cwd, ".forexplore-tests/target-plan.json"),
+        );
+        const plan = JSON.stringify({
+          schemaVersion: "1.0",
+          testBasis: {
+            summary: "Transfer all body bytes",
+            evidence: ["request.requirement"],
+          },
+          cases: [
+            {
+              caseId: "case-1",
+              intent: "body",
+              input: { body: "YWJj" },
+              expectation: {
+                kind: "requirement",
+                rationale: "Report the number of bytes transferred",
+                provenance: ["request.requirement"],
+                expected: { caseId: "case-1", outcome: "return", value: 3 },
+              },
+            },
+          ],
+        });
+        await writeFile(task.expectationFile!, plan);
+        const result = await runtime.runAgent(task);
+        // This fixed evidence tests assembly, not live Java execution or model quality.
+        const record = {
+          ...result,
+          commandId: "fixture-target-command",
+          side: "target" as const,
+          cwd: task.sandbox.cwd,
+          command: { executable: "fixture", args: [] },
+          completed: true,
+          baselineValid: true,
+          credentialHit: false,
+          testFiles: { ".forexplore-tests/harness.json": "{}\n" },
+        };
+        task.onEvidence?.([record], plan);
+        return { ...result, frozenPlan: plan, commandEvidence: [record] };
+      },
+    };
+    const result = await executeMultiAgentE2E(
+      {
+        task: "multipart-read-body",
+        variant: "correct",
+        timeoutMs: 10000,
+        live: false,
+        json: false,
+      },
+      {
+        ...(await roots()),
+        input,
+        runtime: targetRuntime,
+        waitForTarget: async () => {
+          events.push("ready");
+        },
+      },
+    );
+    expect(events).toEqual(["ready", "target"]);
+    expect(result.result, JSON.stringify(result.result.problems)).toMatchObject(
+      {
+        mode: "target_only",
+        sourceAssessment: "not_checked",
+        executionStatus: "completed",
+        targetAssessment: "no_bug_observed",
+      },
+    );
+    expect(result.result.strategyReport).not.toHaveProperty("sourceSnapshot");
+    expect(result.result.strategyReport).toHaveProperty("targetPlan");
+  });
+
   it("keeps source and original fixtures untouched and applies target only after the barrier", async () => {
     const paths = await roots();
     const sourceFixtureHash = projectHash(sourceProjectRoot);

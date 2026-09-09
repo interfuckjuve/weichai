@@ -1,4 +1,11 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -8,6 +15,8 @@ import { createDefaultVerificationService } from "./create-default-verifier.js";
 import { assertVerificationReceipt } from "./schemas/validate-verification-receipt.js";
 import type { VerificationInput } from "./schemas/verification-types.js";
 import { SINGLE_AGENT_DIFFERENTIAL_STRATEGY } from "./strategies/single-agent-differential/strategy.js";
+import { MULTI_AGENT_DIFFERENTIAL_STRATEGY } from "./strategies/multi-agent-differential/strategy.js";
+import { BehaviorEnvironmentError } from "./strategies/multi-agent-differential/claude-runtime.js";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -46,6 +55,69 @@ function input(): VerificationInput {
 }
 
 describe("default service strategy integration", () => {
+  it.each(["reference", "reject"])(
+    "starts only Agent2 for %s with a caller-prepared target and no source project",
+    async (level) => {
+      const root = realpathSync(
+        mkdtempSync(join(tmpdir(), "verifier-target-only-")),
+      );
+      roots.push(root);
+      const targetRoot = join(root, "prepared-target");
+      mkdirSync(targetRoot);
+      const request = input();
+      request.analysisReport = { applicability: { level } };
+      const content = request.translation.generatedContent;
+      writeFileSync(join(targetRoot, "implementation.cjs"), content);
+      const sessions: string[] = [];
+      const service = createDefaultVerificationService({
+        workspaceRoot: join(root, "workspaces"),
+        artifactRoot: join(root, "artifacts"),
+        multiAgent: {
+          executionSides: ["target"],
+          runtime: {
+            async runAgent(task) {
+              sessions.push(task.side);
+              expect(task.sandbox.cwd).toBe(targetRoot);
+              expect(task.sandbox.readRoots).toEqual([targetRoot]);
+              expect(task.additionalProjects).toBeUndefined();
+              expect(task.executionSides).toEqual(["target"]);
+              expect(task.prompt).not.toContain("<source-collection-context>");
+              throw new BehaviorEnvironmentError(
+                "Test Agent environment unavailable",
+              );
+            },
+            async runCommand() {
+              throw new Error("No test was authored");
+            },
+          },
+        },
+      });
+      const receipt = await service.verifyWithReceipt(request, {
+        strategyId: MULTI_AGENT_DIFFERENTIAL_STRATEGY.id,
+        preparedProjects: { targetRoot },
+      });
+      expect(sessions).toEqual(["target"]);
+      expect(receipt.result).toMatchObject({
+        strategyId: MULTI_AGENT_DIFFERENTIAL_STRATEGY.id,
+        subjectHash: request.translation.patchHash,
+        mode: "target_only",
+        sourceAssessment: "not_checked",
+        executionStatus: "failed",
+        targetAssessment: "inconclusive",
+      });
+      expect(() =>
+        assertVerificationReceipt(
+          receipt,
+          request,
+          MULTI_AGENT_DIFFERENTIAL_STRATEGY,
+        ),
+      ).not.toThrow();
+      expect(readFileSync(join(targetRoot, "implementation.cjs"), "utf8")).toBe(
+        content,
+      );
+    },
+  );
+
   it("selects the single session runtime and persists a bound failure when it supplies no evidence", async () => {
     const root = mkdtempSync(join(tmpdir(), "verifier-registration-"));
     roots.push(root);

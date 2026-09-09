@@ -38,6 +38,11 @@ export interface BehaviorCollectionManifest {
   notes: string;
   commands?: { setup: BehaviorCommand[]; run: BehaviorCommand };
 }
+export interface BehaviorTargetPlan {
+  schemaVersion: "1.0";
+  testBasis: { summary: string; evidence: string[] };
+  cases: BehaviorCaseInput[];
+}
 export interface BehaviorTargetManifest {
   schemaVersion: "2.0";
   testFiles: string[];
@@ -159,5 +164,7 @@ export interface BehaviorReport {
   targetSubjectHash?: string;
   patchHash?: string;
   sourceSnapshot?: BehaviorSourceSnapshot;
+  /** Agent2-authored target design, frozen by Host before target execution. */
+  targetPlan?: BehaviorTargetPlan;
   limitations: string[];
 }
