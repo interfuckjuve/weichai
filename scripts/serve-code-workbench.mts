@@ -1,3 +1,4 @@
+import { WorkspaceTranslationHost } from '../apps/vscode-extension/src/workspace-translation-host.js';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createRequire } from 'node:module';
 import { readFile, realpath } from 'node:fs/promises';
@@ -19,6 +20,8 @@ const { values } = parseArgs({ options: {
   'adaptation-url': { type: 'string' }, 'structural-baseline': { type: 'boolean', default: false },
 } });
 const root = process.cwd();
+const workspaceTranslation = new WorkspaceTranslationHost(() => ({ url: values['adaptation-url'] ?? '',
+  token: process.env.ADAPTATION_WORKSPACE_TRANSLATION_TOKEN, profile: process.env.FOREXPLORE_TRANSLATION_PROFILE }));
 const targets = values.target?.length ? values.target : [root];
 const references = values.reference ?? [];
 const inputs = await Promise.all([
@@ -157,6 +160,7 @@ async function build(repositoryId?: string, modulesOnly = false): Promise<void> 
 
 async function message(value: WebviewToHostMessage, signal: AbortSignal): Promise<HostToWebviewMessage[]> {
   switch (value.type) {
+    case 'WORKSPACE_TRANSLATION': return [await workspaceTranslation.handle(value)];
     case 'READY': return [{ type: 'INIT', payload: await payload() }];
     case 'LOAD_MODULE_CHILDREN':
       try {
@@ -166,7 +170,8 @@ async function message(value: WebviewToHostMessage, signal: AbortSignal): Promis
         return [{ type: 'MODULE_CHILDREN_ERROR', requestId: value.requestId, message: error instanceof Error ? error.message : String(error) }];
       }
     case 'START_TASK_SEARCH':
-      try { return [{ type: 'TASK_SEARCH_RESULT', requestId: value.requestId, packet: await host.searchTaskContext(value.requestId, value.targetScope, value.request, signal) }]; }
+      try { const packet = await host.searchTaskContext(value.requestId, value.targetScope, value.request, signal); workspaceTranslation.remember(packet);
+        return [{ type: 'TASK_SEARCH_RESULT', requestId: value.requestId, packet }]; }
       catch (error) { return [{ type: 'TASK_SEARCH_ERROR', requestId: value.requestId, message: error instanceof Error ? error.message : String(error) }]; }
     case 'REFRESH_REPOSITORY': {
       const visible = await host.presentation();

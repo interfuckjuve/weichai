@@ -1,3 +1,4 @@
+import { WorkspaceTranslationHost } from './workspace-translation-host';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import * as vscode from 'vscode';
@@ -80,6 +81,8 @@ interface LastCheckpoint {
   targetPath: string;
 }
 
+const workspaceTranslation = new WorkspaceTranslationHost(() => ({ url: loadSettings().adaptationApiUrl,
+  token: process.env.ADAPTATION_WORKSPACE_TRANSLATION_TOKEN, profile: process.env.FOREXPLORE_TRANSLATION_PROFILE }));
 let activeRun: ActiveMigrationRun | null = null;
 let moduleExplorerTargets = new Map<string, ModuleTarget>();
 let moduleExplorerChildren: ExplorerChildrenIndex = new Map();
@@ -327,6 +330,13 @@ async function handlePanelMessage(
   message: WebviewToHostMessage,
 ): Promise<void> {
   switch (message.type) {
+    case 'WORKSPACE_TRANSLATION': {
+      const panel = TranslationPanel.current;
+      if (!vscode.workspace.isTrusted) { panel?.post({ type: 'WORKSPACE_TRANSLATION_ERROR', requestId: message.requestId, message: '请先信任工作区。' }); return; }
+      const result = await workspaceTranslation.handle(message);
+      if (TranslationPanel.current === panel) panel?.post(result);
+      return;
+    }
     case 'LOAD_MODULE_CHILDREN':
       try {
         TranslationPanel.current?.post({ type: 'MODULE_CHILDREN', requestId: message.requestId,
@@ -411,6 +421,7 @@ async function startTaskSearch(host: ExtensionHost, message: Extract<WebviewToHo
     const packet = await host.codeIntelligence.searchTaskContext(message.requestId, message.targetScope, message.request, signal);
     signal.throwIfAborted();
     if (activeTaskSearch === run && TranslationPanel.current === panel) {
+      workspaceTranslation.remember(packet);
       panel?.post({ type: 'TASK_SEARCH_RESULT', requestId: message.requestId, packet });
     }
   } catch (error) {

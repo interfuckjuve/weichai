@@ -16,7 +16,28 @@ function declaratorName(node: Parser.SyntaxNode): string {
   return value.type === 'identifier' ? value.text : '';
 }
 function jniName(name: string): string {
-  return Array.from(name.replaceAll('.', '/')).map(c => /[a-zA-Z0-9]/.test(c) ? c : c === '/' ? '_' : c === '_' ? '_1' : `_0${c.charCodeAt(0).toString(16).padStart(4, '0')}`).join('');
+  // JNI escapes UTF-16 code units, including both halves of supplementary characters.
+  return name.replaceAll('.', '/').split('').map(c => /[a-zA-Z0-9]/.test(c) ? c : c === '/' ? '_' : c === '_' ? '_1'
+    : c === ';' ? '_2' : c === '[' ? '_3' : `_0${c.charCodeAt(0).toString(16).padStart(4, '0')}`).join('');
+}
+
+/** Only unambiguous primitive, java.lang and fully qualified descriptors; imports need semantic binding. */
+function jniParameters(signature: string): string | undefined {
+  const parameters = /\(([^()]*)\)/.exec(signature)?.[1];
+  if (parameters === undefined) return undefined;
+  if (!parameters.trim()) return '';
+  const primitives: Record<string, string> = { boolean: 'Z', byte: 'B', char: 'C', short: 'S', int: 'I', long: 'J', float: 'F', double: 'D' };
+  const descriptors: string[] = [];
+  for (const parameter of parameters.split(',')) {
+    const match = /^(?:final\s+)?([\w.$]+)((?:\s*\[\s*\])*)(\s*\.\.\.)?\s+[\w$]+((?:\s*\[\s*\])*)\s*$/.exec(parameter.trim());
+    if (!match) return undefined;
+    const type = match[1]!;
+    const base = primitives[type] ?? (type === 'String' || type === 'Object' ? `Ljava/lang/${type};`
+      : /^(?:[a-zA-Z_$][\w$]*\.)+[A-Za-z_$][\w$]*$/.test(type) ? `L${type.replaceAll('.', '/')};` : undefined);
+    if (!base) return undefined;
+    descriptors.push('['.repeat((match[2]!.match(/\[/g)?.length ?? 0) + (match[4]!.match(/\[/g)?.length ?? 0) + Number(Boolean(match[3]))) + base);
+  }
+  return descriptors.join('');
 }
 
 /** Conservative syntactic bindings. No SDK, macro evaluation or dynamic registration is inferred. */
@@ -40,7 +61,13 @@ export function resolveCrossLanguageBindings(input: Input): DependencyEdgeRecord
       // Short JNI exports are insufficient to disambiguate overloaded native methods.
       const overloads = input.symbols.filter(value => value.languageId === 'java' && value.qualifiedName === source.qualifiedName && /\bnative\b/.test(value.signature ?? ''));
       const targets = input.symbols.filter(value => native(value) && value.name === reference && /^JNIEXPORT\b/.test(value.signature ?? ''));
-      add(source, 'jni-binding', reference, overloads.length === 1 ? targets : []);
+      const parameters = jniParameters(source.signature ?? '');
+      const longReference = parameters === undefined ? undefined : `${reference}__${jniName(parameters)}`;
+      const longTargets = longReference === undefined ? [] : input.symbols.filter(value => native(value) && value.name === longReference && /^JNIEXPORT\b/.test(value.signature ?? ''));
+      // The VM searches the short name first. An overloaded short export cannot
+      // be made safe merely by finding a compatible long export alongside it.
+      add(source, 'jni-binding', targets.length ? reference : longReference ?? reference,
+        targets.length ? overloads.length === 1 ? targets : [] : longTargets);
     }
     if (source.languageId === 'kotlin' && /\bexpect\b/.test(source.signature ?? '')) {
       const module = /^(.*\/)?src\/commonMain\//.exec(source.relativePath)?.[1] ?? (source.relativePath.startsWith('src/commonMain/') ? '' : undefined);

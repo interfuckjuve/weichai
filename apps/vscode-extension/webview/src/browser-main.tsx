@@ -27,7 +27,9 @@ window.acquireVsCodeApi = () => ({
       if (!controller.signal.aborted) messages.forEach(dispatch);
     }).catch((error) => {
       if (controller.signal.aborted) return;
-      dispatch(message.type === 'START_TASK_SEARCH'
+      dispatch(message.type === 'WORKSPACE_TRANSLATION'
+        ? { type: 'WORKSPACE_TRANSLATION_ERROR', requestId: message.requestId, message: error.message }
+        : message.type === 'START_TASK_SEARCH'
         ? { type: 'TASK_SEARCH_ERROR', requestId: message.requestId, message: error.message }
         : message.type === 'LOAD_MODULE_CHILDREN'
         ? { type: 'MODULE_CHILDREN_ERROR', requestId: message.requestId, message: error.message }

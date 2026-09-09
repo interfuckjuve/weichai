@@ -272,6 +272,10 @@ export function createHttpServer(options: HttpServerOptions): Server {
         if (request.headers.origin && request.headers.origin !== options.corsOrigin) {
           throw new HttpError(403, "Browser origin is not configured for workspace translation.");
         }
+        if (request.method === "GET" && request.url === "/v1/workspace-translations/configuration") {
+          json(response, 200, translation.runtime.configuration(), options.corsOrigin);
+          return;
+        }
         const route = /^\/v1\/workspace-translations(?:\/([a-f0-9-]{36})(?:\/(cancel|resume|rollback))?)?$/.exec(request.url);
         if (!route) throw new HttpError(404, "Not found.");
         const [, id, action] = route;

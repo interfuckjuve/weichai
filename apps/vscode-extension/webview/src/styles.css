@@ -3095,3 +3095,9 @@ button:disabled {
 .project-analysis details { margin-top: 12px; }
 .project-analysis ul { max-height: 260px; overflow: auto; }
 .unassigned-file { display: block; margin-top: 4px; }
+
+.workspace-translation { margin: 24px 0; padding: 20px; border: 1px solid var(--border-color, #444); border-radius: 10px; }
+.workspace-translation pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 420px; overflow: auto; }
+.workspace-translation details { margin: 12px 0; }
+.translation-actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; margin: 16px 0; }
+.translation-actions label { display: grid; gap: 6px; }

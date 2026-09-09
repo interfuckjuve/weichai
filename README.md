@@ -6,6 +6,9 @@ browser workbench runs the same UI and real indexing/query services. See the
 [offline modeling and Context guide](docs/task-code-context-implementation.zh-CN.md)
 for `npm run dev:code-workbench`. The older `web/` application remains a workflow prototype.
 
+The [guochuang implementation guide](docs/guochuang-implementation.zh-CN.md) covers
+evidence handoff, multi-file generation, behavioral verification, and labeled retrieval evaluation.
+
 ## Repository layout
 
 - `apps/vscode-extension`: primary VS Code extension application.

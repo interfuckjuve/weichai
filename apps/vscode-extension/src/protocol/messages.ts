@@ -1,4 +1,5 @@
 import type {
+  WorkspaceTranslationRun,
   AdaptationResult,
   ApplyResult,
   ModuleTarget,
@@ -45,6 +46,8 @@ export type TaskSearchTargetScope = RepositoryRevisionScope & { projectId?: stri
 
 /** Messages the extension host posts into the Webview. */
 export type HostToWebviewMessage =
+  | { type: 'WORKSPACE_TRANSLATION_RESULT'; requestId: string; run?: WorkspaceTranslationRun; profile?: { profileId: string; workspaceRoot: string; sourceLanguage: string; targetLanguage: string; workspaceFiles: string[]; writeFiles: string[]; behavioralVerification: boolean } }
+  | { type: 'WORKSPACE_TRANSLATION_ERROR'; requestId: string; message: string }
   | { type: 'INIT'; payload: PanelInitPayload }
   | { type: 'SEARCH_RESULT'; candidates: SearchCandidate[] }
   | { type: 'TASK_SEARCH_RESULT'; requestId: string; packet: ContextPacket }
@@ -67,6 +70,7 @@ export type HostToWebviewMessage =
  * candidate objects, validation evidence, or patches to be written.
  */
 export type WebviewToHostMessage =
+  | { type: 'WORKSPACE_TRANSLATION'; requestId: string; action: 'describe' | 'start' | 'read' | 'cancel' | 'resume' | 'rollback'; profileId?: string; packetId?: string; evidenceIds?: string[]; runId?: string }
   | { type: 'READY' }
   | { type: 'START_TASK_SEARCH'; requestId: string; targetScope: TaskSearchTargetScope; request: TaskSearchIntent }
   | { type: 'CANCEL_TASK_SEARCH'; requestId: string }
@@ -97,6 +101,8 @@ export type WebviewToHostMessage =
   | { type: 'OPEN_TARGET' };
 
 const hostMessageTypes = new Set<string>([
+  'WORKSPACE_TRANSLATION_RESULT',
+  'WORKSPACE_TRANSLATION_ERROR',
   'INIT',
   'SEARCH_RESULT',
   'TASK_SEARCH_RESULT',
@@ -120,6 +126,14 @@ export function isWebviewToHostMessage(value: unknown): value is WebviewToHostMe
   if (typeof value !== 'object' || value === null) return false;
   const message = value as Record<string, unknown>;
   switch (message.type) {
+    case 'WORKSPACE_TRANSLATION': {
+      if (!Object.keys(message).every(key => ['type', 'requestId', 'action', 'profileId', 'packetId', 'evidenceIds', 'runId'].includes(key)) || !isOpaqueIdentifier(message.requestId)) return false;
+      if (message.action === 'describe') return hasOnlyKeys(message, ['type', 'requestId', 'action']);
+      if (message.action === 'start') return isOpaqueIdentifier(message.profileId) && message.runId === undefined && isOpaqueIdentifier(message.packetId) && Array.isArray(message.evidenceIds) &&
+        message.evidenceIds.length > 0 && message.evidenceIds.length <= 60 && message.evidenceIds.every(isOpaqueIdentifier);
+      return ['read', 'cancel', 'resume', 'rollback'].includes(String(message.action)) && message.profileId === undefined && message.packetId === undefined && message.evidenceIds === undefined &&
+        typeof message.runId === 'string' && /^[a-f0-9-]{36}$/.test(message.runId);
+    }
     case 'LOAD_MODULE_CHILDREN': {
       if (!hasOnlyKeys(message, ['type', 'requestId', 'request']) || !isOpaqueIdentifier(message.requestId) ||
         typeof message.request !== 'object' || message.request === null) return false;

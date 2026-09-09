@@ -57,6 +57,10 @@ export class WorkspaceTranslationRuntime {
     }
   }
 
+  configuration(): { workspaceRoot: string; behavioralVerification: boolean } {
+    return { workspaceRoot: this.files.root, behavioralVerification: Boolean(this.options.verification) };
+  }
+
   start(input: unknown): WorkspaceTranslationRun {
     this.requireIdle();
     try { validateWorkspaceTranslationRequest(input); }

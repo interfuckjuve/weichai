@@ -61,7 +61,9 @@ export interface ContextPacket {
   usage: { tokenizer: 'cl100k_base'; tokens: number; maxTokens: number; characters: number; files: number; sourceLines: number; latencyMs: number;
     /** Source payload only; excludes database internals and transport overhead. */
     retrieval?: { sourceBytesRead: number; sourceBytesDelivered: number; sourceReadAmplification: number | null;
-      sourceExcerptsRead: number; recallAndExpansionMs: number; compilationMs: number };
+      sourceExcerptsRead: number; recallAndExpansionMs: number; compilationMs: number;
+      /** Disjoint wall-clock stages; recall includes query encoding inside the storage adapter. */
+      stages?: { snapshotMs: number; recallMs: number; candidateResolutionMs: number; expansionMs: number; compilationMs: number } };
   };
 }
 

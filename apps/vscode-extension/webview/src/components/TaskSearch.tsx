@@ -1,3 +1,5 @@
+import { WorkspaceTranslation } from './WorkspaceTranslation';
+import type { TranslationProvider } from '../workspace-translation-provider';
 import { useEffect, useRef, useState } from 'react';
 import { ArrowRight, Check, Copy, Download, FileCode2, GitBranch, Search, X } from 'lucide-react';
 import { formatContextMarkdown, type ContextPacket } from '@forexplore/contracts';
@@ -10,12 +12,14 @@ export type { TaskSearchProvider } from '../task-search-provider';
 const labels = { implementation: '实现', interface: '接口', dependency: '调用依赖', configuration: '配置' };
 const granularities = { auto: '自动', function: '函数 / 方法', class: '类 / 接口', module: '功能模块', subsystem: '子系统' };
 
-export function TaskSearch({ project, search, availableGranularities, onMigrate }: {
+export function TaskSearch({ project, search, availableGranularities, onMigrate, translation }: {
+  translation?: TranslationProvider;
   project: string;
   search?: TaskSearchProvider;
   availableGranularities?: Record<TaskSearchIntent['scope'], readonly TaskSearchIntent['granularity'][]>;
   onMigrate(requirement: string): void;
 }) {
+  const [showTranslation, setShowTranslation] = useState(false);
   const [requirement, setRequirement] = useState('');
   const [scope, setScope] = useState<TaskSearchRequest['scope']>('target');
   const [granularity, setGranularity] = useState<TaskSearchRequest['granularity']>('auto');
@@ -44,6 +48,7 @@ export function TaskSearch({ project, search, availableGranularities, onMigrate 
     controller.current = null;
     setPending(false);
     setPacket(null);
+    setShowTranslation(false);
     setSelected([]);
     setActiveId(null);
     setError('');
@@ -140,9 +145,11 @@ export function TaskSearch({ project, search, availableGranularities, onMigrate 
         <div className="context-export-actions">
           <button type="button" className="icon-button" title={copied ? '已复制' : '复制上下文'} aria-label="复制上下文" disabled={!canExport} onClick={() => void copy()}>{copied ? <Check size={15} /> : <Copy size={15} />}</button>
           <button type="button" className="secondary-action" disabled={!canExport} onClick={download}><Download size={14} />导出上下文</button>
+          {translation ? <button type="button" className="primary-action" disabled={!canExport} onClick={() => setShowTranslation(true)}>生成与验收</button> : null}
           <button type="button" className="secondary-action" disabled={!canExport} onClick={() => onMigrate(requirement)}><GitBranch size={14} />复用迁移<ArrowRight size={13} /></button>
         </div>
       </footer>
+      {showTranslation && translation && packet ? <WorkspaceTranslation provider={translation} packetId={packet.packetId} evidenceIds={selected} /> : null}
       {packet?.gaps.length ? <details className="context-gaps" open={packet.status === 'unavailable'}>
         <summary>证据缺口与检索诊断 · {packet.gaps.length}</summary>
         <ul>{packet.gaps.map((gap, index) => <li key={`${gap.code}:${index}`}>{gap.message}{gap.relativePath ? <code>{gap.relativePath}</code> : null}</li>)}</ul>

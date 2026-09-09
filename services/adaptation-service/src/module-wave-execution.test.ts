@@ -241,7 +241,8 @@ describe("ModuleWaveExecutionCoordinator", () => {
     expect(git(root, ["branch", "--list", "codex/forexplore-migration/run-scheduled-preparation"])).toBe("");
   });
 
-  it("prepares, then commits code, summary, snapshot, and run manifest as one approved wave", async () => {
+  // Real Git worktree/commit processes can exceed the default five seconds on Windows.
+  it("prepares, then commits code, summary, snapshot, and run manifest as one approved wave", { timeout: 15_000 }, async () => {
     const root = await repository();
     const source = analysis();
     const plan = planWithPlanApproval(source);
@@ -420,7 +421,8 @@ describe("ModuleWaveExecutionCoordinator", () => {
     expect(git(root, ["branch", "--list", "codex/forexplore-migration/run-tampered-analysis"])).toBe("");
   });
 
-  it("accepts an already-stored immutable snapshot collected at a different time", async () => {
+  // Real Git worktree/commit processes can exceed the default five seconds on Windows.
+  it("accepts an already-stored immutable snapshot collected at a different time", { timeout: 15_000 }, async () => {
     const root = await repository();
     const source = analysis();
     const artifactDirectory = path.join(root, ".forexplore", "analysis");

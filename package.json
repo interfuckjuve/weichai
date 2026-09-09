@@ -33,6 +33,8 @@
     "test:code-intelligence": "npm run test --workspace @forexplore/code-intelligence-service",
     "test:project-analysis:live": "tsx scripts/verify-project-analysis.ts",
     "test:semantic-index-mcp": "npm run test --workspace @forexplore/semantic-index-mcp-server",
-    "test": "npm run test --workspace @forexplore/workspace-adapters && npm run test --workspace @forexplore/workflow-core && npm run test --workspace @forexplore/code-indexer && npm run test --workspace @forexplore/seekdb-adapter && npm run test --workspace @forexplore/adaptation-http-adapter && npm run test --workspace @forexplore/retrieval-service && npm run test --workspace @forexplore/code-intelligence-service && npm run test --workspace @forexplore/adaptation-service && npm run test --workspace @forexplore/adaptation-mcp-server && npm run test --workspace @forexplore/semantic-index-mcp-server && npm run test --workspace @forexplore/workflow-web && npm run test --workspace forexplore-vscode"
+    "test": "npm run test --workspace @forexplore/workspace-adapters && npm run test --workspace @forexplore/workflow-core && npm run test --workspace @forexplore/code-indexer && npm run test --workspace @forexplore/seekdb-adapter && npm run test --workspace @forexplore/adaptation-http-adapter && npm run test --workspace @forexplore/retrieval-service && npm run test --workspace @forexplore/code-intelligence-service && npm run test --workspace @forexplore/adaptation-service && npm run test --workspace @forexplore/adaptation-mcp-server && npm run test --workspace @forexplore/semantic-index-mcp-server && npm run test --workspace @forexplore/workflow-web && npm run test --workspace forexplore-vscode && npm run test:guochuang",
+    "evaluate:guochuang": "tsx scripts/evaluate-guochuang.mts",
+    "test:guochuang": "vitest run tests/integration/guochuang-handoff.test.ts --maxWorkers=2"
   }
 }

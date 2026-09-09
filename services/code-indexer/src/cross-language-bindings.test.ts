@@ -24,6 +24,24 @@ const build = (sources = files, previousIndex?: ReturnType<typeof buildStructura
   buildStructuralIndex({ repositoryId: 'repo', analysisRevision: 'r1', files: sources, previousIndex }).index;
 
 describe('Huawei language frontends and bindings', () => {
+  it('resolves JNI long names using primitive and array parameter descriptors', () => {
+    const index = build([
+      { relativePath: 'demo/Foo.java', content: 'package demo; public class Foo { public native int sum(int value); public native int sum(long value); public native int read(String[] values); }' },
+      { relativePath: 'native/foo.cpp', content: 'JNIEXPORT jint JNICALL Java_demo_Foo_sum__I(JNIEnv *e, jobject o, jint n) { return n; }\nJNIEXPORT jint JNICALL Java_demo_Foo_sum__J(JNIEnv *e, jobject o, jlong n) { return n; }\nJNIEXPORT jint JNICALL Java_demo_Foo_read___3Ljava_lang_String_2(JNIEnv *e, jobject o, jobjectArray n) { return 1; }' },
+    ]);
+    const edges = index.dependencyEdges.filter(edge => edge.kind === 'jni-binding');
+    expect(edges).toHaveLength(3);
+    expect(edges.every(edge => edge.resolution === 'resolved')).toBe(true);
+    expect(new Set(edges.map(edge => edge.targetSymbolKey)).size).toBe(3);
+  });
+
+  it('does not infer JNI object descriptors from simple imported type names', () => {
+    const index = build([
+      { relativePath: 'demo/Foo.java', content: 'package demo; import other.Value; public class Foo { public native int sum(Value value); }' },
+      { relativePath: 'native/foo.cpp', content: 'JNIEXPORT jint JNICALL Java_demo_Foo_sum__Lother_Value_2(JNIEnv *e, jobject o, jobject n) { return 1; }' },
+    ]);
+    expect(index.dependencyEdges.find(edge => edge.kind === 'jni-binding')?.resolution).toBe('unresolved');
+  });
   it.each([
     ['native/test.c', '#include "local.h"\nint *lookup(int value) { return 0; }', 'lookup', 'local.h'],
     ['native/test.cpp', '#include "local.hpp"\nnamespace demo { class Counter { int sum(int x) { return x; } }; }', 'Counter', 'local.hpp'],

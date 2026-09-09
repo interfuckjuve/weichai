@@ -73,6 +73,9 @@ describe('task retrieval and context compilation', () => {
     expect(packet.evidence.some((item) => item.content.includes('return issueReceipt(value)') && item.sourceRange.startLine > 800)).toBe(true);
     expect(packet.evidence.some((item) => item.role === 'configuration' && item.relativePath === 'package.json')).toBe(true);
     expect(packet.relations.length).toBeGreaterThan(0);
+    const stages = packet.usage.retrieval!.stages!;
+    expect(Object.values(stages).every(value => Number.isFinite(value) && value >= 0)).toBe(true);
+    expect(Object.values(stages).reduce((sum, value) => sum + value, 0)).toBeLessThanOrEqual(packet.usage.latencyMs + 2);
     expect(packet.usage.tokens).toBe(getEncoding('cl100k_base').encode(packet.markdown, [], []).length);
     expect(packet.usage.tokens).toBeLessThanOrEqual(request.budget.maxTokens);
     for (const item of packet.evidence) expect(item.contentHash).toBe(createHash('sha256').update(item.content).digest('hex'));
