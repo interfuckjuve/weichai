@@ -95,6 +95,8 @@ export interface BehaviorExecutionScope {
   readRoots: string[];
   /** Logical test/build permissions, not OS sandbox boundaries. */
   writeRoots: string[];
+  /** Trusted Host opt-in for mutable experiment copies; omitted means protected. */
+  projectAccess?: "experiment";
   /** Host replay checks these frozen harness and input files before and after commands. */
   readOnlyFiles?: string[];
   /** Original caller-owned files, retained across a bounded test-harness repair. */

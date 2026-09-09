@@ -74,6 +74,8 @@ const WRAPPERS = new Set(["mvnw", "gradlew"]);
 export interface BehaviorCommandControl {
   scope: BehaviorExecutionScope;
   baselines: BehaviorProjectBaseline[];
+  /** Canonical mutable project roots selected by the Host, never command argv. */
+  experimentRoots?: string[];
   frozenFiles: Record<string, string>;
   deadlineAt: number;
   env: NodeJS.ProcessEnv;
@@ -124,6 +126,8 @@ export function redact(text: string, secrets: string[]): string {
 export function validateScope(
   scope: BehaviorExecutionScope,
 ): BehaviorExecutionScope {
+  if (scope.projectAccess !== undefined && scope.projectAccess !== "experiment")
+    throw new Error("Invalid Host project access.");
   const directory = (path: string): string => {
     if (!isAbsolute(path) || path.includes("\0"))
       throw new Error("Execution paths must be absolute literal paths.");
@@ -165,6 +169,7 @@ export function validateScope(
     readRoots,
     writeRoots,
     readOnlyFiles,
+    ...(scope.projectAccess ? { projectAccess: scope.projectAccess } : {}),
     ...(scope.baseline ? { baseline: scope.baseline } : {}),
   };
 }
@@ -189,7 +194,13 @@ export function assertCommandIntegrity(control: BehaviorCommandControl): void {
     )
       throw new Error("Frozen test plan integrity violation.");
   }
-  for (const baseline of control.baselines) assertProjectBaseline(baseline);
+  for (const baseline of control.baselines) {
+    if (realpathSync(baseline.root) !== baseline.root)
+      throw new Error("Project baseline root changed.");
+    if (control.experimentRoots?.includes(baseline.root))
+      captureProjectBaseline(baseline.root);
+    else assertProjectBaseline(baseline);
+  }
   for (const [file, hash] of Object.entries(control.frozenFiles)) {
     const metadata = lstatSync(file);
     if (

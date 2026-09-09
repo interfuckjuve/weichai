@@ -83,6 +83,7 @@ export function createBehaviorRuntime(
     const control: BehaviorCommandControl = {
       scope: validated,
       baselines: [baseline],
+      experimentRoots: validated.projectAccess === "experiment" ? [validated.cwd] : [],
       frozenFiles: captureFrozenFiles(validated),
       deadlineAt: Math.min(deadlineAt, Date.now() + timeoutMs),
       env: buildEnvironment(),
@@ -132,7 +133,13 @@ export function createBehaviorRuntime(
       if (executionSides.some((side) => !projects[side]))
         throw new Error("Execution side has no prepared project.");
       const allBaselines = controls.flatMap((item) => item.baselines);
-      for (const item of controls) item.baselines = allBaselines;
+      const experimentRoots = controls.flatMap((item) => item.experimentRoots ?? []);
+      const frozenFiles = Object.assign({}, ...controls.map((item) => item.frozenFiles));
+      for (const item of controls) {
+        item.baselines = allBaselines;
+        item.experimentRoots = experimentRoots;
+        item.frozenFiles = frozenFiles;
+      }
       const model =
         options.model ?? process.env.DEEPSEEK_MODEL ?? "deepseek-v4-flash";
       const claude = findInstalledExecutable("claude", control.env);
@@ -231,12 +238,12 @@ export function createBehaviorRuntime(
         await writeFile(promptFile, task.prompt, { flag: "wx", mode: 0o600 });
         const proxy = `npx tsx ${BEHAVIOR_COMMAND_ENTRY}`;
         const protectedPaths = [
-          ...allBaselines.flatMap((baseline) =>
+          ...allBaselines.filter((baseline) => !experimentRoots.includes(baseline.root)).flatMap((baseline) =>
             Object.keys(baseline.files).map((path) =>
               join(baseline.root, path),
             ),
           ),
-          ...controls.flatMap((item) => Object.keys(item.frozenFiles)),
+          ...Object.keys(frozenFiles),
           ...control.scope.readRoots
             .filter((root) => !controls.some((item) => root === item.scope.cwd))
             .map((root) => `${root}/**`),
@@ -356,7 +363,8 @@ export function createBehaviorRuntime(
                 "HOST EXECUTION CONTEXT (authoritative)",
                 `Actual project cwd: ${control.scope.cwd}`,
                 `Readable project roots: ${JSON.stringify(control.scope.readRoots)}`,
-                `Test/build write scope: ${JSON.stringify(control.scope.writeRoots)}`,
+                `Project write scope: ${JSON.stringify(control.scope.writeRoots)}`,
+                `Host-approved experiment project roots: ${JSON.stringify(experimentRoots)}. Only these copies permit original source edits, deletions and arbitrary new project files; all other project baselines remain protected.`,
                 "Native sandbox is disabled. There is NO OS isolation. Node/Python and build scripts are general-purpose host processes, not a security sandbox.",
                 "Use Read/Edit/Write/Glob/Grep for files. All build, test and run commands MUST use the Host-supplied proxy:",
                 `  ${proxy} ${scoped ? "--project source|target " : ""}-- <installed-tool-or-project-wrapper> <args...>`,
@@ -368,7 +376,7 @@ export function createBehaviorRuntime(
                     ]
                   : []),
                 "The proxy fixes cwd, environment, deadline and baseline; never change these through environment assignments or shell composition. Command evidence is recorded by the Host separately from your output.",
-                "Original baseline files are frozen except regenerable build/cache outputs. Newly authored tests may be repaired unless Host-frozen. New tests belong in standard project test directories or .forexplore-tests. Put other generated metadata in .forexplore-tests.",
+                "Outside Host-approved experiment roots, original baseline files are frozen except regenerable build/cache outputs. Host-frozen inputs remain immutable in every project. Newly authored tests may be repaired unless Host-frozen. New tests belong in standard project test directories or .forexplore-tests. Put other generated metadata in .forexplore-tests.",
               ].join("\n"),
               "--model",
               model,
