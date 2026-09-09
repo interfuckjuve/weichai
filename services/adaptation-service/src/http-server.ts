@@ -4,10 +4,14 @@ import {
   type Server,
   type ServerResponse,
 } from "node:http";
+import { timingSafeEqual } from "node:crypto";
+import { parseModuleHierarchyDecision, parseModuleHierarchyDecisionRequest } from '@forexplore/code-intelligence-service/module-hierarchy-planner';
+import { WorkspaceTranslationError, type WorkspaceTranslationRuntime } from "./workspace-translation-runtime";
 import {
   moduleMigrationSchemaVersion,
   type AdaptationRequest,
   type Language,
+  type ModuleHierarchyPlanner,
   type RepositoryArchitectureRequest,
   type RepositoryStaticAnalysis,
 } from "@forexplore/contracts";
@@ -33,6 +37,10 @@ export interface HttpServerOptions {
   staticAnalysisSnapshots?: StaticAnalysisSnapshotStore;
   /** Revision-native planning path backed only by SemanticQueryPort tools. */
   semanticArchitecturePort?: RevisionScopedArchitecturePort;
+  /** Optional evidence-only node decisions; the injected planner owns model configuration. */
+  moduleHierarchyPlanner?: ModuleHierarchyPlanner;
+  /** Explicitly configured in-place translation, authenticated separately from read-only routes. */
+  workspaceTranslation?: { runtime: WorkspaceTranslationRuntime; bearerToken: string };
   /** Browser CORS is opt-in; the VS Code extension host uses local HTTP directly. */
   corsOrigin?: string;
 }
@@ -63,7 +71,7 @@ function json(
   corsOrigin: string | undefined,
 ): void {
   const headers: Record<string, string> = {
-    "access-control-allow-headers": "content-type",
+    "access-control-allow-headers": "content-type, authorization",
     "access-control-allow-methods": "GET, POST, OPTIONS",
     "content-type": "application/json; charset=utf-8",
   };
@@ -243,6 +251,9 @@ function requestSignal(request: IncomingMessage): AbortSignal {
 }
 
 export function createHttpServer(options: HttpServerOptions): Server {
+  if (options.workspaceTranslation && options.workspaceTranslation.bearerToken.trim().length < 32) {
+    throw new Error("Workspace translation requires a bearer token of at least 32 characters.");
+  }
   return createServer(async (request, response) => {
     if (request.method === "OPTIONS") {
       json(response, 204, null, options.corsOrigin);
@@ -250,11 +261,50 @@ export function createHttpServer(options: HttpServerOptions): Server {
     }
 
     try {
+      if (request.url?.startsWith("/v1/workspace-translations")) {
+        const translation = options.workspaceTranslation;
+        if (!translation) throw new HttpError(404, "Workspace translation is not configured.");
+        const supplied = Buffer.from(request.headers.authorization ?? "");
+        const expected = Buffer.from(`Bearer ${translation.bearerToken}`);
+        if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) {
+          throw new HttpError(401, "Workspace translation requires a valid bearer token.");
+        }
+        if (request.headers.origin && request.headers.origin !== options.corsOrigin) {
+          throw new HttpError(403, "Browser origin is not configured for workspace translation.");
+        }
+        if (request.method === "GET" && request.url === "/v1/workspace-translations/configuration") {
+          json(response, 200, translation.runtime.configuration(), options.corsOrigin);
+          return;
+        }
+        const route = /^\/v1\/workspace-translations(?:\/([a-f0-9-]{36})(?:\/(cancel|resume|rollback))?)?$/.exec(request.url);
+        if (!route) throw new HttpError(404, "Not found.");
+        const [, id, action] = route;
+        if (request.method === "POST" && !id) {
+          requireJson(request);
+          const run = translation.runtime.start(await readBody(request));
+          json(response, 202, run, options.corsOrigin);
+          return;
+        }
+        if (request.method === "GET" && id && !action) {
+          json(response, 200, translation.runtime.get(id), options.corsOrigin);
+          return;
+        }
+        if (request.method === "POST" && id && action) {
+          const run = action === "cancel" ? await translation.runtime.cancel(id)
+            : action === "resume" ? translation.runtime.resume(id) : translation.runtime.rollback(id);
+          json(response, action === "resume" ? 202 : 200, run, options.corsOrigin);
+          return;
+        }
+        throw new HttpError(405, "Method not allowed.");
+      }
       if (request.method === "GET" && request.url === "/health") {
         json(
           response,
           200,
-          { status: "ok", provider: "deepseek" },
+          { status: "ok", provider: "deepseek", capabilities: {
+            semanticModulePlanning: Boolean(options.semanticArchitecturePort),
+            moduleHierarchyPlanning: Boolean(options.moduleHierarchyPlanner),
+          } },
           options.corsOrigin,
         );
         return;
@@ -320,6 +370,27 @@ export function createHttpServer(options: HttpServerOptions): Server {
         return;
       }
 
+      if (request.method === 'POST' && request.url === '/module-hierarchy/decision') {
+        if (!options.moduleHierarchyPlanner) throw new HttpError(503, 'Module hierarchy model is not configured.');
+        requireJson(request);
+        const raw = await readBody(request);
+        let body;
+        try { body = parseModuleHierarchyDecisionRequest(raw); }
+        catch { throw new HttpError(400, 'Invalid bounded module hierarchy evidence snapshot.'); }
+        const controller = new AbortController();
+        const disconnect = () => { if (!response.writableEnded) controller.abort(); };
+        response.once('close', disconnect);
+        const signal = AbortSignal.any([requestSignal(request), controller.signal, AbortSignal.timeout(45_000)]);
+        try {
+          const decision = parseModuleHierarchyDecision(await options.moduleHierarchyPlanner.decide(body, signal), body);
+          signal.throwIfAborted();
+          json(response, 200, decision, options.corsOrigin);
+        } catch {
+          throw new HttpError(signal.aborted ? 504 : 502, signal.aborted ? 'Module hierarchy decision timed out or was cancelled.' : 'Module hierarchy model could not produce a valid decision.');
+        } finally { response.removeListener('close', disconnect); }
+        return;
+      }
+
       if (request.method === "POST" && request.url === "/v1/semantic-module-plan") {
         if (!options.semanticArchitecturePort) {
           json(
@@ -373,8 +444,8 @@ export function createHttpServer(options: HttpServerOptions): Server {
       json(response, 404, { error: "Not found." }, options.corsOrigin);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown adaptation error.";
-      const status = error instanceof HttpError ? error.status : 502;
-      if (!(error instanceof HttpError)) console.error(error);
+      const status = error instanceof HttpError || error instanceof WorkspaceTranslationError ? error.status : 502;
+      if (!(error instanceof HttpError) && !(error instanceof WorkspaceTranslationError)) console.error(error);
       json(response, status, { error: message }, options.corsOrigin);
     }
   });

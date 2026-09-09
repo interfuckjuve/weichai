@@ -24,6 +24,7 @@ export class ModelSearchEmbeddingProvider implements SearchEmbeddingProvider {
   readonly identity: string;
   readonly #client: OpenAiCompatibleEmbeddingProvider;
   readonly #cache = new Map<string, number[]>();
+  readonly #queryFlights = new WeakMap<AbortSignal, Map<string, Promise<number[]>>>();
   constructor(readonly dimension: number, private readonly config: ModelSearchEmbeddingConfig) {
     this.config = Object.freeze({ ...config });
     const url = new URL(config.url);
@@ -39,7 +40,19 @@ export class ModelSearchEmbeddingProvider implements SearchEmbeddingProvider {
     return this.encode(texts.map((text) => `${this.config.documentPrefix ?? ''}${text}`), signal);
   }
   async embedQuery(text: string, signal?: AbortSignal): Promise<number[]> {
-    return (await this.encode([`${this.config.queryPrefix ?? ''}${text}`], signal))[0]!;
+    signal?.throwIfAborted();
+    // Share only within one cancellation domain: aborting another task must not
+    // cancel this request's embedding, even when its text happens to match.
+    if (!signal) return (await this.encode([`${this.config.queryPrefix ?? ''}${text}`]))[0]!;
+    let flights = this.#queryFlights.get(signal);
+    if (!flights) { flights = new Map(); this.#queryFlights.set(signal, flights); }
+    let pending = flights.get(text);
+    if (!pending) {
+      pending = this.encode([`${this.config.queryPrefix ?? ''}${text}`], signal).then(vectors => vectors[0]!)
+        .finally(() => flights!.delete(text));
+      flights.set(text, pending);
+    }
+    return [...await pending];
   }
   private async encode(texts: readonly string[], signal?: AbortSignal): Promise<number[][]> {
     signal?.throwIfAborted();

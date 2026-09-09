@@ -10,9 +10,87 @@ import type {
   RepositoryRecord,
   RepositoryRevisionScope,
   SearchDocumentRecord,
+  SourceRange,
   StructuralIndex,
   SymbolRecord,
 } from '@forexplore/contracts';
+
+export interface SourceTextReader {
+  read(relativePath: string): Promise<string | null>;
+  dispose?(): Promise<void>;
+}
+
+export interface RevisionStatistics {
+  projects: number;
+  files: number;
+  symbols: number;
+  dependencies: number;
+  diagnostics: number;
+  languages: Array<{ languageId: string; fileCount: number; hasSemanticSymbols: boolean }>;
+}
+
+export interface LocalSymbolQuery {
+  projectId?: string;
+  symbolKeys?: readonly string[];
+  relativePaths?: readonly string[];
+  kinds?: readonly string[];
+  limit: number;
+}
+
+export interface LocalDependencyQuery extends Omit<LocalSymbolQuery, 'kinds'> {
+  direction?: 'incoming' | 'outgoing' | 'both';
+}
+
+export interface SourceSlice {
+  file: IndexedFileRecord;
+  text: string;
+  sourceRange: SourceRange;
+  truncated: boolean;
+}
+
+export interface ProjectionFactLookup {
+  filesByPath: ReadonlyMap<string, IndexedFileRecord>;
+  symbolsByKey: ReadonlyMap<string, SymbolRecord>;
+}
+
+export function projectionFactLookup(index: StructuralIndex): ProjectionFactLookup {
+  return { filesByPath: new Map(index.files.map((file) => [file.relativePath, file])),
+    symbolsByKey: new Map(index.symbols.map((symbol) => [symbol.symbolKey, symbol])) };
+}
+
+export function validateLocalQuery(query: LocalSymbolQuery, requireAnchor = true): void {
+  if (!Number.isInteger(query.limit) || query.limit < 1 || query.limit > 200) throw new Error('Local queries require a limit in 1..200.');
+  for (const values of [query.relativePaths, query.symbolKeys, query.kinds]) {
+    if (values && (values.length > 200 || values.some((value) => typeof value !== 'string' || !value.trim()))) throw new Error('Local query filters require at most 200 nonempty values.');
+  }
+  for (const value of query.relativePaths ?? []) assertRelativePath(value, 'Query path');
+  if (requireAnchor && !query.symbolKeys?.length && !query.relativePaths?.length) throw new Error('A local query requires file or symbol anchors.');
+}
+
+export function sliceSourceText(source: string, range: SourceRange | undefined, maxChars: number, baseLine = 1, hasMore = false): Omit<SourceSlice, 'file'> | null {
+  if (!Number.isInteger(maxChars) || maxChars < 1 || maxChars > 32_000) throw new Error('Source slices require 1..32000 characters.');
+  if (range) assertSourceRange(range, 'Source slice');
+  const starts = [0];
+  for (let index = 0; index < source.length; index++) if (source[index] === '\n') starts.push(index + 1);
+  const startLine = range?.startLine ?? baseLine;
+  const startColumn = range?.startColumn ?? 1;
+  const lineOffset = starts[startLine - baseLine];
+  if (lineOffset === undefined) return null;
+  const start = lineOffset + startColumn - 1;
+  if (start > (starts[startLine - baseLine + 1] ?? source.length + 1) - 1) return null;
+  const requestedEnd = range ? (starts[range.endLine - baseLine] === undefined ? Number.POSITIVE_INFINITY : starts[range.endLine - baseLine]! + range.endColumn - 1) : source.length;
+  let end = Math.min(requestedEnd, source.length, start + maxChars);
+  if (end < start) throw new Error('Source slice end precedes its start.');
+  if (end > start && /[\uD800-\uDBFF]/.test(source[end - 1]!) && /[\uDC00-\uDFFF]/.test(source[end] ?? '')) end--;
+  const text = source.slice(start, end);
+  let endLine = startLine;
+  let endColumn = startColumn;
+  for (const character of text.split('')) {
+    if (character === '\n') { endLine++; endColumn = 1; } else endColumn++;
+  }
+  return { text, sourceRange: { startLine, startColumn, endLine, endColumn },
+    truncated: end < requestedEnd || (hasMore && (!range || requestedEnd >= source.length)) };
+}
 
 /**
  * Authoritative revision store for code intelligence. Search documents are a
@@ -37,6 +115,10 @@ export interface IndexStore {
   /** Replaces only records in this revision; it never clears another repository. */
   putStructuralIndex(index: StructuralIndex, sourceTexts?: ReadonlyMap<string, string>): Promise<void>;
   getStructuralIndex(scope: RepositoryRevisionScope): Promise<StructuralIndex | null>;
+  getStructuralIndexMetadata?(scope: RepositoryRevisionScope, signal?: AbortSignal): Promise<Pick<StructuralIndex, 'repositoryId' | 'analysisRevision' | 'analysisHash'> | null>;
+  getRevisionStatistics?(scope: RepositoryRevisionScope, signal?: AbortSignal): Promise<RevisionStatistics | null>;
+  putStructuralIndexFromSource?(index: StructuralIndex, source: SourceTextReader, signal?: AbortSignal): Promise<void>;
+  appendSearchDocuments?(index: StructuralIndex, documents: SearchDocumentRecord[], signal?: AbortSignal): Promise<void>;
   getSourceText(scope: RepositoryRevisionScope, relativePath: string): Promise<string | null>;
   getSourcePreview?(scope: RepositoryRevisionScope, relativePath: string, maxChars: number, signal?: AbortSignal): Promise<{ text: string; truncated: boolean } | null>;
 
@@ -47,6 +129,10 @@ export interface IndexStore {
   listSymbols(scope: RepositoryRevisionScope): Promise<SymbolRecord[]>;
   listDependencyEdges(scope: RepositoryRevisionScope): Promise<DependencyEdgeRecord[]>;
   listDiagnostics(scope: RepositoryRevisionScope): Promise<IndexDiagnosticRecord[]>;
+  queryFiles?(scope: RepositoryRevisionScope, query: { projectId?: string; relativePaths?: readonly string[]; after?: string; limit: number }, signal?: AbortSignal): Promise<{ files: IndexedFileRecord[]; truncated: boolean }>;
+  querySymbols?(scope: RepositoryRevisionScope, query: LocalSymbolQuery, signal?: AbortSignal): Promise<{ symbols: SymbolRecord[]; truncated: boolean }>;
+  queryDependencies?(scope: RepositoryRevisionScope, query: LocalDependencyQuery, signal?: AbortSignal): Promise<{ dependencies: DependencyEdgeRecord[]; truncated: boolean }>;
+  getSourceSlice?(scope: RepositoryRevisionScope, relativePath: string, sourceRange: SourceRange | undefined, maxChars: number, signal?: AbortSignal): Promise<SourceSlice | null>;
 
   putModuleArtifact(artifact: ModuleArtifactRecord): Promise<void>;
   listModuleArtifacts(scope: RepositoryRevisionScope): Promise<ModuleArtifactRecord[]>;
@@ -54,7 +140,7 @@ export interface IndexStore {
   listSearchDocuments(scope: RepositoryRevisionScope): Promise<SearchDocumentRecord[]>;
   /** Optional full-text/vector-backed projection lookup; structural records remain authoritative. */
   searchSearchDocuments?(
-    scope: RepositoryRevisionScope,
+    scope: RepositoryRevisionScope & { projectId?: string },
     query: string,
     limit: number,
     kind?: SearchDocumentRecord['kind'],
@@ -348,9 +434,10 @@ export function validateSearchDocumentRecords(
         }
         break;
       case 'source-fragment':
-        if (document.relativePath === null || document.symbolKey !== undefined || document.moduleArtifactId !== undefined) {
-          throw new Error('Source-fragment search documents require a source path only.');
+        if (document.relativePath === null || document.moduleArtifactId !== undefined || (document.symbolKey !== undefined && (!document.symbolKey.trim() || !document.sourceRange))) {
+          throw new Error('Source-fragment search documents require a source path and a range for symbol-linked chunks.');
         }
+        if (document.sourceRange) assertSourceRange(document.sourceRange, 'Source fragment');
         break;
       case 'summary':
         if (document.relativePath !== null || document.symbolKey !== undefined || !document.moduleArtifactId?.trim()) {
@@ -369,10 +456,10 @@ export function validateSearchDocumentsAgainstIndex(
   documents: readonly SearchDocumentRecord[],
   artifacts: ReadonlyMap<string, ModuleArtifactRecord>,
   repository: Pick<RepositoryRecord, 'activeRevision'> | null,
+  facts: ProjectionFactLookup = projectionFactLookup(index),
 ): void {
   validateSearchDocumentRecords(index, documents);
-  const filesByPath = new Map(index.files.map((file) => [file.relativePath, file]));
-  const symbolsByKey = new Map(index.symbols.map((symbol) => [symbol.symbolKey, symbol]));
+  const { filesByPath, symbolsByKey } = facts;
   for (const document of documents) {
     if (document.kind === 'symbol') {
       const symbol = symbolsByKey.get(document.symbolKey!);
@@ -384,6 +471,16 @@ export function validateSearchDocumentsAgainstIndex(
     if (document.kind === 'source-fragment') {
       if (!filesByPath.has(document.relativePath!)) {
         throw new Error(`Source-fragment search document ${document.searchDocumentId} does not match an indexed file.`);
+      }
+      if (document.symbolKey) {
+        const symbol = symbolsByKey.get(document.symbolKey);
+        const range = document.sourceRange!;
+        const before = (line: number, column: number, otherLine: number, otherColumn: number) => line < otherLine || (line === otherLine && column < otherColumn);
+        if (!symbol || symbol.relativePath !== document.relativePath ||
+          before(range.startLine, range.startColumn, symbol.sourceRange.startLine, symbol.sourceRange.startColumn) ||
+          before(symbol.sourceRange.endLine, symbol.sourceRange.endColumn, range.endLine, range.endColumn)) {
+          throw new Error('Source fragment does not belong to its declared symbol range.');
+        }
       }
       continue;
     }
@@ -398,7 +495,7 @@ export function validateSearchDocumentsAgainstIndex(
 /** Shared policy for writing version-bound module artifacts. */
 export function validateModuleArtifact(
   artifact: ModuleArtifactRecord,
-  index: StructuralIndex,
+  index: Pick<StructuralIndex, 'repositoryId' | 'analysisRevision' | 'analysisHash'>,
   repository: Pick<RepositoryRecord, 'activeRevision'> | null,
 ): void {
   assertScope(index, artifact, 'Module artifact');
@@ -514,6 +611,52 @@ export class InMemoryIndexStore implements IndexStore {
     return contents ? clone(contents.index) : null;
   }
 
+  async getStructuralIndexMetadata(scope: RepositoryRevisionScope, signal?: AbortSignal): Promise<Pick<StructuralIndex, 'repositoryId' | 'analysisRevision' | 'analysisHash'> | null> {
+    signal?.throwIfAborted();
+    const index = this.#contents.get(scopeKey(scope))?.index;
+    return index ? { ...scope, analysisHash: index.analysisHash } : null;
+  }
+
+  async getRevisionStatistics(scope: RepositoryRevisionScope, signal?: AbortSignal): Promise<RevisionStatistics | null> {
+    signal?.throwIfAborted();
+    const index = this.#contents.get(scopeKey(scope))?.index;
+    if (!index) return null;
+    const languages = new Map<string, RevisionStatistics['languages'][number]>();
+    for (const file of index.files) {
+      if (!file.languageId) continue;
+      const language = languages.get(file.languageId) ?? { languageId: file.languageId, fileCount: 0, hasSemanticSymbols: false };
+      language.fileCount++; languages.set(file.languageId, language);
+    }
+    for (const symbol of index.symbols) {
+      const language = languages.get(symbol.languageId);
+      if (language && symbol.provider !== 'tree-sitter') language.hasSemanticSymbols = true;
+    }
+    return { projects: index.projects.length, files: index.files.length, symbols: index.symbols.length,
+      dependencies: index.dependencyEdges.length, diagnostics: index.diagnostics.length,
+      languages: [...languages.values()].sort((a, b) => a.languageId.localeCompare(b.languageId)) };
+  }
+
+  async putStructuralIndexFromSource(index: StructuralIndex, source: SourceTextReader, signal?: AbortSignal): Promise<void> {
+    const texts = new Map<string, string>();
+    for (const file of index.files) {
+      signal?.throwIfAborted();
+      const text = await source.read(file.relativePath);
+      if (text === null && file.parseStatus !== 'failed') throw new Error(`Captured source is unavailable: ${file.relativePath}`);
+      if (text !== null) texts.set(file.relativePath, text);
+    }
+    await this.putStructuralIndex(index, texts);
+  }
+
+  async appendSearchDocuments(index: StructuralIndex, documents: SearchDocumentRecord[], signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
+    const contents = this.#contents.get(scopeKey(index));
+    const revision = this.#revisions.get(scopeKey(index));
+    if (!contents || revision?.status !== 'building') throw new Error('Search batches require a building revision.');
+    validateSearchDocumentsAgainstIndex(index, documents, contents.moduleArtifacts, this.#repositories.get(index.repositoryId) ?? null);
+    validateSearchDocumentRecords(index, documents);
+    for (const document of documents) contents.searchDocuments.set(document.searchDocumentId, clone(document));
+  }
+
   async getSourceText(scope: RepositoryRevisionScope, relativePath: string): Promise<string | null> {
     assertRelativePath(relativePath, 'Source text path');
     return this.#contents.get(scopeKey(scope))?.sourceTexts.get(relativePath) ?? null;
@@ -523,6 +666,48 @@ export class InMemoryIndexStore implements IndexStore {
     if (!Number.isInteger(maxChars) || maxChars < 1 || maxChars > 32_000) throw new Error('Source preview must be bounded to 1..32000 characters.');
     const source = await this.getSourceText(scope, relativePath);
     return source === null ? null : { text: source.slice(0, maxChars), truncated: source.length > maxChars };
+  }
+
+  async getSourceSlice(scope: RepositoryRevisionScope, relativePath: string, range: SourceRange | undefined, maxChars: number, signal?: AbortSignal): Promise<SourceSlice | null> {
+    signal?.throwIfAborted();
+    const file = this.#contents.get(scopeKey(scope))?.index.files.find((value) => value.relativePath === relativePath);
+    const source = await this.getSourceText(scope, relativePath);
+    if (!file || source === null) return null;
+    const slice = sliceSourceText(source, range, maxChars);
+    return slice ? { file: clone(file), ...slice } : null;
+  }
+
+  async queryFiles(scope: RepositoryRevisionScope, query: { projectId?: string; relativePaths?: readonly string[]; after?: string; limit: number }, signal?: AbortSignal): Promise<{ files: IndexedFileRecord[]; truncated: boolean }> {
+    signal?.throwIfAborted();
+    validateLocalQuery(query, false);
+    const files = (this.#contents.get(scopeKey(scope))?.index.files ?? []).filter((file) =>
+      (!query.projectId || file.projectId === query.projectId) && (!query.relativePaths?.length || query.relativePaths.includes(file.relativePath)) && (!query.after || file.relativePath > query.after))
+      .sort((a, b) => a.relativePath < b.relativePath ? -1 : a.relativePath > b.relativePath ? 1 : 0);
+    return { files: clone(files.slice(0, query.limit)), truncated: files.length > query.limit };
+  }
+
+  async querySymbols(scope: RepositoryRevisionScope, query: LocalSymbolQuery, signal?: AbortSignal): Promise<{ symbols: SymbolRecord[]; truncated: boolean }> {
+    signal?.throwIfAborted();
+    validateLocalQuery(query);
+    const symbols = (this.#contents.get(scopeKey(scope))?.index.symbols ?? []).filter((symbol) =>
+      (query.symbolKeys?.includes(symbol.symbolKey) || query.relativePaths?.includes(symbol.relativePath)) &&
+      (!query.projectId || symbol.projectId === query.projectId) && (!query.kinds?.length || query.kinds.includes(symbol.kind)))
+      .sort((a, b) => a.symbolKey < b.symbolKey ? -1 : a.symbolKey > b.symbolKey ? 1 : 0);
+    return { symbols: clone(symbols.slice(0, query.limit)), truncated: symbols.length > query.limit };
+  }
+
+  async queryDependencies(scope: RepositoryRevisionScope, query: LocalDependencyQuery, signal?: AbortSignal): Promise<{ dependencies: DependencyEdgeRecord[]; truncated: boolean }> {
+    signal?.throwIfAborted();
+    validateLocalQuery(query);
+    if (query.direction && !['incoming', 'outgoing', 'both'].includes(query.direction)) throw new Error('Invalid dependency direction.');
+    const index = this.#contents.get(scopeKey(scope))?.index;
+    const projectPaths = query.projectId ? new Set(index?.files.filter((file) => file.projectId === query.projectId).map((file) => file.relativePath)) : undefined;
+    const dependencies = (index?.dependencyEdges ?? []).filter((edge) => {
+      const outgoing = query.direction !== 'incoming' && (query.relativePaths?.includes(edge.sourceRelativePath) || (edge.sourceSymbolKey && query.symbolKeys?.includes(edge.sourceSymbolKey)));
+      const incoming = query.direction !== 'outgoing' && ((edge.targetRelativePath && query.relativePaths?.includes(edge.targetRelativePath)) || (edge.targetSymbolKey && query.symbolKeys?.includes(edge.targetSymbolKey)));
+      return (outgoing || incoming) && (!projectPaths || projectPaths.has(edge.sourceRelativePath) || (edge.targetRelativePath && projectPaths.has(edge.targetRelativePath)));
+    }).sort((a, b) => a.dependencyEdgeId < b.dependencyEdgeId ? -1 : a.dependencyEdgeId > b.dependencyEdgeId ? 1 : 0);
+    return { dependencies: clone(dependencies.slice(0, query.limit)), truncated: dependencies.length > query.limit };
   }
 
   async listProjects(scope: RepositoryRevisionScope): Promise<ProjectRecord[]> {
@@ -610,7 +795,7 @@ export class InMemoryIndexStore implements IndexStore {
   }
 
   async searchSearchDocuments(
-    scope: RepositoryRevisionScope,
+    scope: RepositoryRevisionScope & { projectId?: string },
     query: string,
     limit: number,
     kind: SearchDocumentRecord['kind'] = 'symbol',
@@ -620,8 +805,14 @@ export class InMemoryIndexStore implements IndexStore {
     const normalized = query.trim().toLocaleLowerCase();
     if (!normalized || !Number.isInteger(limit) || limit < 1) return [];
     const terms = normalized.split(/\s+/).filter(Boolean);
+    const projectPaths = scope.projectId ? new Set(this.#contents.get(scopeKey(scope))?.index.files.filter((file) => file.projectId === scope.projectId).map((file) => file.relativePath)) : undefined;
     return [...(this.#contents.get(scopeKey(scope))?.searchDocuments.values() ?? [])]
       .filter((document) => document.kind === kind)
+      .filter((document) => {
+        if (!projectPaths) return true;
+        if (document.relativePath) return projectPaths.has(document.relativePath);
+        try { return JSON.parse(document.text).projectId === scope.projectId; } catch { return false; }
+      })
       .map((document) => ({
         document,
         score: terms.reduce((total, term) =>

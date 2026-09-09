@@ -1,4 +1,5 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import type { ModuleRefinement, ProjectAnalysisRecord, ProjectAnalysisScope } from '@forexplore/contracts';
 import {
   AlertTriangle,
   Box,
@@ -7,11 +8,11 @@ import {
   ChevronRight,
   Database,
   FileCode2,
-  FileJson2,
   Folder,
   FolderOpen,
   GitBranch,
   History,
+  Layers,
   RefreshCw,
   Search,
   Sparkles,
@@ -19,6 +20,7 @@ import {
   RotateCcw,
 } from 'lucide-react';
 import { ProjectPicker, type ProjectPickerProps } from './ProjectPicker';
+import type { ModuleChildrenProvider } from '../module-children-provider';
 import type {
   ModuleExplorerMode,
   ModuleExplorerNode,
@@ -30,11 +32,13 @@ import type {
 type StatusFilter = 'all' | 'implemented' | 'unimplemented' | 'unknown';
 
 interface ModuleWorkspaceProps {
+  primaryContent?: boolean;
   repositories?: ProjectPickerProps['repositories'];
   onSelectProject?: ProjectPickerProps['onSelect'];
   onRefreshRepository?: ProjectPickerProps['onRefresh'];
   onAddTarget?: ProjectPickerProps['onAdd'];
-  onRetry?(scope: import('@forexplore/contracts').ProjectAnalysisScope, force: boolean): void;
+  onRetry?(scope: ProjectAnalysisScope, force: boolean): void;
+  onLoadChildren?: ModuleChildrenProvider;
   explorer: ModuleExplorerPresentation;
   mode: ModuleExplorerMode;
   historyId: string | null;
@@ -52,11 +56,13 @@ interface ModuleWorkspaceProps {
 }
 
 export function ModuleWorkspace({
+  primaryContent = false,
   repositories = [],
   onSelectProject,
   onRefreshRepository,
   onAddTarget,
   onRetry,
+  onLoadChildren,
   explorer,
   mode,
   historyId,
@@ -75,17 +81,68 @@ export function ModuleWorkspace({
   const [query, setQuery] = useState('');
   const [status, setStatus] = useState<StatusFilter>('all');
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [loadedSelection, setLoadedSelection] = useState<{ scope: string; node: ModuleExplorerNode }>();
   const workspace = activeWorkspace(explorer, mode, historyId);
+  const workspaceKey = `${workspace.id}:${workspace.projectId}:${workspace.revision}`;
+  const rootPageKey = `${workspaceKey}:${workspace.analysis?.updatedAt}:${workspace.rootTotal}`;
+  const [rootPage, setRootPage] = useState({ key: '', nodes: [] as ModuleExplorerNode[], loading: false, error: '' });
+  const rootData = rootPage.key === rootPageKey ? rootPage : { nodes: workspace.tree, loading: false, error: '' };
+  const rootTotal = workspace.rootTotal ?? rootData.nodes.length;
   const noTarget = mode === 'target' && !workspace.projectId && workspace.id === 'target:unselected';
-  const analyzing = ['queued', 'analyzing', 'validating'].includes(workspace.analysis?.state ?? '');
   const filteredTree = useMemo(
-    () => filterTree(workspace.tree, query.trim().toLocaleLowerCase(), status),
-    [workspace.tree, query, status],
+    () => filterTree(rootData.nodes, query.trim().toLocaleLowerCase(), status),
+    [rootData.nodes, query, status],
   );
-  const selectedNode = findNode(
-    workspace.tree,
-    (node) => node.id === selectedNodeId,
-  ) ?? findNode(workspace.tree, (node) => node.targetId === currentTargetId);
+  const selectedNode = useMemo(() =>
+    (selectedNodeId ? findNode(rootData.nodes, (node) => node.id === selectedNodeId) : undefined) ??
+    (loadedSelection?.scope === workspaceKey && (loadedSelection.node.id === selectedNodeId ||
+      Boolean(currentTargetId && loadedSelection.node.targetId === currentTargetId)) ? loadedSelection.node : undefined) ??
+    (currentTargetId ? findNode(rootData.nodes, (node) => node.targetId === currentTargetId) : undefined),
+  [rootData.nodes, selectedNodeId, currentTargetId, loadedSelection, workspaceKey]);
+  const selectNode = (node: ModuleExplorerNode) => {
+    setLoadedSelection({ scope: workspaceKey, node });
+    onNodeSelect(node);
+  };
+  const loadChildren = useCallback((nodeId: string, offset: number, signal?: AbortSignal) => {
+    if (!onLoadChildren || !workspace.repositoryId || !workspace.revision || !workspace.projectId) {
+      return Promise.reject(new Error('模块快照不可用。'));
+    }
+    return onLoadChildren({ repositoryId: workspace.repositoryId, analysisRevision: workspace.revision,
+      projectId: workspace.projectId, nodeId, offset,
+      ...(nodeId === '$search' ? { query: query.trim(), status } : {}) }, signal);
+  }, [onLoadChildren, workspace.repositoryId, workspace.revision, workspace.projectId, query, status]);
+  async function loadRootPage(): Promise<void> {
+    if (!onLoadChildren || rootData.loading || rootData.nodes.length >= rootTotal) return;
+    const key = rootPageKey;
+    setRootPage({ key, nodes: rootData.nodes, loading: true, error: '' });
+    try {
+      const page = await loadChildren('$root', rootData.nodes.length);
+      if (page.total !== rootTotal || page.nodes.length === 0) throw new Error('模块列表已更新，请刷新工程。');
+      setRootPage((current) => current.key === key ? { ...current, nodes: [...current.nodes, ...page.nodes], loading: false } : current);
+    } catch (error) {
+      setRootPage((current) => current.key === key ? { ...current, loading: false,
+        error: error instanceof Error ? error.message : '模块目录读取失败' } : current);
+    }
+  }
+  const remoteFiltering = Boolean(onLoadChildren && workspace.tree.some((node) => node.childrenTotal !== undefined) && (query.trim() || status !== 'all'));
+  const [searchPage, setSearchPage] = useState({ nodes: [] as ModuleExplorerNode[], total: 0, loading: false, error: '' });
+  const [searchOffset, setSearchOffset] = useState(0);
+  useEffect(() => { setSearchOffset(0); }, [query, status, workspaceKey]);
+  useEffect(() => {
+    if (!remoteFiltering) return;
+    const controller = new AbortController();
+    setSearchPage((current) => ({ ...current, ...(searchOffset === 0 ? { nodes: [], total: 0 } : {}), loading: true, error: '' }));
+    const timer = setTimeout(() => {
+      void loadChildren('$search', searchOffset, controller.signal).then((page) => {
+        if (!controller.signal.aborted) setSearchPage((current) => ({ ...page,
+          nodes: searchOffset === 0 ? page.nodes : [...current.nodes, ...page.nodes], loading: false, error: '' }));
+      }).catch((error: unknown) => {
+        if (!controller.signal.aborted) setSearchPage((current) => ({ ...current, loading: false, error: error instanceof Error ? error.message : '模块搜索失败' }));
+      });
+    }, 180);
+    return () => { clearTimeout(timer); controller.abort(); };
+  }, [remoteFiltering, loadChildren, searchOffset]);
+  const visibleTree = remoteFiltering ? searchPage.nodes : filteredTree;
 
   return (
     <div className="module-layout">
@@ -98,7 +155,7 @@ export function ModuleWorkspace({
             onClick={() => { setPickerOpen(false); onModeChange('target'); }}
           >
             <Target size={13} />
-            目标工作区
+            目标工程
             <small>01B</small>
           </button>
           <button
@@ -108,7 +165,7 @@ export function ModuleWorkspace({
             onClick={() => { setPickerOpen(false); onModeChange('history'); }}
           >
             <History size={13} />
-            历史仓
+            参考工程
             <small>01A</small>
           </button>
         </div>
@@ -120,7 +177,7 @@ export function ModuleWorkspace({
 
         {!onSelectProject && mode === 'history' && explorer.history.length > 1 ? (
           <label className="history-picker">
-            <span>历史仓库</span>
+            <span>参考工程</span>
             <select
               value={workspace.id}
               onChange={(event) => onHistoryChange(event.target.value)}
@@ -154,6 +211,7 @@ export function ModuleWorkspace({
           <input
             disabled={noTarget}
             type="search"
+            maxLength={200}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             placeholder="搜索模块、文件、类或方法"
@@ -182,28 +240,26 @@ export function ModuleWorkspace({
           {workspace.loading ? (
             <div className="tree-empty">
               <RefreshCw size={15} className="is-spinning" />
-              <span>切换到历史仓后正在按需分析模块…</span>
+              <span>切换到参考工程后正在按需分析模块…</span>
             </div>
           ) : workspace.error ? (
             <div className="tree-empty is-error">
               <AlertTriangle size={15} />
               <span>{workspace.error}</span>
             </div>
-          ) : filteredTree.length === 0 ? (
-            <div className="tree-empty">{noTarget ? '尚未选择目标项目' : '没有匹配的模块项'}</div>
+          ) : visibleTree.length === 0 ? (
+            <div className="tree-empty">{noTarget ? '尚未选择目标工程' : remoteFiltering && searchPage.loading ? '正在搜索…' : remoteFiltering && searchPage.error ? searchPage.error : '没有匹配的模块项'}</div>
           ) : (
-            filteredTree.map((node) => (
-              <TreeNode
-                key={node.id}
-                node={node}
-                depth={0}
-                currentTargetId={currentTargetId}
-                selectedNodeId={selectedNode?.id ?? null}
-                onNodeSelect={onNodeSelect}
-                onTargetSelect={mode === 'target' ? onTargetSelect : undefined}
-              />
-            ))
+            <TreeNodes key={`${workspaceKey}:${query}:${status}`} nodes={visibleTree} depth={0}
+              currentTargetId={currentTargetId} selectedNodeId={selectedNode?.id ?? null}
+              onNodeSelect={selectNode} onTargetSelect={mode === 'target' ? onTargetSelect : undefined}
+              loadChildren={onLoadChildren ? loadChildren : undefined}
+              showLocation={remoteFiltering}
+              total={remoteFiltering ? searchPage.total : workspace.rootTotal ?? visibleTree.length}
+              loading={remoteFiltering ? searchPage.loading : rootData.loading}
+              onMore={remoteFiltering ? () => setSearchOffset(searchPage.nodes.length) : workspace.rootTotal === undefined ? undefined : () => { void loadRootPage(); }} />
           )}
+          {!remoteFiltering && rootData.error ? <div className="tree-load-error" role="alert">{rootData.error}<button type="button" onClick={() => { void loadRootPage(); }}>重试</button></div> : null}
         </div>
 
         <div className="tree-legend">
@@ -215,61 +271,42 @@ export function ModuleWorkspace({
 
       <section className="module-main">
         <div className="module-main-scroll">
-          {!settingsOpen && noTarget ? <section className="target-empty-state" aria-label="选择目标项目">
+          {!settingsOpen && !primaryContent && noTarget ? <section className="target-empty-state" aria-label="选择目标工程">
             <FolderOpen size={32} strokeWidth={1.25} />
-            <h1>选择目标项目</h1>
+            <h1>选择目标工程</h1>
             <button type="button" className="primary-action" onClick={() => setPickerOpen(true)}><FolderOpen size={15} />选择项目<ChevronDown size={13} /></button>
           </section> : null}
-          {!settingsOpen && workspace.projectId ? (
-            <section className="project-analysis" aria-label="项目解析结果">
-              <h2>{workspace.name}</h2>
-              <p role="status">模块解析：{analysisState(workspace.analysis?.state)} · 检索同步：{workspace.analysis?.projection ?? 'pending'}</p>
-              {workspace.analysis?.error ? <p role="alert">{workspace.analysis.error}</p> : null}
-              <p className="project-summary">{workspace.analysis?.proposal?.summary ?? '尚无有效模块摘要。可查看结构索引，或重试模块解析。'}</p>
-              {workspace.analysis?.state === 'stale' ? <p>正在浏览历史版本，以下结果不代表当前代码。</p> : null}
-              {workspace.analysis?.coverage ? <p>文件覆盖：{workspace.analysis.coverage.assigned} / {workspace.analysis.coverage.total}
-                {workspace.analysis.coverage.unassigned.map((item) => <span className="unassigned-file" key={item.path}>{item.path}：{item.reason}</span>)}
-              </p> : null}
-              {workspace.analysis?.proposal?.risks?.map((risk, i) => <p key={i}>{risk}</p>)}
-              {workspace.repositoryId && workspace.revision && workspace.analysis?.state !== 'stale' ? (
-                <div className="project-actions">
-                  <button type="button" className="secondary-action" disabled={analyzing || !onRetry} onClick={() => onRetry?.({ repositoryId: workspace.repositoryId!, analysisRevision: workspace.revision!, projectId: workspace.projectId! }, false)}><RefreshCw size={13} />重试解析 / 同步</button>
-                  <button type="button" className="secondary-action" disabled={analyzing || !onRetry} onClick={() => onRetry?.({ repositoryId: workspace.repositoryId!, analysisRevision: workspace.revision!, projectId: workspace.projectId! }, true)}><RotateCcw size={13} />重新解析模块</button>
-                </div>
-              ) : null}
-              <details><summary>依赖关系（{workspace.dependencies?.length ?? 0}）</summary>
-                <ul>{workspace.dependencies?.map((edge) => <li key={edge.dependencyEdgeId}>
-                  {edge.sourceRelativePath} → {edge.targetRelativePath ?? edge.targetReference ?? '未知目标'} · {edge.kind} · {edge.resolution}
-                </li>)}</ul>
-              </details>
-              <details><summary>解析诊断（{workspace.diagnostics?.length ?? 0}）</summary>
-                <ul>{workspace.diagnostics?.map((diagnostic) => <li key={diagnostic.diagnosticId}>
-                  {diagnostic.relativePath} · {diagnostic.severity} · {diagnostic.message}
-                </li>)}</ul>
-              </details>
-              <details><summary>版本信息</summary><code>{workspace.repositoryId} / {workspace.projectId} / {workspace.revision}</code></details>
-            </section>
-          ) : null}
-          {!settingsOpen && !noTarget && explorer.history.length === 0 ? (
+          {!settingsOpen && !primaryContent && !noTarget && explorer.history.length === 0 ? (
             <section className="history-configuration-prompt" role="status">
               <div className="history-configuration-icon"><History size={17} /></div>
               <div>
-                <strong>尚未配置历史仓</strong>
-                <span>添加至少一个本地历史代码仓路径，保存后即可从左侧切换并加载 01A。</span>
+                <strong>尚未配置参考工程</strong>
+                <span>添加至少一个本地参考工程路径，保存后即可从左侧切换并加载 01A。</span>
               </div>
               <button type="button" className="secondary-action" onClick={onOpenSettings}>
                 配置路径
               </button>
             </section>
           ) : null}
-          {!settingsOpen && mode === 'history' ? (
+          {!settingsOpen && !primaryContent && mode === 'history' ? (
             <HistoryOverview
-              workspace={workspace}
+              key={workspaceKey}
+              workspace={{ ...workspace, tree: rootData.nodes }}
               selectedNode={selectedNode}
-              onNodeSelect={onNodeSelect}
+              onNodeSelect={selectNode}
+              onMoreModules={() => { void loadRootPage(); }}
+              loadingModules={rootData.loading}
             />
           ) : null}
-          {settingsOpen || (mode === 'target' && !noTarget) ? children : null}
+          {settingsOpen || primaryContent || (mode === 'target' && !noTarget) ? children : null}
+          {!settingsOpen && selectedNode?.kind === 'module' && (primaryContent || mode === 'target')
+            ? <HistorySelectionPreview node={selectedNode} /> : null}
+          {!settingsOpen && workspace.projectId && (primaryContent || mode === 'target') ? (
+            <ProjectUnderstandingOverview workspace={workspace} onRetry={onRetry} />
+          ) : null}
+          {!settingsOpen && workspace.projectId && mode === 'history' && !primaryContent ? (
+            <ProjectEngineeringDetails workspace={workspace} onRetry={onRetry} />
+          ) : null}
         </div>
       </section>
     </div>
@@ -283,12 +320,51 @@ interface TreeNodeProps {
   selectedNodeId: string | null;
   onNodeSelect(node: ModuleExplorerNode): void;
   onTargetSelect?: (targetId: string) => void;
+  loadChildren?: (nodeId: string, offset: number, signal?: AbortSignal) => ReturnType<ModuleChildrenProvider>;
+  showLocation?: boolean;
+}
+
+const treePageSize = 80;
+
+function TreeNodes({ nodes, total = nodes.length, loading = false, onMore, ...props }: Omit<TreeNodeProps, 'node'> & {
+  nodes: ModuleExplorerNode[]; total?: number; loading?: boolean; onMore?: () => void;
+}) {
+  const [visible, setVisible] = useState(treePageSize);
+  const shown = Math.min(visible, nodes.length);
+  return <>
+    {nodes.slice(0, visible).map((node) => <TreeNode key={node.id} {...props} node={node} />)}
+    {shown < total ? <button type="button" className="tree-more" disabled={loading} onClick={() => {
+      setVisible((value) => value + treePageSize);
+      if (shown === nodes.length) onMore?.();
+    }}><ChevronDown size={12} />{loading ? '正在读取…' : `更多（${shown} / ${total}）`}</button> : null}
+  </>;
 }
 
 function TreeNode(props: TreeNodeProps) {
-  const { node, depth, currentTargetId, selectedNodeId, onNodeSelect, onTargetSelect } = props;
-  const [expanded, setExpanded] = useState(depth < 2);
-  const hasChildren = node.children.length > 0;
+  const { node, depth, currentTargetId, selectedNodeId, onNodeSelect, onTargetSelect, loadChildren, showLocation } = props;
+  const location = showLocation && node.path ? `${node.path}${node.line === undefined ? '' : `:${node.line}`}` : undefined;
+  const directoryEnd = node.path?.lastIndexOf('/') ?? -1;
+  const lazy = node.childrenTotal !== undefined;
+  const [expanded, setExpanded] = useState(!lazy && depth < 2);
+  const [children, setChildren] = useState(node.children);
+  const [offset, setOffset] = useState(0);
+  const [attempt, setAttempt] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const total = node.childrenTotal ?? node.children.length;
+  const hasChildren = total > 0;
+  useEffect(() => {
+    if (!expanded || !lazy || !loadChildren || children.length > offset || total === 0) return;
+    const controller = new AbortController();
+    setLoading(true);
+    setError('');
+    void loadChildren(node.id, offset, controller.signal).then((page) => {
+      if (!controller.signal.aborted) { setChildren((current) => offset === 0 ? page.nodes : [...current, ...page.nodes]); setLoading(false); }
+    }).catch((error: unknown) => {
+      if (!controller.signal.aborted) { setError(error instanceof Error ? error.message : '读取失败'); setLoading(false); }
+    });
+    return () => controller.abort();
+  }, [expanded, lazy, loadChildren, node.id, offset, attempt, total]);
   const isCurrent = node.targetId === currentTargetId;
   const isSelected = node.id === selectedNodeId;
 
@@ -300,31 +376,41 @@ function TreeNode(props: TreeNodeProps) {
   }
 
   return (
-    <div className="tree-node" role="treeitem" aria-expanded={hasChildren ? expanded : undefined}>
+    <div className="tree-node" role="treeitem" aria-expanded={hasChildren ? expanded : undefined} aria-level={depth + 1}
+      data-node-id={node.id} data-node-kind={node.nodeKind ?? node.kind} data-module-depth={node.depth}>
       <div
-        className={`tree-row${isSelected ? ' is-selected' : ''}${isCurrent ? ' is-current-target' : ''}`}
+        className={`tree-row${isSelected ? ' is-selected' : ''}${isCurrent ? ' is-current-target' : ''}${location ? ' is-search-result' : ''}`}
         style={{ paddingLeft: `${6 + depth * 15}px` }}
       >
         <button
           type="button"
           className="tree-toggle"
-          aria-label={expanded ? '折叠' : '展开'}
+          aria-label={`${expanded ? '折叠' : '展开'} ${node.name}`}
           onClick={() => setExpanded((value) => !value)}
           disabled={!hasChildren}
         >
           {hasChildren ? (expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />) : null}
         </button>
-        <button type="button" className="tree-select" onClick={select} title={node.signature ?? node.path}>
+        <button type="button" className="tree-select" onClick={select} title={location ? [node.signature, location].filter(Boolean).join('\n') : node.signature ?? node.path}>
           <NodeIcon node={node} />
-          <span className="tree-label">{node.name}</span>
+          {location ? <span className="tree-item-text">
+            <span className="tree-label">{node.name}</span>
+            <small className="tree-location" title={location}>
+              {directoryEnd >= 0 ? <span className="tree-location-directory">{node.path!.slice(0, directoryEnd + 1)}</span> : null}
+              <span className="tree-location-file">{node.path!.slice(directoryEnd + 1)}{node.line === undefined ? '' : `:${node.line}`}</span>
+            </small>
+          </span> : <span className="tree-label">{node.name}</span>}
+          {hasChildren ? <small className="tree-count">{total}</small> : null}
+          {node.refinement?.state === 'deferred' ? <span className="tree-refinement-warning"
+            aria-label="待细化" title={node.refinement.reason}><AlertTriangle size={11} /></span> : null}
           {node.targetId || !hasChildren ? <StatusMark status={node.implementationStatus} /> : null}
         </button>
       </div>
       {hasChildren && expanded ? (
         <div role="group">
-          {node.children.map((child) => (
-            <TreeNode key={child.id} {...props} node={child} depth={depth + 1} />
-          ))}
+          {error ? <div className="tree-load-error" role="alert">{error}<button type="button" onClick={() => setAttempt((value) => value + 1)}>重试</button></div> : null}
+          <TreeNodes {...props} nodes={lazy ? children : node.children} depth={depth + 1} total={total}
+            loading={loading} onMore={lazy ? () => setOffset(children.length) : undefined} />
         </div>
       ) : null}
     </div>
@@ -332,6 +418,7 @@ function TreeNode(props: TreeNodeProps) {
 }
 
 function NodeIcon({ node }: { node: ModuleExplorerNode }) {
+  if (node.kind === 'module' && node.nodeKind === 'subsystem') return <Layers size={13} className="node-icon is-subsystem" />;
   if (node.kind === 'module') return <Box size={13} className="node-icon is-module" />;
   if (node.kind === 'folder') return <Folder size={13} className="node-icon is-folder" />;
   if (node.kind === 'file') return <FileCode2 size={13} className="node-icon is-file" />;
@@ -346,56 +433,52 @@ function HistoryOverview({
   workspace,
   selectedNode,
   onNodeSelect,
+  onMoreModules,
+  loadingModules,
 }: {
   workspace: ModuleWorkspacePresentation;
   selectedNode?: ModuleExplorerNode;
   onNodeSelect(node: ModuleExplorerNode): void;
+  onMoreModules?(): void;
+  loadingModules?: boolean;
 }) {
-  const [expanded, setExpanded] = useState(false);
+  const [visibleModules, setVisibleModules] = useState(24);
   const modules = workspace.tree.filter((node) => node.kind === 'module');
-  const pipeline = [
-    { icon: <Database size={15} />, title: '静态索引', detail: `${workspace.stats.files} 文件 / ${workspace.stats.types + workspace.stats.methods} 符号`, complete: Boolean(workspace.snapshotId) },
-    { icon: <GitBranch size={15} />, title: '依赖分析', detail: `${workspace.stats.dependencies} 条依赖证据`, complete: Boolean(workspace.snapshotId) },
-    { icon: <Sparkles size={15} />, title: 'Agent 模块划分', detail: `${workspace.stats.modules} 个模块`, complete: workspace.stats.modules > 0 },
-    {
-      icon: <FileJson2 size={15} />,
-      title: 'summary.json',
-      detail: workspace.summary.error
-        ? '摘要无效'
-        : workspace.summary.exists ? `${workspace.summary.moduleCount ?? 0} 个模块摘要` : '尚未生成',
-      complete: workspace.summary.exists && !workspace.summary.error,
-    },
-  ];
+  const catalogTotal = workspace.analysis?.hierarchy?.rootCount ??
+    (workspace.rootTotal === undefined ? modules.length : workspace.stats.modules);
+  const hierarchical = (workspace.analysis?.hierarchy?.maxDepth ?? 0) > 0 ||
+    (workspace.analysis?.hierarchy?.subsystemCount ?? 0) > 0;
   return (
     <div className="module-overview history-overview">
       <section className="history-library-hero">
         <div className="history-library-title">
           <div className="overview-glyph"><History size={17} /></div>
           <div>
-            <span className="history-library-code">01A · 历史模块库</span>
+            <span className="history-library-code">01A · 参考模块库</span>
             <h1>{workspace.name}</h1>
-            <p>浏览可复用模块，并选择本次需求需要参考的代码范围</p>
+            <p>系统已将工程组织为可检索的功能模块，选择模块可查看职责与关键接口</p>
           </div>
         </div>
         <div className={`history-library-state${workspace.snapshotId ? ' is-ready' : ''}`}>
-          <span><i />{workspace.snapshotId ? '模块库已就绪' : '等待分析'}</span>
+          <span><i />{workspace.snapshotId ? '工程理解已就绪' : '等待分析'}</span>
           <small title={workspace.rootLabel}>{workspace.rootLabel}</small>
         </div>
       </section>
 
       <HistoryStats workspace={workspace} />
+      <AnalysisPipeline workspace={workspace} />
 
-      <section className="history-catalog" aria-label="历史模块目录">
+      <section className="history-catalog" aria-label="参考模块目录">
         <div className="history-section-heading">
           <div>
             <h2>模块目录</h2>
             <p>选择模块后，可继续在左侧定位到具体文件、类或方法</p>
           </div>
-          <span>{modules.length} 个模块</span>
+          <span>{hierarchical ? `${catalogTotal} 个顶层范围 · ${workspace.stats.modules} 个节点` : `${workspace.stats.modules} 个模块`}</span>
         </div>
         {modules.length > 0 ? (
           <div className="history-module-grid">
-            {modules.map((module) => {
+            {modules.slice(0, visibleModules).map((module) => {
               const summary = summarizeModule(module);
               const selected = selectedNode ? containsNode(module, selectedNode.id) : false;
               return (
@@ -407,7 +490,7 @@ function HistoryOverview({
                   onClick={() => onNodeSelect(module)}
                 >
                   <span className="history-module-card-top">
-                    <span className="history-module-icon"><Box size={15} /></span>
+                    <span className="history-module-icon"><NodeIcon node={module} /></span>
                     <span className="history-module-languages">
                       {summary.languages.length > 0
                         ? summary.languages.slice(0, 2).map((language) => <small key={language}>{language}</small>)
@@ -418,8 +501,15 @@ function HistoryOverview({
                   <span className="history-module-description">
                     {module.purpose ?? module.description ?? `包含 ${summary.files} 个代码文件，可作为需求实现的检索范围。`}
                   </span>
+                  {module.coreApis?.length ? (
+                    <span className="history-module-apis">
+                      {module.coreApis.slice(0, 2).map((api) => <code key={api}>{api}</code>)}
+                      {module.coreApis.length > 2 ? <small>+{module.coreApis.length - 2}</small> : null}
+                    </span>
+                  ) : null}
                   <span className="history-module-card-footer">
                     {module.domain ? <span>{module.domain}</span> : null}
+                    {module.refinement ? <span>{refinementLabel(module.refinement.state)}</span> : null}
                     <span>{summary.files} 文件</span>
                     <span>{summary.types} 类型</span>
                     <span>{summary.methods} 方法</span>
@@ -434,74 +524,174 @@ function HistoryOverview({
             <Box size={22} />
             <div>
               <strong>暂无可浏览模块</strong>
-              <span>{workspace.error ?? '重新分析该历史仓后，模块会显示在这里。'}</span>
+              <span>{workspace.error ?? '重新分析该参考工程后，模块会显示在这里。'}</span>
             </div>
           </div>
         )}
+        {Math.min(visibleModules, modules.length) < catalogTotal ? <button type="button" className="tree-more" disabled={loadingModules} onClick={() => {
+          const next = visibleModules + 24;
+          setVisibleModules(next);
+          if (next > modules.length) onMoreModules?.();
+        }}><ChevronDown size={13} />{loadingModules ? '正在读取…' : `更多${hierarchical ? '顶层范围' : '模块'}（${Math.min(visibleModules, modules.length)} / ${catalogTotal}）`}</button> : null}
       </section>
 
       <HistorySelectionPreview node={selectedNode} />
 
-      <div className="history-analysis-fold">
-        <button type="button" className="overview-toggle" onClick={() => setExpanded((value) => !value)}>
-          {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-          {expanded ? '收起分析信息' : '查看分析信息'}
-        </button>
-        {!expanded ? <span>4 项技术状态</span> : null}
-      </div>
-      {expanded ? (
-        <>
-          <div className="analysis-pipeline">
-            {pipeline.map((step, index) => (
-              <div key={step.title} className={`pipeline-step${step.complete ? ' is-complete' : ''}`}>
-                <span className="pipeline-number">{index + 1}</span>
-                <span className="pipeline-icon">{step.icon}</span>
-                <div><strong>{step.title}</strong><small>{step.detail}</small></div>
-                {step.complete ? <CheckCircle2 size={14} /> : <span className="pipeline-pending" />}
-              </div>
-            ))}
-          </div>
-          <div className="history-grid">
-            <section className="card summary-card">
-              <div className="card-heading"><span>模块知识摘要</span><FileJson2 size={14} /></div>
-              {workspace.summary.error ? (
-                <div className="summary-empty is-error">
-                  <AlertTriangle size={24} />
-                  <strong>module-summary.json 无法读取</strong>
-                  <span>{workspace.summary.error}</span>
-                </div>
-              ) : workspace.summary.exists ? (
-                <dl className="compact-definition-list">
-                  <div><dt>计划</dt><dd>{workspace.summary.planId}</dd></div>
-                  <div><dt>状态</dt><dd>{workspace.summary.status}</dd></div>
-                  <div><dt>模块</dt><dd>{workspace.summary.moduleCount}</dd></div>
-                  <div><dt>执行波次</dt><dd>{workspace.summary.waveCount}</dd></div>
-                  <div><dt>审批</dt><dd>{workspace.summary.approvalsCurrent ? '当前有效' : '需重新确认'}</dd></div>
-                </dl>
-              ) : (
-                <div className="summary-empty">
-                  <FileJson2 size={24} />
-                  <strong>未发现 module-summary.json</strong>
-                  <span>完成 Agent 模块计划和受信任审批后，由 Host 事务生成。</span>
-                </div>
-              )}
-            </section>
-          </div>
-        </>
-      ) : null}
     </div>
+  );
+}
+
+function ProjectUnderstandingOverview({
+  workspace,
+  onRetry,
+}: {
+  workspace: ModuleWorkspacePresentation;
+  onRetry?: ModuleWorkspaceProps['onRetry'];
+}) {
+  return (
+    <section className="project-understanding" aria-label="工程理解结果">
+      <header className="project-understanding-heading">
+        <div>
+          <span className="section-kicker">工程理解结果</span>
+          <h2>{workspace.name}</h2>
+          <p>{workspace.analysis?.proposal?.summary ?? '系统已将结构事实组织为可检索的模块与依赖证据。'}</p>
+        </div>
+        <span className={`project-result-state${workspace.analysis?.state === 'ready' ? ' is-ready' : ''}`}>
+          <i />{analysisState(workspace.analysis?.state)}
+        </span>
+      </header>
+      <HistoryStats workspace={workspace} />
+      <AnalysisPipeline workspace={workspace} />
+      <ProjectEngineeringDetails workspace={workspace} onRetry={onRetry} />
+    </section>
+  );
+}
+
+function AnalysisPipeline({ workspace }: { workspace: ModuleWorkspacePresentation }) {
+  const hierarchy = workspace.analysis?.hierarchy;
+  const projectionReady = workspace.analysis?.projection === 'ready';
+  const steps = [
+    {
+      icon: <Database size={15} />,
+      title: '静态解析',
+      detail: `${workspace.stats.files} 文件 · ${workspace.stats.types + workspace.stats.methods} 符号`,
+      complete: Boolean(workspace.snapshotId),
+    },
+    {
+      icon: <GitBranch size={15} />,
+      title: '依赖恢复',
+      detail: `${workspace.stats.dependencies} 条依赖证据`,
+      complete: Boolean(workspace.snapshotId),
+    },
+    {
+      icon: <Sparkles size={15} />,
+      title: '分层建模',
+      detail: hierarchy
+        ? `${hierarchy.rootCount} 顶层 · 叶模块 ${hierarchy.leafCount} · 深度 ${hierarchy.maxDepth}`
+        : `${workspace.stats.modules} 个模块节点`,
+      complete: workspace.stats.modules > 0,
+    },
+    {
+      icon: <Search size={15} />,
+      title: '多粒度检索',
+      detail: projectionReady ? '模块检索索引已发布' : projectionLabel(workspace.analysis?.projection),
+      complete: projectionReady,
+    },
+  ];
+  return (
+    <div className="analysis-pipeline" aria-label="工程理解技术阶段">
+      {steps.map((step, index) => (
+        <div key={step.title} className={`pipeline-step${step.complete ? ' is-complete' : ''}`}>
+          <span className="pipeline-number">{index + 1}</span>
+          <span className="pipeline-icon">{step.icon}</span>
+          <div><strong>{step.title}</strong><small>{step.detail}</small></div>
+          {step.complete ? <CheckCircle2 size={14} /> : <span className="pipeline-pending" />}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ProjectEngineeringDetails({
+  workspace,
+  onRetry,
+}: {
+  workspace: ModuleWorkspacePresentation;
+  onRetry?: ModuleWorkspaceProps['onRetry'];
+}) {
+  const dependencyCount = workspace.detailCounts?.dependencies ?? workspace.dependencies?.length ?? 0;
+  const diagnosticCount = workspace.detailCounts?.diagnostics ?? workspace.diagnostics?.length ?? 0;
+  const unassignedCount = workspace.detailCounts?.unassigned ?? workspace.analysis?.coverage?.unassignedTotal ??
+    workspace.analysis?.coverage?.unassigned.length ?? 0;
+  const analyzing = ['queued', 'analyzing', 'validating'].includes(workspace.analysis?.state ?? '');
+  return (
+    <details className="project-engineering-details">
+      <summary>
+        <span>工程详情</span>
+        <small>依赖 {dependencyCount} · 诊断 {diagnosticCount} · 未归属 {unassignedCount}</small>
+      </summary>
+      <div className="project-engineering-body">
+        <dl className="project-engineering-status">
+          <div><dt>模块来源</dt><dd>{workspace.analysis?.modeling?.strategy === 'structural' ? '离线结构分析' : 'Agent 分析'}</dd></div>
+          <div><dt>检索同步</dt><dd>{projectionLabel(workspace.analysis?.projection)}</dd></div>
+          <div><dt>文件归属</dt><dd>{workspace.analysis?.coverage
+            ? `${workspace.analysis.coverage.assigned} / ${workspace.analysis.coverage.total}` : '暂无统计'}</dd></div>
+          <div><dt>模块摘要</dt><dd>{workspace.summary.exists && !workspace.summary.error ? '已生成' : workspace.summary.error ? '读取失败' : '未生成'}</dd></div>
+        </dl>
+        {workspace.analysis?.error ? <p className="project-engineering-alert" role="alert">{workspace.analysis.error}</p> : null}
+        {workspace.analysis?.state === 'stale' ? <p className="project-engineering-alert">正在浏览历史版本，以下结果不代表当前代码。</p> : null}
+        {workspace.analysis?.proposal?.risks?.length ? (
+          <div className="project-engineering-risks"><strong>分析提示</strong><ul>
+            {workspace.analysis.proposal.risks.map((risk, index) => <li key={index}>{risk}</li>)}
+          </ul></div>
+        ) : null}
+        {workspace.analysis?.coverage?.unassigned.length ? (
+          <details><summary>未归属文件（{unassignedCount}）</summary><ul>
+            {workspace.analysis.coverage.unassigned.map((item) => <li key={item.path}><code>{item.path}</code> · {item.reason}</li>)}
+          </ul></details>
+        ) : null}
+        <details><summary>依赖关系（{dependencyCount}）</summary>
+          {(workspace.detailCounts?.dependencies ?? 0) > (workspace.dependencies?.length ?? 0)
+            ? <p className="detail-preview-count">展示前 {workspace.dependencies?.length ?? 0} 条 / 共 {dependencyCount} 条</p> : null}
+          <ul>{workspace.dependencies?.map((edge) => <li key={edge.dependencyEdgeId}>
+            {edge.sourceRelativePath} → {edge.targetRelativePath ?? edge.targetReference ?? '未知目标'} · {edge.kind} · {edge.resolution}
+          </li>)}</ul>
+        </details>
+        <details><summary>解析诊断（{diagnosticCount}）</summary>
+          {(workspace.detailCounts?.diagnostics ?? 0) > (workspace.diagnostics?.length ?? 0)
+            ? <p className="detail-preview-count">展示前 {workspace.diagnostics?.length ?? 0} 条 / 共 {diagnosticCount} 条</p> : null}
+          <ul>{workspace.diagnostics?.map((diagnostic) => <li key={diagnostic.diagnosticId}>
+            <code>{diagnostic.relativePath}</code> · {diagnostic.severity} · {diagnostic.message}
+          </li>)}</ul>
+        </details>
+        <details><summary>版本信息</summary><code>{workspace.repositoryId} / {workspace.projectId} / {workspace.revision}</code></details>
+        {workspace.repositoryId && workspace.revision && workspace.analysis?.state !== 'stale' ? (
+          <div className="project-actions">
+            <button type="button" className="secondary-action" disabled={analyzing || !onRetry}
+              onClick={() => onRetry?.({ repositoryId: workspace.repositoryId!, analysisRevision: workspace.revision!, projectId: workspace.projectId! }, false)}>
+              <RefreshCw size={13} />重试解析 / 同步
+            </button>
+            <button type="button" className="secondary-action" disabled={analyzing || !onRetry}
+              onClick={() => onRetry?.({ repositoryId: workspace.repositoryId!, analysisRevision: workspace.revision!, projectId: workspace.projectId! }, true)}>
+              <RotateCcw size={13} />重新解析模块
+            </button>
+          </div>
+        ) : null}
+      </div>
+    </details>
   );
 }
 
 function HistoryStats({ workspace }: { workspace: ModuleWorkspacePresentation }) {
   const stats = [
-    ['可复用模块', workspace.stats.modules, 'M'],
+    ['模块节点', workspace.analysis?.hierarchy?.nodeCount ?? workspace.stats.modules, 'M'],
     ['代码文件', workspace.stats.files, 'F'],
-    ['类 / 类型', workspace.stats.types, 'C'],
-    ['方法 / 函数', workspace.stats.methods, 'ƒ'],
+    ['依赖证据', workspace.stats.dependencies, 'D'],
+    ['文件归属', workspace.analysis?.coverage
+      ? `${workspace.analysis.coverage.assigned}/${workspace.analysis.coverage.total}` : '—', 'C'],
   ] as const;
   return (
-    <div className="history-stats" aria-label="历史仓规模">
+    <div className="history-stats" aria-label="工程理解结果统计">
       {stats.map(([label, value, glyph]) => (
         <div key={label}>
           <span>{glyph}</span>
@@ -518,23 +708,29 @@ function HistorySelectionPreview({ node }: { node?: ModuleExplorerNode }) {
     return (
       <section className="history-selection-preview is-empty">
         <Box size={16} />
-        <span>从模块卡片或左侧模块树中选择一项，查看它的检索范围。</span>
+        <span>选择一个模块，查看它的职责、核心接口与细化依据。</span>
       </section>
     );
   }
   const summary = summarizeModule(node);
   const coreApis = node.coreApis?.slice(0, 6) ?? [];
+  const description = node.purpose ?? node.description ?? node.signature ?? '该项将作为代码检索与复用的参考范围。';
   return (
     <section className="history-selection-preview" aria-label="当前选择">
       <div className="history-selection-heading">
-        <span>当前选择</span>
-        <small>{kindLabel(node.kind)}</small>
+        <span>模块技术画像</span>
+        <small>{node.nodeKind === 'subsystem' ? '子系统' : kindLabel(node.kind)}</small>
       </div>
       <div className="history-selection-body">
         <span className="history-selection-icon"><NodeIcon node={node} /></span>
         <div>
           <strong>{node.name}</strong>
-          <p>{node.purpose ?? node.description ?? node.signature ?? '该项将作为历史代码检索与复用的参考范围。'}</p>
+          {description !== node.refinement?.reason ? <p>{description}</p> : null}
+          {node.refinement ? <div className={`module-refinement${node.refinement.state === 'deferred' ? ' is-deferred' : ''}`} aria-label="模块细化状态">
+            <span>{({ leaf: '叶模块', split: '已划分子模块', deferred: '待细化' })[node.refinement.state]}</span>
+            <span>{({ model: '模型判断', structural: '结构分析', budget: '预算限制' })[node.refinement.decisionSource]}</span>
+            <p>{node.refinement.reason}</p>
+          </div> : null}
           <div className="history-selection-meta">
             {node.path ? <code title={node.path}>{node.path}</code> : null}
             {node.domain ? <span>{node.domain}</span> : null}
@@ -562,6 +758,7 @@ interface ModuleContentsSummary {
 }
 
 function summarizeModule(node: ModuleExplorerNode): ModuleContentsSummary {
+  if (node.contents) return node.contents;
   const summary: ModuleContentsSummary = { files: 0, types: 0, methods: 0, languages: [] };
   const languages = new Set<string>();
   visitNode(node, (current) => {
@@ -575,11 +772,7 @@ function summarizeModule(node: ModuleExplorerNode): ModuleContentsSummary {
 }
 
 function containsNode(root: ModuleExplorerNode, id: string): boolean {
-  let found = false;
-  visitNode(root, (node) => {
-    if (node.id === id) found = true;
-  });
-  return found;
+  return root.id === id || root.children.some((node) => containsNode(node, id));
 }
 
 function visitNode(node: ModuleExplorerNode, visit: (node: ModuleExplorerNode) => void): void {
@@ -601,9 +794,9 @@ function emptyHistoryWorkspace(): ModuleWorkspacePresentation {
   return {
     id: 'history:empty',
     mode: 'history',
-    name: '未配置历史仓',
-    rootLabel: '请在 ForeXplore 设置中配置 repositoryPaths',
-    error: '未配置可分析的历史代码仓路径。',
+    name: '未配置参考工程',
+    rootLabel: '请在 RECAST 设置中配置 repositoryPaths',
+    error: '未配置可分析的参考工程路径。',
     stats: { modules: 0, files: 0, types: 0, methods: 0, implemented: 0, unimplemented: 0, unknown: 0, dependencies: 0 },
     summary: { exists: false, path: '.forexplore/module-summary.json' },
     tree: [],
@@ -615,6 +808,7 @@ function filterTree(
   query: string,
   status: StatusFilter,
 ): ModuleExplorerNode[] {
+  if (!query && status === 'all') return nodes;
   return nodes.flatMap((node) => {
     const children = filterTree(node.children, query, status);
     const queryMatch = !query || [node.name, node.path, node.signature]
@@ -658,6 +852,14 @@ function statusLabel(status?: ModuleImplementationStatus): string {
   return '待确认';
 }
 
-function analysisState(state?: import('@forexplore/contracts').ProjectAnalysisRecord['state']): string {
+function analysisState(state?: ProjectAnalysisRecord['state']): string {
   return ({ missing: '未解析', queued: '排队中', analyzing: '解析中', validating: '校验中', ready: '就绪', failed: '失败，可重试', stale: '历史结果' })[state ?? 'missing'];
+}
+
+function refinementLabel(state: ModuleRefinement['state']): string {
+  return ({ leaf: '叶模块', split: '已划分', deferred: '待细化' })[state];
+}
+
+function projectionLabel(projection?: ProjectAnalysisRecord['projection']): string {
+  return ({ pending: '等待发布', ready: '检索已就绪', failed: '发布失败' })[projection ?? 'pending'];
 }

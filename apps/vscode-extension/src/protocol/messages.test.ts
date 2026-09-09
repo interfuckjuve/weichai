@@ -2,6 +2,29 @@ import { describe, expect, it } from 'vitest';
 import { isWebviewToHostMessage } from './messages';
 
 describe('Webview message boundary', () => {
+  it('accepts only scoped bounded module page intent without filesystem overrides', () => {
+    const message = { type: 'LOAD_MODULE_CHILDREN', requestId: 'page-1', request: {
+      repositoryId: 'repo-1', analysisRevision: 'revision-1', projectId: 'project-1', nodeId: 'file:src/index.ts', offset: 80,
+    } };
+    expect(isWebviewToHostMessage(message)).toBe(true);
+    expect(isWebviewToHostMessage({ ...message, request: { ...message.request, nodeId: '$search', query: 'run', status: 'all' } })).toBe(true);
+    expect(isWebviewToHostMessage({ ...message, request: { ...message.request, path: '/private' } })).toBe(false);
+    expect(isWebviewToHostMessage({ ...message, request: { ...message.request, offset: -1 } })).toBe(false);
+    expect(isWebviewToHostMessage({ ...message, request: { ...message.request, query: 'x'.repeat(201) } })).toBe(false);
+    expect(isWebviewToHostMessage({ ...message, request: { ...message.request, status: 'unsupported' } })).toBe(false);
+  });
+
+  it('accepts version-bound task intent and rejects extra roots, invalid granularity and client budgets', () => {
+    const message = { type: 'START_TASK_SEARCH', requestId: 'request-1',
+      targetScope: { repositoryId: 'repo-1', analysisRevision: 'analysis-1', projectId: 'project-1' },
+      request: { requirement: '限制上传大小', scope: 'target', granularity: 'function' } };
+    expect(isWebviewToHostMessage(message)).toBe(true);
+    expect(isWebviewToHostMessage({ ...message, targetScope: { ...message.targetScope, localPath: '/tmp/private' } })).toBe(false);
+    expect(isWebviewToHostMessage({ ...message, request: { ...message.request, granularity: 'directory' } })).toBe(false);
+    expect(isWebviewToHostMessage({ ...message, request: { ...message.request, budget: { maxTokens: 4000 } } })).toBe(false);
+    expect(isWebviewToHostMessage({ ...message, request: { ...message.request, requirement: ' ' } })).toBe(false);
+    expect(isWebviewToHostMessage({ type: 'CANCEL_TASK_SEARCH', requestId: 'request-1' })).toBe(true);
+  });
   it('accepts bounded intent messages', () => {
     expect(isWebviewToHostMessage({ type: 'ADD_TARGET_WORKSPACE', mode: 'browse' })).toBe(true);
     expect(isWebviewToHostMessage({ type: 'ADD_TARGET_WORKSPACE', mode: 'input' })).toBe(true);

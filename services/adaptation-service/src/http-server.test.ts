@@ -3,6 +3,7 @@ import type {
   AdaptationRequest,
   AdaptationResult,
   ModuleMigrationProposal,
+  ModuleHierarchyPlanner,
   RepositoryArchitectureRequest,
   RepositoryStaticAnalysis,
   SearchCandidate,
@@ -40,6 +41,7 @@ async function listen(
     architecturePort?: RepositoryArchitecturePort;
     staticAnalysisSnapshots?: StaticAnalysisSnapshotStore;
     semanticArchitecturePort?: RevisionScopedArchitecturePort;
+    moduleHierarchyPlanner?: ModuleHierarchyPlanner;
   } = {},
 ): Promise<string> {
   const server = createHttpServer({
@@ -203,7 +205,23 @@ describe('adaptation HTTP API', () => {
 
     const response = await fetch(`${url}/health`);
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ status: 'ok', provider: 'deepseek' });
+    expect(await response.json()).toEqual({ status: 'ok', provider: 'deepseek',
+      capabilities: { semanticModulePlanning: false, moduleHierarchyPlanning: false } });
+  });
+
+  it.each([[true, false], [false, true], [true, true]])('reports configured planning capabilities without invoking them: semantic=%s hierarchy=%s', async (semantic, hierarchy) => {
+    const proposeModulePlanWithEvidence = vi.fn();
+    const decide = vi.fn();
+    const url = await listen({ adapt: vi.fn() }, {
+      ...(semantic ? { semanticArchitecturePort: { proposeModulePlanWithEvidence } } : {}),
+      ...(hierarchy ? { moduleHierarchyPlanner: { decide } } : {}),
+    });
+    const response = await fetch(`${url}/health`);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ status: 'ok', provider: 'deepseek',
+      capabilities: { semanticModulePlanning: semantic, moduleHierarchyPlanning: hierarchy } });
+    expect(proposeModulePlanWithEvidence).not.toHaveBeenCalled();
+    expect(decide).not.toHaveBeenCalled();
   });
 
   it('routes adaptation requests to the adapter', async () => {

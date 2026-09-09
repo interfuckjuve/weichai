@@ -343,8 +343,8 @@ export interface StructuralWorkspaceTransformInput {
 export function workspacePresentationFromStructuralIndex(
   input: StructuralWorkspaceTransformInput,
 ): { presentation: ModuleWorkspacePresentation; targets: Map<string, ModuleTarget> } {
-  return workspacePresentationFromAnalysis({
-    analysis: staticAnalysisFromStructuralIndex(input.index),
+  const result = workspacePresentationFromAnalysis({
+    analysis: staticAnalysisFromStructuralIndex({ ...input.index, dependencyEdges: [], diagnostics: [] }),
     currentTarget: input.currentTarget,
     mode: input.mode,
     name: input.name,
@@ -352,6 +352,8 @@ export function workspacePresentationFromStructuralIndex(
     rootLabel: input.rootLabel,
     summary: input.summary,
   });
+  result.presentation.stats.dependencies = input.index.dependencyEdges.length;
+  return result;
 }
 
 function staticAnalysisFromStructuralIndex(index: StructuralIndex): RepositoryStaticAnalysis {
@@ -562,26 +564,27 @@ function buildFileNode(
     ['method', 'constructor', 'function'].includes(symbol.kind),
   );
   const typeNodes = typeSymbols.map((symbol) => symbolNode(symbol, content, currentTarget, targets));
-  const claimedMembers = new Set<string>();
-  for (let index = 0; index < typeSymbols.length; index += 1) {
-    const type = typeSymbols[index];
-    const node = typeNodes[index];
-    if (!type || !node) continue;
-    const owned = memberSymbols.filter((member) => member.qualifiedName.startsWith(`${type.qualifiedName}.`));
-    node.children = owned.map((member) => {
-      claimedMembers.add(member.id);
-      return symbolNode(member, content, currentTarget, targets);
-    });
+  const typesByName = new Map(typeSymbols.map((symbol, index) => [symbol.qualifiedName, typeNodes[index]!]));
+  for (const member of memberSymbols) {
+    let owner: ModuleExplorerNode | undefined;
+    let qualifiedName = member.qualifiedName;
+    // Resolve the nearest enclosing type once, including nested types and methods.
+    while (qualifiedName.includes('.')) {
+      qualifiedName = qualifiedName.slice(0, qualifiedName.lastIndexOf('.'));
+      owner = typesByName.get(qualifiedName);
+      if (owner) break;
+    }
+    const node = symbolNode(member, content, currentTarget, targets);
+    if (owner) owner.children.push(node);
+    else typeNodes.push(node);
   }
-  typeNodes.push(...memberSymbols
-    .filter((symbol) => !claimedMembers.has(symbol.id))
-    .map((symbol) => symbolNode(symbol, content, currentTarget, targets)));
   return {
     id: `file:${file.path}`,
     name: file.path.split('/').at(-1) ?? file.path,
     kind: 'file',
     path: file.path,
     language: file.language,
+    contents: { files: 1, types: typeSymbols.length, methods: memberSymbols.length, languages: file.language ? [file.language] : [] },
     children: typeNodes,
   };
 }
@@ -743,8 +746,9 @@ function projectLabel(project: string): string {
   return name.replace(/\.(?:csproj|sln|xml|gradle(?:\.kts)?)$/i, '') || '工作区模块';
 }
 
-function folderTree(fileNodes: ModuleExplorerNode[]): ModuleExplorerNode[] {
+export function folderTree(fileNodes: ModuleExplorerNode[], namespace?: string): ModuleExplorerNode[] {
   const root: ModuleExplorerNode[] = [];
+  const foldersByPath = new Map<string, ModuleExplorerNode>();
   for (const fileNode of fileNodes.sort((left, right) => (left.path ?? '').localeCompare(right.path ?? ''))) {
     const pathParts = (fileNode.path ?? fileNode.name).split('/');
     const folders = pathParts.slice(0, -1);
@@ -752,10 +756,12 @@ function folderTree(fileNodes: ModuleExplorerNode[]): ModuleExplorerNode[] {
     let accumulated = '';
     for (const folder of folders) {
       accumulated = accumulated ? `${accumulated}/${folder}` : folder;
-      let node = level.find((item) => item.kind === 'folder' && item.name === folder);
+      let node = foldersByPath.get(accumulated);
       if (!node) {
-        node = { id: `folder:${accumulated}`, name: folder, kind: 'folder', path: accumulated, children: [] };
+        node = { id: `folder:${namespace === undefined ? accumulated : JSON.stringify([namespace, accumulated])}`,
+          name: folder, kind: 'folder', path: accumulated, children: [] };
         level.push(node);
+        foldersByPath.set(accumulated, node);
       }
       level = node.children;
     }

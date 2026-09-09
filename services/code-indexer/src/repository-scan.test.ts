@@ -11,6 +11,37 @@ afterEach(async () => {
 });
 
 describe('scanRepositoryStructuralIndex', () => {
+  it('keeps production source bytes on disk and reports files beyond the parsing limit', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'code-indexer-stream-'));
+    temporaryRoots.push(root);
+    await writeFile(path.join(root, 'small.ts'), 'export const original = 1;');
+    await writeFile(path.join(root, 'large.ts'), 'x'.repeat(256));
+    const result = await scanRepositoryStructuralIndex({ repositoryId: 'stream', analysisRevision: 'one', repositoryRoot: root,
+      retainSourceTexts: false, isolatedParsing: true, maxFileBytes: 128 });
+    try {
+      expect(result.sourceFiles.size).toBe(0);
+      expect(result.index.symbols.some((symbol) => symbol.name === 'original')).toBe(true);
+      expect(result.stats.parserResources?.workers).toBe(1);
+      expect(result.index.files.find((file) => file.relativePath === 'large.ts')).toMatchObject({ parseStatus: 'failed', sizeBytes: 256 });
+      expect(result.index.diagnostics).toContainEqual(expect.objectContaining({ relativePath: 'large.ts', code: 'SOURCE_CONTENT_UNAVAILABLE' }));
+      await writeFile(path.join(root, 'small.ts'), 'export const changed = 2;');
+      expect(await result.sourceReader!.read('small.ts')).toBe('export const original = 1;');
+      expect(await result.sourceReader!.read('large.ts')).toBeNull();
+    } finally { await result.sourceReader!.dispose(); }
+    await expect(result.sourceReader!.read('small.ts')).rejects.toThrow();
+  });
+
+  it('parses large Java input through bounded native input buffers', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'code-indexer-java-'));
+    temporaryRoots.push(root);
+    const source = 'public class Large {\n' + Array.from({ length: 1200 }, (_, index) => `public int method${index}() { return ${index}; }`).join('\n') + '\n}';
+    await writeFile(path.join(root, 'Large.java'), source);
+    const result = await scanRepositoryStructuralIndex({ repositoryId: 'large-java', analysisRevision: 'one', repositoryRoot: root });
+    expect(source.length).toBeGreaterThan(32768);
+    expect(result.index.symbols).toHaveLength(1201);
+    expect(result.index.diagnostics).toEqual([]);
+  });
+
   it('captures only indexable source/manifests beneath the registered root', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'code-indexer-scan-'));
     temporaryRoots.push(root);

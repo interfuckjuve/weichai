@@ -1,0 +1,11 @@
+{
+  "startedAt": "2026-09-08T07:31:14.263Z",
+  "endpoint": "http://127.0.0.1:4040",
+  "provider": "Real HTTP service; no provider mocks",
+  "cases": [],
+  "passed": false,
+  "readinessWaitMs": 342,
+  "setupError": "Cannot read properties of undefined (reading 'some')",
+  "finishedAt": "2026-09-08T07:31:14.616Z",
+  "latencyInterpretation": "Observed end-to-end timings only; no enterprise SLA or no-match accuracy claim is established by this small live sample."
+}

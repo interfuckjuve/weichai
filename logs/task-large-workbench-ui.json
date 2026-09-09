@@ -1,0 +1,403 @@
+{
+  "passed": true,
+  "startedAt": "2026-09-08T08:56:11.247Z",
+  "url": "http://127.0.0.1:4042",
+  "stage": "complete",
+  "guardrails": {
+    "pageSize": 80,
+    "maxInitialBytes": 2097152
+  },
+  "screenshots": [
+    "logs/task-large-workbench-desktop-initial.png",
+    "logs/task-large-workbench-desktop-module.png",
+    "logs/task-large-workbench-desktop-hidden-search.png",
+    "logs/task-large-workbench-desktop-paginated.png",
+    "logs/task-large-workbench-desktop-context.png",
+    "logs/task-large-workbench-mobile-initial.png",
+    "logs/task-large-workbench-mobile-hidden-search.png"
+  ],
+  "browserErrors": [],
+  "measurements": {
+    "firstReady": {
+      "bytes": 265916,
+      "latencyMs": 8
+    },
+    "selectProject": {
+      "bytes": 265713,
+      "latencyMs": 7119
+    },
+    "selectedReady": {
+      "bytes": 265916,
+      "latencyMs": 8,
+      "initialTreeNodes": 80,
+      "rootTotal": 1537,
+      "initiallyEmbeddedDescendants": 0,
+      "stats": {
+        "modules": 1537,
+        "files": 7702,
+        "types": 21532,
+        "methods": 93398,
+        "implemented": 0,
+        "unimplemented": 0,
+        "unknown": 113391,
+        "dependencies": 117420
+      },
+      "analysis": {
+        "state": "ready",
+        "projection": "ready",
+        "modeling": {
+          "strategy": "structural",
+          "algorithm": "directory-dependency/v1",
+          "maxFilesPerModule": 64
+        }
+      },
+      "displayedDetails": {
+        "dependencies": 200,
+        "diagnostics": 12
+      },
+      "detailCounts": {
+        "dependencies": 117420,
+        "diagnostics": 12,
+        "unassigned": 0
+      },
+      "sectionBytes": {
+        "target": 4,
+        "workspaceRoot": 5,
+        "settings": 31,
+        "repositoryStatuses": 2,
+        "codeIntelligence": 3400,
+        "moduleExplorer": 262195,
+        "serviceStatus": 76,
+        "searchProvider": 8,
+        "adaptationProvider": 10
+      },
+      "workspaceSectionBytes": {
+        "id": 14,
+        "mode": 8,
+        "name": 29,
+        "rootLabel": 3,
+        "snapshotId": 21,
+        "revision": 21,
+        "stats": 132,
+        "summary": 57,
+        "tree": 157247,
+        "repositoryId": 14,
+        "projectId": 34,
+        "analysis": 743,
+        "dependencies": 97963,
+        "diagnostics": 5594,
+        "detailCounts": 55,
+        "rootTotal": 4
+      }
+    },
+    "completeRoots": {
+      "total": 1537,
+      "modules": 1537,
+      "filesAcrossRoots": 7702,
+      "pages": [
+        {
+          "offset": 0,
+          "returned": 80,
+          "bytes": 157357,
+          "latencyMs": 5
+        },
+        {
+          "offset": 80,
+          "returned": 80,
+          "bytes": 198016,
+          "latencyMs": 4
+        },
+        {
+          "offset": 160,
+          "returned": 80,
+          "bytes": 212963,
+          "latencyMs": 3
+        },
+        {
+          "offset": 240,
+          "returned": 80,
+          "bytes": 234372,
+          "latencyMs": 3
+        },
+        {
+          "offset": 320,
+          "returned": 80,
+          "bytes": 190569,
+          "latencyMs": 3
+        },
+        {
+          "offset": 400,
+          "returned": 80,
+          "bytes": 168816,
+          "latencyMs": 2
+        },
+        {
+          "offset": 480,
+          "returned": 80,
+          "bytes": 173352,
+          "latencyMs": 3
+        },
+        {
+          "offset": 560,
+          "returned": 80,
+          "bytes": 182541,
+          "latencyMs": 2
+        },
+        {
+          "offset": 640,
+          "returned": 80,
+          "bytes": 204702,
+          "latencyMs": 3
+        },
+        {
+          "offset": 720,
+          "returned": 80,
+          "bytes": 197793,
+          "latencyMs": 2
+        },
+        {
+          "offset": 800,
+          "returned": 80,
+          "bytes": 246830,
+          "latencyMs": 4
+        },
+        {
+          "offset": 880,
+          "returned": 80,
+          "bytes": 276214,
+          "latencyMs": 4
+        },
+        {
+          "offset": 960,
+          "returned": 80,
+          "bytes": 209159,
+          "latencyMs": 2
+        },
+        {
+          "offset": 1040,
+          "returned": 80,
+          "bytes": 189340,
+          "latencyMs": 2
+        },
+        {
+          "offset": 1120,
+          "returned": 80,
+          "bytes": 251293,
+          "latencyMs": 4
+        },
+        {
+          "offset": 1200,
+          "returned": 80,
+          "bytes": 223826,
+          "latencyMs": 3
+        },
+        {
+          "offset": 1280,
+          "returned": 80,
+          "bytes": 183993,
+          "latencyMs": 2
+        },
+        {
+          "offset": 1360,
+          "returned": 80,
+          "bytes": 162528,
+          "latencyMs": 3
+        },
+        {
+          "offset": 1440,
+          "returned": 80,
+          "bytes": 153378,
+          "latencyMs": 3
+        },
+        {
+          "offset": 1520,
+          "returned": 17,
+          "bytes": 56085,
+          "latencyMs": 2
+        }
+      ],
+      "uniqueNodes": 1537
+    },
+    "hiddenSearch": {
+      "query": "executeEdits",
+      "returned": 6,
+      "pages": [
+        {
+          "offset": 0,
+          "returned": 6,
+          "bytes": 3452,
+          "latencyMs": 98
+        }
+      ],
+      "exactMatches": [
+        {
+          "name": "executeEdits",
+          "path": "vs/editor/browser/widget/codeEditor/codeEditorWidget.ts",
+          "kind": "method"
+        },
+        {
+          "name": "executeEdits",
+          "path": "vs/editor/browser/editorBrowser.ts",
+          "kind": "method"
+        },
+        {
+          "name": "executeEdits",
+          "path": "vs/editor/browser/editorBrowser.ts",
+          "kind": "method"
+        },
+        {
+          "name": "executeEdits",
+          "path": "vs/editor/common/cursor/cursor.ts",
+          "kind": "method"
+        },
+        {
+          "name": "executeEdits",
+          "path": "vs/editor/common/viewModel/viewModelImpl.ts",
+          "kind": "method"
+        },
+        {
+          "name": "executeEdits",
+          "path": "vs/monaco.d.ts",
+          "kind": "method"
+        }
+      ]
+    },
+    "completeBranch": {
+      "id": "symbol:symbol:e14855386f230dd0f8ead109",
+      "name": "CodeEditorWidget",
+      "path": "vs/editor/browser/widget/codeEditor/codeEditorWidget.ts",
+      "total": 158,
+      "pages": [
+        {
+          "offset": 0,
+          "returned": 80,
+          "bytes": 40977,
+          "latencyMs": 1
+        },
+        {
+          "offset": 80,
+          "returned": 78,
+          "bytes": 40035,
+          "latencyMs": 1
+        }
+      ],
+      "uniqueNodes": 158,
+      "otherRevisionRejected": true
+    },
+    "desktop": {
+      "width": 1440,
+      "height": 1000,
+      "navigationMs": 198,
+      "initiallyRenderedTreeNodes": 80,
+      "loadedRootPages": [
+        80,
+        80
+      ],
+      "expandedModuleChildren": 11,
+      "hiddenSearchNodes": 6,
+      "loadedBranchPages": [
+        80,
+        78
+      ]
+    },
+    "mobile": {
+      "width": 390,
+      "height": 844,
+      "initialRootNodes": 80,
+      "moduleOptionEnabled": true,
+      "selectedGranularity": "module",
+      "hiddenSearchNodes": 6,
+      "disambiguatedLocations": 6,
+      "horizontalOverflow": {
+        "page": false,
+        "tree": false
+      }
+    }
+  },
+  "corpus": {
+    "report": "logs/task-indexing-scale-20260908.json",
+    "repositoryRoot": "/mnt/e/CS/devsys/vscode/src",
+    "database": "forexplore_task_scale_20260908",
+    "files": 7708,
+    "symbols": 287471,
+    "loc": 2356695,
+    "analysisRevision": "scale-1788853146362",
+    "sourceRevision": "c5f02db50896ef310d3c909628e651675644fcef",
+    "embedding": "Local hash vectors; semantic quality not measured",
+    "upstreamValidation": {
+      "passed": true,
+      "buildPassed": true,
+      "stage": "complete",
+      "supplementalError": null
+    }
+  },
+  "scope": {
+    "repositoryId": "vscode-scale",
+    "analysisRevision": "scale-1788853146362",
+    "projectId": "project-1133a0288d95fd93d6132ebf",
+    "projectName": "未归属工程文件"
+  },
+  "context": {
+    "requirement": "CodeEditorWidget executeEdits editor text model",
+    "granularity": "function",
+    "budget": 8000,
+    "status": "partial",
+    "roundTripMs": 5085,
+    "serviceLatencyMs": 4924,
+    "tokens": 7843,
+    "evidenceCount": 12,
+    "resultCount": 10,
+    "gaps": [
+      "SYMBOL_CANDIDATES_TRUNCATED",
+      "DEPENDENCY_BUDGET_EXCEEDED",
+      "UNRESOLVED_DEPENDENCY",
+      "UNRESOLVED_DEPENDENCY",
+      "UNRESOLVED_DEPENDENCY",
+      "UNRESOLVED_DEPENDENCY",
+      "UNRESOLVED_DEPENDENCY",
+      "UNRESOLVED_DEPENDENCY",
+      "UNRESOLVED_DEPENDENCY",
+      "UNRESOLVED_DEPENDENCY",
+      "UNRESOLVED_DEPENDENCY",
+      "UNRESOLVED_DEPENDENCY",
+      "UNRESOLVED_DEPENDENCY",
+      "DEPENDENCY_BUDGET_EXCEEDED",
+      "UNRESOLVED_DEPENDENCY",
+      "UNRESOLVED_DEPENDENCY",
+      "UNRESOLVED_DEPENDENCY",
+      "UNRESOLVED_DEPENDENCY",
+      "UNRESOLVED_DEPENDENCY",
+      "UNRESOLVED_DEPENDENCY",
+      "UNRESOLVED_DEPENDENCY",
+      "UNRESOLVED_DEPENDENCY",
+      "UNRESOLVED_DEPENDENCY",
+      "UNRESOLVED_DEPENDENCY",
+      "UNRESOLVED_DEPENDENCY",
+      "DEPENDENCY_BUDGET_EXCEEDED",
+      "UNRESOLVED_DEPENDENCY",
+      "UNRESOLVED_DEPENDENCY",
+      "UNRESOLVED_DEPENDENCY",
+      "UNRESOLVED_DEPENDENCY",
+      "SOURCE_TRUNCATED",
+      "DEPENDENCY_BUDGET_EXCEEDED",
+      "CONTEXT_BUDGET_EXCEEDED"
+    ],
+    "implementation": {
+      "name": "CodeEditorWidget.executeEdits",
+      "relativePath": "vs/editor/browser/widget/codeEditor/codeEditorWidget.ts",
+      "sourceRange": {
+        "startLine": 1282,
+        "startColumn": 2,
+        "endLine": 1314,
+        "endColumn": 3
+      },
+      "truncated": false,
+      "contentHash": "e0a3803bad6dd468addafafcb4157fbe886b4d28b6dc280555a43c6ba8093a58",
+      "fileHash": "91d4a7e80375bc37049deb08f2d258bcb7f4c657849bdbcb33d02a80b9a9130f"
+    },
+    "snapshotFileHashMatches": true,
+    "originalRangeMatches": true,
+    "previewMatches": true
+  },
+  "completedAt": "2026-09-08T08:56:28.079Z"
+}

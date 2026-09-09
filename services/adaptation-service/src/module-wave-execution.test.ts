@@ -67,6 +67,8 @@ async function repository(): Promise<string> {
   await mkdir(path.join(root, "src"));
   await writeFile(path.join(root, "src", "Service.cs"), "old implementation", "utf8");
   git(root, ["init"]);
+  // This fixture hashes LF bytes; do not inherit machine-specific checkout conversion.
+  git(root, ["config", "core.autocrlf", "false"]);
   git(root, ["config", "user.email", "forexplore@example.test"]);
   git(root, ["config", "user.name", "ForeXplore Test"]);
   git(root, ["add", "."]);
@@ -286,7 +288,7 @@ describe("ModuleWaveExecutionCoordinator", () => {
       preparedHash: prepared.transaction.preparedHash,
       baseCommit: prepared.transaction.baseCommit,
     })]);
-  });
+  }, 15_000); // Real Git worktree creation and commits can exceed 5 seconds on Windows.
 
   it("rejects missing or mismatched prepared-bundle approval without publishing a branch", async () => {
     const root = await repository();
@@ -418,7 +420,8 @@ describe("ModuleWaveExecutionCoordinator", () => {
     expect(git(root, ["branch", "--list", "codex/forexplore-migration/run-tampered-analysis"])).toBe("");
   });
 
-  it("accepts an already-stored immutable snapshot collected at a different time", async () => {
+  // Real Git worktree/commit processes can exceed the default five seconds on Windows.
+  it("accepts an already-stored immutable snapshot collected at a different time", { timeout: 15_000 }, async () => {
     const root = await repository();
     const source = analysis();
     const artifactDirectory = path.join(root, ".forexplore", "analysis");
