@@ -208,7 +208,7 @@ export class ModuleMigrationHost {
       const analysis: RepositoryStaticAnalysis = await vscode.window.withProgress<RepositoryStaticAnalysis>(
         {
           location: vscode.ProgressLocation.Notification,
-          title: 'ForeXplore: 正在收集模块迁移静态证据',
+          title: 'RECAST: 正在收集模块迁移静态证据',
         },
         () => analyzeRepository({
           root: workspaceFolder.uri.fsPath,
@@ -247,13 +247,13 @@ export class ModuleMigrationHost {
       }
 
       const objective = await vscode.window.showInputBox({
-        title: 'ForeXplore: 模块迁移目标',
+        title: 'RECAST: 模块迁移目标',
         prompt: '描述本次模块级迁移要完成的目标。',
         validateInput: (value) => value.trim() ? undefined : '迁移目标不能为空。',
       });
       if (objective === undefined) return;
       const constraintsText = await vscode.window.showInputBox({
-        title: 'ForeXplore: 不可变约束（可选）',
+        title: 'RECAST: 不可变约束（可选）',
         prompt: '用分号分隔。例如：保持公开接口；不得修改构建配置。',
       });
       if (constraintsText === undefined) return;
@@ -269,7 +269,7 @@ export class ModuleMigrationHost {
         ? await vscode.window.withProgress(
           {
             location: vscode.ProgressLocation.Notification,
-            title: 'ForeXplore: Agenticodex 正在按 revision 取证并提出模块边界',
+            title: 'RECAST: Agenticodex 正在按 revision 取证并提出模块边界',
           },
           () => this.options.semanticPlan!({
             workspaceFolder,
@@ -283,7 +283,7 @@ export class ModuleMigrationHost {
         : await vscode.window.withProgress(
           {
             location: vscode.ProgressLocation.Notification,
-            title: 'ForeXplore: Agenticodex 正在提出模块边界',
+            title: 'RECAST: Agenticodex 正在提出模块边界',
           },
           () => requestModuleMigrationProposal(settings.adaptationApiUrl, {
             snapshotId: session.analysis.snapshotId,
@@ -392,7 +392,7 @@ export class ModuleMigrationHost {
       const prepared = await vscode.window.withProgress(
         {
           location: vscode.ProgressLocation.Notification,
-          title: `ForeXplore: 正在准备模块迁移波次 ${wave.id}`,
+          title: `RECAST: 正在准备模块迁移波次 ${wave.id}`,
         },
         () => prepareLocalModuleWave({
           repositoryRoot: workspaceFolder.uri.fsPath,
@@ -459,7 +459,7 @@ export class ModuleMigrationHost {
       const committed = await vscode.window.withProgress(
         {
           location: vscode.ProgressLocation.Notification,
-          title: `ForeXplore: 正在原子提交模块迁移波次 ${prepared.transaction.waveId}`,
+          title: `RECAST: 正在原子提交模块迁移波次 ${prepared.transaction.waveId}`,
         },
         () => commitPreparedLocalModuleWave({
           repositoryRoot: workspaceFolder.uri.fsPath,

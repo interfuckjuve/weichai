@@ -1,6 +1,6 @@
 # huawei 实现与验证记录
 
-基线为 `chiparon/weichai` 的 `9-8-v` 分支、`c3f09d3`。本分支将计划书中可以直接接入现有服务的机制实现为可运行代码，并重写第四至第八章。大仓历史数据仍归属于原实验，不算作本次测试结果。
+本分支在 `chiparon/weichai` 的 `9-8-v`（`c3f09d3`）上实现计划书中的主要功能，并合入 2026-09-09 获取的最新上游分支 `codex/guochuang-ui`（`a02e903`）。合并后的代码重新安装依赖、运行功能测试、构建和类型检查；计划书全文同时完成措辞修订。大仓历史数据仍归属于原实验，不算作本次测试结果。
 
 ## 已接通的机制
 
@@ -39,7 +39,7 @@
 
 ## 测试与构建
 
-2026-09-09，在 Windows、Node.js 24.16.0、npm 11.13.0 下验证。为避免混入另一个目录迁移，将基线源码和本次改动组合成干净验证副本；`npm ci --no-audit --no-fund` 成功，语言依赖统一使用兼容的 Tree-sitter 0.21.1，Kotlin 语法固定为 1.0.1，无需强制忽略 peer dependency。
+2026-09-09，在 Windows、Node.js 24.16.0、npm 11.13.0 下验证。本轮在独立 worktree 合入最新上游代码后验证，未提交工作区中另一个目录迁移；`npm ci --no-audit --no-fund` 成功，语言依赖统一使用兼容的 Tree-sitter 0.21.1，Kotlin 语法固定为 1.0.1，无需强制忽略 peer dependency。
 
 | 工作区 | 通过 | 跳过 |
 | --- | ---: | ---: |
@@ -54,10 +54,10 @@
 | adaptation-mcp-server | 7 | 0 |
 | semantic-index-mcp-server | 16 | 0 |
 | workflow-web | 4 | 0 |
-| vscode-extension | 135 | 0 |
-| 合计 | 654 | 1 |
+| vscode-extension | 134 | 0 |
+| 合计 | 653 | 1 |
 
-跳过项是原有 `RUN_DOTNET_INTEGRATION=1` 开关控制的 .NET 集成测试。测试中同时修正了三个与机器或随机身份有关的夹具问题：明确召回同名顶层函数而非随机选到类方法；固定临时 Git 仓库的换行转换；将 Windows 临时短路径转为规范路径。产品断言未被删除。
+跳过项是原有 `RUN_DOTNET_INTEGRATION=1` 开关控制的 .NET 集成测试。测试中同时修正了三个与机器或随机身份有关的夹具问题：明确召回同名顶层函数而非随机选到类方法；固定临时 Git 仓库的换行转换；将 Windows 临时短路径转为规范路径。这些修正保留原有产品断言。本次最新代码回归还发现，执行真实 Git worktree 创建与提交的集成用例连续耗时 5.9～6.3 秒，超过默认 5 秒上限；仅将该用例限时设为 15 秒，全部断言保留后通过。上游 `a02e903` 删除了一项旧界面展示测试，因此最新总数比此前的 654 项少 1 项。
 
 构建通过：code-indexer、code-intelligence-service、adaptation-service，VS Code 扩展及 Webview 类型检查，以及根目录 `npm run build`。另以真实 IPC 启动打包后的解析进程，分别解析 C、C++、Kotlin 和 ArkTS 文件，确认新增原生依赖被包含。构建器原有的 CJS `import.meta` 静态警告仍存在；打包路径使用随扩展提供的 worker，烟雾测试验证了这条实际路径。
 
@@ -84,4 +84,4 @@ npm run build
 - 工作区翻译 HTTP 服务与现有迁移审阅界面的完整联调；已有检索 UI 和 MCP 入口保留。
 - 使用真实数据库、远程模型、完整 SDK 和大仓任务集评测召回质量、行为通过率与时延。源码载荷指标不包含数据库物理 I/O 或网络协议开销，不能据此宣称吞吐/准确率目标达标。
 
-第四至第八章主稿、可编辑 TeX 及 PDF 构建方式见 `docs/guochuang-revision-notes.zh-CN.md`。
+全文 Markdown 主稿、可编辑 TeX 及 PDF 构建方式见 `docs/guochuang-revision-notes.zh-CN.md`。

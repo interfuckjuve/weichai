@@ -241,8 +241,7 @@ describe("ModuleWaveExecutionCoordinator", () => {
     expect(git(root, ["branch", "--list", "codex/forexplore-migration/run-scheduled-preparation"])).toBe("");
   });
 
-  // Real Git worktree/commit processes can exceed the default five seconds on Windows.
-  it("prepares, then commits code, summary, snapshot, and run manifest as one approved wave", { timeout: 15_000 }, async () => {
+  it("prepares, then commits code, summary, snapshot, and run manifest as one approved wave", async () => {
     const root = await repository();
     const source = analysis();
     const plan = planWithPlanApproval(source);
@@ -289,7 +288,7 @@ describe("ModuleWaveExecutionCoordinator", () => {
       preparedHash: prepared.transaction.preparedHash,
       baseCommit: prepared.transaction.baseCommit,
     })]);
-  });
+  }, 15_000); // Real Git worktree creation and commits can exceed 5 seconds on Windows.
 
   it("rejects missing or mismatched prepared-bundle approval without publishing a branch", async () => {
     const root = await repository();

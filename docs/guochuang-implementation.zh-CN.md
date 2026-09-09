@@ -2,7 +2,7 @@
 
 ## 基线与范围
 
-依据 `guochuang-technical-revised.pdf` 第四至第八章。2026-09-09 已执行 `git fetch --all --prune`，核对三个远程：`origin/main` 为 `d732249`，`upstream/main` 为 `c8ff223`，`darkstars/main` 为 `92c8084`。`origin/huawei` 的 `f7c3136` 已包含这些主线提交，并包含计划书所述的实现，因此 `guochuang` 从该提交继续开发。
+依据 `guochuang-technical-revised.pdf` 第四至第八章。2026-09-09 已执行 `git fetch --all --prune`，核对三个远程：`origin/main` 为 `d732249`，`upstream/main` 为 `c8ff223`，`darkstars/main` 为 `92c8084`。`origin/huawei` 的 `f7c3136` 已包含这些主线提交，并包含计划书所述的实现，因此 `guochuang` 从该提交继续开发。开发期间 `origin/huawei` 更新为 `2ee7278`（包含 `a02e903` 的 RECAST 界面），本分支在最终提交前也合并该更新并复验。
 
 本次使用独立 worktree，原工作区的未提交修改不进入本分支。PDF 的既有实验记录是需求背景，不作为本次实测结果。
 
@@ -86,7 +86,7 @@ npm run evaluate:guochuang -- --tasks tasks.json --url http://127.0.0.1:4041 --o
 
 前端组件测试覆盖目标预览、证据编号交接、失败状态、差异审阅和回滚。三个已有真实 Git worktree/commit 用例在 Windows 上超过默认 5 秒，为这些用例单独设置 15 秒，未删除或放宽功能断言。
 
-2026-09-09 完整测试结果：**662 项通过、1 项跳过**。跳过项是原有 `RUN_DOTNET_INTEGRATION=1` 控制的 .NET 集成用例。code-indexer、code-intelligence、adaptation-service 构建、扩展/Webview 类型检查、扩展打包及旧网页构建均通过；扩展打包仍有基线已有的 CJS `import.meta` 静态警告。
+2026-09-09 合并最新界面前，完整 `npm test`：**662 项通过、1 项跳过**。同步 `2ee7278` 后，上游移除一个旧界面用例；本次复验扩展 135 项、端到端 2 项及 Git 波次 9 项均通过，最终测试集合为 661 个通过用例和 1 个跳过用例。跳过项是原有 `RUN_DOTNET_INTEGRATION=1` 控制的 .NET 集成用例。code-indexer、code-intelligence、adaptation-service 构建、扩展/Webview 类型检查、扩展打包及旧网页构建均通过；扩展打包仍有基线已有的 CJS `import.meta` 静态警告。
 
 复现命令：
 

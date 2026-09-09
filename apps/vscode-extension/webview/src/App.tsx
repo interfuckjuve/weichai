@@ -253,7 +253,7 @@ export default function App({ taskSearch, initialMode = 'search' }: { taskSearch
   if (!payload || !moduleExplorer) {
     return (
       <div className="app">
-        <div className="loading-state">正在初始化 ForeXplore 翻译面板…</div>
+        <div className="loading-state">正在初始化 RECAST 智能开发工作台…</div>
       </div>
     );
   }
@@ -264,8 +264,8 @@ export default function App({ taskSearch, initialMode = 'search' }: { taskSearch
     <div className="app">
       <header className="app-header">
         <div className="brand">
-          <span className="brand-glyph">FX</span>
-          <strong>ForeXplore</strong>
+          <span className="brand-glyph">RC</span>
+          <strong>RECAST</strong>
         </div>
         <nav className="workbench-modes" aria-label="工作模式">
           <button type="button" aria-pressed={taskMode === 'search'} onClick={() => { setTaskMode('search'); setSettingsOpen(false); }}><Search size={14} />任务检索</button>
