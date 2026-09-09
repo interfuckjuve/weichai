@@ -68,8 +68,7 @@ async function repository(): Promise<string> {
 }
 
 describe("GitWaveTransaction", () => {
-  // Real Git worktree/commit processes can exceed the default five seconds on Windows.
-  it("commits the complete approved write set to an isolated migration branch", { timeout: 15_000 }, async () => {
+  it("commits the complete approved write set to an isolated migration branch", async () => {
     const root = await repository();
     const validationRoots: string[] = [];
     const result = await new GitWaveTransaction().commit({

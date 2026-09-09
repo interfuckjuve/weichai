@@ -1,16 +1,10 @@
 import 'dotenv/config';
-import { ModelModuleHierarchyPlanner } from '@forexplore/code-intelligence-service/module-hierarchy-planner';
 import { loadConfig } from './config.js';
-import { completeWithDeepSeek } from './deepseek-client.js';
-import { deepSeekModelConfig } from './model-config.js';
-import { observeAgentModelCall } from './agent-model-observer.js';
 import { createHttpServer } from './http-server.js';
 import { AdaptationAdapter } from './adaptation-adapter.js';
 import { ArchitectAgent } from './architect-agent.js';
 import { FileStaticAnalysisSnapshotStore } from './analysis-snapshot-store.js';
 import { HttpSemanticQueryPort } from './http-semantic-query-port.js';
-import { WorkspaceTranslationRuntime } from './workspace-translation-runtime.js';
-import { createWorkspaceTranslationModelClient } from './workspace-translation-agent.js';
 import {
   createDeepSeekToolCallingArchitectClient,
   ToolCallingArchitectRuntime,
@@ -25,50 +19,24 @@ const adapter = new AdaptationAdapter({
 });
 
 let server: ReturnType<typeof createHttpServer> | undefined;
-let workspaceTranslationRuntime: WorkspaceTranslationRuntime | undefined;
 
 async function main(): Promise<void> {
-  if (config.workspaceTranslation) {
-    workspaceTranslationRuntime = new WorkspaceTranslationRuntime({
-      workspaceRoot: config.projectRoot,
-      compileCommand: config.workspaceTranslation.compileCommand,
-      verification: config.workspaceTranslation.verification,
-      maxModelTurns: config.workspaceTranslation.maxModelTurns,
-      timeoutMs: config.workspaceTranslation.timeoutMs,
-      client: createWorkspaceTranslationModelClient({ apiKey: config.apiKey, temperature: 0 }),
-    });
-  }
   // Legacy /v1/module-plan remains snapshot-compatible. The semantic route is
   // explicitly opt-in and talks only to the VS Code host's read-only HTTP
   // SemanticQueryPort endpoint; this process never creates an index runtime.
-  const semanticModel = createDeepSeekToolCallingArchitectClient({ apiKey: config.apiKey, temperature: 0 });
   const semanticArchitecturePort = config.semanticQueryPort
     ? new ToolCallingArchitectRuntime({
       queryPort: new HttpSemanticQueryPort(config.semanticQueryPort),
-      client: { complete: (messages, tools, signal) => observeAgentModelCall({
-        strategy: 'semantic', model: deepSeekModelConfig.model, inputChars: JSON.stringify({ messages, tools }).length,
-      }, () => semanticModel.complete(messages, tools, signal), (result) => JSON.stringify(result).length, signal) },
+      client: createDeepSeekToolCallingArchitectClient({ apiKey: config.apiKey, temperature: 0 }),
     })
     : undefined;
   const httpServer = createHttpServer({
     adapter,
-    moduleHierarchyPlanner: new ModelModuleHierarchyPlanner({
-      timeoutMs: 45_000,
-      maxRepairs: 1,
-      complete: (messages, signal) => observeAgentModelCall({
-        strategy: 'hierarchy', model: deepSeekModelConfig.model, inputChars: JSON.stringify(messages).length,
-      }, () => completeWithDeepSeek(messages, {
-        apiKey: config.apiKey, temperature: 0, jsonMode: true,
-      }, signal), (result) => result.length, signal),
-    }),
     architecturePort: new ArchitectAgent({ apiKey: config.apiKey }),
     staticAnalysisSnapshots: new FileStaticAnalysisSnapshotStore({
       analysisRoot: config.analysisRoot,
     }),
     ...(semanticArchitecturePort ? { semanticArchitecturePort } : {}),
-    ...(workspaceTranslationRuntime && config.workspaceTranslation ? {
-      workspaceTranslation: { runtime: workspaceTranslationRuntime, bearerToken: config.workspaceTranslation.bearerToken },
-    } : {}),
     corsOrigin: config.corsOrigin,
   });
   server = httpServer;
@@ -84,7 +52,6 @@ async function main(): Promise<void> {
 }
 
 async function shutdown(): Promise<void> {
-  await workspaceTranslationRuntime?.shutdown();
   const activeServer = server;
   if (!activeServer) return;
   await new Promise<void>((resolve, reject) => {

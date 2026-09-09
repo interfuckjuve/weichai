@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -23,7 +23,7 @@ beforeEach(async () => {
   vi.resetAllMocks(); api.folders = []; api.selectedPaths = [];
   api.update.mockImplementation(async (_key, value) => { api.selectedPaths = value; });
   api.updateWorkspaceFolders.mockReturnValue(true);
-  root = await realpath(await mkdtemp(path.join(tmpdir(), 'forexplore-target-dir-')));
+  root = await mkdtemp(path.join(tmpdir(), 'forexplore-target-dir-'));
 });
 afterEach(async () => { await rm(root, { recursive: true, force: true }); });
 

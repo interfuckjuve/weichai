@@ -1,26 +1,17 @@
-import { createHash, randomUUID } from 'node:crypto';
-import {
-  indexModuleHierarchy, type ModuleHierarchyPlanner,
-  type ModuleArtifactRecord, type ProjectAnalysisPort, type ProjectAnalysisRecord, type ProjectAnalysisResult,
-  type ProjectAnalysisScope, type StructuralIndex,
+import { createHash } from 'node:crypto';
+import type {
+  ModuleArtifactRecord, ProjectAnalysisPort, ProjectAnalysisRecord, ProjectAnalysisResult,
+  ProjectAnalysisScope, StructuralIndex,
 } from '@forexplore/contracts';
 import type { IndexStore } from './index-store.js';
 import { SeekDbProjection } from './seekdb-projection.js';
-import { adaptiveModuleAlgorithm, buildAdaptiveModuleProposal, type AdaptiveModuleOptions } from './module-hierarchy.js';
 
 export const projectAnalysisProfile = 'code-understanding/v1';
 export const projectAnalysisObjective = '解释所选项目的功能模块、用途、核心 API 和依赖。提供项目 summary，并在 unassignedFiles 中逐一说明未归属的项目文件。仅分析代码，不制定迁移或写回计划。';
 
 export interface ProjectAnalysisOptions {
   store: IndexStore;
-  plan?(scope: ProjectAnalysisScope & { objective: string }): Promise<ProjectAnalysisResult>;
-  hierarchyPlanner?: ModuleHierarchyPlanner;
-  hierarchy?: Omit<AdaptiveModuleOptions, 'planner' | 'readSource' | 'decisionCache'>;
-  /** Explicit capacity-test mode; directory groups are not functional module analysis. */
-  allowStructuralFallback?: boolean;
-  maxFilesPerModule?: number;
-  /** Repository-wide limit because the legacy planner reads repository metadata. */
-  maxAgentProjectFiles?: number;
+  plan(scope: ProjectAnalysisScope & { objective: string }): Promise<ProjectAnalysisResult>;
   onChange?(): void;
   project?(index: StructuralIndex): Promise<void>;
 }
@@ -69,23 +60,18 @@ export function validateProjectResult(index: StructuralIndex, scope: ProjectAnal
   const files = new Set(index.files.filter((file) => file.projectId === scope.projectId).map((file) => file.relativePath));
   const owned = new Set<string>();
   const moduleIds = new Set<string>();
-  const symbolsByKey = new Map(index.symbols.map((symbol) => [symbol.symbolKey, symbol]));
-  const dependenciesByModule = new Map<string, Set<string>>();
   if (!Array.isArray(proposal.modules)) throw new Error('无效的模块列表。');
   for (const module of proposal.modules) {
     if (!module.id || !module.name?.trim() || !module.description?.trim() || moduleIds.has(module.id)) throw new Error('模块名称、说明或标识无效。');
     moduleIds.add(module.id);
-    dependenciesByModule.set(module.id, new Set(module.dependsOn));
     cite(module.evidenceIds);
     if (!Array.isArray(module.sourceFiles) || !Array.isArray(module.symbolKeys) || !Array.isArray(module.dependsOn)) throw new Error('模块结构无效。');
     for (const file of module.sourceFiles) {
       if (!files.has(file) || owned.has(file)) throw new Error('模块文件越过项目边界或重复归属。');
       owned.add(file);
     }
-    const sourceFiles = new Set(module.sourceFiles);
     for (const key of module.symbolKeys) {
-      const symbol = symbolsByKey.get(key);
-      if (!symbol || !sourceFiles.has(symbol.relativePath)) {
+      if (!index.symbols.some((symbol) => symbol.symbolKey === key && module.sourceFiles.includes(symbol.relativePath))) {
         throw new Error('模块符号不属于其声明的文件。');
       }
     }
@@ -93,38 +79,10 @@ export function validateProjectResult(index: StructuralIndex, scope: ProjectAnal
   for (const module of proposal.modules) {
     if (module.dependsOn.some((id) => id === module.id || !moduleIds.has(id))) throw new Error('模块依赖不存在。');
   }
-  const forest = indexModuleHierarchy(proposal.modules);
-  if (proposal.hierarchy) {
-    const hierarchy = proposal.hierarchy;
-    const depth = proposal.modules.length ? Math.max(...forest.depthById.values()) + 1 : 0;
-    if (hierarchy.version !== 1 || hierarchy.algorithm !== adaptiveModuleAlgorithm || hierarchy.maxDepth !== depth ||
-        !Number.isSafeInteger(hierarchy.decisionCount) || hierarchy.decisionCount < proposal.modules.length || hierarchy.decisionCount > proposal.modules.length + 1 ||
-        !Number.isSafeInteger(hierarchy.modelDecisionCount) || hierarchy.modelDecisionCount < 0 || hierarchy.modelDecisionCount > hierarchy.decisionCount ||
-        hierarchy.deferredCount !== proposal.modules.filter(module => module.refinement?.state === 'deferred').length) throw new Error('模块层级统计无效。');
-    const fileRecords = new Map(index.files.filter(file => file.projectId === scope.projectId).map(file => [file.relativePath, file]));
-    const symbolCounts = new Map<string, number>();
-    for (const symbol of index.symbols) if (fileRecords.has(symbol.relativePath)) symbolCounts.set(symbol.relativePath, (symbolCounts.get(symbol.relativePath) ?? 0) + 1);
-    const aggregate = new Map<string, { fileCount: number; sourceBytes: number; symbolCount: number }>();
-    for (const module of [...proposal.modules].sort((a, b) => forest.depthById.get(b.id)! - forest.depthById.get(a.id)!)) {
-      const children = forest.childrenById.get(module.id)!;
-      const refinement = module.refinement;
-      if (module.parentId === undefined || !['module', 'subsystem'].includes(module.nodeKind ?? '') ||
-          !refinement || !['leaf', 'split', 'deferred'].includes(refinement.state) || !refinement.reason.trim() ||
-          !['model', 'structural', 'budget'].includes(refinement.decisionSource) || children.length === 1 ||
-          (children.length > 0) !== (refinement.state === 'split') || (!children.length && !module.sourceFiles.length)) throw new Error('模块层级或细化状态无效。');
-      const counts = children.length ? children.map(child => aggregate.get(child.id)!) : module.sourceFiles.map(file => ({
-        fileCount: 1, sourceBytes: fileRecords.get(file)!.sizeBytes, symbolCount: symbolCounts.get(file) ?? 0,
-      }));
-      const actual = counts.reduce((sum, item) => ({ fileCount: sum.fileCount + item.fileCount, sourceBytes: sum.sourceBytes + item.sourceBytes,
-        symbolCount: sum.symbolCount + item.symbolCount }), { fileCount: 0, sourceBytes: 0, symbolCount: 0 });
-      if (!module.metrics || Object.keys(actual).some(key => actual[key as keyof typeof actual] !== module.metrics![key as keyof typeof actual])) throw new Error('模块聚合统计与文件索引不一致。');
-      aggregate.set(module.id, actual);
-    }
-  }
   for (const edge of proposal.dependencies ?? []) {
     cite(edge.evidenceIds);
     if (!moduleIds.has(edge.moduleId) || !moduleIds.has(edge.dependsOnModuleId) ||
-        !dependenciesByModule.get(edge.moduleId)?.has(edge.dependsOnModuleId)) throw new Error('模块依赖与提案不一致。');
+        !proposal.modules.find((m) => m.id === edge.moduleId)?.dependsOn.includes(edge.dependsOnModuleId)) throw new Error('模块依赖与提案不一致。');
   }
   const unassigned = proposal.unassignedFiles ?? [];
   const covered = new Set(owned);
@@ -145,38 +103,27 @@ export class ProjectAnalysisCoordinator implements ProjectAnalysisPort {
   constructor(private readonly options: ProjectAnalysisOptions) {}
 
   async read(scope: ProjectAnalysisScope): Promise<ProjectAnalysisRecord> {
-    const artifacts = this.options.store.getModuleArtifacts
-      ? await this.options.store.getModuleArtifacts(scope, [identity(scope, 'job'), identity(scope, 'summary')])
-      : await this.options.store.listModuleArtifacts(scope);
+    const artifacts = await this.options.store.listModuleArtifacts(scope);
     const job = artifacts.find((artifact) => artifact.moduleArtifactId === identity(scope, 'job'));
     const summary = artifacts.find((artifact) => artifact.moduleArtifactId === identity(scope, 'summary'));
     const repository = await this.options.store.getRepository(scope.repositoryId);
     let record = (job?.payload ?? summary?.payload) as ProjectAnalysisRecord | undefined;
     if (!record) return { ...scope, analysisProfile: projectAnalysisProfile, state: 'missing', projection: 'pending', updatedAt: '' };
     record = structuredClone(record);
-    const stale = repository?.activeRevision !== scope.analysisRevision;
+    if (repository?.activeRevision !== scope.analysisRevision) return { ...record, state: 'stale' };
     if (['queued', 'analyzing', 'validating'].includes(record.state) && !this.running.has(this.key(scope))) {
-      record.state = 'failed';
-      record.error = '上次解析已中断，可重试。';
+      return { ...record, state: 'failed', error: '上次解析已中断，可重试。' };
     }
     // A failed forced reanalysis never hides the last valid result.
     if (!record.proposal && summary?.status === 'current') {
       const previous = summary.payload as ProjectAnalysisRecord;
       record.proposal = previous.proposal;
       record.coverage = previous.coverage;
-      record.planHash = previous.planHash;
-      record.modeling = previous.modeling;
     }
-    if (!this.options.allowStructuralFallback && record.modeling?.strategy === 'structural') {
-      const { proposal: _proposal, coverage: _coverage, planHash: _planHash, modeling: _modeling, ...metadata } = record;
-      return { ...metadata, state: stale ? 'stale' : record.state === 'failed' ? 'failed' : 'missing', projection: 'pending',
-        error: record.error ?? '基础索引已完成，功能模块需要 Agent 分析。' };
-    }
-    return stale ? { ...record, state: 'stale' } : record;
+    return record;
   }
 
   ensure(scope: ProjectAnalysisScope, force = false): Promise<void> {
-    scope = { repositoryId: scope.repositoryId, analysisRevision: scope.analysisRevision, projectId: scope.projectId };
     const key = this.key(scope);
     const existing = this.running.get(key);
     if (existing) return existing;
@@ -196,12 +143,12 @@ export class ProjectAnalysisCoordinator implements ProjectAnalysisPort {
 
   private async run(scope: ProjectAnalysisScope, force: boolean): Promise<void> {
     const store = this.options.store;
+    const index = await store.getStructuralIndex(scope);
+    if (!index || !index.projects.some((p) => p.projectId === scope.projectId)) return;
     const active = async () => (await store.getRepository(scope.repositoryId))?.activeRevision === scope.analysisRevision;
     if (!await active()) return;
     let record = await this.read(scope);
     if (!force && record.state === 'ready' && record.projection === 'ready') return;
-    const index = await store.getStructuralIndex(scope);
-    if (!index || !index.projects.some((p) => p.projectId === scope.projectId)) return;
     const persist = async () => {
       record.updatedAt = new Date().toISOString();
       await store.putModuleArtifact(this.artifact(index, record, 'job'));
@@ -215,53 +162,8 @@ export class ProjectAnalysisCoordinator implements ProjectAnalysisPort {
         record.state = 'analyzing';
         await persist();
         const planStarted = performance.now();
-        const useAgent = Boolean(this.options.plan) && index.files.length <= (this.options.maxAgentProjectFiles ?? 120);
-        let result: ProjectAnalysisResult;
-        if (useAgent) {
-          result = await this.options.plan!({ ...scope, objective: projectAnalysisObjective });
-          record.modeling = { strategy: 'agent', algorithm: projectAnalysisProfile };
-        } else {
-          if (!this.options.hierarchyPlanner && !this.options.allowStructuralFallback) {
-            throw new Error('Agent 功能模块分析服务未配置；基础索引和源码检索仍可使用。');
-          }
-          const checkpointId = `module-decisions:${scope.projectId}:${adaptiveModuleAlgorithm}`;
-          const stored = (await (store.getModuleArtifacts ? store.getModuleArtifacts(scope, [checkpointId]) : store.listModuleArtifacts(scope)))
-            .find(artifact => artifact.moduleArtifactId === checkpointId && artifact.analysisHash === index.analysisHash);
-          const previous = stored?.payload as { version?: number; decisions?: Record<string, unknown> } | undefined;
-          const decisions: Record<string, unknown> = !force && previous?.version === 1 && previous.decisions &&
-            stored && stored.contentHash === createHash('sha256').update(canonical(stored.payload)).digest('hex') ? { ...previous.decisions } : {};
-          const executionId = randomUUID();
-          let saving = Promise.resolve();
-          const saveDecisions = async () => {
-            if (!await active()) throw new Error('Module decision snapshot is no longer active.');
-            const payload = { version: 1, executionId, decisions };
-            const now = new Date().toISOString();
-            await store.putModuleArtifact({ ...scope, moduleArtifactId: checkpointId, kind: 'other', status: 'current',
-              analysisHash: index.analysisHash, contentHash: createHash('sha256').update(canonical(payload)).digest('hex'),
-              createdAt: stored?.createdAt ?? now, updatedAt: now, payload: structuredClone(payload) });
-          };
-          await saveDecisions();
-          const proposal = await buildAdaptiveModuleProposal(index, scope, projectAnalysisObjective, {
-            ...this.options.hierarchy, requireModel: !this.options.allowStructuralFallback,
-            planner: this.options.hierarchyPlanner, readSource: store.getSourceSlice?.bind(store),
-            decisionCache: {
-              read: async key => decisions[key],
-              write: (key, decision) => {
-                saving = saving.then(async () => { decisions[key] = structuredClone(decision); await saveDecisions(); });
-                return saving;
-              },
-            },
-          });
-          await saving;
-          if (!this.options.allowStructuralFallback && !proposal.hierarchy!.modelDecisionCount) {
-            throw new Error('Agent 未能完成有效的功能模块分析，请检查模型服务后重试。');
-          }
-          result = { proposal, evidence: { ...scope, analysisHash: index.analysisHash, planHash: projectPlanHash(proposal),
-            evidenceIds: [...new Set([...proposal.modules.flatMap((module) => module.evidenceIds),
-              ...(proposal.dependencies ?? []).flatMap((edge) => edge.evidenceIds)])] } };
-          record.modeling = { strategy: proposal.hierarchy!.modelDecisionCount ? 'agent' : 'structural', algorithm: adaptiveModuleAlgorithm };
-        }
-        console.info('[forexplore:performance]', JSON.stringify({ stage: 'module-modeling', strategy: record.modeling.strategy, ...scope,
+        const result = await this.options.plan({ ...scope, objective: projectAnalysisObjective });
+        console.info('[forexplore:performance]', JSON.stringify({ stage: 'agent-analysis', ...scope,
           durationMs: Math.round(performance.now() - planStarted) }));
         record.state = 'validating';
         await persist();

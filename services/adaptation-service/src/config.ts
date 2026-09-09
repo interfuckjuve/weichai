@@ -1,7 +1,5 @@
 import { fileURLToPath } from "node:url";
 import { join, resolve } from "node:path";
-import type { WorkspaceCompileCommand } from "@forexplore/contracts";
-import { validateWorkspaceCompileCommand } from "./workspace-compiler";
 
 const defaultProjectPath = fileURLToPath(
   new URL("../../../fixtures/target-system/commons-fileupload-java-skeleton", import.meta.url),
@@ -17,13 +15,6 @@ export interface AdaptationServiceConfig {
   projectRoot: string;
   /** Server-owned analysis snapshot location used by the read-only planner. */
   analysisRoot: string;
-  workspaceTranslation?: {
-    bearerToken: string;
-    compileCommand: WorkspaceCompileCommand;
-    verification?: { command: WorkspaceCompileCommand; protectedFiles: string[] };
-    maxModelTurns: number;
-    timeoutMs: number;
-  };
   /**
    * Optional host-owned read-only semantic-query endpoint for revision-scoped
    * plans. The adaptation process never receives a database or index-runtime
@@ -64,8 +55,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AdaptationServ
   const semanticQueryPort = semanticPlanningEnabled
     ? loadSemanticQueryPortConfig(env)
     : undefined;
-  const workspaceTranslation = env.ADAPTATION_WORKSPACE_TRANSLATION_ENABLED?.trim().toLowerCase() === "true"
-    ? loadWorkspaceTranslationConfig(env) : undefined;
   return {
     host: env.ADAPTATION_HOST?.trim() || "127.0.0.1",
     port: positiveInteger(env.ADAPTATION_PORT, 8788, "ADAPTATION_PORT"),
@@ -78,28 +67,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AdaptationServ
       join(projectRoot, ".forexplore", "analysis"),
     ),
     ...(semanticQueryPort ? { semanticQueryPort } : {}),
-    ...(workspaceTranslation ? { workspaceTranslation } : {}),
-  };
-}
-
-function loadWorkspaceTranslationConfig(env: NodeJS.ProcessEnv): NonNullable<AdaptationServiceConfig["workspaceTranslation"]> {
-  const bearerToken = env.ADAPTATION_WORKSPACE_TRANSLATION_TOKEN?.trim() ?? "";
-  if (bearerToken.length < 32) throw new Error("ADAPTATION_WORKSPACE_TRANSLATION_TOKEN must contain at least 32 characters.");
-  let compileCommand: unknown;
-  try { compileCommand = JSON.parse(env.ADAPTATION_WORKSPACE_COMPILE_COMMAND ?? ""); }
-  catch { throw new Error("ADAPTATION_WORKSPACE_COMPILE_COMMAND must be a JSON command object."); }
-  validateWorkspaceCompileCommand(compileCommand);
-  let verification: NonNullable<AdaptationServiceConfig["workspaceTranslation"]>["verification"];
-  if (env.ADAPTATION_WORKSPACE_VERIFICATION) {
-    const value = JSON.parse(env.ADAPTATION_WORKSPACE_VERIFICATION);
-    validateWorkspaceCompileCommand(value.command);
-    if (!Array.isArray(value.protectedFiles) || !value.protectedFiles.length || value.protectedFiles.some((path: unknown) => typeof path !== "string")) throw new Error("Verification protectedFiles must be a nonempty path array.");
-    verification = value;
-  }
-  return {
-    bearerToken, compileCommand, ...(verification ? { verification } : {}),
-    maxModelTurns: positiveInteger(env.ADAPTATION_WORKSPACE_MAX_TURNS, 80, "ADAPTATION_WORKSPACE_MAX_TURNS"),
-    timeoutMs: positiveInteger(env.ADAPTATION_WORKSPACE_TIMEOUT_MS, 1_800_000, "ADAPTATION_WORKSPACE_TIMEOUT_MS"),
   };
 }
 

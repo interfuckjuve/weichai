@@ -37,19 +37,6 @@ describe('model embedding adapter', () => {
     expect(requests).toHaveLength(2);
   });
 
-  it('coalesces concurrent query channels within one request', async () => {
-    const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
-      await new Promise(resolve => setTimeout(resolve, 5));
-      return new Response(JSON.stringify({ data: [{ index: 0, embedding: [1, 0] }] }));
-    });
-    const provider = new ModelSearchEmbeddingProvider(2, { url: 'http://127.0.0.1/embeddings', apiKey: '', model: 'test-model' });
-    const signal = new AbortController().signal;
-    const vectors = await Promise.all([1, 2, 3].map(() => provider.embedQuery('same request', signal)));
-    expect(fetch).toHaveBeenCalledTimes(1);
-    vectors[0]![0] = 99;
-    expect(vectors[1]).toEqual([1, 0]);
-  });
-
   it('limits batch size and skips empty requests', async () => {
     const sizes: number[] = [];
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {

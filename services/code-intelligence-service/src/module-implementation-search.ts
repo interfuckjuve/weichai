@@ -1,4 +1,3 @@
-import { indexModuleHierarchy } from '@forexplore/contracts';
 import type {
   Language,
   ModuleArtifactRecord,
@@ -14,7 +13,6 @@ import type {
 import type { IndexStore } from './index-store.js';
 import { searchModules } from './module-matching.js';
 import type { ModuleReranker } from './module-reranker.js';
-import { projectPlanHash } from './project-analysis.js';
 
 export interface ModuleImplementationSearchRequest {
   target: ModuleTarget;
@@ -74,11 +72,11 @@ function moduleText(module: ProjectModule): string {
   ].join('\n');
 }
 
-function moduleIdentity(document: SearchDocumentRecord): { projectId: string; moduleId: string; planHash?: string } | null {
+function moduleIdentity(document: SearchDocumentRecord): { projectId: string; moduleId: string } | null {
   try {
-    const value = JSON.parse(document.text) as { projectId?: unknown; moduleId?: unknown; planHash?: unknown };
+    const value = JSON.parse(document.text) as { projectId?: unknown; moduleId?: unknown };
     return typeof value.projectId === 'string' && typeof value.moduleId === 'string'
-      ? { projectId: value.projectId, moduleId: value.moduleId, ...(typeof value.planHash === 'string' ? { planHash: value.planHash } : {}) }
+      ? { projectId: value.projectId, moduleId: value.moduleId }
       : null;
   } catch {
     return null;
@@ -88,8 +86,7 @@ function moduleIdentity(document: SearchDocumentRecord): { projectId: string; mo
 function projectRecord(artifact: ModuleArtifactRecord): ProjectAnalysisRecord | null {
   if (artifact.kind !== 'module-summary' || artifact.status !== 'current' || !artifact.payload) return null;
   const value = artifact.payload as Partial<ProjectAnalysisRecord>;
-  if (value.state !== 'ready' || !value.proposal || !Array.isArray(value.proposal.modules) ||
-    artifact.analysisHash !== value.proposal.analysisHash || !artifact.planHash || artifact.planHash !== projectPlanHash(value.proposal)) {
+  if (value.state !== 'ready' || !value.proposal || !Array.isArray(value.proposal.modules)) {
     return null;
   }
   return value as ProjectAnalysisRecord;
@@ -141,7 +138,7 @@ export class ModuleImplementationSearchService implements ModuleImplementationSe
       throw new Error('Module implementation search topK must be between 1 and 10.');
     }
     const repositoryIds = [...new Set(request.repositoryIds.filter(Boolean))];
-    if (repositoryIds.length === 0) throw new Error('至少需要一个已解析的参考工程才能执行模块检索。');
+    if (repositoryIds.length === 0) throw new Error('至少需要一个已解析的历史仓库才能执行模块检索。');
     const query = queryText(request);
     const rankedModules = new Map<string, RankedModule>();
 
@@ -160,24 +157,17 @@ export class ModuleImplementationSearchService implements ModuleImplementationSe
         ? projectedDocuments
         : (await this.store.listSearchDocuments(scope)).filter((document) => document.kind === 'summary');
       const artifactsById = new Map(artifacts.map((artifact) => [artifact.moduleArtifactId, artifact]));
-      const trees = new Map<string, ReturnType<typeof indexModuleHierarchy>>();
       documents.forEach((document, rank) => {
         const identity = moduleIdentity(document);
         const artifact = document.moduleArtifactId ? artifactsById.get(document.moduleArtifactId) : undefined;
         const record = artifact ? projectRecord(artifact) : null;
         if (!record || (identity && record.projectId !== identity.projectId)) return;
-        if (identity?.planHash !== undefined && identity.planHash !== artifact?.planHash || record.proposal!.hierarchy && identity?.planHash !== artifact?.planHash) return;
-        if (record.repositoryId !== scope.repositoryId || record.analysisRevision !== scope.analysisRevision || record.proposal!.analysisHash !== index.analysisHash) return;
-        let tree = trees.get(document.moduleArtifactId!);
-        if (!tree) { tree = indexModuleHierarchy(record.proposal!.modules); trees.set(document.moduleArtifactId!, tree); }
         const project = index.projects.find((candidate) => candidate.projectId === record.projectId);
         if (!project) return;
         const matchingModules = identity
           ? record.proposal!.modules.filter((candidate) => candidate.id === identity.moduleId)
           : record.proposal!.modules;
-        matchingModules.forEach((node) => {
-          const module = { ...node, sourceFiles: tree!.sourceFiles(node.id).files };
-          if (!module.sourceFiles.length) return;
+        matchingModules.forEach((module) => {
           const lexical = overlap(query, moduleText(module));
           const api = overlap(request.target.signature, (module.coreApis ?? []).join('\n'));
           const recall = 1 - rank / Math.max(1, documents.length);
@@ -208,7 +198,6 @@ export class ModuleImplementationSearchService implements ModuleImplementationSe
     const selected: SearchCandidate[] = [];
     const counts = new Map<string, number>();
     for (const candidate of candidates) {
-      if (selected.some((entry) => entry.id === candidate.id)) continue;
       const moduleId = candidate.sourceModule
         ? `${candidate.sourceModule.repositoryId}/${candidate.sourceModule.analysisRevision}/${candidate.sourceModule.moduleId}`
         : '';
@@ -233,20 +222,17 @@ export class ModuleImplementationSearchService implements ModuleImplementationSe
   ): Promise<SearchCandidate[]> {
     const ownedKeys = new Set(ranked.module.symbolKeys);
     const ownedPaths = new Set(ranked.module.sourceFiles);
-    const score = (symbol: SymbolRecord) => {
+    const symbols = ranked.index.symbols.filter((symbol) =>
+      (ownedKeys.has(symbol.symbolKey) || ownedPaths.has(symbol.relativePath)) && supportsTarget(symbol, request.target),
+    );
+    return Promise.all(symbols.map(async (symbol) => {
+      signal?.throwIfAborted();
+      const source = await this.store.getSourceText(ranked.index, symbol.relativePath) ?? '';
       const symbolMatch = overlap(queryText(request), [symbol.name, symbol.qualifiedName, symbol.signature ?? ''].join('\n'));
       const kindMatch = request.target.kind === 'class'
         ? ['class', 'record', 'struct'].includes(symbol.kind) ? 1 : 0.65
         : symbol.kind === 'constructor' ? 0.7 : 1;
-      return { symbolMatch, kindMatch, overall: Math.min(1, 0.45 * ranked.score + 0.4 * symbolMatch + 0.15 * kindMatch) };
-    };
-    const symbols = ranked.index.symbols.filter((symbol) => symbol.projectId === ranked.projectId &&
-      (ownedKeys.has(symbol.symbolKey) || ownedPaths.has(symbol.relativePath)) && supportsTarget(symbol, request.target),
-    ).sort((a, b) => score(b).overall - score(a).overall || a.symbolId.localeCompare(b.symbolId)).slice(0, Math.max(12, request.topK * 4));
-    return Promise.all(symbols.map(async (symbol) => {
-      signal?.throwIfAborted();
-      const source = await this.store.getSourceText(ranked.index, symbol.relativePath) ?? '';
-      const { symbolMatch, kindMatch, overall } = score(symbol);
+      const overall = Math.min(1, 0.45 * ranked.score + 0.4 * symbolMatch + 0.15 * kindMatch);
       return {
         id: symbol.symbolId,
         title: symbol.qualifiedName || symbol.name,

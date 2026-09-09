@@ -1,6 +1,3 @@
-import C from 'tree-sitter-c';
-import Cpp from 'tree-sitter-cpp';
-import Kotlin from '@tree-sitter-grammars/tree-sitter-kotlin';
 import CSharp from 'tree-sitter-c-sharp';
 import Go from 'tree-sitter-go';
 import Java from 'tree-sitter-java';
@@ -19,10 +16,6 @@ import type {
  * even though the legacy retrieval contract has no JavaScript member yet.
  */
 export type TreeSitterLanguageId =
-  | 'c'
-  | 'cpp'
-  | 'kotlin'
-  | 'arkts'
   | 'csharp'
   | 'go'
   | 'java'
@@ -135,7 +128,6 @@ export class LanguageRegistry {
 
 function displayNameFor(languageId: TreeSitterLanguageId): string {
   const names: Readonly<Record<TreeSitterLanguageId, string>> = {
-    c: 'C', cpp: 'C++', kotlin: 'Kotlin', arkts: 'ArkTS (TypeScript syntax subset)',
     csharp: 'C#',
     go: 'Go',
     java: 'Java',
@@ -148,11 +140,6 @@ function displayNameFor(languageId: TreeSitterLanguageId): string {
 }
 
 const defaultRegistrations: readonly TreeSitterLanguageRegistration[] = [
-  { languageId: 'c', fileExtensions: ['.c', '.h'], grammar: C as TreeSitterGrammar, capabilityLevel: 'structural' },
-  { languageId: 'cpp', fileExtensions: ['.cpp', '.cc', '.cxx', '.hpp', '.hh', '.hxx'], grammar: Cpp as TreeSitterGrammar, capabilityLevel: 'structural' },
-  { languageId: 'kotlin', fileExtensions: ['.kt', '.kts'], grammar: Kotlin as TreeSitterGrammar, capabilityLevel: 'structural' },
-  // ArkUI-specific syntax remains diagnostic; do not advertise compiler-level ArkTS support.
-  { languageId: 'arkts', fileExtensions: ['.ets'], grammar: TypeScript.typescript as TreeSitterGrammar, capabilityLevel: 'structural' },
   {
     languageId: 'java',
     fileExtensions: ['.java'],

@@ -103,9 +103,6 @@ export class AdaptationAdapter implements CodeAdaptationPort {
     request: AdaptationRequest,
     signal?: AbortSignal,
   ): Promise<AdaptationResult> {
-    if (request.target.kind === "module") {
-      throw new Error("Module targets require the workspace translation workflow.");
-    }
     assertSupportedTranslation(request);
     const projectRoot = this.#projectRoot ?? this.#skeletonProjectPath;
     if (!projectRoot) {

@@ -8,7 +8,7 @@ import esbuild from 'esbuild';
 const require = createRequire(import.meta.url);
 const { chromium } = require(path.join(process.env.LOCALAPPDATA, 'Temp/forexplore-ui-tools/node_modules/playwright'));
 const report = JSON.parse(await readFile('logs/project-analysis-live.json', 'utf8'));
-const empty = { id: 'target:unselected', mode: 'target', name: '选择目标工程', rootLabel: '', tree: [],
+const empty = { id: 'target:unselected', mode: 'target', name: '选择目标项目', rootLabel: '', tree: [],
   stats: { modules: 0, files: 0, types: 0, methods: 0, implemented: 0, unimplemented: 0, unknown: 0, dependencies: 0 },
   summary: { exists: false, path: '' } };
 function fixture(name, role) {
@@ -78,20 +78,19 @@ try {
   for (const [name, width, height] of [['desktop', 1100, 780], ['narrow', 390, 844]]) {
     await page.setViewportSize({ width, height });
     await page.goto(pathToFileURL(preview).href);
-    await page.locator('.workbench-modes').getByRole('button', { name: '复用迁移' }).click();
-    await page.getByRole('heading', { name: '选择目标工程' }).waitFor();
+    await page.getByRole('heading', { name: '选择目标项目' }).waitFor();
     assert.equal(await page.locator('.project-selector').count(), 0);
     await page.screenshot({ path: `logs/project-picker-${name}-empty.png` });
-    await page.getByRole('button', { name: '选择目标工程', exact: true }).click();
-    await page.getByRole('menu', { name: '目标工程列表' }).waitFor();
+    await page.getByRole('button', { name: '选择目标项目', exact: true }).click();
+    await page.getByRole('menu', { name: '目标项目列表' }).waitFor();
     await page.screenshot({ path: `logs/project-picker-${name}-menu.png` });
     await page.keyboard.press('Escape');
-    await page.getByRole('button', { name: '选择目标工程', exact: true }).click();
+    await page.getByRole('button', { name: '选择目标项目', exact: true }).click();
     await page.getByRole('menuitem', { name: '从已打开工作区选择…' }).click();
     await page.getByRole('heading', { name: 'circuit-lane-java / Circuit Lane' }).waitFor();
     await page.screenshot({ path: `logs/project-picker-${name}-target.png` });
-    await page.getByRole('tab', { name: /参考工程/ }).click();
-    await page.getByRole('button', { name: '选择参考工程', exact: true }).click();
+    await page.getByRole('tab', { name: /历史仓/ }).click();
+    await page.getByRole('button', { name: '选择历史项目', exact: true }).click();
     await page.getByRole('menuitemradio').click();
     await page.getByRole('heading', { name: 'account-stream-rs / Cargo' }).first().waitFor();
     await page.screenshot({ path: `logs/project-picker-${name}-history.png` });

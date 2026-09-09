@@ -72,7 +72,7 @@ describe('Tree-sitter structural indexer', () => {
   it('indexes declarations and explicit import/export syntax for every registered v1 grammar', () => {
     const registry = createDefaultLanguageRegistry();
     expect(registry.describe().map((entry) => entry.languageId)).toEqual([
-      'arkts', 'c', 'cpp', 'csharp', 'go', 'java', 'javascript', 'kotlin', 'python', 'rust', 'typescript',
+      'csharp', 'go', 'java', 'javascript', 'python', 'rust', 'typescript',
     ]);
 
     for (const sample of samples) {

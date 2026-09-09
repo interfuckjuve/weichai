@@ -173,8 +173,6 @@ export class RepositoryStructuralScanner implements StructuralScanner {
       repositoryRoot: request.root,
       languageRegistry: this.#registry,
       maxFileBytes: this.#maxFileBytes,
-      retainSourceTexts: false,
-      signal: request.signal,
       ...(request.mode === 'incremental' && request.previousIndex
         ? { previousIndex: request.previousIndex }
         : {}),
@@ -182,21 +180,14 @@ export class RepositoryStructuralScanner implements StructuralScanner {
         ? { changedPaths: request.changedPaths }
         : {}),
     });
-    try {
-      const sourceRevision = await this.#readSourceRevision(request.root);
-      return {
-        index: build.index,
-        sourceTexts: build.sourceFiles,
-        parserResources: build.stats.parserResources,
-        ...(build.sourceReader ? { sourceReader: build.sourceReader } : {}),
-        ...(sourceRevision ? { sourceRevision } : {}),
-        changedPaths: build.changedPaths ?? [],
-        reusedFileCount: build.stats.reusedFileCount,
-      };
-    } catch (error) {
-      await build.sourceReader?.dispose();
-      throw error;
-    }
+    const sourceRevision = await this.#readSourceRevision(request.root);
+    return {
+      index: build.index,
+      sourceTexts: build.sourceFiles,
+      ...(sourceRevision ? { sourceRevision } : {}),
+      changedPaths: build.changedPaths ?? [],
+      reusedFileCount: build.stats.reusedFileCount,
+    };
   }
 }
 

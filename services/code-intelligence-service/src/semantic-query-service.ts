@@ -331,24 +331,9 @@ export class SemanticQueryService implements SemanticQueryPort {
     request: GetRepositoryOverviewRequest,
     signal?: AbortSignal,
   ): Promise<GetRepositoryOverviewResult> {
-    const { repository, revision, statistics } = await (async () => {
-      if (this.store.getRevisionStatistics) {
-        const scoped = await this.#metadataScope(request, signal);
-        const statistics = await this.store.getRevisionStatistics(request, signal);
-        if (!statistics) throw new Error('Repository analysis revision was not found.');
-        return { ...scoped, statistics };
-      }
-      const { repository, revision, index } = await this.#scope(request, signal);
-      const languageIds = [...new Set(index.files.flatMap((file) => file.languageId ? [file.languageId] : []))];
-      return { repository, revision, statistics: {
-        projects: index.projects.length, files: index.files.length, symbols: index.symbols.length,
-        dependencies: index.dependencyEdges.length, diagnostics: index.diagnostics.length,
-        languages: languageIds.map((languageId) => ({ languageId,
-          fileCount: index.files.filter((file) => file.languageId === languageId).length,
-          hasSemanticSymbols: inferredCapability(index.symbols, languageId) === 'semantic' })),
-      } };
-    })();
-    signal?.throwIfAborted();
+    const { repository, revision, index } = await this.#scope(request, signal);
+    const languageIds = [...new Set(index.files.flatMap((file) => file.languageId ? [file.languageId] : []))]
+      .sort((left, right) => left.localeCompare(right));
     const semanticProviders = await this.#availableSemanticProviders(request, signal, 'findDefinition');
     const overview = {
       repository: (() => {
@@ -356,19 +341,19 @@ export class SemanticQueryService implements SemanticQueryPort {
         return safe;
       })(),
       revision,
-      projectCount: statistics.projects,
-      fileCount: statistics.files,
-      symbolCount: statistics.symbols,
-      dependencyCount: statistics.dependencies,
-      diagnosticCount: statistics.diagnostics,
-      languages: [...statistics.languages].sort((left, right) => left.languageId.localeCompare(right.languageId)).map(({ languageId, fileCount, hasSemanticSymbols }) => ({
+      projectCount: index.projects.length,
+      fileCount: index.files.length,
+      symbolCount: index.symbols.length,
+      dependencyCount: index.dependencyEdges.length,
+      diagnosticCount: index.diagnostics.length,
+      languages: languageIds.map((languageId) => ({
         languageId,
         capabilityLevel: semanticProviders.some((provider) =>
           !provider.supportedLanguageIds || provider.supportedLanguageIds.includes(languageId),
         )
           ? 'semantic'
-          : this.#languageCapabilities.get(languageId) ?? (hasSemanticSymbols ? 'semantic' : 'structural'),
-        fileCount,
+          : this.#languageCapabilities.get(languageId) ?? inferredCapability(index.symbols, languageId),
+        fileCount: index.files.filter((file) => file.languageId === languageId).length,
       })),
     };
     return {
@@ -384,24 +369,12 @@ export class SemanticQueryService implements SemanticQueryPort {
   }
 
   async listProjects(request: ListProjectsRequest, signal?: AbortSignal): Promise<ListProjectsResult> {
-    await this.#metadataScope(request, signal);
-    const [projects, files] = await Promise.all([this.store.listProjects(request), this.store.listFiles(request)]);
-    signal?.throwIfAborted();
-    const projectFiles = new Map<string, NonNullable<ProjectRecord['files']>>();
-    for (const file of files) {
-      sameScope(request, file);
-      if (!file.projectId) continue;
-      const entries = projectFiles.get(file.projectId) ?? [];
-      entries.push({ relativePath: file.relativePath, role: file.role, parseStatus: file.parseStatus });
-      projectFiles.set(file.projectId, entries);
-    }
-    return { projects: projects.map((project) => {
-      sameScope(request, project);
-      return projectResult(request, {
-        ...project,
-        files: projectFiles.get(project.projectId) ?? [],
-      });
-    }) };
+    const { index } = await this.#scope(request, signal);
+    return { projects: index.projects.map((project) => projectResult(request, {
+      ...project,
+      files: index.files.filter((file) => file.projectId === project.projectId)
+        .map(({ relativePath, role, parseStatus }) => ({ relativePath, role, parseStatus })),
+    })) };
   }
 
   async getFileStructure(
@@ -578,25 +551,6 @@ export class SemanticQueryService implements SemanticQueryPort {
         sourceRange: selected.range,
       }, { text: selected.text, truncated: selected.truncated }),
     };
-  }
-
-  async #metadataScope(scope: RepositoryRevisionScope, signal?: AbortSignal) {
-    signal?.throwIfAborted();
-    if (!isRepositoryRevisionScope(scope)) throw new Error('Every semantic query requires a valid repositoryId and analysisRevision.');
-    const [repository, revision, metadata] = await Promise.all([
-      this.store.getRepository(scope.repositoryId, signal),
-      this.store.getRevision(scope, signal),
-      this.store.getStructuralIndexMetadata ? this.store.getStructuralIndexMetadata(scope, signal) : this.store.getStructuralIndex(scope),
-    ]);
-    signal?.throwIfAborted();
-    if (!repository || !revision || !metadata) throw new Error('Repository analysis revision was not found.');
-    if (revision.status !== 'ready' && revision.status !== 'superseded') throw new Error('Repository analysis revision is not ready for read-only queries.');
-    sameScope(scope, revision);
-    sameScope(scope, metadata);
-    if (repository.repositoryId !== scope.repositoryId || metadata.analysisHash !== revision.analysisHash) {
-      throw new Error('Structural index metadata does not match the requested repository revision.');
-    }
-    return { repository, revision };
   }
 
   async #scope(

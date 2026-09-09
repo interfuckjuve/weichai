@@ -1,4 +1,3 @@
-import { resolveCrossLanguageBindings } from './cross-language-bindings.js';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import type {
@@ -36,9 +35,6 @@ import {
 export interface StructuralSourceFile {
   content: string;
   relativePath: string;
-  sha256?: string;
-  sizeBytes?: number;
-  unavailableReason?: string;
 }
 
 export interface BuildStructuralIndexRequest {
@@ -49,9 +45,6 @@ export interface BuildStructuralIndexRequest {
    */
   changedPaths?: readonly string[];
   files: readonly StructuralSourceFile[];
-  /** Filesystem scans use lazy, immutable file contents and retain only facts. */
-  retainSourceTexts?: boolean;
-  signal?: AbortSignal;
   /** Optional test/host seam; normal callers use the real Tree-sitter indexer. */
   indexFile?: (request: TreeSitterIndexRequest) => TreeSitterFileIndex;
   languageRegistry?: LanguageRegistry;
@@ -69,12 +62,10 @@ export interface StructuralIndexBuild {
   changedPaths?: string[];
   index: StructuralIndex;
   sourceFiles: ReadonlyMap<string, string>;
-  sourceReader?: { read(relativePath: string): Promise<string | null>; dispose(): Promise<void> };
   stats: StructuralIndexBuildStats;
 }
 
 export interface StructuralIndexBuildStats {
-  parserResources?: { peakWorkerRss: number; peakCombinedRss: number; workers: number };
   changedFileCount: number;
   reparsedFileCount: number;
   rebuiltDependencyEdgeCount: number;
@@ -89,10 +80,6 @@ interface IndexedSource {
 }
 
 const configurationFileNames = new Set([
-  'cmakelists.txt',
-  'compile_commands.json',
-  'oh-package.json5',
-  'build-profile.json5',
   'build.gradle',
   'build.gradle.kts',
   'cargo.toml',
@@ -258,21 +245,15 @@ function analysisHash(input: {
     for (const key of keys) delete copy[key];
     return copy;
   };
-  const digest = createHash('sha256');
-  const ids: Record<keyof typeof input, string | undefined> = {
-    dependencyEdges: 'dependencyEdgeId', diagnostics: 'diagnosticId', files: 'fileId', projects: undefined, symbols: 'symbolId',
-  };
-  digest.update('{');
-  let first = true;
-  for (const name of Object.keys(ids).sort() as Array<keyof typeof input>) {
-    const omitted = ['repositoryId', 'analysisRevision', ...(ids[name] ? [ids[name]!] : [])];
-    const encoded = input[name].map((entry) => canonicalJson(withoutScope(entry, omitted))).sort(compareText);
-    digest.update(`${first ? '' : ','}${JSON.stringify(name)}:[`);
-    encoded.forEach((entry, index) => { if (index) digest.update(','); digest.update(entry); });
-    digest.update(']');
-    first = false;
-  }
-  return digest.update('}').digest('hex');
+  const sort = (entries: readonly Record<string, unknown>[]): Record<string, unknown>[] =>
+    entries.map((entry) => ({ ...entry })).sort((left, right) => compareText(canonicalJson(left), canonicalJson(right)));
+  return hash(canonicalJson({
+    files: sort(input.files.map((entry) => withoutScope(entry, ['repositoryId', 'analysisRevision', 'fileId']))),
+    projects: sort(input.projects.map((entry) => withoutScope(entry, ['repositoryId', 'analysisRevision']))),
+    symbols: sort(input.symbols.map((entry) => withoutScope(entry, ['repositoryId', 'analysisRevision', 'symbolId']))),
+    dependencyEdges: sort(input.dependencyEdges.map((entry) => withoutScope(entry, ['repositoryId', 'analysisRevision', 'dependencyEdgeId']))),
+    diagnostics: sort(input.diagnostics.map((entry) => withoutScope(entry, ['repositoryId', 'analysisRevision', 'diagnosticId']))),
+  }));
 }
 
 function dependencyEdgeId(
@@ -367,7 +348,7 @@ function importFromEdge(
 ): TreeSitterImport | undefined {
   const range = edge.evidenceRanges[0];
   if (!file?.languageId || !range || !edge.targetReference || edge.kind !== 'import') return undefined;
-  if (!['arkts', 'c', 'cpp', 'csharp', 'go', 'java', 'javascript', 'kotlin', 'python', 'rust', 'typescript'].includes(file.languageId)) return undefined;
+  if (!['csharp', 'go', 'java', 'javascript', 'python', 'rust', 'typescript'].includes(file.languageId)) return undefined;
   return {
     importKind: 'import',
     languageId: file.languageId as TreeSitterImport['languageId'],
@@ -383,7 +364,7 @@ function exportFromEdge(
 ): TreeSitterExport | undefined {
   const range = edge.evidenceRanges[0];
   if (edge.kind !== 'export' || !file?.languageId || !range) return undefined;
-  if (!['arkts', 'c', 'cpp', 'csharp', 'go', 'java', 'javascript', 'kotlin', 'python', 'rust', 'typescript'].includes(file.languageId)) return undefined;
+  if (!['csharp', 'go', 'java', 'javascript', 'python', 'rust', 'typescript'].includes(file.languageId)) return undefined;
   return {
     exportKind: edge.targetRelativePath ? 're-export' : 'declaration',
     languageId: file.languageId as TreeSitterExport['languageId'],
@@ -421,7 +402,7 @@ function edgeNeedsRebuild(input: {
   const exported = exportFromEdge(edge, source);
   const imported = importFromEdge(edge, source) ?? (exported ? importForExport(exported) : undefined);
   if (!imported) return false;
-  if (['java', 'kotlin'].includes(imported.languageId) && (input.changedLanguageIds.has('java') || input.changedLanguageIds.has('kotlin')) || imported.languageId === 'csharp' && input.changedLanguageIds.has('csharp')) {
+  if ((imported.languageId === 'java' || imported.languageId === 'csharp') && input.changedLanguageIds.has(imported.languageId)) {
     return true;
   }
   return syntacticDependencyCandidatePaths(imported).some((candidate) => changedPaths.has(candidate));
@@ -435,12 +416,10 @@ function edgeNeedsRebuild(input: {
 export function buildStructuralIndex(request: BuildStructuralIndexRequest): StructuralIndexBuild {
   const registry = request.languageRegistry ?? createDefaultLanguageRegistry();
   const sourceFiles = new Map<string, string>();
-  const sources = new Map<string, StructuralSourceFile>();
   for (const source of request.files) {
     const relativePath = canonicalPath(source.relativePath);
-    if (sources.has(relativePath)) throw new Error(`Structural index input has duplicate path: ${relativePath}`);
-    sources.set(relativePath, source);
-    if (request.retainSourceTexts !== false && !source.unavailableReason) sourceFiles.set(relativePath, source.content);
+    if (sourceFiles.has(relativePath)) throw new Error(`Structural index input has duplicate path: ${relativePath}`);
+    sourceFiles.set(relativePath, source.content);
   }
 
   const previous = request.previousIndex;
@@ -450,14 +429,13 @@ export function buildStructuralIndex(request: BuildStructuralIndexRequest): Stru
   const previousFilesByPath = new Map((previous?.files ?? []).map((file) => [file.relativePath, file]));
   const suppliedChanges = new Set((request.changedPaths ?? []).map(canonicalPath));
   const changed = new Set(suppliedChanges);
-  for (const [relativePath, source] of sources) {
-    request.signal?.throwIfAborted();
-    if (previousFilesByPath.get(relativePath)?.sha256 !== (source.sha256 ?? hash(Buffer.from(source.content, 'utf8')))) {
+  for (const [relativePath, content] of sourceFiles) {
+    if (previousFilesByPath.get(relativePath)?.sha256 !== hash(Buffer.from(content, 'utf8'))) {
       changed.add(relativePath);
     }
   }
   for (const relativePath of previousFilesByPath.keys()) {
-    if (!sources.has(relativePath)) changed.add(relativePath);
+    if (!sourceFiles.has(relativePath)) changed.add(relativePath);
   }
   const changedPaths = [...changed].sort(compareText);
   const changedPathSet = new Set(changedPaths);
@@ -465,9 +443,9 @@ export function buildStructuralIndex(request: BuildStructuralIndexRequest): Stru
   const discovery = discoverProjects({
     repositoryId: request.repositoryId,
     analysisRevision: request.analysisRevision,
-    files: [...sources.entries()].map(([relativePath, source]) => ({
+    files: [...sourceFiles.entries()].map(([relativePath, content]) => ({
       relativePath,
-      content: isConfigurationPath(relativePath) ? source.content : '',
+      content,
       languageId: registry.resolvePath(relativePath)?.languageId,
     })),
   });
@@ -491,8 +469,7 @@ export function buildStructuralIndex(request: BuildStructuralIndexRequest): Stru
   const indexFile = request.indexFile ?? indexTreeSitterFile;
   let reparsedFileCount = 0;
   let reusedFileCount = 0;
-  for (const [relativePath, source] of [...sources.entries()].sort(([left], [right]) => compareText(left, right))) {
-    request.signal?.throwIfAborted();
+  for (const [relativePath, content] of [...sourceFiles.entries()].sort(([left], [right]) => compareText(left, right))) {
     const registration = registry.resolvePath(relativePath);
     const project = projectForPath(discovery.projects, relativePath, registration?.languageId);
     const record: IndexedFileRecord = {
@@ -502,23 +479,14 @@ export function buildStructuralIndex(request: BuildStructuralIndexRequest): Stru
       relativePath,
       ...(registration ? { languageId: registration.languageId } : {}),
       role: roleForPath(relativePath, registration?.languageId),
-      sha256: source.sha256 ?? hash(Buffer.from(source.content, 'utf8')),
-      sizeBytes: source.sizeBytes ?? Buffer.byteLength(source.content, 'utf8'),
+      sha256: hash(Buffer.from(content, 'utf8')),
+      sizeBytes: Buffer.byteLength(content, 'utf8'),
       parseStatus: registration ? 'parsed' : 'unsupported',
       ...(project ? { projectId: project.projectId } : {}),
     };
-    if (source.unavailableReason) {
-      record.parseStatus = 'failed';
-      const diagnostic = failureDiagnostic(request.repositoryId, request.analysisRevision, relativePath, new Error(source.unavailableReason));
-      diagnostic.code = 'SOURCE_CONTENT_UNAVAILABLE';
-      diagnostics.push(diagnostic);
-      indexed.push({ file: record, reused: false });
-      continue;
-    }
     const previousFile = previousFilesByPath.get(relativePath);
     const reuse = Boolean(
       previousFile &&
-      previousFile.parseStatus !== 'failed' &&
       previousFile.sha256 === record.sha256 &&
       !changedPathSet.has(relativePath),
     );
@@ -540,7 +508,7 @@ export function buildStructuralIndex(request: BuildStructuralIndexRequest): Stru
       continue;
     }
     try {
-      const parserResult = indexFile({ content: source.content, language: registration, relativePath });
+      const parserResult = indexFile({ content, language: registration, relativePath });
       reparsedFileCount += 1;
       if (parserResult.diagnostics.length > 0) record.parseStatus = 'partial';
       diagnostics.push(...parserResult.diagnostics.map((diagnostic) =>
@@ -591,7 +559,7 @@ export function buildStructuralIndex(request: BuildStructuralIndexRequest): Stru
     const file = currentFilesByPath.get(relativePath) ?? previousFilesByPath.get(relativePath);
     return file?.languageId ? [file.languageId] : [];
   }));
-  const previousEdges = (previous?.dependencyEdges ?? []).filter((edge) => edge.provider === 'tree-sitter' && !edge.kind.endsWith('-binding'));
+  const previousEdges = (previous?.dependencyEdges ?? []).filter((edge) => edge.provider === 'tree-sitter');
   const previousEdgeByKey = new Map(previousEdges.map((edge) => [edgeKey(edge), edge]));
   const currentImports: TreeSitterImport[] = [];
   const currentExports: TreeSitterExport[] = [];
@@ -659,11 +627,8 @@ export function buildStructuralIndex(request: BuildStructuralIndexRequest): Stru
       !needEdgeRebuild(edge),
     )
     .map((edge) => rehydrateEdge(edge, request.repositoryId, request.analysisRevision));
-  const bindings = resolveCrossLanguageBindings({ repositoryId: request.repositoryId, analysisRevision: request.analysisRevision,
-    files: currentFiles, symbols, signal: request.signal,
-    read: relativePath => { const source = sources.get(relativePath); return source && !source.unavailableReason ? source.content : undefined; } });
   const dependencyById = new Map<string, DependencyEdgeRecord>();
-  for (const edge of [...reusedDependencies, ...rebuiltDependencies, ...bindings]) dependencyById.set(edge.dependencyEdgeId, edge);
+  for (const edge of [...reusedDependencies, ...rebuiltDependencies]) dependencyById.set(edge.dependencyEdgeId, edge);
   const dependencies = [...dependencyById.values()].sort((left, right) => compareText(left.dependencyEdgeId, right.dependencyEdgeId));
 
   const index: StructuralIndex = {
@@ -690,7 +655,7 @@ export function buildStructuralIndex(request: BuildStructuralIndexRequest): Stru
     stats: {
       changedFileCount: changedPaths.length,
       reparsedFileCount,
-      rebuiltDependencyEdgeCount: rebuiltDependencies.length + bindings.length,
+      rebuiltDependencyEdgeCount: rebuiltDependencies.length,
       reusedDependencyEdgeCount: reusedDependencies.length,
       reusedFileCount,
     },

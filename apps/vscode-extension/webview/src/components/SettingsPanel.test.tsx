@@ -41,7 +41,7 @@ describe('SettingsPanel', () => {
       />,
     );
 
-    expect(markup).toContain('尚未添加参考工程路径');
+    expect(markup).toContain('尚未添加历史仓路径');
     expect(markup).toContain('添加第一个路径');
   });
 

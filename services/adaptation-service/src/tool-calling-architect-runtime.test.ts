@@ -28,7 +28,6 @@ function proposal(overrides: Partial<RevisionScopedModulePlanProposal> = {}): Re
     ...scope,
     analysisHash,
     objective: request.objective,
-    summary: "Handles quote requests and their supporting contracts.",
     modules: [{
       id: "quote-service",
       name: "Quote service",
@@ -110,12 +109,12 @@ function scriptedClient(
 }
 
 describe("ToolCallingArchitectRuntime", () => {
-  function projectPort(paths = ['src/QuoteService.java']) {
+  function projectPort() {
     const port = queryPort();
     const selected = evidence({ evidenceId: 'project:quote', relativePath: null, sourceRange: null,
       value: { projectId: 'quote', kind: 'maven', displayName: 'Quote', relativePath: '',
         manifestPaths: ['pom.xml'], languageIds: ['java'],
-        files: paths.map(relativePath => ({ relativePath, role: 'source', parseStatus: 'parsed' })) } });
+        files: [{ relativePath: 'src/QuoteService.java', role: 'source', parseStatus: 'parsed' }] } });
     vi.mocked(port.listProjects).mockResolvedValue({ projects: [selected,
       evidence({ evidenceId: 'project:unrelated', value: { projectId: 'unrelated', files: [{ relativePath: 'unrelated/Secret.java' }] } }),
     ] } as never);
@@ -409,50 +408,6 @@ describe("ToolCallingArchitectRuntime", () => {
     expect(tools).toEqual([]);
     expect(messages.at(-1)!.content).toContain('not retrieved through SemanticQueryPort');
     expect(messages.at(-1)!.content).toContain(evidenceId);
-  });
-
-  it.each(['overlap', 'duplicate-unassigned', 'missing-file', 'foreign-assigned', 'foreign-unassigned', 'missing-summary'] as const)(
-    'repairs %s before returning a project proposal', async (mode) => {
-      const files = ['duplicate-unassigned', 'missing-file'].includes(mode)
-        ? ['src/QuoteService.java', 'pom.xml'] : ['src/QuoteService.java'];
-      const port = projectPort(files);
-      vi.mocked(port.getDependencies).mockResolvedValue({ dependencies: [evidence({
-        evidenceId: 'dependency:cross-project', value: { sourceRelativePath: 'src/QuoteService.java',
-          targetRelativePath: 'unrelated/Secret.java', kind: 'import', resolution: 'resolved', internal: true },
-      })] } as never);
-      const corrected = proposal({ unassignedFiles: files.length > 1
-        ? [{ path: 'pom.xml', reason: 'Build metadata does not implement the feature.' }] : [] });
-      const invalid = structuredClone(corrected);
-      if (mode === 'overlap') invalid.unassignedFiles = [{ path: files[0]!, reason: 'Insufficient evidence.' }];
-      if (mode === 'duplicate-unassigned') invalid.unassignedFiles!.push({ ...invalid.unassignedFiles![0]! });
-      if (mode === 'missing-file') invalid.unassignedFiles = [];
-      if (mode === 'foreign-assigned') invalid.modules[0]!.sourceFiles.push('unrelated/Secret.java');
-      if (mode === 'foreign-unassigned') invalid.unassignedFiles = [{ path: 'unrelated/Secret.java', reason: 'External context.' }];
-      if (mode === 'missing-summary') delete invalid.summary;
-      const client = scriptedClient([{ content: JSON.stringify(invalid) }, { content: JSON.stringify(corrected) }]);
-      const result = await new ToolCallingArchitectRuntime({ queryPort: port, client })
-        .proposeModulePlanWithEvidence({ ...request, projectId: 'quote' });
-      expect(result.proposal).toEqual(corrected);
-      expect(client.complete).toHaveBeenCalledTimes(2);
-      const [messages, tools] = vi.mocked(client.complete).mock.calls[1]!;
-      expect(tools).toEqual([]);
-      const feedback = messages.at(-1)!.content;
-      expect(feedback).toContain('Proposal validation failed:');
-      expect(feedback).toContain('Each selected-project file must appear exactly once');
-      if (mode === 'overlap' || mode === 'duplicate-unassigned') expect(feedback).toContain('duplicates an assigned or unassigned file');
-      if (mode === 'missing-file') expect(feedback).toContain('without ownership or an unassignedFiles reason: pom.xml');
-      if (mode.startsWith('foreign')) expect(feedback).toContain('outside the selected project');
-      if (mode === 'missing-summary') expect(feedback).toContain('summary must be a non-empty string');
-      expect(port.listProjects).toHaveBeenCalledTimes(1);
-    },
-  );
-
-  it('rejects overlapping ownership after the bounded repair budget is exhausted', async () => {
-    const invalid = proposal({ unassignedFiles: [{ path: 'src/QuoteService.java', reason: 'Insufficient evidence.' }] });
-    const client = scriptedClient(Array.from({ length: 3 }, () => ({ content: JSON.stringify(invalid) })));
-    await expect(new ToolCallingArchitectRuntime({ queryPort: projectPort(), client })
-      .proposeModulePlan({ ...request, projectId: 'quote' })).rejects.toThrow('duplicates an assigned or unassigned file');
-    expect(client.complete).toHaveBeenCalledTimes(3);
   });
 
   it('stops after two invalid proposal repairs without accepting fabricated citations', async () => {

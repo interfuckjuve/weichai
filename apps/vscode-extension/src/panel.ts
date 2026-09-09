@@ -11,7 +11,7 @@ export interface PanelHandlers {
 }
 
 const VIEW_TYPE = 'forexplore.translation';
-const PANEL_TITLE = 'RECAST 智能开发工作台';
+const PANEL_TITLE = 'ForeXplore 代码翻译';
 
 /**
  * Owns the translation Webview panel: creation, focus reuse, HTML injection

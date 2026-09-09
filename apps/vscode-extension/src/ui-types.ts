@@ -47,7 +47,7 @@ export interface CodeIntelligenceLanguagePresentation {
 }
 
 export interface CodeIntelligenceProjectPresentation {
-  analysis?: ProjectAnalysisPresentation;
+  analysis?: import('@forexplore/contracts').ProjectAnalysisRecord;
   projectId: string;
   displayName: string;
   kind: string;
@@ -126,15 +126,6 @@ export interface ModuleExplorerNode {
   purpose?: string;
   coreApis?: string[];
   domain?: string;
-  moduleId?: string;
-  parentId?: string | null;
-  nodeKind?: import('@forexplore/contracts').ModuleNodeKind;
-  /** Module-tree depth, independent of directory and symbol nesting. */
-  depth?: number;
-  refinement?: import('@forexplore/contracts').ModuleRefinement;
-  /** Full direct-child count when children are loaded from the host in pages. */
-  childrenTotal?: number;
-  contents?: { files: number; types: number; methods: number; languages: string[] };
   children: ModuleExplorerNode[];
 }
 
@@ -160,29 +151,12 @@ export interface ModuleSummaryPresentation {
   waveCount?: number;
 }
 
-export type ProjectAnalysisPresentation = Omit<import('@forexplore/contracts').ProjectAnalysisRecord, 'proposal' | 'coverage'> & {
-  proposal?: Pick<import('@forexplore/contracts').ProjectModuleProposal, 'summary' | 'risks' | 'hierarchy'>;
-  hierarchy?: {
-    nodeCount: number;
-    rootCount: number;
-    moduleCount: number;
-    subsystemCount: number;
-    leafCount: number;
-    splitCount: number;
-    deferredCount: number;
-    unknownCount: number;
-    maxDepth: number;
-  };
-  coverage?: NonNullable<import('@forexplore/contracts').ProjectAnalysisRecord['coverage']> & { unassignedTotal?: number };
-};
-
 export interface ModuleWorkspacePresentation {
   repositoryId?: string;
   projectId?: string;
-  analysis?: ProjectAnalysisPresentation;
+  analysis?: import('@forexplore/contracts').ProjectAnalysisRecord;
   dependencies?: import('@forexplore/contracts').DependencyEdgeRecord[];
   diagnostics?: import('@forexplore/contracts').IndexDiagnosticRecord[];
-  detailCounts?: { dependencies: number; diagnostics: number; unassigned: number };
   id: string;
   mode: ModuleExplorerMode;
   name: string;
@@ -193,24 +167,7 @@ export interface ModuleWorkspacePresentation {
   error?: string;
   stats: ModuleExplorerStats;
   summary: ModuleSummaryPresentation;
-  /** Complete root-node count when the initial tree contains only its first host page. */
-  rootTotal?: number;
   tree: ModuleExplorerNode[];
-}
-
-export interface ModuleChildrenRequest {
-  repositoryId: string;
-  analysisRevision: string;
-  projectId: string;
-  nodeId: string;
-  offset: number;
-  query?: string;
-  status?: 'all' | ModuleImplementationStatus;
-}
-
-export interface ModuleChildrenPage {
-  nodes: ModuleExplorerNode[];
-  total: number;
 }
 
 /** Complete module-navigation snapshot sent by the trusted extension host. */

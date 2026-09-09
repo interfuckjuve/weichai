@@ -283,7 +283,6 @@ export interface SearchDocumentRecord extends RepositoryRevisionScope {
   kind: SearchDocumentKind;
   relativePath: string | null;
   symbolKey?: SymbolKey;
-  sourceRange?: SourceRange;
   moduleArtifactId?: ModuleArtifactId;
   contentHash: string;
   title: string;

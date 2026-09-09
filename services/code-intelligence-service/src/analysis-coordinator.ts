@@ -5,7 +5,7 @@ import {
   type RepositoryRevisionScope,
   type StructuralIndex,
 } from '@forexplore/contracts';
-import type { IndexStore, SourceTextReader } from './index-store.js';
+import type { IndexStore } from './index-store.js';
 import type { RepositoryRegistry } from './repository-registry.js';
 
 export type AnalysisMode = 'full' | 'incremental';
@@ -21,11 +21,9 @@ export interface StructuralScanRequest extends RepositoryRevisionScope {
 }
 
 export interface StructuralScanResult {
-  parserResources?: { peakWorkerRss: number; peakCombinedRss: number; workers: number };
   index: StructuralIndex;
   /** Immutable source copies used for revision-bound read_source_excerpt. */
   sourceTexts: ReadonlyMap<string, string>;
-  sourceReader?: SourceTextReader;
   sourceRevision?: string;
   /** Informational incremental accounting for the host/UI. */
   changedPaths?: string[];
@@ -37,7 +35,6 @@ export interface StructuralScanner {
 }
 
 export interface SearchProjection {
-  projectFromSource?(index: StructuralIndex, source: SourceTextReader, signal?: AbortSignal): Promise<void>;
   project(
     index: StructuralIndex,
     sourceTexts?: ReadonlyMap<string, string>,
@@ -113,7 +110,7 @@ export class AnalysisCoordinator {
   ) {
     this.#clock = options.clock ?? systemClock();
     this.#revisionIdGenerator = options.revisionIdGenerator ?? (() => `analysis-${randomUUID()}`);
-    this.#indexerVersion = options.indexerVersion ?? 'forexplore-code-intelligence/2.1';
+    this.#indexerVersion = options.indexerVersion ?? 'forexplore-code-intelligence/1.0';
   }
 
   async run(request: RunAnalysisRequest): Promise<AnalysisRunResult> {
@@ -158,7 +155,6 @@ export class AnalysisCoordinator {
 
     let building: AnalysisRevisionRecord | null = null;
     let ownsBuildingRevision = false;
-    let sourceReader: SourceTextReader | undefined;
 
     try {
       const scanStarted = performance.now();
@@ -170,7 +166,6 @@ export class AnalysisCoordinator {
         ...(effectiveMode === 'incremental' && changedPaths.length > 0 ? { changedPaths } : {}),
         signal: request.signal,
       });
-      sourceReader = result.sourceReader;
       console.info('[forexplore:performance]', JSON.stringify({ stage: 'scan', ...scope,
         durationMs: Math.round(performance.now() - scanStarted), files: result.index.files.length,
         symbols: result.index.symbols.length, dependencies: result.index.dependencyEdges.length,
@@ -206,20 +201,11 @@ export class AnalysisCoordinator {
       await this.store.putRevision(building);
       ownsBuildingRevision = true;
       const writeStarted = performance.now();
-      if (sourceReader && this.store.putStructuralIndexFromSource) {
-        await this.store.putStructuralIndexFromSource(result.index, sourceReader, request.signal);
-      } else {
-        if (sourceReader) throw new Error('The index store does not support streamed source persistence.');
-        await this.store.putStructuralIndex(result.index, result.sourceTexts);
-      }
+      await this.store.putStructuralIndex(result.index, result.sourceTexts);
       console.info('[forexplore:performance]', JSON.stringify({ stage: 'structural-write', ...scope,
         durationMs: Math.round(performance.now() - writeStarted) }));
       const projectionStarted = performance.now();
-      if (sourceReader && this.projection.projectFromSource) {
-        await this.projection.projectFromSource(result.index, sourceReader, request.signal);
-      } else {
-        await this.projection.project(result.index, result.sourceTexts, request.signal);
-      }
+      await this.projection.project(result.index, result.sourceTexts, request.signal);
       console.info('[forexplore:performance]', JSON.stringify({ stage: 'search-projection', ...scope,
         durationMs: Math.round(performance.now() - projectionStarted) }));
       const ready: AnalysisRevisionRecord = {
@@ -257,8 +243,6 @@ export class AnalysisCoordinator {
         // write must never cause a coordinator retry to overwrite a revision.
       }
       throw error;
-    } finally {
-      await sourceReader?.dispose?.();
     }
   }
 

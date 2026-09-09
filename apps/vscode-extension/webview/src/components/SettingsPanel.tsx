@@ -64,7 +64,7 @@ export function SettingsPanel({
         <span className="settings-glyph"><Settings2 size={18} /></span>
         <div>
           <h1>设置</h1>
-          <p>配置候选方案数量和用于模块检索的参考工程。</p>
+          <p>配置候选方案数量和用于模块检索的历史代码仓。</p>
         </div>
       </div>
 
@@ -96,7 +96,7 @@ export function SettingsPanel({
               <div className="code-intelligence-row" key={repository.repositoryId}>
                 <div>
                   <strong>{repository.displayName}</strong>
-                  <span>{repository.role === 'target' ? '目标工程' : '参考工程'} · {repository.analysisStatus}</span>
+                  <span>{repository.role === 'target' ? '目标工程' : '历史仓库'} · {repository.analysisStatus}</span>
                 </div>
                 <div className="code-intelligence-facts">
                   <span className="code-intelligence-active-revision" title={repository.activeRevision ?? '尚未激活 revision'}>
@@ -133,9 +133,9 @@ export function SettingsPanel({
                     : '尚无语言能力数据'}</span>
                   {repository.projects.length ? (
                     <label className="code-intelligence-revision-picker">
-                      <span>{repository.role === 'target' ? '目标工程' : '参考工程'}</span>
+                      <span>目标项目</span>
                       <select
-                        aria-label={`${repository.displayName} 的${repository.role === 'target' ? '目标工程' : '参考工程'}`}
+                        aria-label={`${repository.displayName} 的目标项目`}
                         value={repository.selectedProjectId ?? ''}
                         onChange={(event) => {
                           if (event.target.value && repository.selectedRevision) {
@@ -175,7 +175,7 @@ export function SettingsPanel({
 
       <section className="card settings-section">
         <div className="card-heading">
-          <span>参考工程路径</span>
+          <span>检索仓库路径</span>
           <button
             type="button"
             className="text-button"
@@ -185,10 +185,10 @@ export function SettingsPanel({
             <FolderPlus size={13} /> 添加路径
           </button>
         </div>
-        <p className="settings-intro">可添加多个本地参考工程。保存后，它们会分别出现在左侧“参考工程”列表中。</p>
+        <p className="settings-intro">可添加多个本地历史代码仓。保存后，它们会分别出现在左侧“历史仓”列表中。</p>
         {draftPaths.length === 0 ? (
           <div className="settings-empty">
-            <span>尚未添加参考工程路径</span>
+            <span>尚未添加历史仓路径</span>
             <button type="button" className="secondary-action" onClick={() => setDraftPaths([''])}>
               <FolderPlus size={13} /> 添加第一个路径
             </button>

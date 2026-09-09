@@ -34,7 +34,6 @@ interface Resolution {
 }
 
 const sourceExtensions: Readonly<Record<string, readonly string[]>> = {
-  c: ['.h', '.c'], cpp: ['.h', '.hpp', '.cpp'], kotlin: ['.kt', '.kts'], arkts: ['.ets', '.ts'],
   csharp: ['.cs'],
   go: ['.go'],
   java: ['.java'],
@@ -84,11 +83,6 @@ function relativeCandidates(
   targetReference: string,
   languageId: LanguageId,
 ): { candidates: string[]; internal: boolean } {
-  if (languageId === 'c' || languageId === 'cpp') {
-    if (targetReference.startsWith('<')) return { candidates: [], internal: false };
-    const local = path.posix.normalize(path.posix.join(path.posix.dirname(sourceRelativePath), targetReference));
-    return { candidates: isInsideRepository(local) ? [local] : [], internal: true };
-  }
   if (!targetReference.startsWith('.')) return { candidates: [], internal: false };
   const sourceDirectory = path.posix.dirname(canonicalPath(sourceRelativePath));
   const base = path.posix.normalize(path.posix.join(sourceDirectory, targetReference));
@@ -154,7 +148,7 @@ function javaCandidates(targetReference: string, symbols: readonly SymbolRecord[
   const wildcard = targetReference.endsWith('.*');
   return symbols
     .filter((symbol) =>
-      ['java', 'kotlin'].includes(symbol.languageId) &&
+      symbol.languageId === 'java' &&
       (wildcard
         ? symbol.qualifiedName.startsWith(`${target}.`)
         : symbol.qualifiedName === target),
@@ -177,7 +171,7 @@ function candidatesForImport(
   symbols: readonly SymbolRecord[],
 ): { candidates: ResolutionCandidate[]; internal: boolean } {
   const languageId = imported.languageId;
-  if (languageId === 'java' || languageId === 'kotlin') {
+  if (languageId === 'java') {
     const candidates = javaCandidates(imported.targetReference, symbols);
     return { candidates, internal: candidates.length > 0 };
   }
@@ -202,7 +196,7 @@ function candidatesForImport(
  * a change to any same-language declaration can affect those edges.
  */
 export function syntacticDependencyCandidatePaths(imported: TreeSitterImport): string[] {
-  if (imported.languageId === 'java' || imported.languageId === 'kotlin' || imported.languageId === 'csharp') return [];
+  if (imported.languageId === 'java' || imported.languageId === 'csharp') return [];
   const resolution = imported.languageId === 'python'
     ? pythonCandidates(imported.relativePath, imported.targetReference)
     : imported.languageId === 'rust'
@@ -332,7 +326,6 @@ function edgeForExport(
   request: SyntacticDependencyResolverRequest,
   exported: TreeSitterExport,
   filesByPath: ReadonlyMap<string, IndexedFileRecord>,
-  localSymbols: readonly SymbolRecord[],
 ): DependencyEdgeRecord {
   const kind: IndexDependencyKind = 'export';
   const reExport = exported.exportKind === 're-export' && Boolean(exported.targetReference);
@@ -350,7 +343,7 @@ function edgeForExport(
     : undefined;
   const localCandidates = imported
     ? []
-    : localSymbols
+    : request.symbols
       .filter((symbol) =>
         symbol.relativePath === exported.relativePath &&
         (!exported.targetReference ||
@@ -404,14 +397,9 @@ export function resolveSyntacticDependencies(
   request: SyntacticDependencyResolverRequest,
 ): DependencyEdgeRecord[] {
   const filesByPath = new Map(request.files.map((file) => [canonicalPath(file.relativePath), file]));
-  const symbolsByPath = new Map<string, SymbolRecord[]>();
-  for (const symbol of request.symbols) {
-    const symbols = symbolsByPath.get(symbol.relativePath) ?? [];
-    symbols.push(symbol); symbolsByPath.set(symbol.relativePath, symbols);
-  }
   const edges = [
     ...request.imports.map((imported) => edgeForImport(request, imported, filesByPath)),
-    ...(request.exports ?? []).map((exported) => edgeForExport(request, exported, filesByPath, symbolsByPath.get(exported.relativePath) ?? [])),
+    ...(request.exports ?? []).map((exported) => edgeForExport(request, exported, filesByPath)),
     ...(request.projectReferences ?? []).map((reference) => edgeForProjectReference(request, reference, filesByPath)),
   ];
   const unique = new Map<string, DependencyEdgeRecord>();

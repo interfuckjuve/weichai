@@ -2,13 +2,6 @@ import type { RepositoryRevisionScope } from './code-intelligence';
 
 export interface ProjectAnalysisScope extends RepositoryRevisionScope { projectId: string }
 
-export type ModuleNodeKind = 'module' | 'subsystem';
-export interface ModuleRefinement {
-  state: 'leaf' | 'split' | 'deferred';
-  reason: string;
-  decisionSource: 'model' | 'structural' | 'budget';
-}
-
 export interface ProjectModule {
   id: string;
   name: string;
@@ -22,11 +15,6 @@ export interface ProjectModule {
   symbolKeys: string[];
   dependsOn: string[];
   evidenceIds: string[];
-  /** Legacy proposals omit these fields and remain flat module forests. */
-  parentId?: string | null;
-  nodeKind?: ModuleNodeKind;
-  refinement?: ModuleRefinement;
-  metrics?: { fileCount: number; sourceBytes: number; symbolCount: number };
 }
 
 export interface ProjectModuleProposal extends RepositoryRevisionScope {
@@ -37,14 +25,6 @@ export interface ProjectModuleProposal extends RepositoryRevisionScope {
   modules: ProjectModule[];
   dependencies?: Array<{ moduleId: string; dependsOnModuleId: string; evidenceIds: string[] }>;
   risks?: string[];
-  hierarchy?: {
-    version: 1;
-    algorithm: 'adaptive-module-tree/v1';
-    maxDepth: number;
-    decisionCount: number;
-    modelDecisionCount: number;
-    deferredCount: number;
-  };
 }
 
 export interface ProjectAnalysisResult {
@@ -62,49 +42,6 @@ export interface ProjectAnalysisRecord extends ProjectAnalysisScope {
   proposal?: ProjectModuleProposal;
   planHash?: string;
   coverage?: { total: number; assigned: number; unassigned: Array<{ path: string; reason: string }> };
-  modeling?: {
-    strategy: 'structural' | 'agent';
-    algorithm: string;
-    maxFilesPerModule?: number;
-  };
-}
-
-export interface ModuleHierarchyCandidate {
-  id: string;
-  name: string;
-  relativePath: string;
-  fileCount: number;
-  sourceBytes: number;
-  symbolCount: number;
-  languages: string[];
-  samplePaths: string[];
-  coreApis: string[];
-  evidenceIds: string[];
-}
-
-export interface ModuleHierarchyDecisionRequest extends ProjectAnalysisScope {
-  analysisHash: string;
-  nodeId: string;
-  name: string;
-  depth: number;
-  metrics: { fileCount: number; sourceBytes: number; symbolCount: number };
-  candidates: ModuleHierarchyCandidate[];
-  dependencies: Array<{ sourceId: string; targetId: string; count: number; evidenceIds: string[] }>;
-  excerpts: Array<{ relativePath: string; content: string; evidenceId: string }>;
-}
-
-export type ModuleHierarchyDecision = {
-  action: 'stop'; name: string; nodeKind: ModuleNodeKind; description: string;
-  reason: string; evidenceIds: string[];
-  stopReason?: 'cohesive' | 'insufficient-evidence' | 'no-valid-split';
-} | {
-  action: 'split'; name: string; nodeKind: ModuleNodeKind; description: string;
-  reason: string; evidenceIds: string[];
-  children: Array<{ name: string; nodeKind: ModuleNodeKind; description: string; groupIds: string[]; evidenceIds: string[] }>;
-};
-
-export interface ModuleHierarchyPlanner {
-  decide(request: ModuleHierarchyDecisionRequest, signal?: AbortSignal): Promise<ModuleHierarchyDecision>;
 }
 
 export interface ProjectAnalysisPort {

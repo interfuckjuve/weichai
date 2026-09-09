@@ -10,4 +10,3 @@ export * from './module-summary';
 export * from './module-wave-lifecycle';
 export * from './module-migration-workflow';
 export * from './semantic-query-port';
-export * from './task-retrieval-port';

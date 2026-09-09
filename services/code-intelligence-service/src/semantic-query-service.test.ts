@@ -4,7 +4,7 @@ import type {
   RepositoryRecord,
   StructuralIndex,
 } from '@forexplore/contracts';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { AnalysisCoordinator, type StructuralScanner } from './analysis-coordinator.js';
 import { InMemoryIndexStore } from './index-store.js';
 import { RepositoryRegistry } from './repository-registry.js';
@@ -111,10 +111,8 @@ async function seed(
   repositoryId: string,
   analysisRevision: string,
   analysisHash = 'b'.repeat(64),
-  amend?: (structural: StructuralIndex) => void,
 ): Promise<StructuralIndex> {
   const structural = index(repositoryId, analysisRevision, analysisHash);
-  amend?.(structural);
   await store.putRepository(repository(repositoryId));
   const ready = revision(repositoryId, analysisRevision, analysisHash);
   await store.putRevision({
@@ -175,103 +173,6 @@ describe('SemanticQueryService', () => {
     expect(result.symbols.map((symbol) => symbol.value.symbolKey)).toEqual(structural.symbols.map((symbol) => symbol.symbolKey));
     expect((await query.searchSymbols({ ...scope, query: '', projectIds: ['another-project'] })).symbols).toEqual([]);
     await expect(query.searchSymbols({ ...scope, query: '' })).rejects.toThrow('without a project filter');
-  });
-
-  it('reads repository statistics and project files without hydrating the full structural index', async () => {
-    const store = new InMemoryIndexStore();
-    const structural = await seed(store, 'history-one', 'revision-one');
-    const query = new SemanticQueryService(store);
-    const scope = { repositoryId: structural.repositoryId, analysisRevision: structural.analysisRevision };
-    for (const method of ['getStructuralIndex', 'listSymbols', 'listDependencyEdges', 'listDiagnostics'] as const) {
-      vi.spyOn(store, method).mockRejectedValue(new Error(`Unexpected full index read: ${method}`));
-    }
-    const files = vi.spyOn(store, 'listFiles');
-    const projects = vi.spyOn(store, 'listProjects');
-    const overview = (await query.getRepositoryOverview(scope)).overview.value;
-    expect(overview).toMatchObject({ projectCount: 1, fileCount: 1, symbolCount: 1, dependencyCount: 1, diagnosticCount: 0,
-      languages: [{ languageId: 'typescript', fileCount: 1, capabilityLevel: 'structural' }] });
-    expect(overview.repository).not.toHaveProperty('localPath');
-    expect(files).not.toHaveBeenCalled();
-    expect(projects).not.toHaveBeenCalled();
-    const listed = await query.listProjects(scope);
-    expect(listed.projects[0]?.value.files).toEqual([{ relativePath: 'src/first.ts', role: 'source', parseStatus: 'parsed' }]);
-    expect(files).toHaveBeenCalledOnce();
-    expect(projects).toHaveBeenCalledOnce();
-  });
-
-  it('preserves configured and live-provider language capability precedence with aggregate statistics', async () => {
-    const store = new InMemoryIndexStore();
-    const structural = await seed(store, 'history-one', 'revision-one', 'b'.repeat(64), (item) => {
-      item.symbols[0]!.provider = 'lsp';
-      item.symbols[0]!.evidenceLevel = 'syntactic';
-    });
-    const scope = { repositoryId: structural.repositoryId, analysisRevision: structural.analysisRevision };
-    vi.spyOn(store, 'getStructuralIndex').mockRejectedValue(new Error('Unexpected full index read'));
-    const inherited = await new SemanticQueryService(store).getRepositoryOverview(scope);
-    expect(inherited.overview.value.languages[0]?.capabilityLevel).toBe('semantic');
-    const configured = new Map([['typescript', 'structural' as const]]);
-    const structuralOnly = await new SemanticQueryService(store, { languageCapabilities: configured }).getRepositoryOverview(scope);
-    expect(structuralOnly.overview.value.languages[0]?.capabilityLevel).toBe('structural');
-    const provider: SemanticProvider = { provider: 'lsp', supportedLanguageIds: ['java'], isAvailable: async () => ({ available: true }), findDefinition: async () => [] };
-    const unsupported = await new SemanticQueryService(store, { languageCapabilities: configured, semanticProviders: [provider] }).getRepositoryOverview(scope);
-    expect(unsupported.overview.value.languages[0]?.capabilityLevel).toBe('structural');
-    const available = await new SemanticQueryService(store, { languageCapabilities: configured, semanticProviders: [{ ...provider, supportedLanguageIds: ['typescript'] }] }).getRepositoryOverview(scope);
-    expect(available.overview.value.languages[0]?.capabilityLevel).toBe('semantic');
-  });
-
-  it('keeps lightweight reads pinned to a superseded revision after activating another revision', async () => {
-    const store = new InMemoryIndexStore();
-    const original = await seed(store, 'history-one', 'revision-one');
-    await store.activateRevision(original);
-    const activeRepository = (await store.getRepository(original.repositoryId))!;
-    const next = await seed(store, 'history-one', 'revision-two', 'c'.repeat(64));
-    await store.putRepository(activeRepository);
-    await store.activateRevision(next);
-    vi.spyOn(store, 'getStructuralIndex').mockRejectedValue(new Error('Unexpected full index read'));
-    const query = new SemanticQueryService(store);
-    const scope = { repositoryId: original.repositoryId, analysisRevision: original.analysisRevision };
-    const overview = await query.getRepositoryOverview(scope);
-    expect(overview.overview.value.revision).toMatchObject({ analysisRevision: 'revision-one', status: 'superseded', analysisHash: original.analysisHash });
-    expect((await query.listProjects(scope)).projects.every((item) => item.analysisRevision === 'revision-one' && item.value.analysisRevision === 'revision-one')).toBe(true);
-  });
-
-  it('rejects unready, mismatched or missing metadata before reading summaries', async () => {
-    const store = new InMemoryIndexStore();
-    const structural = await seed(store, 'history-one', 'revision-one');
-    const scope = { repositoryId: structural.repositoryId, analysisRevision: structural.analysisRevision };
-    const query = new SemanticQueryService(store);
-    const readRevision = vi.spyOn(store, 'getRevision');
-    const readMetadata = vi.spyOn(store, 'getStructuralIndexMetadata');
-    const statistics = vi.spyOn(store, 'getRevisionStatistics');
-    for (const status of ['building', 'failed'] as const) {
-      readRevision.mockResolvedValue({ ...revision(scope.repositoryId, scope.analysisRevision, structural.analysisHash), status });
-      await expect(query.getRepositoryOverview(scope)).rejects.toThrow('not ready');
-      await expect(query.listProjects(scope)).rejects.toThrow('not ready');
-    }
-    readRevision.mockRestore();
-    readMetadata.mockResolvedValue({ ...scope, analysisHash: 'c'.repeat(64) });
-    await expect(query.getRepositoryOverview(scope)).rejects.toThrow('metadata does not match');
-    await expect(query.listProjects(scope)).rejects.toThrow('metadata does not match');
-    readMetadata.mockResolvedValue(null);
-    await expect(query.listProjects(scope)).rejects.toThrow('not found');
-    expect(statistics).not.toHaveBeenCalled();
-    await expect(query.getRepositoryOverview(scope, AbortSignal.abort(new Error('cancelled')))).rejects.toThrow('cancelled');
-    await expect(query.listProjects(scope, AbortSignal.abort(new Error('cancelled')))).rejects.toThrow('cancelled');
-  });
-
-  it('retains compatible overview and project results when the store has no lightweight methods', async () => {
-    const store = new InMemoryIndexStore();
-    const structural = await seed(store, 'history-one', 'revision-one');
-    const scope = { repositoryId: structural.repositoryId, analysisRevision: structural.analysisRevision };
-    const query = new SemanticQueryService(store);
-    const overview = await query.getRepositoryOverview(scope);
-    const projects = await query.listProjects(scope);
-    Object.defineProperty(store, 'getRevisionStatistics', { value: undefined });
-    Object.defineProperty(store, 'getStructuralIndexMetadata', { value: undefined });
-    const full = vi.spyOn(store, 'getStructuralIndex');
-    expect(await query.getRepositoryOverview(scope)).toEqual(overview);
-    expect(await query.listProjects(scope)).toEqual(projects);
-    expect(full).toHaveBeenCalledTimes(2);
   });
 
   it('preserves unresolved dependencies instead of fabricating semantic definition/reference evidence', async () => {

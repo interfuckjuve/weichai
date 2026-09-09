@@ -1,7 +1,5 @@
 import { useEffect, useMemo, useReducer, useRef, useState } from 'react';
-import { GitBranch, Search, Settings2 } from 'lucide-react';
-import { createTranslationProvider } from './workspace-translation-provider';
-import { TaskSearch, type TaskSearchProvider } from './components/TaskSearch';
+import { Settings2 } from 'lucide-react';
 import type { CodeIntelligencePresentation, RepositoryStatus, ServiceStatus } from '../../src/ui-types';
 import type { ModuleExplorerMode, ModuleExplorerNode } from '../../src/ui-types';
 import {
@@ -23,30 +21,15 @@ import { ModuleWorkspace } from './components/ModuleWorkspace';
 import { SettingsPanel } from './components/SettingsPanel';
 import { errorEvent } from './errors';
 import { createMessageBus, type MessageBus } from './vscode-api';
-import { createTaskSearchProvider } from './task-search-provider';
-import { createModuleChildrenProvider } from './module-children-provider';
 
-export default function App({ taskSearch, initialMode = 'search' }: { taskSearch?: TaskSearchProvider; initialMode?: 'search' | 'migration' } = {}) {
-  const [taskMode, setTaskMode] = useState(initialMode);
+export default function App() {
   const bus: MessageBus = useMemo(() => createMessageBus(), []);
-  const translation = useMemo(() => createTranslationProvider(bus), [bus]);
-  const loadModuleChildren = useMemo(() => createModuleChildrenProvider(bus), [bus]);
   const [state, dispatch] = useReducer(workflowReducer, initialWorkflowState);
   const [payload, setPayload] = useState<PanelInitPayload | null>(null);
   const [repositoryStatuses, setRepositoryStatuses] = useState<RepositoryStatus[]>([]);
   const [codeIntelligence, setCodeIntelligence] = useState<CodeIntelligencePresentation | null>(null);
   const [serviceStatus, setServiceStatus] = useState<ServiceStatus | null>(null);
   const [moduleExplorer, setModuleExplorer] = useState<PanelInitPayload['moduleExplorer'] | null>(null);
-  const connectedTaskSearch = useMemo(() => {
-    const target = moduleExplorer?.target;
-    if (taskSearch) return taskSearch;
-    if (!target?.repositoryId || !target.revision) return undefined;
-    return createTaskSearchProvider(bus, {
-      repositoryId: target.repositoryId,
-      analysisRevision: target.revision,
-      ...(target.projectId ? { projectId: target.projectId } : {}),
-    });
-  }, [bus, taskSearch, moduleExplorer?.target.repositoryId, moduleExplorer?.target.projectId, moduleExplorer?.target.revision]);
   const [explorerMode, setExplorerMode] = useState<ModuleExplorerMode>('target');
   const [historyId, setHistoryId] = useState<string | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
@@ -253,7 +236,7 @@ export default function App({ taskSearch, initialMode = 'search' }: { taskSearch
   if (!payload || !moduleExplorer) {
     return (
       <div className="app">
-        <div className="loading-state">正在初始化 RECAST 智能开发工作台…</div>
+        <div className="loading-state">正在初始化 ForeXplore 翻译面板…</div>
       </div>
     );
   }
@@ -264,13 +247,14 @@ export default function App({ taskSearch, initialMode = 'search' }: { taskSearch
     <div className="app">
       <header className="app-header">
         <div className="brand">
-          <span className="brand-glyph">RC</span>
-          <strong>RECAST</strong>
+          <span className="brand-glyph">FX</span>
+          <strong>ForeXplore</strong>
         </div>
-        <nav className="workbench-modes" aria-label="工作模式">
-          <button type="button" aria-pressed={taskMode === 'search'} onClick={() => { setTaskMode('search'); setSettingsOpen(false); }}><Search size={14} />任务检索</button>
-          <button type="button" aria-pressed={taskMode === 'migration'} onClick={() => { setTaskMode('migration'); setSettingsOpen(false); }}><GitBranch size={14} />复用迁移</button>
-        </nav>
+        <StepRail
+          stage={state.stage}
+          activeStep={visibleStep}
+          onStepChange={handleStepChange}
+        />
         <button
           type="button"
           className={`header-settings-button${settingsOpen ? ' is-active' : ''}`}
@@ -283,7 +267,6 @@ export default function App({ taskSearch, initialMode = 'search' }: { taskSearch
 
       {error ? <div className="error-banner" role="alert">{error}</div> : null}
       <ModuleWorkspace
-        primaryContent={taskMode === 'search'}
         repositories={codeIntelligence?.repositories ?? []}
         onSelectProject={(repositoryId, revision, projectId) => {
           setSelectedNodeId(null);
@@ -297,7 +280,6 @@ export default function App({ taskSearch, initialMode = 'search' }: { taskSearch
         }}
         onAddTarget={(mode) => { setError(null); bus.post({ type: 'ADD_TARGET_WORKSPACE', mode }); }}
         explorer={moduleExplorer}
-        onLoadChildren={loadModuleChildren}
         mode={explorerMode}
         historyId={historyId}
         currentTargetId={state.target?.id ?? ''}
@@ -312,27 +294,6 @@ export default function App({ taskSearch, initialMode = 'search' }: { taskSearch
         onOpenSettings={() => setSettingsOpen(true)}
         settingsOpen={settingsOpen}
       >
-        <div hidden={settingsOpen || taskMode !== 'search'}>
-          <TaskSearch key={`${moduleExplorer.target.repositoryId}:${moduleExplorer.target.projectId}:${moduleExplorer.target.revision}`}
-            project={moduleExplorer.target.name} search={connectedTaskSearch} translation={translation}
-            availableGranularities={{
-              target: ['auto', ...(moduleExplorer.target.stats.methods > 0 ? ['function' as const] : []),
-                ...(moduleExplorer.target.stats.types > 0 ? ['class' as const] : []),
-                ...(moduleExplorer.target.analysis?.proposal && moduleExplorer.target.analysis.projection === 'ready' &&
-                  (moduleExplorer.target.analysis.hierarchy?.moduleCount ?? moduleExplorer.target.stats.modules) > 0 ? ['module' as const] : []),
-                ...(moduleExplorer.target.analysis?.projection === 'ready' && (moduleExplorer.target.analysis.hierarchy?.subsystemCount ?? 0) > 0 ? ['subsystem' as const] : [])],
-              all: ['auto', ...([moduleExplorer.target, ...moduleExplorer.history].some((workspace) => workspace.stats.methods > 0) ? ['function' as const] : []),
-                ...([moduleExplorer.target, ...moduleExplorer.history].some((workspace) => workspace.stats.types > 0) ? ['class' as const] : []),
-                ...([moduleExplorer.target, ...moduleExplorer.history].some((workspace) => workspace.analysis?.proposal && workspace.analysis.projection === 'ready' &&
-                  (workspace.analysis.hierarchy?.moduleCount ?? workspace.stats.modules) > 0) ? ['module' as const] : []),
-                ...([moduleExplorer.target, ...moduleExplorer.history].some((workspace) => workspace.analysis?.projection === 'ready' &&
-                  (workspace.analysis.hierarchy?.subsystemCount ?? 0) > 0) ? ['subsystem' as const] : [])],
-            }} onMigrate={(requirement) => {
-              if (state.pending) return;
-              dispatch({ type: 'SET_REQUIREMENT', value: requirement });
-              setTaskMode('migration'); setExplorerMode('target'); setVisibleStep('requirement');
-            }} />
-        </div>
         {settingsOpen ? (
           <SettingsPanel
             topK={payload.settings.topK}
@@ -346,10 +307,8 @@ export default function App({ taskSearch, initialMode = 'search' }: { taskSearch
             onSave={handleSaveSettings}
             onCancel={() => setSettingsOpen(false)}
           />
-        ) : taskMode === 'migration' ? (
+        ) : (
           <main className="stage-body">
-            <div className="migration-progress"><StepRail stage={state.stage} activeStep={visibleStep} onStepChange={handleStepChange} /></div>
-            {!state.target ? <div className="context-empty"><GitBranch size={25} /><strong>选择待实现的目标模块</strong></div> : null}
             {visibleStep === 'requirement' && state.target ? (
               <RequirementStage
                 key={state.target.id}
@@ -385,7 +344,7 @@ export default function App({ taskSearch, initialMode = 'search' }: { taskSearch
               />
             ) : null}
           </main>
-        ) : null}
+        )}
       </ModuleWorkspace>
 
       <FooterStatus

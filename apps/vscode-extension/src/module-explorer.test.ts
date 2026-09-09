@@ -91,17 +91,6 @@ const currentTarget: ModuleTarget = {
 };
 
 describe('module explorer host transform', () => {
-  it('assigns a nested member to its nearest enclosing type without duplicating it', () => {
-    const outer = analysis.symbols[0]!;
-    const inner = { ...outer, id: 'inner', name: 'Nested', qualifiedName: `${outer.qualifiedName}.Nested` };
-    const member = { ...analysis.symbols[1]!, qualifiedName: `${inner.qualifiedName}.Pay` };
-    const result = workspacePresentationFromAnalysis({ analysis: { ...analysis, symbols: [outer, inner, member] },
-      mode: 'target', name: 'Target', rootLabel: '.' });
-    const serialized = JSON.stringify(result.presentation.tree);
-    expect(serialized.match(/"id":"symbol:payment-method"/g)).toHaveLength(1);
-    expect(result.presentation.stats.methods).toBe(1);
-  });
-
   it('builds module/file/type/method hierarchy and a host-owned target catalog', () => {
     const result = workspacePresentationFromAnalysis({
       analysis,
