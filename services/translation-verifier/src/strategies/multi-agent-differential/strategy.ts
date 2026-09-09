@@ -843,10 +843,11 @@ export class MultiAgentDifferentialStrategy implements TwoPhaseVerificationStrat
     };
     const prompt =
       (targetDesign
-        ? buildIndependentTargetPrompt(input)
+        ? buildIndependentTargetPrompt(input, context.workspace)
         : buildBehaviorPrompt(
             input,
             side,
+            context.workspace,
             side === "target"
               ? report.sourceSnapshot?.manifest.cases
               : undefined,

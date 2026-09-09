@@ -55,6 +55,7 @@ export function createBehaviorRuntime(
 ): BehaviorRuntime {
   const timeoutMs = options.timeoutMs ?? 300_000;
   const maxTurns = options.maxTurns ?? 50;
+  const effort = options.effort ?? "low";
   if (
     !Number.isFinite(timeoutMs) ||
     timeoutMs <= 0 ||
@@ -62,10 +63,7 @@ export function createBehaviorRuntime(
     maxTurns <= 0
   )
     throw new Error("Invalid behavior runtime limits.");
-  if (
-    options.effort &&
-    !["low", "medium", "high", "xhigh", "max"].includes(options.effort)
-  )
+  if (!["low", "medium", "high", "xhigh", "max"].includes(effort))
     throw new Error("Invalid Claude effort.");
   const baselines = new Map<string, BehaviorProjectBaseline>();
   const controlFor = (
@@ -382,7 +380,8 @@ export function createBehaviorRuntime(
               model,
               "--max-turns",
               String(maxTurns),
-              ...(options.effort ? ["--effort", options.effort] : []),
+              "--effort",
+              effort,
             ],
             cwd: control.scope.cwd,
             env,

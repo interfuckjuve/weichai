@@ -166,7 +166,7 @@ export class MultiAgentBlackBoxStrategy implements TwoPhaseVerificationStrategy 
           executionSides: (
             this.options.executionSides ?? ["source", "target"]
           ).filter((side) => side === "source"),
-          prompt: preparationPrompt(input),
+          prompt: preparationPrompt(input, context.workspace),
           ...bounded,
         },
         context,
@@ -507,7 +507,7 @@ export class MultiAgentBlackBoxStrategy implements TwoPhaseVerificationStrategy 
               failure: firstFailure ? errorText(firstFailure) : null,
               cases: report.cases,
               evidence: report.evidence,
-            }),
+            }, targetRoot),
           },
           context,
           "black-box-agent2",

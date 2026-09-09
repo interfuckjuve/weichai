@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ForeXplore | Black-Box Verification Architecture</title>
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: true, securityLevel: 'strict', theme: 'base', themeVariables: {
+      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+      primaryColor: '#e8f1ff', primaryTextColor: '#172033', primaryBorderColor: '#4978b9',
+      lineColor: '#667085', secondaryColor: '#eef8f1', tertiaryColor: '#fff5df'
+    }});
+  </script>
+  <style>
+    :root { color-scheme: light; }
+    body { margin: 0; background: #f6f8fb; color: #172033; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.5; }
+    header { padding: 24px; border-bottom: 1px solid #d9e0ea; background: #fff; }
+    h1 { margin: 0; font-size: 26px; overflow-wrap: anywhere; }
+    p { margin: 8px 0 0; max-width: 1000px; }
+    nav { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 12px; }
+    a { color: #245b96; }
+    main { padding: 24px; }
+    .diagram-scroll { overflow: auto; }
+    .mermaid { min-width: 1000px; margin: 0; }
+    .notes { max-width: 1000px; }
+    h2 { font-size: 20px; }
+    li { margin-bottom: 8px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>ForeXplore: Black-Box Verification</h1>
+    <p><code>multi-agent-black-box@1.0.0</code>: Agent1 authors target tests before seeing the generated translation. Agent2 runs only after an eligible target failure, for diagnosis and at most one harness repair.</p>
+    <nav aria-label="Architecture documents"><a href="white-box-architecture.html">White-box architecture</a><a href="README.md">Verifier documentation</a><a href="e2e/REPRODUCING.md">Reproduce the shared task</a></nav>
+  </header>
+  <main>
+    <div class="diagram-scroll" role="region" aria-label="Black-box verification flow" tabindex="0">
+      <pre class="mermaid">
+flowchart TD
+    INPUT[Caller supplies requirements, Analyzer report and untranslated projects] --&gt; ROUTE{Reuse classification}
+    ROUTE --&gt;|direct / adapt| A1[prepareTests: Agent1 reads source and untranslated target]
+    A1 --&gt; DESIGN[Explore source copy; author target tests and case expectations]
+    DESIGN --&gt; CHECK[Host validates artifacts; replays original source for source-based cases]
+    CHECK --&gt; FREEZE[Host freezes cases, expectations, manifests and target tests]
+    FREEZE --&gt; TRANS[Caller supplies translated target and preparation capsule]
+    TRANS --&gt; REPLAY[verifyTranslation: Host runs frozen target tests first]
+    REPLAY --&gt; RESULT{Execution and case comparison}
+    RESULT --&gt;|No divergence| REPORT[Retain evidence and report tested outcomes]
+    RESULT --&gt;|Eligible failure / divergence| A2[Agent2 reads failure evidence and target implementation]
+    RESULT --&gt;|Integrity failure / timeout| STOP[Fail closed; retain evidence]
+    A2 --&gt; DIAG{Diagnosis}
+    DIAG --&gt;|Harness problem| REPAIR[Repair declared generated tests once; preserve frozen meaning]
+    REPAIR --&gt; RETEST[Host replays once; no repair loop]
+    RETEST --&gt; REPORT
+    DIAG --&gt;|Translation issue / inconclusive| REPORT
+    ROUTE --&gt;|reference / reject| SKIP[Skip Agent1; target-only preparation]
+    SKIP --&gt; TARGET[Caller supplies translation; use independent white-box target-only branch]
+    TARGET --&gt; REPORT
+    CHECK -. invalid artifacts .-&gt; STOP
+    TRANS -. invalid capsule or subject .-&gt; STOP
+
+    classDef host fill:#e8f1ff,stroke:#4978b9,color:#172033
+    classDef agent fill:#eef8f1,stroke:#4b9364,color:#172033
+    classDef decision fill:#fff5df,stroke:#c28a2e,color:#172033
+    classDef terminal fill:#f1f3f5,stroke:#667085,color:#172033
+    class INPUT,CHECK,FREEZE,TRANS,REPLAY,RETEST,TARGET host
+    class A1,DESIGN,A2,REPAIR agent
+    class ROUTE,RESULT,DIAG decision
+    class REPORT,STOP,SKIP terminal
+      </pre>
+    </div>
+    <section class="notes" aria-labelledby="boundaries">
+      <h2 id="boundaries">Visibility and Limits</h2>
+      <ul>
+        <li>Agent1 cannot access the generated translation or its explanation and cannot execute target tests during preparation. Source experiments are not original Source Observations; source-based expectations require replay against the unchanged original source.</li>
+        <li>Agent2 may inspect the translation after a failure. Only initial test design is translation-implementation black-box; the complete workflow is not strictly black-box.</li>
+        <li>Frozen cases, inputs, expectations, command manifests and original implementation files remain protected. Agent2 cannot repair business code, weaken expectations or hide failures. Integrity violations and timeouts do not enter the repair branch.</li>
+        <li>The reference/reject route is target-only verification, not black-box preparation coverage. Required unresolved expectations stop verification.</li>
+        <li>Upstream Analyzer/Translator parallel orchestration is not integrated. The fixture E2E uses a supplied analysis report and fixed translation patch. There is no automatic retranslation loop in this verifier.</li>
+        <li>Service/CLI preparation capsules require Host-issued provenance. Local command policies and hash checks are not OS isolation or rollback. Passing tests do not prove business correctness or test adequacy.</li>
+      </ul>
+      <p>The diagram loads Mermaid from a CDN; an internet connection is required to render it. The flow text remains in this HTML file.</p>
+    </section>
+  </main>
+</body>
+</html>

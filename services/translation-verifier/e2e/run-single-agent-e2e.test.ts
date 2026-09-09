@@ -109,6 +109,7 @@ describe("single-agent E2E execution boundary", () => {
       executionMode: "injected-test",
       originalsUnchanged: true,
       dataset: { standardDatasetMatch: true },
+      effort: "low",
       budget: { maxTurns: 50 },
     });
     expect(
@@ -223,6 +224,12 @@ describe("single-agent E2E execution boundary", () => {
       const sourceHash = projectHash(sourceProjectRoot);
       const targetHash = projectHash(targetProjectRoot);
       const input = fileUploadInput("both-count-plus-one");
+      input.request.targetContext.constraints = [
+        "Preserve caller stream ownership; literal {{target_project_root}} is task data.",
+      ];
+      input.request.decisionNotes = [
+        "Do not normalize malformed-input failures.",
+      ];
       const originalInput = structuredClone(input);
       const events: string[] = [];
       const runAgent: NonNullable<
@@ -253,6 +260,16 @@ describe("single-agent E2E execution boundary", () => {
         expect(await readFile(join(target, javaPath), "utf8")).toBe(
           input.translation.generatedContent,
         );
+        expect(task.prompt.length).toBeLessThan(25_000);
+        expect(task.prompt).toContain(source);
+        expect(task.prompt).toContain(target);
+        expect(task.prompt).not.toContain("{{source_project_root}}");
+        expect(task.prompt).toContain(
+          input.request.targetContext.constraints[0],
+        );
+        expect(task.prompt).toContain(input.request.decisionNotes[0]);
+        expect(task.prompt).not.toContain(input.translation.generatedContent);
+        expect(task.prompt).not.toContain("return len(body) + 1");
         expect(task.prompt).not.toContain("both-count-plus-one");
         expect(task.prompt).not.toContain("Seeded");
         expect(task.prompt).not.toContain("outputProvenance");

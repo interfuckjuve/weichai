@@ -539,7 +539,7 @@ export async function executeMultiAgentE2E(
     const runtimeOptions = {
       apiKey: options.apiKey,
       model,
-      effort: options.effort,
+      effort: options.effort ?? "low",
       timeoutMs,
       maxTurns,
     };
@@ -665,7 +665,7 @@ export async function executeMultiAgentE2E(
   await writeFile(resultPath, text, { flag: "wx" });
   await writeFile(
     benchmarkPath,
-    `${JSON.stringify({ dataset, strategy: descriptor.id, strategyVersion: descriptor.version, model, effort: options.effort ?? null, task: options.task, variant: options.variant, executionMode, budget: { timeoutMs, maxTurns, scope: "per-preflight-and-phase", nativeSessionTimeoutMs: timeoutMs, nativeSessionMaxTurns: maxTurns }, originals, originalsUnchanged, preparationEvidencePaths, resultPath, ...telemetry }, null, 2)}\n`,
+    `${JSON.stringify({ dataset, strategy: descriptor.id, strategyVersion: descriptor.version, model, effort: options.effort ?? "low", task: options.task, variant: options.variant, executionMode, budget: { timeoutMs, maxTurns, scope: "per-preflight-and-phase", nativeSessionTimeoutMs: timeoutMs, nativeSessionMaxTurns: maxTurns }, originals, originalsUnchanged, preparationEvidencePaths, resultPath, ...telemetry }, null, 2)}\n`,
     { flag: "wx" },
   );
   return {

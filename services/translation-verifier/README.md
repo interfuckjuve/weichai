@@ -2,6 +2,15 @@
 
 A replaceable strategy baseline for translation verification: generic input -> registered strategy -> identified output. The default `differential-smoke` strategy supports Host-selected differential or target-only verification. It reports source/target conclusions separately from execution failures. It is not proof of business correctness.
 
+## Architecture Diagrams
+
+Open these HTML files in a browser (Mermaid is loaded from a CDN):
+
+- [Black-box verification](black-box-architecture.html): Agent1 freezes target tests before translation; Agent2 runs only after an eligible target failure, with at most one harness repair.
+- [White-box verification](white-box-architecture.html): Agent1 freezes source evidence; Agent2 inspects the translated target and binds frozen cases to target tests.
+
+The diagrams describe the implemented two-phase lifecycle, including target-only branches and trust boundaries. Upstream Analyzer/Translator parallel orchestration is not integrated. See [E2E reproduction](e2e/REPRODUCING.md) for the shared fixture experiment.
+
 ## Public Contract
 
 Output schema `$id` is `urn:forexplore:verification-output:2.0`; `VerificationResult.schemaVersion` and `translationVerifierSchemaVersion` are `2.0`. The default strategy is `differential-smoke@2.0.0`. Input and run/timing schemas remain `1.0`. This is a breaking output change: strategy outputs and results explicitly reject legacy `status`, and `deriveCompatibilityStatus` is no longer exported. Old reports are not converted or accepted. Unrelated strategy extension fields remain accepted.
@@ -86,7 +95,7 @@ const service = new VerificationService({
 
 For a real comparison, register both implemented providers in that same factory, then call `service.verifyWithReceipt(sameInput, { strategyId })` once per provider. Keep patch hash, round, source/target snapshots, fixture and runtime configuration identical. Compare verdicts, evidence coverage, missing evidence and cost separately. Private task names and step counts need not match. `context.measureStep(name, work)` optionally measures arbitrary or repeated private work; it does not schedule it. Return artifacts only through `context.writeArtifact()` and use its returned references.
 
-The smoke E2E wrapper currently supports only `differential-smoke`; it is not a general strategy benchmark runner. Use the generic service for other registered strategies. A single run cannot establish a performance ranking or semantic accuracy.
+The E2E entry point defaults to `differential-smoke` and dispatches the three explicitly selected Agent strategies to their dedicated runners. The separate `run-fileupload-benchmark.ts` remains a smoke-only diagnostic benchmark. Use the generic service for other registered strategies. A single run cannot establish a performance ranking or semantic accuracy.
 
 ### Prepared Projects and Independent Tests
 

@@ -191,7 +191,7 @@ export class SingleAgentDifferentialStrategy implements VerificationStrategy {
       stage = "agent";
       let agent: BehaviorAgentResult | undefined;
       let partialOutput = "";
-      const prompt = buildSingleAgentPrompt(input);
+      const prompt = buildSingleAgentPrompt(input, context.workspace);
       await recordArtifact("single-agent-prompt", { prompt });
       // The managed runtime must finish process-group cleanup before resolving or rejecting.
       const invoke = () =>

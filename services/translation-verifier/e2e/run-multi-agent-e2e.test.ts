@@ -155,8 +155,19 @@ describe("multi-agent differential E2E", () => {
         expect(await readFile(join(target, subject), "utf8")).toBe(
           await readFile(join(targetProjectRoot, subject), "utf8"),
         );
+        expect(task.prompt.length).toBeLessThan(25_000);
+        expect(task.prompt).toContain(task.sandbox.cwd);
+        expect(task.prompt).toContain(target);
+        expect(task.prompt).not.toContain("{{source_project_root}}");
+        expect(task.prompt).not.toContain('"sourceFiles"');
         expect(task.prompt).not.toContain("outputProvenance");
         expect(task.prompt).not.toContain("has been filled in");
+        expect(task.prompt).toContain(
+          "Only when execution is authorized and required in this phase",
+        );
+        expect(task.prompt).toContain(
+          "Host executes these target tests only AFTER translation",
+        );
         await writeFile(
           join(task.sandbox.cwd, "src/commons_fileupload/core.py"),
           "# source experiment in the copy\n",
@@ -278,6 +289,7 @@ describe("multi-agent differential E2E", () => {
       executionMode: "injected-test",
       originalsUnchanged: true,
       strategy: "multi-agent-black-box",
+      effort: "low",
     });
     expect(
       JSON.parse(
@@ -517,6 +529,12 @@ describe("multi-agent differential E2E", () => {
           expect(await readFile(join(targetRoot, subject), "utf8")).toBe(
             await readFile(join(targetProjectRoot, subject), "utf8"),
           );
+          expect(task.prompt).toContain(task.sandbox.cwd);
+          expect(task.prompt).toContain(targetRoot);
+          expect(task.prompt).not.toMatch(/\{\{[a-z_]+\}\}/);
+          expect(task.prompt.length).toBeLessThan(25_000);
+          expect(task.prompt).toContain("For cases requiring execution");
+          expect(task.prompt).not.toContain('"sourceFiles"');
           ordered.push("agent1");
         }
         return runtime.runAgent(task);

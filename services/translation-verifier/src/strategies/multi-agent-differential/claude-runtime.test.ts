@@ -397,113 +397,117 @@ describe("behavior command controls without OS isolation", () => {
 });
 
 describe("behavior Claude agent configuration", () => {
-  it("uses separate actual source/target cwd, isolated config, disabled native sandbox, fixed proxy permissions and stdin", async () => {
-    const f = fixture();
-    const key = "only-a-test-key";
-    const settingsSeen: {
-      sandbox: { enabled: boolean };
-      disableAllHooks: boolean;
-      permissions: { deny: string[] };
-    }[] = [];
-    vi.stubEnv("JAVA_HOME", "/host/toolchain");
-    const spy = vi
-      .spyOn(processes, "runManagedProcess")
-      .mockImplementation(async (input) => {
-        if (!input.args.includes("--version")) {
-          settingsSeen.push(
-            JSON.parse(
-              readFileSync(
-                input.args[input.args.indexOf("--settings") + 1]!,
-                "utf8",
+  it.each([undefined, "high"])(
+    "uses actual project cwd, isolated config and explicit effort (override: %s)",
+    async (effort) => {
+      const f = fixture();
+      const key = "only-a-test-key";
+      const settingsSeen: {
+        sandbox: { enabled: boolean };
+        disableAllHooks: boolean;
+        permissions: { deny: string[] };
+      }[] = [];
+      vi.stubEnv("JAVA_HOME", "/host/toolchain");
+      const spy = vi
+        .spyOn(processes, "runManagedProcess")
+        .mockImplementation(async (input) => {
+          if (!input.args.includes("--version")) {
+            settingsSeen.push(
+              JSON.parse(
+                readFileSync(
+                  input.args[input.args.indexOf("--settings") + 1]!,
+                  "utf8",
+                ),
               ),
-            ),
-          );
-          expect(readFileSync(input.args[3]!, "utf8")).toBe(
-            "author tests $HOME",
-          );
-          const c = JSON.parse(
-            readFileSync(input.env[BEHAVIOR_CONTROL_ENV]!, "utf8"),
-          );
-          expect(c.env.HOME).toBe(process.env.HOME);
-          expect(c.env.JAVA_HOME).toBe("/host/toolchain");
-          expect(c.env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
-          input.onStdoutChunk?.(
-            Buffer.from(
-              `{"type":"assistant","text":"${key}"}\n{"type":"stream_event"}\n`,
-            ),
-          );
-        }
-        return {
-          exitCode: 0,
-          timedOut: false,
-          durationMs: 1,
-          stdout: input.args.includes("--version")
-            ? "2.1.236 (Claude Code)\n"
-            : "",
-          stderr: key,
-        };
+            );
+            expect(readFileSync(input.args[3]!, "utf8")).toBe(
+              "author tests $HOME",
+            );
+            const c = JSON.parse(
+              readFileSync(input.env[BEHAVIOR_CONTROL_ENV]!, "utf8"),
+            );
+            expect(c.env.HOME).toBe(process.env.HOME);
+            expect(c.env.JAVA_HOME).toBe("/host/toolchain");
+            expect(c.env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+            input.onStdoutChunk?.(
+              Buffer.from(
+                `{"type":"assistant","text":"${key}"}\n{"type":"stream_event"}\n`,
+              ),
+            );
+          }
+          return {
+            exitCode: 0,
+            timedOut: false,
+            durationMs: 1,
+            stdout: input.args.includes("--version")
+              ? "2.1.236 (Claude Code)\n"
+              : "",
+            stderr: key,
+          };
+        });
+      const runtime = createBehaviorRuntime({
+        apiKey: key,
+        model: "test-model",
+        maxTurns: 3,
+        effort,
       });
-    const runtime = createBehaviorRuntime({
-      apiKey: key,
-      model: "test-model",
-      maxTurns: 3,
-      effort: "high",
-    });
-    for (const side of ["source", "target"] as const) {
-      const cwd = side === "source" ? f.source : f.target;
-      const tests = join(cwd, ".forexplore-tests");
-      mkdirSync(tests, { recursive: true });
-      const result = await runtime.runAgent({
-        side,
-        sandbox: {
-          cwd,
-          readRoots: [f.source, f.target],
-          writeRoots: [tests, cwd],
-        },
-        prompt: "author tests $HOME",
-        deadlineAt: Date.now() + 10_000,
-      });
-      expect(result.stdout).toContain("[REDACTED]");
-      expect(result.stdout).not.toContain("stream_event");
-      expect(result.stderr).toBe("[REDACTED]");
-    }
-    const calls = spy.mock.calls.filter(
-      ([input]) => !input.args.includes("--version"),
-    );
-    expect(calls).toHaveLength(2);
-    for (const [index, [input]] of calls.entries()) {
-      const args = input.args;
-      const settings = settingsSeen[index]!;
-      expect(settings.permissions.deny).toContain(
-        `Write(//${input.cwd.replace(/^\/+/, "")}/implementation.txt)`,
+      for (const side of ["source", "target"] as const) {
+        const cwd = side === "source" ? f.source : f.target;
+        const tests = join(cwd, ".forexplore-tests");
+        mkdirSync(tests, { recursive: true });
+        const result = await runtime.runAgent({
+          side,
+          sandbox: {
+            cwd,
+            readRoots: [f.source, f.target],
+            writeRoots: [tests, cwd],
+          },
+          prompt: "author tests $HOME",
+          deadlineAt: Date.now() + 10_000,
+        });
+        expect(result.stdout).toContain("[REDACTED]");
+        expect(result.stdout).not.toContain("stream_event");
+        expect(result.stderr).toBe("[REDACTED]");
+      }
+      const calls = spy.mock.calls.filter(
+        ([input]) => !input.args.includes("--version"),
       );
-      expect(settings.permissions.deny).toContain(
-        `Edit(//${(index === 0 ? f.target : f.source).replace(/^\/+/, "")}/**)`,
+      expect(calls).toHaveLength(2);
+      for (const [index, [input]] of calls.entries()) {
+        const args = input.args;
+        const settings = settingsSeen[index]!;
+        expect(settings.permissions.deny).toContain(
+          `Write(//${input.cwd.replace(/^\/+/, "")}/implementation.txt)`,
+        );
+        expect(settings.permissions.deny).toContain(
+          `Edit(//${(index === 0 ? f.target : f.source).replace(/^\/+/, "")}/**)`,
+        );
+        expect(input.cwd).toBe(index === 0 ? f.source : f.target);
+        expect(settings.sandbox).toEqual({ enabled: false });
+        expect(settings.disableAllHooks).toBe(true);
+        expect(args[args.indexOf("--effort") + 1]).toBe(effort ?? "low");
+        expect(args).toContain("--safe-mode");
+        expect(args).toContain("--disallowedTools");
+        expect(args).toContain("dontAsk");
+        expect(args).toContain(`Bash(npx tsx ${BEHAVIOR_COMMAND_ENTRY} *)`);
+        expect(args).not.toContain("Bash");
+        expect(args).not.toContain("bypassPermissions");
+        expect(args[args.indexOf("--append-system-prompt") + 1]).toContain(
+          "NO OS isolation",
+        );
+        expect(input.env.HOME).toBe(process.env.HOME);
+        expect(input.env.PATH).toBe(process.env.PATH);
+        expect(input.env.ANTHROPIC_AUTH_TOKEN).toBe(key);
+        expect(input.env.ANTHROPIC_BASE_URL).toBe(
+          "https://api.deepseek.com/anthropic",
+        );
+        expect(existsSync(input.env.CLAUDE_CONFIG_DIR!)).toBe(false);
+      }
+      expect(calls[0]![0].env.CLAUDE_CONFIG_DIR).not.toBe(
+        calls[1]![0].env.CLAUDE_CONFIG_DIR,
       );
-      expect(input.cwd).toBe(index === 0 ? f.source : f.target);
-      expect(settings.sandbox).toEqual({ enabled: false });
-      expect(settings.disableAllHooks).toBe(true);
-      expect(args).toContain("--safe-mode");
-      expect(args).toContain("--disallowedTools");
-      expect(args).toContain("dontAsk");
-      expect(args).toContain(`Bash(npx tsx ${BEHAVIOR_COMMAND_ENTRY} *)`);
-      expect(args).not.toContain("Bash");
-      expect(args).not.toContain("bypassPermissions");
-      expect(args[args.indexOf("--append-system-prompt") + 1]).toContain(
-        "NO OS isolation",
-      );
-      expect(input.env.HOME).toBe(process.env.HOME);
-      expect(input.env.PATH).toBe(process.env.PATH);
-      expect(input.env.ANTHROPIC_AUTH_TOKEN).toBe(key);
-      expect(input.env.ANTHROPIC_BASE_URL).toBe(
-        "https://api.deepseek.com/anthropic",
-      );
-      expect(existsSync(input.env.CLAUDE_CONFIG_DIR!)).toBe(false);
-    }
-    expect(calls[0]![0].env.CLAUDE_CONFIG_DIR).not.toBe(
-      calls[1]![0].env.CLAUDE_CONFIG_DIR,
-    );
-  });
+    },
+  );
 
   it("uses Host original baseline in new retry sessions and accepts repaired frozen helpers on later replay", async () => {
     const f = fixture();

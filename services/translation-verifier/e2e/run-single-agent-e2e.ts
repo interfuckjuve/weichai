@@ -503,7 +503,7 @@ export async function executeSingleAgentE2E(
       const runtimeOptions = {
         apiKey: options.apiKey,
         model,
-        effort: options.effort,
+        effort: options.effort ?? "low",
         timeoutMs,
         maxTurns,
       };
@@ -622,7 +622,7 @@ export async function executeSingleAgentE2E(
   // Preserve the legacy API timings field without replacing unified timing.json.
   await writeFile(
     benchmarkPath,
-    `${JSON.stringify({ dataset, strategy: descriptor.id, strategyVersion: descriptor.version, model, effort: options.effort ?? null, task: options.task, variant: options.variant, executionMode, budget: { timeoutMs, maxTurns, scope: "per-preflight-and-phase", nativeSessionTimeoutMs: timeoutMs, nativeSessionMaxTurns: maxTurns }, originals, originalsUnchanged, preparationEvidencePath, resultPath, timings, ...telemetry }, null, 2)}\n`,
+    `${JSON.stringify({ dataset, strategy: descriptor.id, strategyVersion: descriptor.version, model, effort: options.effort ?? "low", task: options.task, variant: options.variant, executionMode, budget: { timeoutMs, maxTurns, scope: "per-preflight-and-phase", nativeSessionTimeoutMs: timeoutMs, nativeSessionMaxTurns: maxTurns }, originals, originalsUnchanged, preparationEvidencePath, resultPath, timings, ...telemetry }, null, 2)}\n`,
     { flag: "wx" },
   );
   return {

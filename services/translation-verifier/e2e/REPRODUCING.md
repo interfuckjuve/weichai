@@ -59,7 +59,21 @@ npm run e2e:single-agent --workspace @forexplore/translation-verifier -- \
   --live --task multipart-read-body --variant correct --timeout-ms 600000 --max-turns 50
 ```
 
-An explicit `--model` overrides the environment. `--output-root /absolute/path` overrides the default root below. Use an absolute override with npm workspace commands so the result does not depend on npm's working directory. `--offline-only` skips model execution; it is not an E2E pass.
+An explicit `--model` overrides the environment. All three behavior strategies explicitly pass `--effort low` by default; `--effort high` (or another supported level) overrides it for an experiment. `benchmark.json` records the requested level, not confirmation that the upstream model honored it. Keep the level identical across compared runs. `--output-root /absolute/path` overrides the default root below. Use an absolute override with npm workspace commands so the result does not depend on npm's working directory. `--offline-only` skips model execution; it is not an E2E pass.
+
+## Prompt Templates
+
+Each strategy owns its readable template and generation functions:
+
+- White box: `src/strategies/multi-agent-differential/behavior-prompt.ts`.
+- Black box: `src/strategies/multi-agent-black-box/prompt.ts`.
+- Single-agent: `src/strategies/single-agent-differential/prompt.ts`.
+
+Templates use `{{source_project_root}}`, `{{target_project_root}}`, language and task-context slots. The strategy injects the actual prepared project roots before calling the runtime. Shared inspection rules and single-pass substitution live in `src/strategies/prompt-template.ts`; inserted task text is never rendered again. Templates are TypeScript strings, so the normal build includes them without extra asset copying or a template dependency.
+
+All three receive task requirements, selected symbol locations, constraints, decision notes and applicable analysis/plan evidence, not inline repository snapshots. Agents read implementation and tests from the authorized project copies as needed. Single-agent reads the already-patched target instead of receiving the complete translation content/patch again. Black-box preparation sees only the untranslated target, and its diagnosis phase remains target-only. White-box independent target verification omits source context. Host still retains the complete input for identity and verification; smaller prompts do not relax permissions, frozen expectations or independent replay.
+
+One live run per strategy after this change used `deepseek-v4-flash`, explicit `--effort low`, and `multipart-read-body/correct`: white-box completed in about 565 seconds with two exception-message divergences requiring review; black-box failed preparation in about 598 seconds because observations violated the protocol; single-agent timed out at its 600-second session limit (about 602 seconds total). Initial input tokens fell from about 160k to 6.1k for black-box and 200k to 5.3k for single-agent. This single sample does not establish a performance ranking or isolate the effect of effort from prompt changes. The existing 600-second ceiling is unchanged; neither lower effort nor smaller input guarantees completion.
 
 ## Inspect the Run
 
