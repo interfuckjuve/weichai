@@ -27,9 +27,13 @@ import {
   protectedSecrets,
   redact,
 } from "../src/strategies/multi-agent-differential/behavior-command.js";
-import type { SingleAgentDifferentialOptions } from "../src/strategies/single-agent-differential/strategy.js";
+import { createBehaviorRuntime } from "../src/strategies/multi-agent-differential/claude-runtime.js";
 import {
-  fileUploadInput,
+  SingleAgentDifferentialStrategy,
+  SINGLE_AGENT_DIFFERENTIAL_STRATEGY,
+  type SingleAgentDifferentialOptions,
+} from "../src/strategies/single-agent-differential/strategy.js";
+import {
   repositoryRoot,
   sourceProjectRoot,
   targetProjectRoot,
@@ -37,6 +41,12 @@ import {
   isFileUploadTask,
   type FileUploadTaskId,
 } from "./fileupload-benchmark-fixture.js";
+import {
+  fileUploadVerificationInput,
+  createE2EDatasetRecord,
+  E2E_TARGET_PROJECT_ID,
+} from "./fileupload-e2e-dataset.js";
+import { createE2EObserver } from "./observe-e2e.js";
 
 const singleAgentVariants = [
   "correct",
@@ -45,8 +55,9 @@ const singleAgentVariants = [
   "source-count-plus-one",
   "both-count-plus-one",
 ] as const;
-
 export interface SingleAgentE2EOptions {
+  outputRoot?: string;
+  maxTurns?: number;
   task: FileUploadTaskId;
   variant: (typeof singleAgentVariants)[number];
   /** Separate budgets for environment preflight and Agent execution, not a total deadline. */
@@ -59,11 +70,11 @@ export interface SingleAgentE2EOptions {
   json: boolean;
   offlineOnly: boolean;
 }
-
 export function parseSingleAgentArgs(
   argv: string[],
 ): SingleAgentE2EOptions | { error: string } {
   const options: SingleAgentE2EOptions = {
+    maxTurns: 50,
     task: "multipart-read-body",
     variant: "correct",
     timeoutMs: 600_000,
@@ -86,11 +97,13 @@ export function parseSingleAgentArgs(
           "--model",
           "--effort",
           "--analysis-report",
+          "--output-root",
+          "--max-turns",
         ].includes(flag)
       )
         return { error: `Unknown option: ${flag}` };
       const value = argv[++i];
-      if (!value || value.startsWith("--"))
+      if (!value || !value.trim() || value.startsWith("--"))
         return { error: `Missing value for ${flag}.` };
       if (flag === "--task") {
         if (!isFileUploadTask(value))
@@ -106,20 +119,22 @@ export function parseSingleAgentArgs(
       } else if (flag === "--api-key") options.apiKey = value;
       else if (flag === "--model") options.model = value;
       else if (flag === "--analysis-report") options.analysisReport = value;
+      else if (flag === "--output-root") options.outputRoot = value;
       else if (flag === "--effort") {
         if (!["low", "medium", "high", "xhigh", "max"].includes(value))
           return { error: `Invalid --effort: ${value}` };
         options.effort = value;
       } else {
-        const timeout = Number(value);
+        const limit = Number(value);
         if (
           !/^\d+$/.test(value) ||
-          !Number.isSafeInteger(timeout) ||
-          timeout <= 0 ||
-          timeout > 2_147_483_647
+          !Number.isSafeInteger(limit) ||
+          limit <= 0 ||
+          limit > 2_147_483_647
         )
-          return { error: `Invalid --timeout-ms: ${value}` };
-        options.timeoutMs = timeout;
+          return { error: `Invalid ${flag}: ${value}` };
+        if (flag === "--max-turns") options.maxTurns = limit;
+        else options.timeoutMs = limit;
       }
     }
   }
@@ -127,7 +142,6 @@ export function parseSingleAgentArgs(
     return { error: "--live and --offline-only are mutually exclusive." };
   return options;
 }
-
 export interface ProjectPreparationEvidence {
   side: "source" | "target";
   command: string;
@@ -138,7 +152,6 @@ export interface ProjectPreparationEvidence {
   stdout: string;
   stderr: string;
 }
-
 export interface SingleAgentE2EDeps {
   runtime?: SingleAgentDifferentialOptions["runtime"];
   artifactRoot?: string;
@@ -151,9 +164,11 @@ export interface SingleAgentE2EDeps {
     targetRoot: string;
     deadlineAt: number;
     signal: AbortSignal;
+    sides?: ("source" | "target")[];
+    /** False keeps generated test compilation inside strategy verification. */
+    compileTests?: boolean;
   }) => Promise<ProjectPreparationEvidence[]>;
 }
-
 export interface SingleAgentE2EResult {
   executionMode: "live" | "injected-test";
   result: VerificationResult;
@@ -161,9 +176,10 @@ export interface SingleAgentE2EResult {
   workspaceRoot: string;
   preparationEvidencePath: string;
   timingPath: string;
+  eventsPath: string;
+  benchmarkPath: string;
   timings: { preparationMs: number; agentMs: number; totalMs: number };
 }
-
 async function containedPath(root: string, path: string): Promise<string> {
   const destination = resolve(root, path);
   const rel = relative(root, destination);
@@ -187,7 +203,6 @@ async function containedPath(root: string, path: string): Promise<string> {
   }
   return destination;
 }
-
 async function overlay(
   root: string,
   files: { path: string; content: string }[],
@@ -198,7 +213,6 @@ async function overlay(
     await writeFile(path, file.content, "utf8");
   }
 }
-
 export async function prepareFileUploadProjects(
   context: Parameters<NonNullable<SingleAgentE2EDeps["prepareProjects"]>>[0],
 ): Promise<ProjectPreparationEvidence[]> {
@@ -217,10 +231,17 @@ export async function prepareFileUploadProjects(
       side: "target" as const,
       cwd: context.targetRoot,
       command: "mvn",
-      args: ["-B", "-ntp", "-DskipTests", "clean", "test-compile"],
+      args: [
+        "-B",
+        "-ntp",
+        "-DskipTests",
+        "clean",
+        context.compileTests === false ? "compile" : "test-compile",
+      ],
     },
   ];
   for (const task of commands) {
+    if (context.sides && !context.sides.includes(task.side)) continue;
     const startedAt = Date.now();
     let stdout = "";
     try {
@@ -282,7 +303,7 @@ export async function executeSingleAgentE2E(
   const startedAt = Date.now();
   const secrets = protectedSecrets(options.apiKey);
   const input = structuredClone(
-    deps.input ?? fileUploadInput(options.variant, options.task),
+    deps.input ?? fileUploadVerificationInput(options.variant, options.task),
   );
   delete input.verificationPolicy;
   if (
@@ -301,211 +322,320 @@ export async function executeSingleAgentE2E(
         `Cannot read Analyzer report: ${redact(error instanceof Error ? error.message : String(error), secrets)}`,
       );
     }
-  } else if (!deps.input)
-    input.analysisReport = {
-      scope: `Selected FileUpload task ${options.task} and class prerequisites`,
-      provenance:
-        "Simulated Analyzer report; no live upstream analysis was executed.",
-      notes:
-        "Assess reference suitability from the requirement and actual project evidence. Python materializes input while Java streams it; representation and exception timing may differ.",
-    };
+  }
   assertVerificationInput(input);
+  const timeoutMs = Math.min(options.timeoutMs, 600_000);
+  const maxTurns = Math.min(options.maxTurns ?? 50, 50);
+  const model =
+    options.model ?? process.env.DEEPSEEK_MODEL ?? "deepseek-v4-flash";
+  const executionMode = deps.runtime
+    ? ("injected-test" as const)
+    : ("live" as const);
+  const descriptor = SINGLE_AGENT_DIFFERENTIAL_STRATEGY;
+  const runId = randomUUID();
+  const requestedRoot = resolve(
+    options.outputRoot ??
+      deps.workspaceRoot ??
+      join(repositoryRoot, "e2e-runs"),
+    descriptor.id,
+    E2E_TARGET_PROJECT_ID,
+    runId,
+  );
+  await mkdir(resolve(requestedRoot, ".."), { recursive: true });
+  await mkdir(requestedRoot);
+  const root = await realpath(requestedRoot);
+  const sourceRoot = join(root, "source"),
+    targetRoot = join(root, "target"),
+    strategyRoot = join(root, "agent");
+  await mkdir(strategyRoot);
+  const observer = createE2EObserver({
+    root,
+    strategy: descriptor.id,
+    model,
+    task: options.task,
+    variant: options.variant,
+    secrets,
+  });
   const originals = {
     source: projectHash(sourceProjectRoot),
     target: projectHash(targetProjectRoot),
   };
-  const requestedRoot = resolve(
-    deps.workspaceRoot ??
-      join(repositoryRoot, "services/translation-verifier/test-results"),
-    `single-agent-${randomUUID()}`,
-  );
-  await mkdir(requestedRoot, { recursive: true });
-  const root = await realpath(requestedRoot);
-  const sourceRoot = join(root, "source");
-  const targetRoot = join(root, "target");
-  const strategyRoot = join(root, "agent");
-  await mkdir(strategyRoot, { recursive: true });
-  // FICLONE falls back to an independent ordinary copy, never a hard link.
-  await Promise.all([
-    cp(sourceProjectRoot, sourceRoot, {
-      recursive: true,
-      mode: constants.COPYFILE_FICLONE,
-      dereference: true,
-    }),
-    cp(targetProjectRoot, targetRoot, {
-      recursive: true,
-      mode: constants.COPYFILE_FICLONE,
-      dereference: true,
-    }),
-  ]);
-  await overlay(sourceRoot, input.request.sourceBundle.files);
-  await overlay(
-    targetRoot,
-    input.request.targetContext.sourceFiles.flatMap((file) =>
-      typeof file.path === "string" && typeof file.content === "string"
-        ? [{ path: file.path, content: file.content }]
-        : [],
-    ),
-  );
-  for (const patch of input.translation.files) {
-    const path = await containedPath(targetRoot, patch.path);
-    if (patch.status === "created") {
-      await mkdir(resolve(path, ".."), { recursive: true });
-      await writeFile(path, newFileContent(patch.hunks), { flag: "wx" });
-    } else {
-      const original = await readFile(path, "utf8");
-      if (sha256(original) !== patch.expectedOriginalSha256)
-        throw new Error(
-          "Target fixture hash changed before translation application.",
-        );
-      await writeFile(path, applyHunksStrict(original, patch.hunks), "utf8");
-    }
-  }
+  const dataset = createE2EDatasetRecord(input, options.task, options.variant);
+  const store = createVerificationArtifactStore({
+    artifactRoot: deps.artifactRoot ?? join(root, "artifacts"),
+    durablePrefix: `attempt-e2e-${runId}`,
+    agentRoot: strategyRoot,
+  });
   const preparationEvidencePath = join(root, "preparation.json");
-  const controller = new AbortController();
-  const timer = setTimeout(
-    () =>
+  let evidence: ProjectPreparationEvidence[] = [];
+  let preparationError: string | undefined;
+  let preparationMs = 0,
+    agentMs = 0;
+  let originalsUnchanged = false;
+  let output: VerificationStrategyOutput | undefined;
+  let telemetry = {
+    timingPath: join(root, "timing.json"),
+    eventsPath: join(root, "events.jsonl"),
+  };
+  const failure = (
+    message: string,
+    integrity = false,
+  ): VerificationStrategyOutput => ({
+    mode: "target_only",
+    referenceDecision: "undetermined",
+    referenceReason:
+      "Project preparation or execution failed; inspect the recorded phase evidence.",
+    executionStatus: "failed",
+    sourceAssessment: "not_checked",
+    targetAssessment: "not_checked",
+    problems: [
+      {
+        code: integrity
+          ? "workspace_integrity_violation"
+          : "environment_unavailable",
+        message: redact(message, secrets),
+      },
+    ],
+    summary: redact(message, secrets),
+    issues: [],
+    artifacts: [],
+    strategyReport: { stage: "e2e", evidencePath: preparationEvidencePath },
+  });
+  try {
+    await observer.measureStep("copy-projects", async () => {
+      // FICLONE falls back to independent ordinary copies, never hard links.
+      await Promise.all([
+        cp(sourceProjectRoot, sourceRoot, {
+          recursive: true,
+          mode: constants.COPYFILE_FICLONE,
+          dereference: true,
+        }),
+        cp(targetProjectRoot, targetRoot, {
+          recursive: true,
+          mode: constants.COPYFILE_FICLONE,
+          dereference: true,
+        }),
+      ]);
+      await overlay(sourceRoot, input.request.sourceBundle.files);
+      await overlay(
+        targetRoot,
+        input.request.targetContext.sourceFiles.flatMap((file) =>
+          typeof file.path === "string" && typeof file.content === "string"
+            ? [{ path: file.path, content: file.content }]
+            : [],
+        ),
+      );
+    });
+    await observer.measureStep("apply-fixed-translation", async () => {
+      for (const patch of input.translation.files) {
+        const path = await containedPath(targetRoot, patch.path);
+        if (patch.status === "created") {
+          await mkdir(resolve(path, ".."), { recursive: true });
+          await writeFile(path, newFileContent(patch.hunks), { flag: "wx" });
+        } else {
+          const original = await readFile(path, "utf8");
+          if (sha256(original) !== patch.expectedOriginalSha256)
+            throw new Error(
+              "Target fixture hash changed before translation application.",
+            );
+          await writeFile(
+            path,
+            applyHunksStrict(original, patch.hunks),
+            "utf8",
+          );
+        }
+      }
+    });
+    const controller = new AbortController();
+    const abort = () =>
       controller.abort(
         new DOMException(
           "Project preparation deadline exceeded",
           "TimeoutError",
         ),
-      ),
-    options.timeoutMs,
-  );
-  let evidence: ProjectPreparationEvidence[] = [];
-  let preparationError: string | undefined;
-  try {
-    evidence = await (deps.prepareProjects ?? prepareFileUploadProjects)({
-      sourceRoot,
-      targetRoot,
-      signal: controller.signal,
-      deadlineAt: Date.now() + options.timeoutMs,
-    });
-    controller.signal.throwIfAborted();
-    if (
-      evidence.length !== 2 ||
-      !["source", "target"].every(
-        (side) => evidence.filter((item) => item.side === side).length === 1,
-      ) ||
-      evidence.some(
-        (item) =>
-          item.exitCode !== 0 ||
-          item.timedOut ||
-          item.cwd !== (item.side === "source" ? sourceRoot : targetRoot),
-      )
-    )
-      throw new Error(
-        "Both source and target project preparation must succeed.",
       );
-  } catch (error) {
-    preparationError = error instanceof Error ? error.message : String(error);
-  } finally {
-    clearTimeout(timer);
-  }
-  if (preparationError) preparationError = redact(preparationError, secrets);
-  const preparationText = `${redact(JSON.stringify({ status: preparationError ? "failed" : "completed", evidence, error: preparationError }, null, 2), secrets)}\n`;
-  await writeFile(preparationEvidencePath, preparationText);
-  const preparationMs = Date.now() - startedAt;
-  const artifactRoot = deps.artifactRoot ?? join(root, "artifacts");
-  const store = createVerificationArtifactStore({
-    artifactRoot,
-    durablePrefix: `attempt-e2e-${randomUUID()}`,
-    agentRoot: strategyRoot,
-  });
-  const {
-    SingleAgentDifferentialStrategy,
-    SINGLE_AGENT_DIFFERENTIAL_STRATEGY,
-  } = await import("../src/strategies/single-agent-differential/strategy.js");
-  let output: VerificationStrategyOutput;
-  const agentStartedAt = Date.now();
-  if (preparationError)
-    output = {
-      mode: "target_only",
-      referenceDecision: "undetermined",
-      referenceReason:
-        "Project preparation failed before the Agent could assess reference suitability.",
-      executionStatus: "failed",
-      sourceAssessment: "not_checked",
-      targetAssessment: "not_checked",
-      problems: [
-        { code: "environment_unavailable", message: preparationError },
-      ],
-      summary: "Environment preflight failed; no Agent session was started.",
-      issues: [],
-      artifacts: [],
-      strategyReport: {
-        stage: "preparation",
-        evidencePath: preparationEvidencePath,
-      },
-    };
-  else
-    output = await new SingleAgentDifferentialStrategy({
-      runtime: deps.runtime,
-      apiKey: options.apiKey,
-      model: options.model,
-      effort: options.effort,
-      timeoutMs: options.timeoutMs,
-    }).verify(input, {
-      workspace: {
-        root,
-        sourceRoot,
-        targetRoot,
-        strategyRoot,
-        evidenceRoot: strategyRoot,
-        projectOwnership: "caller",
-      },
-      deadlineAt: Date.now() + options.timeoutMs,
-      writeArtifact: store.writeArtifact,
-    });
-  const agentMs = preparationError ? 0 : Date.now() - agentStartedAt;
-  if (
-    projectHash(sourceProjectRoot) !== originals.source ||
-    projectHash(targetProjectRoot) !== originals.target
-  )
-    throw new Error(
-      "Original FileUpload fixtures changed during the run; benchmark is invalid.",
+    const timer = setTimeout(abort, Math.max(0, timeoutMs));
+    if (timeoutMs <= 0) abort();
+    try {
+      await observer.measureStep("project-preflight", async () => {
+        controller.signal.throwIfAborted();
+        evidence = await (deps.prepareProjects ?? prepareFileUploadProjects)({
+          sourceRoot,
+          targetRoot,
+          signal: controller.signal,
+          deadlineAt: Date.now() + timeoutMs,
+        });
+        controller.signal.throwIfAborted();
+        if (
+          evidence.length !== 2 ||
+          !["source", "target"].every(
+            (side) =>
+              evidence.filter((item) => item.side === side).length === 1,
+          ) ||
+          evidence.some(
+            (item) =>
+              item.exitCode !== 0 ||
+              item.timedOut ||
+              item.cwd !== (item.side === "source" ? sourceRoot : targetRoot),
+          )
+        )
+          throw new Error(
+            "Both source and target project preparation must succeed.",
+          );
+      });
+    } catch (error) {
+      preparationError = redact(
+        error instanceof Error ? error.message : String(error),
+        secrets,
+      );
+    } finally {
+      clearTimeout(timer);
+      observer.recordPreparation(evidence);
+    }
+    preparationMs = Date.now() - startedAt;
+    if (preparationError) {
+      observer.skip(
+        "single-agent-validation",
+        "Project preflight failed; no Agent session started.",
+      );
+      output = failure(preparationError);
+    } else {
+      const runtimeOptions = {
+        apiKey: options.apiKey,
+        model,
+        effort: options.effort,
+        timeoutMs,
+        maxTurns,
+      };
+      const runtime = observer.wrapRuntime(
+        deps.runtime ?? createBehaviorRuntime(runtimeOptions),
+      );
+      const agentStartedAt = Date.now();
+      try {
+        output = await observer.measureStep("single-agent-validation", () =>
+          new SingleAgentDifferentialStrategy({
+            ...runtimeOptions,
+            runtime,
+          }).verify(input, {
+            workspace: {
+              root,
+              sourceRoot,
+              targetRoot,
+              strategyRoot,
+              evidenceRoot: strategyRoot,
+              projectOwnership: "caller",
+            },
+            deadlineAt: Date.now() + timeoutMs,
+            writeArtifact: store.writeArtifact,
+            measureStep: (name, work) =>
+              observer.measureStep(name, async () => work()),
+          }),
+        );
+      } finally {
+        agentMs = Date.now() - agentStartedAt;
+      }
+    }
+  } catch (cause) {
+    const message = redact(
+      cause instanceof Error ? cause.message : String(cause),
+      secrets,
     );
-  await writeFile(join(strategyRoot, "e2e-preparation.json"), preparationText, {
-    flag: "wx",
-  });
-  output.artifacts.push(
-    await store.writeArtifact({
-      id: "e2e-preparation",
-      kind: "environment-preparation",
-      path: "e2e-preparation.json",
-      contentHash: sha256(preparationText),
-      mediaType: "application/json",
-    }),
-  );
-  const result = createVerificationResult(
-    input,
-    SINGLE_AGENT_DIFFERENTIAL_STRATEGY,
-    output,
-    deps.now,
-  );
-  const artifact = store.writeFrameworkResult(
-    new TextEncoder().encode(`${JSON.stringify(result, null, 2)}\n`),
-  );
+    if (!preparationMs) {
+      preparationMs = Date.now() - startedAt;
+      preparationError = message;
+      observer.skip(
+        "single-agent-validation",
+        "Fixture setup failed; no Agent session started.",
+      );
+    }
+    output = failure(message);
+    await writeFile(
+      join(root, "failure.json"),
+      `${JSON.stringify({ message }, null, 2)}\n`,
+      { flag: "wx" },
+    ).catch(() => {});
+  } finally {
+    try {
+      originalsUnchanged =
+        projectHash(sourceProjectRoot) === originals.source &&
+        projectHash(targetProjectRoot) === originals.target;
+      if (!originalsUnchanged)
+        output = failure(
+          "Original FileUpload fixtures changed during the run; benchmark is invalid.",
+          true,
+        );
+    } catch (cause) {
+      output = failure(
+        cause instanceof Error ? cause.message : String(cause),
+        true,
+      );
+    }
+    try {
+      telemetry = await observer.finish();
+    } catch {
+      /* Telemetry is best effort. */
+    }
+  }
+  const preparationText = `${redact(JSON.stringify({ status: preparationError ? "failed" : "completed", evidence, error: preparationError }, null, 2), secrets)}\n`;
+  let result: VerificationResult;
+  try {
+    await writeFile(preparationEvidencePath, preparationText, { flag: "wx" });
+    await writeFile(
+      join(strategyRoot, "e2e-preparation.json"),
+      preparationText,
+      { flag: "wx" },
+    );
+    output!.artifacts.push(
+      await store.writeArtifact({
+        id: "e2e-preparation",
+        kind: "environment-preparation",
+        path: "e2e-preparation.json",
+        contentHash: sha256(preparationText),
+        mediaType: "application/json",
+      }),
+    );
+    result = createVerificationResult(input, descriptor, output!, deps.now);
+    store.writeFrameworkResult(
+      new TextEncoder().encode(`${JSON.stringify(result, null, 2)}\n`),
+    );
+  } catch (cause) {
+    const failed = failure(
+      cause instanceof Error ? cause.message : String(cause),
+    );
+    result = createVerificationResult(
+      input,
+      descriptor,
+      { ...failed, artifacts: output!.artifacts },
+      deps.now,
+    );
+    await writeFile(
+      join(root, "persistence-failure.json"),
+      `${JSON.stringify({ message: failed.summary }, null, 2)}\n`,
+      { flag: "wx" },
+    ).catch(() => {});
+  }
+  const text = `${JSON.stringify(result, null, 2)}\n`;
+  const resultPath = join(root, "report.json");
+  const benchmarkPath = join(root, "benchmark.json");
   const timings = { preparationMs, agentMs, totalMs: Date.now() - startedAt };
-  const timingPath = join(root, "timing.json");
-  await writeFile(timingPath, `${JSON.stringify(timings, null, 2)}\n`);
-  // Dataset labels stay in the Host summary, not the Agent's input or prompt.
+  await writeFile(resultPath, text, { flag: "wx" });
+  // Preserve the legacy API timings field without replacing unified timing.json.
   await writeFile(
-    join(root, "benchmark.json"),
-    `${JSON.stringify({ task: options.task, variant: options.variant, originals, preparationEvidencePath, timingPath, resultPath: join(artifactRoot, artifact.path) }, null, 2)}\n`,
+    benchmarkPath,
+    `${JSON.stringify({ dataset, strategy: descriptor.id, strategyVersion: descriptor.version, model, effort: options.effort ?? null, task: options.task, variant: options.variant, executionMode, budget: { timeoutMs, maxTurns, scope: "per-preflight-and-phase", nativeSessionTimeoutMs: timeoutMs, nativeSessionMaxTurns: maxTurns }, originals, originalsUnchanged, preparationEvidencePath, resultPath, timings, ...telemetry }, null, 2)}\n`,
+    { flag: "wx" },
   );
   return {
-    executionMode: deps.runtime ? "injected-test" : "live",
+    executionMode,
     result,
-    resultPath: join(artifactRoot, artifact.path),
+    resultPath,
     workspaceRoot: root,
     preparationEvidencePath,
-    timingPath,
+    benchmarkPath,
     timings,
+    ...telemetry,
   };
 }
-
 export async function runSingleAgentE2E(
   argv: string[],
   deps: SingleAgentE2EDeps = {},
@@ -539,6 +669,5 @@ export async function runSingleAgentE2E(
     return 2;
   }
 }
-
 if (process.argv[1]?.endsWith("run-single-agent-e2e.ts"))
   process.exitCode = await runSingleAgentE2E(process.argv.slice(2));

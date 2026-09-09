@@ -2,6 +2,8 @@
 
 All E2E translation tasks use actual TODO methods in the repository's Apache Commons FileUpload Java skeleton. There is no package-local `e2e/fixtures` directory and no synthetic MimeUtility or arithmetic project.
 
+For the standardized `multipart-read-body/correct` experiment across white-box, black-box and single-agent strategies, use [Reproducing the Shared Task](REPRODUCING.md). It defines the common dataset, three real-model commands, retained `e2e-runs/` directories and timing interpretation. The smoke benchmark below remains separate.
+
 ## Dataset
 
 Project roots, relative to the repository:
@@ -76,7 +78,7 @@ npx tsx services/translation-verifier/e2e/run-smoke-e2e.ts --strategy multi-agen
 | `--task <id>` | `multipart-read-body` | One of the six real TODO methods above. |
 | `--api-key <key>` | `DEEPSEEK_API_KEY` | Optional override; environment configuration avoids shell-history exposure. |
 | `--timeout-ms <ms>` | `300000` | Positive integer session timeout. |
-| `--strategy <id>` | `differential-smoke` | `differential-smoke` keeps the existing default; `multi-agent-differential` dispatches to the explicit two-phase E2E harness. |
+| `--strategy <id>` | `differential-smoke` | `differential-smoke` keeps the existing default; `multi-agent-differential` and `multi-agent-black-box` dispatch to the explicit two-phase E2E harness; `single-agent-differential` dispatches to its autonomous runner. |
 | `--verify-only` | Always enabled | Accepted compatibility flag. |
 | `--offline-only` | Off | Skip the real session and exit zero. |
 | `--json` | Off | Emit the complete service receipt plus the Host comparison; timing remains in files. |
@@ -136,13 +138,19 @@ npm run e2e:single-agent --workspace @forexplore/translation-verifier -- --live 
 npm run e2e:single-agent --workspace @forexplore/translation-verifier -- --live --analysis-report /path/to/analysis.json
 ```
 
-Supported variants are `correct`, `count-plus-one`, `drop-output`, `source-count-plus-one`, and `both-count-plus-one`; mutation variants remain limited to body reading. Legacy policy-only variants, forced mode and Host test-basis flags are rejected. The input passed to the Agent removes the legacy verification policy and mutation-label provenance. Default analysis is explicitly simulated and leaves reference suitability to the Agent; dataset labels remain in the Host summary.
+Supported variants are `correct`, `count-plus-one`, `drop-output`, `source-count-plus-one`, and `both-count-plus-one`; mutation variants remain limited to body reading. Legacy policy-only variants, forced mode and Host test-basis flags are rejected. The input passed to the Agent removes the legacy verification policy and mutation-label provenance. Default analysis is the shared simulated applicability report; the Agent still assesses reference suitability from evidence. Dataset labels remain in the Host summary.
 
 Real preflight checks Python 3.11+ imports and runs Maven `clean test-compile` against the already-patched target. It may restore declared dependencies. Both sides must succeed before any Agent starts. Tests explicitly inject both the model runtime and preparation callback, so no dependency restoration or model call is hidden behind an offline test. The wrapper's injected records verify orchestration and evidence contracts, not Java/Python behavior or real Agent quality.
 
-Results are retained under `test-results/single-agent-*/`: complete project copies, canonical result and strategy artifacts, redacted `preparation.json`, `timing.json`, and Host-only `benchmark.json`. Preparation failures produce `environment_unavailable` without launching an Agent. `--timeout-ms` provides separate budgets for preflight and the Agent; copying is measured in preparation time but is outside the preflight timer. `agentMs` is the strategy invocation interval, not a model-token timing metric. Exit 0 means verification completed (possibly finding a bug), 1 means incomplete verification, and 2 means argument/setup failure. `--offline-only` reports an explicit skip and exits 0.
+Results are retained under `e2e-runs/single-agent-differential/commons-fileupload-java-skeleton/<run-id>/`: complete project copies, canonical result and strategy artifacts, redacted `preparation.json`, common timing/events files, and Host-only `benchmark.json`. Preparation failures produce `environment_unavailable` without launching an Agent. `--timeout-ms` provides separate budgets for preflight and the Agent; copying is measured in preparation time but is outside the preflight timer. `agentMs` is the strategy invocation interval, not a model-token timing metric. Exit 0 means verification completed (possibly finding a bug), 1 means incomplete verification, and 2 means argument/setup failure. `--offline-only` reports an explicit skip and exits 0.
 
 The runner checks original fixture baselines after execution; it does not implement an OS sandbox or rollback. Strategy tests can bypass this FileUpload runner and call the public `verify()` directly with their own complete, runnable project copies.
+
+## Multi-Agent Black Box
+
+`multi-agent-black-box@1.0.0` uses the same two-phase E2E runner and shared dataset as white-box. Select it with `--strategy multi-agent-black-box --live`. Agent1 sees the source working copy and untranslated target context, prepares and freezes target tests before the fixed patch is applied, and may experiment on the source copy. Verification replays the frozen target tests first; only a failure starts Agent2 for bounded diagnosis/harness repair. This is not the target-only branch of white-box.
+
+The default retained root is `e2e-runs/multi-agent-black-box/commons-fileupload-java-skeleton/<run-id>/`. White-box uses the corresponding `multi-agent-differential` directory. Both retain phase evidence, run identity, logs and the shared timing format described in [Reproducing the Shared Task](REPRODUCING.md). Black-box post-translation preflight compiles production code only; generated-test compilation stays inside verification so a harness failure can reach Agent2. No live Translator or upstream parallel scheduler is invoked.
 
 ## Multi-Agent Differential
 
@@ -185,7 +193,7 @@ npx tsx services/translation-verifier/e2e/run-smoke-e2e.ts --strategy multi-agen
 
 The white-box E2E requires `--live` for actual model execution. A test runtime can be explicitly injected by tests; there is no silent mock fallback. `--offline-only` skips execution. Its exit code is 0 for a completed comparison, 1 for incomplete verification, and 2 for invalid arguments/setup errors. It does not grade results against the independent mutation catalog.
 
-The E2E defaults to separate 600-second preparation and strategy budgets; each Agent has at most 50 turns. Before verification, live preparation checks Python 3.11+ imports and runs `mvn -B -ntp -DskipTests clean test-compile` in the already-patched target copy. Preparation may restore declared dependencies. It uses credential-minimized managed processes, persists redacted command/output/exit/duration evidence in `agent/target-preparation.json`, and starts no Agent2 on target preparation failure. Agent1 may already have completed; its frozen preparation is retained. Injected live runtimes require an explicit preparation callback; offline orchestration tests do not run toolchains or restore dependencies implicitly. The generic service retains its own configurable deadline.
+The E2E defaults to separate 600-second preparation and strategy budgets; each Agent has at most 50 turns. Before verification, live preparation checks Python 3.11+ imports and runs `mvn -B -ntp -DskipTests clean test-compile` in the already-patched target copy. Preparation may restore declared dependencies. It uses credential-minimized managed processes, persists redacted command/output/exit/duration evidence in `agent/original-preparation.json` and `agent/translated-preparation.json`, and starts no Agent2 on target preparation failure. Agent1 may already have completed; its frozen preparation is retained. Injected live runtimes require an explicit preparation callback; offline orchestration tests do not run toolchains or restore dependencies implicitly. The generic service retains its own configurable deadline.
 
 The strategy reads `analysisReport.applicability.level`: `direct` and `adapt` select their respective Agent1 prompts; `reference`/`reject` select a dedicated independent Agent2 prompt with no source handoff or source directory. Invalid or absent classification starts no Agent. Legacy `migrationEligibility`, Host reference policy and `testBasis` do not gate this strategy. Default E2E analysis is simulated as `direct`; programmatic tests can supply other reports through `deps.input`. The wrapper removes legacy verification policy, and dataset mode labels do not force the strategy's decision. It uses full `fs.cp` COW copies with independent ordinary-copy fallback, never hardlinks. Real Analyzer/Translator integration remains out of scope.
 

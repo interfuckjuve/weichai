@@ -52,6 +52,16 @@ afterEach(async () => {
 });
 
 describe("single-agent E2E execution boundary", () => {
+  it("accepts a common output root and native session turn limit", () => {
+    expect(
+      parseSingleAgentArgs(["--output-root", "/tmp/e2e", "--max-turns", "12"]),
+    ).toMatchObject({
+      outputRoot: "/tmp/e2e",
+      maxTurns: 12,
+      timeoutMs: 600_000,
+    });
+    expect(parseSingleAgentArgs(["--max-turns", "0"])).toHaveProperty("error");
+  });
   it.each([
     ["--live", "--offline-only"],
     ["--timeout-ms", "0"],
@@ -68,6 +78,80 @@ describe("single-agent E2E execution boundary", () => {
     ["--variant", "target-only-correct"],
   ])("rejects invalid or forced-decision arguments %j", (...argv) => {
     expect(parseSingleAgentArgs(argv)).toHaveProperty("error");
+  });
+
+  it("keeps separate runs and unified failure artifacts under the common project root", async () => {
+    const root = await mkdtemp(join(tmpdir(), "single-agent-e2e-"));
+    roots.push(root);
+    const runAgent = vi.fn(noReplay);
+    const run = () =>
+      executeSingleAgentE2E(
+        { ...options, outputRoot: root },
+        {
+          runtime: { runAgent, runCommand: noReplay },
+          prepareProjects: async () => {
+            throw new Error("environment unavailable");
+          },
+        },
+      );
+    const first = await run();
+    const originalReport = await readFile(first.resultPath, "utf8");
+    const second = await run();
+    expect(first.workspaceRoot).not.toBe(second.workspaceRoot);
+    expect(second.workspaceRoot).toContain(
+      "/single-agent-differential/commons-fileupload-java-skeleton/",
+    );
+    expect(await readFile(first.resultPath, "utf8")).toBe(originalReport);
+    const benchmark = JSON.parse(
+      await readFile(join(second.workspaceRoot, "benchmark.json"), "utf8"),
+    );
+    expect(benchmark).toMatchObject({
+      executionMode: "injected-test",
+      originalsUnchanged: true,
+      dataset: { standardDatasetMatch: true },
+      budget: { maxTurns: 50 },
+    });
+    expect(
+      JSON.parse(
+        await readFile(join(second.workspaceRoot, "report.json"), "utf8"),
+      ),
+    ).toEqual(second.result);
+    const timing = JSON.parse(await readFile(second.timingPath, "utf8"));
+    expect(timing.hostSpans).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "single-agent-validation",
+          state: "skipped",
+        }),
+      ]),
+    );
+    expect(await stat(join(second.workspaceRoot, "events.jsonl"))).toBeTruthy();
+    expect(runAgent).not.toHaveBeenCalled();
+  });
+
+  it("retains a failed report when the durable artifact destination is unavailable", async () => {
+    const root = await mkdtemp(join(tmpdir(), "single-agent-e2e-"));
+    roots.push(root);
+    const artifactRoot = join(root, "blocked-artifacts");
+    await writeFile(artifactRoot, "not a directory\n");
+    const output = await executeSingleAgentE2E(
+      { ...options, outputRoot: root },
+      {
+        artifactRoot,
+        runtime: { runAgent: vi.fn(noReplay), runCommand: noReplay },
+        prepareProjects: async () => {
+          throw new Error("preflight unavailable");
+        },
+      },
+    );
+    expect(output.result.executionStatus).toBe("failed");
+    expect(JSON.parse(await readFile(output.resultPath, "utf8"))).toEqual(
+      output.result,
+    );
+    expect(
+      JSON.parse(await readFile(output.benchmarkPath, "utf8")),
+    ).toMatchObject({ originalsUnchanged: true });
+    expect(await stat(output.timingPath)).toBeTruthy();
   });
 
   it("requires explicit preparation for an injected runtime and records environment failure before any Agent", async () => {
@@ -275,9 +359,23 @@ describe("single-agent E2E execution boundary", () => {
       expect(JSON.parse(await readFile(output.resultPath, "utf8"))).toEqual(
         output.result,
       );
-      expect(JSON.parse(await readFile(output.timingPath, "utf8"))).toEqual(
-        output.timings,
-      );
+      expect(
+        JSON.parse(await readFile(output.timingPath, "utf8")),
+      ).toMatchObject({
+        schemaVersion: "1.0",
+        strategy: "single-agent-differential",
+        hostSpans: expect.arrayContaining([
+          expect.objectContaining({
+            name: "single-agent-validation",
+            state: "completed",
+          }),
+        ]),
+      });
+      expect(output.timings).toMatchObject({
+        preparationMs: expect.any(Number),
+        agentMs: expect.any(Number),
+        totalMs: expect.any(Number),
+      });
       expect(input).toEqual(originalInput);
       expect(projectHash(sourceProjectRoot)).toBe(sourceHash);
       expect(projectHash(targetProjectRoot)).toBe(targetHash);

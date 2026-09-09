@@ -66,6 +66,7 @@ __pycache__/
 *.pyc
 
 # Experiment / test output
+/e2e-runs/
 results/
 results_副本/
 output/

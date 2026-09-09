@@ -103,6 +103,29 @@ afterEach(() => {
 });
 
 describe("FileUpload VerificationInput E2E", () => {
+  it.each([
+    "multi-agent-differential",
+    "multi-agent-black-box",
+    "single-agent-differential",
+  ])(
+    "routes %s to its verification-module runner without invoking legacy smoke",
+    async (strategy) => {
+      vi.spyOn(console, "log").mockImplementation(() => {});
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      expect(
+        await runSmokeE2E([
+          "--strategy",
+          strategy,
+          "--offline-only",
+          "--output-root",
+          directory(),
+          "--max-turns",
+          "50",
+        ]),
+      ).toBe(0);
+      expect(verifyWithReceipt).not.toHaveBeenCalled();
+    },
+  );
   it.each(Object.keys(fileUploadTasks) as FileUploadTaskId[])(
     "sends the realistic %s request through VerificationService",
     async (taskId) => {

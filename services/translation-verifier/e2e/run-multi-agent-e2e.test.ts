@@ -121,86 +121,384 @@ async function roots() {
 }
 
 describe("multi-agent differential E2E", () => {
-  it("skips Agent1 and its handoff for a not-applicable target-only run", async () => {
+  it("accepts the true black-box strategy and explicit per-session output budgets", () => {
+    expect(
+      parseMultiAgentArgs([
+        "--strategy",
+        "multi-agent-black-box",
+        "--output-root",
+        "/tmp/e2e",
+        "--max-turns",
+        "12",
+      ]),
+    ).toMatchObject({
+      strategyId: "multi-agent-black-box",
+      outputRoot: "/tmp/e2e",
+      maxTurns: 12,
+      timeoutMs: 600_000,
+    });
+    expect(parseMultiAgentArgs(["--max-turns", "0"])).toHaveProperty("error");
+  });
+  it("runs true black-box preparation before fixed translation, preserving source experiments only in the copy", async () => {
+    const paths = await roots();
+    const sourceBefore = projectHash(sourceProjectRoot);
+    const targetBefore = projectHash(targetProjectRoot);
     const events: string[] = [];
-    const input = fileUploadInput("correct", "multipart-read-body");
-    input.analysisReport = { applicability: { level: "reject" } };
-    const targetRuntime: BehaviorRuntime = {
-      ...runtime,
+    const subject =
+      "src/main/java/org/apache/commons/fileupload/MultipartStream.java";
+    const blackbox: BehaviorRuntime = {
       async runAgent(task) {
-        expect(events).toEqual([]);
-        events.push(task.side);
-        expect(task.side).toBe("target");
-        expect(task.sandbox.readRoots).toEqual([task.sandbox.cwd]);
-        expect(task.executionSides).toEqual(["target"]);
-        expect(task.prompt).not.toContain("<source-collection-context>");
-        expect(task.expectationFile).toBe(
-          join(task.sandbox.cwd, ".forexplore-tests/target-plan.json"),
+        events.push(`agent-${task.side}`);
+        expect(task.side).toBe("source");
+        expect(task.executionSides).toEqual(["source"]);
+        const target = task.additionalProjects!.target!.cwd;
+        expect(await readFile(join(target, subject), "utf8")).toBe(
+          await readFile(join(targetProjectRoot, subject), "utf8"),
         );
-        const plan = JSON.stringify({
-          schemaVersion: "1.0",
-          testBasis: {
-            summary: "Transfer all body bytes",
-            evidence: ["request.requirement"],
-          },
-          cases: [
-            {
-              caseId: "case-1",
-              intent: "body",
-              input: { body: "YWJj" },
-              expectation: {
-                kind: "requirement",
-                rationale: "Report the number of bytes transferred",
-                provenance: ["request.requirement"],
-                expected: { caseId: "case-1", outcome: "return", value: 3 },
+        expect(task.prompt).not.toContain("outputProvenance");
+        expect(task.prompt).not.toContain("has been filled in");
+        await writeFile(
+          join(task.sandbox.cwd, "src/commons_fileupload/core.py"),
+          "# source experiment in the copy\n",
+        );
+        await writeFile(
+          join(task.sandbox.cwd, ".forexplore-tests/manifest.json"),
+          JSON.stringify({
+            schemaVersion: "3.0",
+            notes: "Requirement-derived oracle, no source observation",
+            testFiles: [],
+            cases: [
+              {
+                caseId: "case-1",
+                intent: "body",
+                input: { body: "YWJj" },
+                expectation: {
+                  kind: "requirement",
+                  rationale: "Count body bytes",
+                  provenance: ["request.requirement"],
+                  expected: { caseId: "case-1", outcome: "return", value: 3 },
+                },
               },
-            },
-          ],
-        });
-        await writeFile(task.expectationFile!, plan);
-        const result = await runtime.runAgent(task);
-        // This fixed evidence tests assembly, not live Java execution or model quality.
-        const record = {
-          ...result,
-          commandId: "fixture-target-command",
-          side: "target" as const,
-          cwd: task.sandbox.cwd,
-          command: { executable: "fixture", args: [] },
-          completed: true,
-          baselineValid: true,
-          credentialHit: false,
-          testFiles: { ".forexplore-tests/harness.json": "{}\n" },
+            ],
+          }),
+        );
+        await mkdir(join(target, "src/test/java"), { recursive: true });
+        await writeFile(
+          join(target, "src/test/java/FrozenBodyTest.java"),
+          "class FrozenBodyTest {}\n",
+        );
+        await writeFile(
+          join(target, ".forexplore-tests/manifest.json"),
+          JSON.stringify({
+            schemaVersion: "2.0",
+            notes: "Tests authored against target contract",
+            testFiles: ["src/test/java/FrozenBodyTest.java"],
+            resultFile: ".forexplore-tests/observations.json",
+            commands: { setup: [], run: { executable: "fixture", args: [] } },
+          }),
+        );
+        return {
+          exitCode: 0,
+          timedOut: false,
+          durationMs: 1,
+          stdout: "",
+          stderr: "",
         };
-        task.onEvidence?.([record], plan);
-        return { ...result, frozenPlan: plan, commandEvidence: [record] };
+      },
+      async runCommand(task) {
+        events.push("replay-target");
+        expect(task.sandbox.cwd.endsWith("/target")).toBe(true);
+        expect(
+          await readFile(
+            join(task.sandbox.cwd, "src/test/java/FrozenBodyTest.java"),
+            "utf8",
+          ),
+        ).toBe("class FrozenBodyTest {}\n");
+        return runtime.runCommand(task);
       },
     };
-    const result = await executeMultiAgentE2E(
+    const output = await executeMultiAgentE2E(
       {
         task: "multipart-read-body",
         variant: "correct",
-        timeoutMs: 10000,
-        live: false,
+        timeoutMs: 10_000,
+        strategyId: "multi-agent-black-box",
+        outputRoot: paths.root,
+        live: true,
         json: false,
       },
       {
-        ...(await roots()),
-        input,
-        runtime: targetRuntime,
+        runtime: blackbox,
+        prepareProjects: async (context) => {
+          const { targetRoot, sides } = context;
+          events.push(
+            events.includes("agent-source")
+              ? "preflight-translated"
+              : "preflight-original",
+          );
+          if (events.includes("agent-source")) {
+            expect(context).toMatchObject({ compileTests: false });
+            expect(sides).toEqual(["target"]);
+            expect(await readFile(join(targetRoot, subject), "utf8")).not.toBe(
+              await readFile(join(targetProjectRoot, subject), "utf8"),
+            );
+          }
+          return {
+            command: "fixture compile",
+            cwd: targetRoot,
+            durationMs: 1,
+            exitCode: 0,
+            timedOut: false,
+            stdout: "ready",
+            stderr: "",
+          };
+        },
       },
     );
-    expect(events).toEqual(["target"]);
-    expect(result.result, JSON.stringify(result.result.problems)).toMatchObject(
+    expect(output.result, JSON.stringify(output.result.problems)).toMatchObject(
       {
-        mode: "target_only",
-        sourceAssessment: "not_checked",
+        strategyId: "multi-agent-black-box",
         executionStatus: "completed",
         targetAssessment: "no_bug_observed",
       },
     );
-    expect(result.result.strategyReport).not.toHaveProperty("sourceSnapshot");
-    expect(result.result.strategyReport).toHaveProperty("targetPlan");
+    expect(events).toEqual([
+      "preflight-original",
+      "agent-source",
+      "preflight-translated",
+      "replay-target",
+    ]);
+    expect(output.workspaceRoot).toContain(
+      "/multi-agent-black-box/commons-fileupload-java-skeleton/",
+    );
+    const benchmark = JSON.parse(
+      await readFile(join(output.workspaceRoot, "benchmark.json"), "utf8"),
+    );
+    expect(benchmark).toMatchObject({
+      executionMode: "injected-test",
+      originalsUnchanged: true,
+      strategy: "multi-agent-black-box",
+    });
+    expect(
+      JSON.parse(
+        await readFile(join(output.workspaceRoot, "report.json"), "utf8"),
+      ),
+    ).toEqual(output.result);
+    for (const name of [
+      "timing.json",
+      "events.jsonl",
+      "agent/original-preparation.json",
+      "agent/translated-preparation.json",
+    ])
+      expect(await stat(join(output.workspaceRoot, name))).toBeTruthy();
+    expect(
+      JSON.parse(await readFile(output.timingPath, "utf8")).hostSpans,
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "copy-projects",
+          state: "completed",
+          durationMs: expect.any(Number),
+        }),
+        expect.objectContaining({ name: "black-box-agent2", state: "skipped" }),
+      ]),
+    );
+    expect(projectHash(sourceProjectRoot)).toBe(sourceBefore);
+    expect(projectHash(targetProjectRoot)).toBe(targetBefore);
   });
+
+  it("retains verifier timeout evidence when target cleanup finishes after the phase deadline", async () => {
+    const paths = await roots();
+    const output = await executeMultiAgentE2E(
+      {
+        task: "multipart-read-body",
+        variant: "correct",
+        timeoutMs: 1000,
+        live: false,
+        json: false,
+      },
+      {
+        ...paths,
+        runtime: {
+          ...runtime,
+          async runAgent(task) {
+            if (task.side === "source") return runtime.runAgent(task);
+            await new Promise<void>((resolve) => {
+              if (task.signal?.aborted) resolve();
+              else
+                task.signal?.addEventListener(
+                  "abort",
+                  () => setTimeout(resolve, 20),
+                  { once: true },
+                );
+            });
+            return {
+              exitCode: null,
+              timedOut: true,
+              durationMs: 1000,
+              stdout: "",
+              stderr: "target timed out",
+            };
+          },
+        },
+      },
+    );
+    expect(output.result.executionStatus).not.toBe("completed");
+    expect(
+      output.result.problems.some(
+        (problem) => problem.code === "environment_unavailable",
+      ),
+    ).toBe(false);
+    expect(output.result.strategyReport).toMatchObject({
+      stage: "target",
+      caseStatus: "timeout",
+    });
+    expect(
+      output.result.artifacts.some(
+        (artifact) => artifact.kind === "target-agent-session",
+      ),
+      JSON.stringify(output.result.artifacts),
+    ).toBe(true);
+  });
+
+  it("classifies a black-box preparation timeout as timeout rather than environment failure", async () => {
+    const paths = await roots();
+    const output = await executeMultiAgentE2E(
+      {
+        strategyId: "multi-agent-black-box",
+        task: "multipart-read-body",
+        variant: "correct",
+        timeoutMs: 1000,
+        live: false,
+        json: false,
+      },
+      {
+        ...paths,
+        runtime: {
+          ...runtime,
+          async runAgent() {
+            throw new DOMException(
+              "prepare-tests deadline exceeded",
+              "TimeoutError",
+            );
+          },
+        },
+      },
+    );
+    expect(output.result.executionStatus).toBe("failed");
+    expect(output.result.problems).toEqual([
+      { code: "agent_timeout", message: "prepare-tests deadline exceeded" },
+    ]);
+  });
+
+  it("retains outer failure artifacts when durable storage is unavailable", async () => {
+    const paths = await roots();
+    await writeFile(paths.artifactRoot, "not a directory\n");
+    const output = await executeMultiAgentE2E(
+      {
+        task: "multipart-read-body",
+        variant: "correct",
+        timeoutMs: 0,
+        live: false,
+        json: false,
+      },
+      { ...paths, runtime },
+    );
+    expect(output.result.executionStatus).toBe("failed");
+    expect(JSON.parse(await readFile(output.resultPath, "utf8"))).toEqual(
+      output.result,
+    );
+    expect(
+      JSON.parse(await readFile(output.benchmarkPath, "utf8")),
+    ).toMatchObject({ originalsUnchanged: true });
+    expect(await stat(output.eventsPath)).toBeTruthy();
+  });
+
+  it.each(["multi-agent-differential", "multi-agent-black-box"] as const)(
+    "skips Agent1 and its handoff for a not-applicable target-only run (%s)",
+    async (strategyId) => {
+      const events: string[] = [];
+      const input = fileUploadInput("correct", "multipart-read-body");
+      input.analysisReport = { applicability: { level: "reject" } };
+      const targetRuntime: BehaviorRuntime = {
+        ...runtime,
+        async runAgent(task) {
+          expect(events).toEqual([]);
+          events.push(task.side);
+          expect(task.side).toBe("target");
+          expect(task.sandbox.readRoots).toEqual([task.sandbox.cwd]);
+          expect(task.executionSides).toEqual(["target"]);
+          expect(task.prompt).not.toContain("<source-collection-context>");
+          expect(task.expectationFile).toBe(
+            join(task.sandbox.cwd, ".forexplore-tests/target-plan.json"),
+          );
+          const plan = JSON.stringify({
+            schemaVersion: "1.0",
+            testBasis: {
+              summary: "Transfer all body bytes",
+              evidence: ["request.requirement"],
+            },
+            cases: [
+              {
+                caseId: "case-1",
+                intent: "body",
+                input: { body: "YWJj" },
+                expectation: {
+                  kind: "requirement",
+                  rationale: "Report the number of bytes transferred",
+                  provenance: ["request.requirement"],
+                  expected: { caseId: "case-1", outcome: "return", value: 3 },
+                },
+              },
+            ],
+          });
+          await writeFile(task.expectationFile!, plan);
+          const result = await runtime.runAgent(task);
+          // This fixed evidence tests assembly, not live Java execution or model quality.
+          const record = {
+            ...result,
+            commandId: "fixture-target-command",
+            side: "target" as const,
+            cwd: task.sandbox.cwd,
+            command: { executable: "fixture", args: [] },
+            completed: true,
+            baselineValid: true,
+            credentialHit: false,
+            testFiles: { ".forexplore-tests/harness.json": "{}\n" },
+          };
+          task.onEvidence?.([record], plan);
+          return { ...result, frozenPlan: plan, commandEvidence: [record] };
+        },
+      };
+      const result = await executeMultiAgentE2E(
+        {
+          strategyId,
+          task: "multipart-read-body",
+          variant: "correct",
+          timeoutMs: 10000,
+          live: false,
+          json: false,
+        },
+        {
+          ...(await roots()),
+          input,
+          runtime: targetRuntime,
+        },
+      );
+      expect(events).toEqual(["target"]);
+      expect(
+        result.result,
+        JSON.stringify(result.result.problems),
+      ).toMatchObject({
+        mode: "target_only",
+        sourceAssessment: "not_checked",
+        executionStatus: "completed",
+        targetAssessment: "no_bug_observed",
+      });
+      expect(result.result.strategyReport).not.toHaveProperty("sourceSnapshot");
+      expect(result.result.strategyReport).toHaveProperty("targetPlan");
+    },
+  );
 
   it("prepares source tests before fixture translation application and leaves original fixtures untouched", async () => {
     const paths = await roots();
