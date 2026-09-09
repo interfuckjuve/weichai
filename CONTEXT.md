@@ -36,6 +36,10 @@ _Avoid_: Proof of business correctness
 Verification that executes the target against requirement-derived expectations without using source execution as its behavioral reference. It does not imply that historical code or analysis has no reuse value.
 _Avoid_: Translation from scratch, source correctness assessment
 
+**Translation-Implementation Black-Box Verification**:
+Verification whose initial target tests are designed without access to the generated implementation under test. Source implementations and existing target contracts may inform test design; later implementation-aware diagnosis is an explicit exception, so the entire workflow is not strictly black-box.
+_Avoid_: No source-code access, target-only verification, strictly black-box workflow
+
 **Verification Strategy**:
 An arrangement of test design, execution, and assessment work for a migration task. A single-agent baseline and a split-agent strategy can pursue the same verification objective with different scheduling and information handoffs.
 _Avoid_: A different product requirement for each agent count

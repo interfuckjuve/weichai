@@ -9,9 +9,19 @@ Output schema `$id` is `urn:forexplore:verification-output:2.0`; `VerificationRe
 ```ts
 createDefaultVerificationService(options?).verify(input, { strategyId?, keepWorkspace? }, signal)
 createDefaultVerificationService(options?).verifyWithReceipt(input, { strategyId?, keepWorkspace? }, signal)
+createDefaultVerificationService(options?).prepareTests(
+  { request, analysisReport, migrationPlan }, { strategyId?, keepWorkspace? }, signal,
+)
+createDefaultVerificationService(options?).verifyTranslationWithReceipt(
+  input, { strategyId?, preparation?, keepWorkspace? }, signal,
+)
 ```
 
-`VerificationInput` carries the adaptation request, analysis report, migration plan, translation patch and optional legacy strategy-specific `verificationPolicy`. Strategies own reference suitability and test design; the framework owns resource preparation, execution lifecycle and durable results. `VerificationResult` binds strategy ID/version, patch subject hash, the complete canonical input hash, round, independent assessments, issues, artifacts and a strategy-owned report. `verifyWithReceipt()` persists the canonical result once and returns its exact durable relative path, SHA-256, byte size, ID and media type. Timing observations do not change results, receipts, hashes or verdicts.
+`verify()` and `verifyWithReceipt()` explicitly reject two-phase strategies. `prepareTests()` accepts only the pretranslation request, analysis report and migration plan; it does not receive translation. It returns a serializable Host-issued preparation capsule and saves that capsule under the per-attempt artifact budget plus a trusted-preparations receipt index under `artifactRoot`. `verifyTranslationWithReceipt()` accepts only a capsule previously issued by the same Host artifact store; external, rehashed or cross-store capsules are rejected. The shared `artifactRoot` supports this check across processes.
+
+`VerificationInput` carries the adaptation request, analysis report, migration plan, translation patch and optional legacy strategy-specific `verificationPolicy`. Strategies own reference suitability and test design; the framework owns resource preparation, execution lifecycle and durable results. `VerificationResult` binds strategy ID/version, patch subject hash, the complete canonical input hash, round, independent assessments, issues, artifacts and a strategy-owned report. `verifyWithReceipt()` persists the canonical result once and returns its exact durable relative path, SHA-256, byte size, ID and media type. Timing observations do not change results, receipts, hashes or verdicts. Preparation failures retain failure evidence unless persistence itself fails.
+
+Direct strategy calls are trusted programmatic APIs, not an external JSON API; their callers must validate capsule origin and integrity before invoking them.
 
 ### Reference Policy and Report Dimensions
 
@@ -45,7 +55,7 @@ The V2 adaptation runtime uses `TranslationVerifierV2Adapter` and the default se
 
 ## Register and Compare Strategies
 
-Register providers in the existing factory; each provider creates a strategy with `verify(input, context, signal)`. A provider may declare `workspaceRequirements(input): { source: boolean }` before resource preparation, without creating an Agent. Source context is available by default; its presence is not acceptance of source behavior or a command to execute it. No Agent or step list is required. Registered providers are trusted Host code and remain responsible for establishing an independent test basis, which may come from fixed acceptance tests rather than smoke's policy text. Generic result validation checks envelope integrity and assessment consistency; it does not attest that a provider ran meaningful tests. A result claiming `insufficient_test_basis` cannot also claim decisive code findings, and unresolved execution problems cannot accompany `completed`.
+Register providers in the existing factory. Single-phase providers create a strategy with `verify(input, context, signal)`. Two-phase providers declare `lifecycle: "two-phase"`, implement `prepareTests({ request, analysisReport, migrationPlan }, context, signal)` and `verifyTranslation(input, context, preparation, signal)`, and may declare `workspaceRequirements(input, phase)` for the preparation or verification phase. Black-box preparation requests source resources during the prepare phase only; its verification uses the target project and frozen preparation evidence. White-box direct/adapt verification retains source resources to validate and expose the frozen source handoff. A provider may have zero Agent calls, arbitrary steps and repeated or nested steps. `context.measureStep(name, work)` optionally measures existing work; it does not schedule it. Registered providers are trusted Host code and remain responsible for establishing an independent test basis, which may come from fixed acceptance tests rather than smoke's policy text. Generic result validation checks envelope integrity and assessment consistency; it does not attest that a provider ran meaningful tests. A result claiming `insufficient_test_basis` cannot also claim decisive code findings, and unresolved execution problems cannot accompany `completed`.
 
 A minimal registration-only example deliberately returns failed execution with inconclusive findings:
 
@@ -98,19 +108,32 @@ The Host validates the frozen plan, command identities, actual outputs and proje
 
 `executionSides` is a trusted single-agent runtime option, separate from the Agent's reference judgment. Directory availability and business suitability are not execution authorization. The normal baseline authorizes both supplied projects; callers can limit it to target execution. The existing local-process and no-OS-isolation limitations still apply.
 
-## Multi-Agent Three-Way Verification
+## Multi-Agent Differential
 
-`multi-agent-differential@3.1.0` maps `analysisReport.applicability.level` explicitly: `direct` selects Agent1 source collection, `adapt` selects Agent1 preserved-versus-changed behavior design, and `reference`/`reject` skip Agent1 entirely and select autonomous target-only Agent2 verification. Missing or invalid classification fails before an Agent starts. Legacy `migrationEligibility`, accepted Host policy and `testBasis` are not prerequisites.
+`multi-agent-differential@4.0.0` is the opt-in white-box two-phase strategy. It has no `verify()` method and no `waitForTarget` API. Agent1 prepares source evidence from the pretranslation input; after the caller performs translation, Agent2 authors the target side and verification runs through `verifyTranslationWithReceipt()`. The preparation capsule is serializable and Host-issued. Source evidence is evidence, not a business-correctness proof; generated test adequacy and common-mode defects still require review.
 
-Agent1 collection and the behavior report use schema `3.0`; Agent2's executable manifest stays `2.0`. The independent target design uses `target-plan.json` schema `1.0`, with a test-basis summary/evidence and language-neutral cases. Old collection materials are rejected, not silently reinterpreted as target plans. Each case has stable ID, intent, input, optional structured setup/operations/observables, and an expectation with rationale and provenance. A `source` expectation obtains its value only from Host replay; a `requirement` expectation contains a fixed return or exception outcome before target execution; `unresolved` blocks completion. Source commands execute only source-based cases.
+The service rejects legacy `verify` entry points for this strategy. Direct strategy calls are trusted programmatic APIs and require the caller to validate capsule origin; the external service/CLI path uses the Host artifact receipt and shared `artifactRoot` checks. Preparation and verification are explicit phases with caller-owned project copies: target is untranslated during preparation and translated during verification. There is no old readiness barrier or `waitForTarget`. Real upstream Analyzer/Translator parallel scheduling is not wired; local explicit phases do not establish that integration.
 
-For `reference`/`reject`, Agent2 receives a dedicated prompt and only the target project directory and command authorization. It neither reads nor waits for Agent1 handoff materials, receives no source observations, and does not explore the source project. It derives requirement expectations, authors new tests, and submits a target plan before any target command, including builds or diagnostics. The runtime freezes the exact plan bytes; Host validates the frozen design and independently replays the tests. The report records `targetPlan`, not a fabricated `sourceSnapshot`. The provider does not require a prepared source project for this branch.
+## Multi-Agent Black Box
 
-Agent2 starts only after the caller's readiness barrier. `waitForTarget` is a read-only readiness notification, not a preparation job: callers must finish all writes and process work before invoking `verify()`, and the target must remain unchanged across readiness. Direct/adapt retain both project snapshots and the Agent1 handoff, including adapt cases based only on requirements. Required execution is checked against trusted `executionSides`, never inferred from a business classification. Target-only execution cannot hide recorded source activity.
+`multi-agent-black-box@1.0.0` is an optional registered two-phase strategy configured through `createDefaultVerificationService({ blackBox: { ... } })`. Preparation writes target tests before translated implementation access and allows Agent1 source experiments. Experiment changes and outputs are exploratory, not original-source observations and not proof of requirement correctness. Source experiments operate on prepared copies and do not modify the original workspace.
 
-On direct/adapt routes, the Host freezes Agent1's cases, manifests and test files across readiness and Agent2, then replays target tests. Source-based passes are `verified-equivalent`; requirement-based passes are `requirement-satisfied`. Mixed cases are not compared unconditionally against source outputs. Target-only reports source `not_checked`; differential source assessment remains `inconclusive`. One bounded harness-repair session per active side remains available for malformed manifests/observations, not genuine behavioral differences, integrity failures or timeouts. Repair cannot change frozen expectations. Autonomous Agent2 derives both expectations and tests; freezing and Host replay do not prove that its requirement interpretation or test coverage is correct.
+Verification first runs the frozen target tests. Only after a failure or target divergence may Agent2 run once for diagnosis/repair. Agent2 may repair the declared generated harness, not translated implementation files; frozen cases, expectations and command manifests remain protected, and test changes are recorded. The workflow uses local process and command-policy controls, not an OS sandbox, and does not prove business correctness. Its source resource is requested only in preparation; verification uses the target project resource while retaining preparation evidence. Upstream Analyzer/Translator concurrency is not connected.
 
-Both full-project strategies retain Host-owned command evidence and finish nested command process cleanup before returning from direct `verify()`. The proxy forwards cancellation, and the Host reaps registered outstanding process groups when the Agent or proxy exits unexpectedly. Generated test sources are captured with single-agent execution evidence. These lifecycle and integrity checks are not kernel isolation or proof of test adequacy.
+### Two-Phase CLI
+
+```bash
+npm run verify --workspace @forexplore/translation-verifier -- \
+  --strategy multi-agent-differential --phase prepare-tests \
+  --input pretranslation.json --output preparation.json
+npm run verify --workspace @forexplore/translation-verifier -- \
+  --strategy multi-agent-differential --phase verify-translation \
+  --input translated-input.json --preparation preparation.json \
+  --output result.json
+```
+
+The preparation input contains no translation. The caller owns the prepared copies and retains them between phases. `--preparation` is valid only for `verify-translation`.
+
 
 ## Ownership and Files
 
