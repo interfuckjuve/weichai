@@ -121,25 +121,50 @@ Agent `[VERIFIER_STEP]` intervals are approximate Host receipt times, not model 
 
 The default `differential-smoke` strategy is local-process execution, not an OS sandbox. A successful run is neither proof of business correctness nor automatic mutant/control grading. The benchmark still requires independent replay before crediting a detected defect. Disk controls have local upstream JUnit and storage-observation checks; no automated six-task Agent scoring system is claimed.
 
+## Single-Agent Differential
+
+`single-agent-differential@1.0.0` has a separate runner. It does not pass through the smoke workflow or run a Translator. The caller copies the complete source and target projects with COW when supported (independent ordinary-copy fallback), overlays the declared source/target snapshots, applies the fixed target patch once, and prepares both projects before starting the single Agent session.
+
+```bash
+# Explicit skip, not verification and not a mock fallback.
+npm run e2e:single-agent --workspace @forexplore/translation-verifier -- --offline-only --json
+
+# Real model execution: opt in only with credentials and toolchains available.
+npm run e2e:single-agent --workspace @forexplore/translation-verifier -- --live --task multipart-read-body --variant correct --timeout-ms 600000
+
+# Optional externally prepared Analyzer report.
+npm run e2e:single-agent --workspace @forexplore/translation-verifier -- --live --analysis-report /path/to/analysis.json
+```
+
+Supported variants are `correct`, `count-plus-one`, `drop-output`, `source-count-plus-one`, and `both-count-plus-one`; mutation variants remain limited to body reading. Legacy policy-only variants, forced mode and Host test-basis flags are rejected. The input passed to the Agent removes the legacy verification policy and mutation-label provenance. Default analysis is explicitly simulated and leaves reference suitability to the Agent; dataset labels remain in the Host summary.
+
+Real preflight checks Python 3.11+ imports and runs Maven `clean test-compile` against the already-patched target. It may restore declared dependencies. Both sides must succeed before any Agent starts. Tests explicitly inject both the model runtime and preparation callback, so no dependency restoration or model call is hidden behind an offline test. The wrapper's injected records verify orchestration and evidence contracts, not Java/Python behavior or real Agent quality.
+
+Results are retained under `test-results/single-agent-*/`: complete project copies, canonical result and strategy artifacts, redacted `preparation.json`, `timing.json`, and Host-only `benchmark.json`. Preparation failures produce `environment_unavailable` without launching an Agent. `--timeout-ms` provides separate budgets for preflight and the Agent; copying is measured in preparation time but is outside the preflight timer. `agentMs` is the strategy invocation interval, not a model-token timing metric. Exit 0 means verification completed (possibly finding a bug), 1 means incomplete verification, and 2 means argument/setup failure. `--offline-only` reports an explicit skip and exits 0.
+
+The runner checks original fixture baselines after execution; it does not implement an OS sandbox or rollback. Strategy tests can bypass this FileUpload runner and call the public `verify()` directly with their own complete, runnable project copies.
+
 ## Multi-Agent Differential
 
-`multi-agent-differential@2.0.0` is opt-in. Two independent Claude processes use the source and target project copies as their respective working directories. Both are full caller-owned COW project copies. Agents add tests in standard project test directories; `.forexplore-tests` holds metadata, observations and optional serialization/launch glue, not a replacement project. There is no model coordinator. Source collection starts before the E2E caller applies the prepared translation patch; the Host releases agent2 only after the readiness callback, target patch application and live-only project preparation complete. This models the future upstream integration, not a live translator or analyzer.
+`multi-agent-differential@3.0.0` is opt-in. Two independent Claude processes use complete caller-prepared project copies. Agents add new project tests; `.forexplore-tests` holds language-neutral designs, observations and optional launch glue. There is no coordinator model or live upstream Analyzer/Translator. The E2E caller overlays snapshots, applies the fixed target patch once and prepares both projects before Agent1; a readiness callback still controls when Agent2 may start. That callback is a read-only notification, not a preparation task: it must not write the projects, launch commands, or own cleanup resources. Cancellation may stop waiting for a notification that never arrives.
 
 ```mermaid
 flowchart TD
-  A[Caller prepares source and target copies] --> B[Explicit upstream eligibility and reference policy]
-  B --> C[Agent1 authors source tests]
-  C --> D[Host freezes harness and replays source inputs]
-  D --> E[Versioned source behavior snapshot]
-  E --> F[Host awaits target readiness]
-  F --> G[Agent2 authors target tests]
-  G --> H[Host freezes harness and replays identical inputs]
-  H --> I[Exact JSON comparison and existing verifier result]
-  I --> J[Upstream translator receives issues; no implementation repairs]
+  A[Caller prepares full projects and target patch] --> B{Analyzer applicability.level}
+  B -->|direct| C[Agent1 collects preserved source behavior]
+  B -->|adapt| D[Agent1 separates source and requirement bases]
+  B -->|reference or reject| E[Agent1 designs requirements without execution]
+  C --> F[Host freezes v3 design and actual source evidence]
+  D --> F
+  E --> F
+  F --> G[Await target readiness]
+  G --> H[Agent2 binds frozen cases to target tests]
+  H --> I[Host replays target and compares per-case expectations]
+  I --> J[Report evidence and issues without implementation repair]
 ```
 
 ```bash
-# Discover both strategies through the official CLI.
+# Discover registered strategies through the official CLI.
 npm run verify --workspace @forexplore/translation-verifier -- --list-strategies
 
 # Verify an already-translated request using the official service workspace.
@@ -151,21 +176,23 @@ npm run e2e --workspace @forexplore/translation-verifier -- --strategy multi-age
 
 The new E2E requires `--live` for actual model execution. A test runtime can only be explicitly injected by tests; there is no silent mock fallback. `--offline-only` skips execution, and cannot be combined with `--live`. JSON output includes `executionMode: live | injected-test`. Its exit code is 0 for a completed comparison (which may find divergences), 1 for incomplete verification, and 2 for invalid arguments/setup errors. Unlike the default benchmark, it does not grade results against the independent mutation catalog.
 
-The new E2E defaults to a 600-second total deadline; each agent has at most 50 turns. In `--live` mode the caller applies the target patch and runs a bounded Host Maven preparation in the full target COW project before agent2 starts: `mvn -B -ntp -DskipTests test-compile`. Maven may restore real dependencies/plugins from local caches or the network. The preparation command runs through `runManagedProcess` with `sanitizedBuildEnvironment`; `PATH`, `JAVA_HOME` and `HOME` are preserved, model/service credentials are removed, and native OS sandboxing is off. Preparation stdout/stderr/exit/duration are persisted as `agent/target-preparation.json`; failure stops agent2 and is reported as environment-unverified. Injected test runtimes must provide an explicit preparation seam and never silently download dependencies. The official CLI retains its existing 300-second service deadline, so larger real-project runs should use the E2E's `--timeout-ms` option or set `timeoutMs` on `createDefaultVerificationService` through the programmatic API.
+The E2E defaults to separate 600-second preparation and strategy budgets; each Agent has at most 50 turns. Before Agent1, live preparation checks Python 3.11+ imports and runs `mvn -B -ntp -DskipTests clean test-compile` in the already-patched target copy. Preparation may restore declared dependencies. It uses credential-minimized managed processes, persists redacted command/output/exit/duration evidence in `agent/target-preparation.json`, and stops both Agents on failure. Injected live runtimes require an explicit preparation callback; offline orchestration tests do not run toolchains or restore dependencies implicitly. The generic service retains its own configurable deadline.
 
-The caller must provide `analysisReport.migrationEligibility.decision = "eligible"`, an accepted `verificationPolicy.referenceDecision`, and a nonempty test basis. Missing/rejected eligibility starts no agents. The strategy neither decides eligibility nor copies projects. The E2E caller uses `fs.cp` with `COPYFILE_FICLONE` (reflink when available, physical copy otherwise; never hard links), overlays the declared snapshots, and applies all final patches after the barrier. The live preparation uses the patched target copy only; originals remain untouched. This is a command-policy boundary, not an OS isolation boundary: native sandboxing is disabled for the trusted Host preflight, and the command proxy/build policy must not be described as a standalone sandbox or as permission to invent shims/manual-copy algorithms. The standard service still materializes complete snapshots before invoking strategies. Production adaptation/workflow concurrency is intentionally not connected yet.
+The strategy reads `analysisReport.applicability.level`: `direct`, `adapt`, and `reference`/`reject` map to its three Agent1 prompts. Invalid or absent classification starts no Agent. Legacy `migrationEligibility`, Host reference policy and `testBasis` do not gate this strategy. Default E2E analysis is simulated as `direct`; programmatic tests can supply other reports through `deps.input`. The wrapper removes legacy verification policy, and dataset mode labels do not force the strategy's decision. It uses full `fs.cp` COW copies with independent ordinary-copy fallback, never hardlinks. Real Analyzer/Translator integration remains out of scope.
 
 ### Artifacts and States
 
-Artifacts use generic `Behavior*` types, not `Smoke*` aliases. Agent1 emits a schema-validated collection manifest with explicit case IDs, inputs, test references, command specifications and notes. Host source execution creates the immutable behavior snapshot and hashes. Agent2 receives the inputs, recorded source outputs and collection notes as the language-neutral handoff. It cannot change the Host's frozen reference. Agent-authored harness code still requires review; output agreement does not prove harness correctness.
+Agent1 collection, frozen handoff and final behavior report use schema `3.0`; Agent2's executable manifest stays `2.0`. Older collection materials are rejected. Each case has ID, intent, input, optional structured setup/operations/observables, and an expectation with rationale and provenance. `source` cases obtain observations only through actual Host replay; `requirement` cases freeze an expected return or exception before target execution; `unresolved` blocks completion. Source replay executes only source-based cases. Requirement-only designs omit source commands/results and use `testFiles: []`. For `reference`/`reject`, Agent1 is explicitly design-only with no authorized execution sides.
+
+Agent2 receives the immutable language-neutral cases, source observations where applicable, and notes. It binds target-language tests without changing scenario meaning, expectations or source evidence. Agent-authored harnesses and expectation reasoning still require review; agreement does not prove their correctness.
 
 The retained output includes separate agent sessions, redacted incremental `source-agent-stream.jsonl` and `target-agent-stream.jsonl`, frozen test sources/manifests, source observations, command stdout/stderr/exit codes, target subject hash, and the final behavior report. No translation files are written back. `json-schema-faker` is not required; this version uses explicit source-derived inputs and existing Ajv validation.
 
 Each side may receive one additional session when the Host rejects a manifest or observation JSON. Feedback includes the actual failure evidence; original files and already-frozen inputs remain unchanged. Target harness repair reuses the accepted source snapshot instead of rerunning source collection. Genuine behavioral differences, integrity violations and timeouts do not trigger this repair. `repairs` and separate `*-repair-1-session.json` artifacts record it; the original overall deadline still applies.
 
-The existing status-free verifier envelope is preserved: `executionStatus` distinguishes completed/partial/failed/cancelled; assessments distinguish bug_found/no_bug_observed/suspected_bug/inconclusive/not_checked; `problems` retains execution failure codes. The strategy report additionally records per-case `caseStatus`, including equivalent observations, translation divergence, generation failure, invalid input, target not ready, timeout, command failure and workspace integrity failure. A source exception is not automatically a source defect. This version does not infer `source-defect` or `accepted-difference` without an independent rule. Source assessment remains `inconclusive` because source execution alone does not establish source correctness.
+The existing status-free verifier envelope is preserved. Source-based case passes are `verified-equivalent`; requirement-based passes are `requirement-satisfied`, even where the requirement intentionally differs from source behavior. The report retains divergence, invalid input, generation, readiness, timeout and integrity failures separately. Target-only source assessment is `not_checked`; differential source assessment remains `inconclusive`. No source-correctness proof or automated adequacy grading is claimed.
 
-Actual outputs must cover every frozen case exactly once. Manifest schema `2.0` uses canonical project-relative `testFiles` paths, including `.forexplore-tests/` when a helper lives in the metadata directory. Duplicate paths, traversal and links are rejected. `resultFile` is an optional dedicated JSON output under `.forexplore-tests/`; normal build/test stdout is retained as evidence and is not required to be JSON. Comparisons preserve types, order, null values and exception data. Unsafe integers must be encoded as strings. Credentials in command stdout fail closed rather than being rewritten before comparison. Host hash checks detect and reject modifications to frozen manifests, harnesses, inputs and existing project files; they do not prevent writes or provide rollback. Build/cache outputs remain writable in normal project build locations.
+Actual outputs must cover every executed case exactly once. Both manifest versions use canonical project-relative `testFiles` paths, including `.forexplore-tests/` when a helper lives in the metadata directory. Duplicate paths, traversal and links are rejected. `resultFile` is an optional dedicated JSON output under `.forexplore-tests/`; normal build/test stdout is retained as evidence and is not required to be JSON. Comparisons preserve types, order, null values and exception data. Unsafe integers must be encoded as strings. Credentials in command stdout fail closed rather than being rewritten before comparison. Host hash checks detect and reject modifications to frozen manifests, harnesses, inputs and existing project files; they do not prevent writes or provide rollback. Build/cache outputs remain writable in normal project build locations.
 
 ### Runtime Boundary
 

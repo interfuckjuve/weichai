@@ -1,3 +1,13 @@
+# Local planning, scratch work, and generated architecture previews
+/.scratch/
+/architecture-diagram*.html
+
+# Private verification research notes (shared product docs remain tracked)
+/services/translation-verifier/docs/black-box-test-adequacy-methods.zh.md
+/services/translation-verifier/docs/json-schema-faker-evaluation.zh.md
+/services/translation-verifier/docs/test-generation-literature-research.zh.md
+/services/translation-verifier/docs/verification-intent-review.zh.md
+
 # Codex workspace metadata
 .codex/
 
