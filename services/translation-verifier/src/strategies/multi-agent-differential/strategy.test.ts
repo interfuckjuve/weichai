@@ -63,13 +63,8 @@ function fixture(delta = 0) {
       sourceBundle: { files: [] },
       targetContext: { sourceFiles: [] },
     } as unknown as VerificationInput["request"],
-    analysisReport: { migrationEligibility: { decision: "eligible" } },
+    analysisReport: { applicability: { level: "direct" } },
     migrationPlan: {},
-    verificationPolicy: {
-      referenceDecision: "accepted",
-      reason: "Selected by upstream",
-      testBasis: "Identity behavior",
-    },
     translation: {
       round: 1,
       generatedContent: "",
@@ -115,15 +110,33 @@ function writeHarness(task: BehaviorAgentTask) {
   writeFileSync(
     join(root, "manifest.json"),
     JSON.stringify({
-      schemaVersion: "2.0",
+      schemaVersion: task.side === "source" ? "3.0" : "2.0",
       testFiles: ["tests/runner.cjs"],
       notes:
         "Trusted deterministic fixture harness invokes implementation module.",
       ...(task.side === "source"
         ? {
             cases: [
-              { caseId: "zero", intent: "zero input", input: 0 },
-              { caseId: "negative", intent: "negative input", input: -1 },
+              {
+                caseId: "zero",
+                intent: "zero input",
+                input: 0,
+                expectation: {
+                  kind: "source",
+                  rationale: "Preserve existing identity behavior",
+                  provenance: ["analysisReport.applicability"],
+                },
+              },
+              {
+                caseId: "negative",
+                intent: "negative input",
+                input: -1,
+                expectation: {
+                  kind: "source",
+                  rationale: "Preserve existing identity behavior",
+                  provenance: ["analysisReport.applicability"],
+                },
+              },
             ],
           }
         : {}),
@@ -139,6 +152,282 @@ function writeHarness(task: BehaviorAgentTask) {
 }
 
 describe("independent two-session differential strategy", () => {
+  it.each(["reference", "reject", "adapt"])(
+    "uses a design-only Agent1 for %s and validates target requirements without Host policy",
+    async (level) => {
+      const f = fixture(1);
+      f.input.analysisReport = { applicability: { level } };
+      f.input.request.requirement = "Increment the input by one";
+      const author = f.runtime.runAgent;
+      f.runtime.runAgent = async (task) => {
+        if (task.side === "source") {
+          expect(task.executionSides).toEqual([]);
+          expect(task.prompt).toContain(
+            level === "adapt"
+              ? "MODIFICATION / ADAPTATION:"
+              : "NOT APPLICABLE AS A SOURCE ORACLE",
+          );
+          expect(task.prompt).not.toContain("DIRECT REUSE:");
+        }
+        const result = await author(task);
+        if (task.side === "source") {
+          const path = join(
+            task.sandbox.cwd,
+            ".forexplore-tests/manifest.json",
+          );
+          const manifest = JSON.parse(readFileSync(path, "utf8"));
+          delete manifest.commands;
+          manifest.testFiles = [];
+          for (const item of manifest.cases)
+            item.expectation = {
+              kind: "requirement",
+              rationale: "Increment required",
+              provenance: ["request.requirement"],
+              expected: {
+                caseId: item.caseId,
+                outcome: "return",
+                value: item.input + 1,
+              },
+            };
+          writeFileSync(path, JSON.stringify(manifest));
+        }
+        return result;
+      };
+      const run = f.runtime.runCommand;
+      f.runtime.runCommand = (task) => {
+        expect(task.sandbox.cwd).toBe(f.context.workspace.targetRoot);
+        return run(task);
+      };
+      const result = await new MultiAgentDifferentialStrategy({
+        runtime: f.runtime,
+        executionSides: ["target"],
+      }).verify(f.input, f.context);
+      expect(f.agents).toEqual(["source", "target"]);
+      expect(result).toMatchObject({
+        executionStatus: "completed",
+        mode: "target_only",
+        referenceDecision: "rejected",
+        sourceAssessment: "not_checked",
+        targetAssessment: "no_bug_observed",
+      });
+      expect(result.strategyReport).toMatchObject({
+        classification: level === "adapt" ? "adapt" : "not_applicable",
+        caseStatus: "requirement-satisfied",
+        sourceSnapshot: { observations: [] },
+        evidence: [{ side: "target" }],
+      });
+      expect(normalizeVerificationStrategyOutput(f.input, result)).toEqual(
+        result,
+      );
+    },
+  );
+  it.each([false, true])(
+    "compares preserved and adapted behavior using separate frozen bases (defect=%s)",
+    async (defect) => {
+      const f = fixture();
+      f.input.analysisReport = { applicability: { level: "adapt" } };
+      f.input.request.requirement = "Preserve zero, increment negative inputs";
+      writeFileSync(
+        join(f.context.workspace.targetRoot, "implementation.cjs"),
+        defect
+          ? "module.exports = value => value;"
+          : "module.exports = value => value === 0 ? 0 : value + 1;",
+      );
+      const author = f.runtime.runAgent;
+      f.runtime.runAgent = async (task) => {
+        const result = await author(task);
+        if (task.side === "source") {
+          expect(task.executionSides).toEqual(["source"]);
+          expect(task.prompt).toContain("MODIFICATION / ADAPTATION:");
+          expect(task.prompt).not.toContain("DIRECT REUSE:");
+          const path = join(
+            task.sandbox.cwd,
+            ".forexplore-tests/manifest.json",
+          );
+          const manifest = JSON.parse(readFileSync(path, "utf8"));
+          manifest.cases[1].expectation = {
+            kind: "requirement",
+            rationale: "Changed behavior",
+            provenance: ["request.requirement"],
+            expected: { caseId: "negative", outcome: "return", value: 0 },
+          };
+          manifest.cases[1].setup = { value: -1 };
+          manifest.cases[1].operations = [
+            { operation: "invoke", arguments: [-1] },
+          ];
+          manifest.cases[1].observe = ["return"];
+          writeFileSync(path, JSON.stringify(manifest));
+          const runner = join(task.sandbox.cwd, "tests/runner.cjs");
+          writeFileSync(
+            runner,
+            readFileSync(runner, "utf8").replace(
+              "cases.map",
+              "cases.filter(c => c.expectation.kind === 'source').map",
+            ),
+          );
+        } else {
+          expect(task.prompt).toContain(
+            '"operations":[{"operation":"invoke","arguments":[-1]}]',
+          );
+          expect(task.prompt).toContain('"kind":"requirement"');
+        }
+        return result;
+      };
+      const result = await new MultiAgentDifferentialStrategy({
+        runtime: f.runtime,
+      }).verify(f.input, f.context);
+      expect(result).toMatchObject({
+        executionStatus: "completed",
+        mode: "differential",
+        targetAssessment: defect ? "bug_found" : "no_bug_observed",
+      });
+      expect(result.strategyReport).toMatchObject({
+        cases: [
+          { caseId: "zero", caseStatus: "verified-equivalent" },
+          {
+            caseId: "negative",
+            source: null,
+            caseStatus: defect
+              ? "translation-divergence"
+              : "requirement-satisfied",
+            expectation: {
+              kind: "requirement",
+              provenance: ["request.requirement"],
+            },
+          },
+        ],
+      });
+      expect(normalizeVerificationStrategyOutput(f.input, result)).toEqual(
+        result,
+      );
+    },
+  );
+  it.each(["adapt", "reference"])(
+    "rejects source activity hidden by a requirement-only %s collection",
+    async (level) => {
+      const f = fixture();
+      f.input.analysisReport = { applicability: { level } };
+      const author = f.runtime.runAgent;
+      f.runtime.runAgent = async (task) => {
+        const result = await author(task);
+        const path = join(task.sandbox.cwd, ".forexplore-tests/manifest.json");
+        const manifest = JSON.parse(readFileSync(path, "utf8"));
+        delete manifest.commands;
+        manifest.testFiles = [];
+        for (const item of manifest.cases)
+          item.expectation = {
+            kind: "requirement",
+            rationale: "Identity requirement",
+            provenance: ["request.requirement"],
+            expected: {
+              caseId: item.caseId,
+              outcome: "return",
+              value: item.input,
+            },
+          };
+        writeFileSync(path, JSON.stringify(manifest));
+        return {
+          ...result,
+          commandEvidence: [
+            {
+              ...result,
+              commandId: "source-probe",
+              side: "source",
+              cwd: task.sandbox.cwd,
+              command: { executable: "node", args: ["-e", "0"] },
+              baselineValid: true,
+              credentialHit: false,
+            },
+          ],
+        };
+      };
+      const result = await new MultiAgentDifferentialStrategy({
+        runtime: f.runtime,
+      }).verify(f.input, f.context);
+      expect(result.executionStatus).toBe("failed");
+      expect(result.problems[0]?.code).toBe("report_evidence_invalid");
+      expect(f.agents).not.toContain("target");
+      expect(result.referenceDecision).toBe("undetermined");
+    },
+  );
+  it("does not promote direct applicability to caller execution authorization", async () => {
+    const f = fixture();
+    const result = await new MultiAgentDifferentialStrategy({
+      runtime: f.runtime,
+      executionSides: ["target"],
+    }).verify(f.input, f.context);
+    expect(result.problems[0]?.code).toBe("context_incomplete");
+    expect(f.agents).toEqual([]);
+  });
+  it.each(["unresolved", "uncited", "invented-source"])(
+    "fails closed for %s expectations",
+    async (kind) => {
+      const f = fixture();
+      f.input.analysisReport = { applicability: { level: "adapt" } };
+      const author = f.runtime.runAgent;
+      f.runtime.runAgent = async (task) => {
+        const result = await author(task);
+        const path = join(task.sandbox.cwd, ".forexplore-tests/manifest.json");
+        const manifest = JSON.parse(readFileSync(path, "utf8"));
+        manifest.cases[0].expectation =
+          kind === "invented-source"
+            ? {
+                kind: "source",
+                rationale: "fabricated",
+                provenance: ["analysisReport"],
+                expected: { caseId: "zero", outcome: "return", value: 0 },
+              }
+            : {
+                kind: kind === "unresolved" ? "unresolved" : "requirement",
+                rationale: "Need a requirement",
+                provenance:
+                  kind === "uncited" ? [" "] : ["request.requirement"],
+                ...(kind === "uncited"
+                  ? {
+                      expected: { caseId: "zero", outcome: "return", value: 0 },
+                    }
+                  : {}),
+              };
+        writeFileSync(path, JSON.stringify(manifest));
+        return result;
+      };
+      const result = await new MultiAgentDifferentialStrategy({
+        runtime: f.runtime,
+      }).verify(f.input, f.context);
+      expect(result.executionStatus).toBe("failed");
+      expect(result.targetAssessment).toBe("inconclusive");
+      expect(f.agents).not.toContain("target");
+    },
+  );
+  it.each(["waiting", "target"])(
+    "rejects Agent1 handoff changes during %s",
+    async (phase) => {
+      const f = fixture();
+      const corrupt = () =>
+        writeFileSync(
+          join(
+            f.context.workspace.sourceRoot,
+            ".forexplore-tests/manifest.json",
+          ),
+          "{}",
+        );
+      const author = f.runtime.runAgent;
+      f.runtime.runAgent = async (task) => {
+        const result = await author(task);
+        if (phase === "target" && task.side === "target") corrupt();
+        return result;
+      };
+      const result = await new MultiAgentDifferentialStrategy({
+        runtime: f.runtime,
+        waitForTarget: async () => {
+          if (phase === "waiting") corrupt();
+        },
+      }).verify(f.input, f.context);
+      expect(result.problems[0]?.code).toBe("workspace_integrity_violation");
+      expect(result.targetAssessment).toBe("inconclusive");
+    },
+  );
+
   it.each([0, 1])(
     "replays generated tests through the actual implementations (delta=%s)",
     async (delta) => {
@@ -232,7 +521,7 @@ describe("independent two-session differential strategy", () => {
     expect(result.problems[0].message).toContain(
       "differs from the submitted snapshot",
     );
-    expect(f.agents).toEqual(["source"]);
+    expect(f.agents).toEqual([]);
   });
   it("rejects source-side pollution of undeclared target helper files before agent2 starts", async () => {
     const f = fixture();
@@ -270,15 +559,19 @@ describe("independent two-session differential strategy", () => {
       });
     },
   );
-  it("does not treat eligibility as authorization to execute an unaccepted reference", async () => {
+  it("does not use legacy Host policy as the strategy's reference decision", async () => {
     const f = fixture();
-    f.input.verificationPolicy!.referenceDecision = "rejected";
+    f.input.verificationPolicy = {
+      referenceDecision: "rejected",
+      reason: "Legacy only",
+    };
     const result = await new MultiAgentDifferentialStrategy({
       runtime: f.runtime,
     }).verify(f.input, f.context);
-    expect(f.agents).toEqual([]);
-    expect(result.sourceAssessment).toBe("not_checked");
-    expect(result.problems[0].code).toBe("insufficient_test_basis");
+    expect(f.agents).toEqual(["source", "target"]);
+    expect(result.mode).toBe("differential");
+    expect(result.referenceDecision).toBe("accepted");
+    expect(result.targetAssessment).toBe("no_bug_observed");
   });
   it("cancels a pending ready barrier and preserves the frozen source artifact", async () => {
     const f = fixture();
@@ -510,6 +803,48 @@ describe("independent two-session differential strategy", () => {
     expect(result.problems[0].code).toBe("report_evidence_invalid");
     expect(f.agents).toEqual(["source", "source"]);
   });
+  it("persists Host command evidence when an Agent throws after execution", async () => {
+    const f = fixture();
+    const controller = new AbortController();
+    f.runtime.runAgent = async (task) => {
+      task.onEvidence?.([
+        {
+          commandId: "interrupted-source",
+          side: "source",
+          cwd: task.sandbox.cwd,
+          command: { executable: "node", args: ["tests/runner.cjs"] },
+          stdout: "partial actual output",
+          stderr: "partial error output",
+          completed: false,
+          exitCode: null,
+          timedOut: false,
+          durationMs: 10,
+          baselineValid: true,
+          credentialHit: false,
+        },
+      ]);
+      controller.abort();
+      throw controller.signal.reason;
+    };
+    const result = await new MultiAgentDifferentialStrategy({
+      runtime: f.runtime,
+    }).verify(f.input, f.context, controller.signal);
+    expect(result.executionStatus).toBe("cancelled");
+    const artifact = result.artifacts.find(
+      (item) => item.kind === "source-agent-session",
+    )!;
+    const session = JSON.parse(
+      readFileSync(join(f.root, "durable", artifact.path), "utf8"),
+    );
+    expect(session.commandEvidence).toMatchObject([
+      {
+        commandId: "interrupted-source",
+        completed: false,
+        stdout: "partial actual output",
+        stderr: "partial error output",
+      },
+    ]);
+  });
   it("retains redacted incremental logs after cancellation", async () => {
     const f = fixture();
     const controller = new AbortController();
@@ -566,7 +901,16 @@ describe("independent two-session differential strategy", () => {
         let nested: unknown = 1;
         for (let i = 0; i < 12; i++) nested = { item: nested };
         manifest.cases = [
-          { caseId: "nested", intent: "nested values", input: nested },
+          {
+            caseId: "nested",
+            intent: "nested values",
+            input: nested,
+            expectation: {
+              kind: "source",
+              rationale: "Preserved identity",
+              provenance: ["analysisReport.applicability"],
+            },
+          },
         ];
         writeFileSync(path, JSON.stringify(manifest));
       }

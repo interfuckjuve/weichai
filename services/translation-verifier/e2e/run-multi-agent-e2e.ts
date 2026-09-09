@@ -3,10 +3,12 @@ import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { applyHunksStrict, newFileContent } from "@forexplore/workflow-core";
+import { prepareFileUploadProjects } from "./run-single-agent-e2e.js";
 import {
-  runManagedProcess,
-  sanitizedBuildEnvironment,
-} from "../src/strategies/smoke-differential/manage-test-process.js";
+  protectedSecrets,
+  redact,
+} from "../src/strategies/multi-agent-differential/behavior-command.js";
+import { persistBehaviorArtifact } from "../src/strategies/multi-agent-differential/behavior-workspace.js";
 import { createVerificationArtifactStore } from "../src/run-output/verification-artifact-store.js";
 import { createVerificationResult } from "../src/schemas/materialize-verification-result.js";
 import { assertVerificationInput } from "../src/schemas/validate-verification-input.js";
@@ -14,6 +16,7 @@ import type {
   VerificationInput,
   VerificationStrategyContext,
   VerificationResult,
+  VerificationStrategyOutput,
 } from "../src/schemas/verification-types.js";
 import {
   MULTI_AGENT_DIFFERENTIAL_STRATEGY,
@@ -42,6 +45,7 @@ export interface MultiAgentE2EDeps {
   input?: VerificationInput;
   /** Explicit test seam; live runs default to the real Maven preflight. */
   prepareProjects?: (input: {
+    sourceRoot: string;
     targetRoot: string;
     deadlineAt: number;
     signal: AbortSignal;
@@ -221,9 +225,10 @@ export async function executeMultiAgentE2E(
       ...(analysis && typeof analysis === "object" && !Array.isArray(analysis)
         ? analysis
         : {}),
-      migrationEligibility: { decision: "eligible" },
+      applicability: { level: "direct" },
     };
   }
+  delete input.verificationPolicy;
   assertVerificationInput(input);
   const root = resolve(
     deps.workspaceRoot ??
@@ -255,6 +260,7 @@ export async function executeMultiAgentE2E(
     if (!options.live) return;
     const startedAt = Date.now();
     let evidence: {
+      commands?: Awaited<ReturnType<typeof prepareFileUploadProjects>>;
       command: string;
       cwd: string;
       durationMs: number;
@@ -268,49 +274,19 @@ export async function executeMultiAgentE2E(
       const deadlineAt = context.deadlineAt;
       if (deps.prepareProjects) {
         evidence = await deps.prepareProjects({
+          sourceRoot,
           targetRoot,
           deadlineAt,
           signal,
         });
       } else {
-        const command = "mvn";
-        const args = ["-B", "-ntp", "-DskipTests", "test-compile"];
-        let stdout = "";
-        try {
-          const result = await runManagedProcess(
-            {
-              command,
-              args,
-              cwd: targetRoot,
-              env: sanitizedBuildEnvironment(),
-              deadlineAt,
-              onStdoutChunk: (chunk) => {
-                if (stdout.length < 1024 * 1024)
-                  stdout += chunk
-                    .toString()
-                    .slice(0, 1024 * 1024 - stdout.length);
-              },
-            },
-            signal,
-          );
-          evidence = {
-            command: [command, ...args].join(" "),
-            cwd: targetRoot,
-            ...result,
-          };
-        } catch (error) {
-          evidence = {
-            command: [command, ...args].join(" "),
-            cwd: targetRoot,
-            durationMs: Date.now() - startedAt,
-            exitCode: null,
-            timedOut:
-              signal.reason instanceof Error &&
-              signal.reason.name === "TimeoutError",
-            stdout,
-            stderr: error instanceof Error ? error.message : String(error),
-          };
-        }
+        const commands = await prepareFileUploadProjects({
+          sourceRoot,
+          targetRoot,
+          deadlineAt,
+          signal,
+        });
+        evidence = { ...commands.at(-1)!, commands };
       }
     } catch (error) {
       evidence = {
@@ -330,7 +306,7 @@ export async function executeMultiAgentE2E(
     const evidencePath = join(strategyRoot, "target-preparation.json");
     await writeFile(
       evidencePath,
-      `${JSON.stringify(evidence, null, 2)}\n`,
+      `${redact(JSON.stringify(evidence, null, 2), protectedSecrets(options.apiKey))}\n`,
       "utf8",
     );
     preparationEvidencePath = evidencePath;
@@ -386,17 +362,44 @@ export async function executeMultiAgentE2E(
     waitForTarget: async (signal) => {
       await deps.waitForTarget?.(signal);
       signal.throwIfAborted();
-      await applyTarget(signal);
     },
   };
-  let output;
+  let output: VerificationStrategyOutput | undefined;
   try {
+    await applyTarget(AbortSignal.timeout(options.timeoutMs));
+  } catch (cause) {
+    const message = redact(
+      cause instanceof Error ? cause.message : String(cause),
+      protectedSecrets(options.apiKey),
+    );
+    const artifact = await persistBehaviorArtifact(
+      context,
+      "project-preparation-failure",
+      { message },
+    );
+    output = {
+      mode: "target_only",
+      referenceDecision: "undetermined",
+      referenceReason:
+        "Project preparation failed before either Agent started.",
+      executionStatus: "failed",
+      sourceAssessment: "not_checked",
+      targetAssessment: "not_checked",
+      problems: [{ code: "environment_unavailable", message }],
+      summary: message,
+      issues: [],
+      artifacts: [artifact],
+      strategyReport: { stage: "preparation", message },
+    };
+  } finally {
+    await preparationPromise?.catch(() => {});
+  }
+  if (!output) {
+    context.deadlineAt = Date.now() + options.timeoutMs;
     output = await new MultiAgentDifferentialStrategy(strategyOptions).verify(
       input,
       context,
     );
-  } finally {
-    await preparationPromise?.catch(() => {});
   }
   const result = createVerificationResult(
     input,

@@ -6,10 +6,23 @@ export interface BehaviorCommand {
   executable: string;
   args: string[];
 }
+export type ReuseClassification = "direct" | "adapt" | "not_applicable";
+export type BehaviorExpectation = {
+  rationale: string;
+  provenance: string[];
+} & (
+  | { kind: "source" }
+  | { kind: "requirement"; expected: BehaviorCaseResult }
+  | { kind: "unresolved" }
+);
 export interface BehaviorCaseInput {
   caseId: string;
   intent: string;
   input: JsonValue;
+  setup?: JsonValue;
+  operations?: JsonValue[];
+  observe?: JsonValue;
+  expectation: BehaviorExpectation;
 }
 export interface BehaviorCaseResult {
   caseId: string;
@@ -18,12 +31,12 @@ export interface BehaviorCaseResult {
   error?: { category: string; message: string };
 }
 export interface BehaviorCollectionManifest {
-  schemaVersion: "2.0";
+  schemaVersion: "3.0";
   cases: BehaviorCaseInput[];
   testFiles: string[];
   resultFile?: string;
   notes: string;
-  commands: { setup: BehaviorCommand[]; run: BehaviorCommand };
+  commands?: { setup: BehaviorCommand[]; run: BehaviorCommand };
 }
 export interface BehaviorTargetManifest {
   schemaVersion: "2.0";
@@ -34,6 +47,7 @@ export interface BehaviorTargetManifest {
 }
 export type BehaviorCaseStatus =
   | "verified-equivalent"
+  | "requirement-satisfied"
   | "translation-divergence"
   | "source-defect"
   | "accepted-difference"
@@ -51,6 +65,8 @@ export interface BehaviorCaseReport {
   caseStatus: BehaviorCaseStatus;
   source: BehaviorCaseResult | null;
   target: BehaviorCaseResult | null;
+  expectation?: BehaviorExpectation;
+  expected?: BehaviorCaseResult;
 }
 export interface BehaviorProcessResult {
   exitCode: number | null;
@@ -114,7 +130,6 @@ export interface BehaviorAgentTask {
   deadlineAt: number;
   signal?: AbortSignal;
 }
-
 export interface BehaviorCommandTask {
   command: BehaviorCommand;
   sandbox: BehaviorExecutionScope;
@@ -125,16 +140,17 @@ export interface BehaviorRuntime {
   runAgent(task: BehaviorAgentTask): Promise<BehaviorAgentResult>;
   runCommand(task: BehaviorCommandTask): Promise<BehaviorProcessResult>;
 }
-
 export interface BehaviorSourceSnapshot {
-  schemaVersion: "2.0";
+  schemaVersion: "3.0";
   subjectHash: string;
   casesHash: string;
   manifest: BehaviorCollectionManifest;
   observations: BehaviorCaseResult[];
 }
 export interface BehaviorReport {
-  schemaVersion: "2.0";
+  schemaVersion: "3.0";
+  classification?: ReuseClassification;
+  sourceExecuted?: boolean;
   stage: "eligibility" | "source" | "waiting-target" | "target" | "comparison";
   caseStatus: BehaviorCaseStatus;
   cases: BehaviorCaseReport[];

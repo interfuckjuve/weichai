@@ -1,12 +1,9 @@
 import { existsSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import {
-  failureAssessment,
-  resolveVerificationPolicy,
-} from "../../schemas/verification-assessment.js";
 import type {
   VerificationArtifact,
+  VerificationAssessment,
   VerificationInput,
   VerificationProblem,
   VerificationStrategy,
@@ -24,6 +21,9 @@ import type {
   BehaviorSide,
   BehaviorTargetManifest,
   BehaviorExecutionScope,
+  ReuseClassification,
+  BehaviorAgentResult,
+  BehaviorCommandRecord,
 } from "./behavior-types.js";
 import {
   parseBehaviorJson,
@@ -43,6 +43,7 @@ import {
   type BehaviorProjectBaseline,
   TEST_DIRECTORY,
   readTestFile,
+  isProjectTestPath,
 } from "./behavior-workspace.js";
 import { createBehaviorRuntime } from "./claude-runtime.js";
 import { protectedSecrets, redact } from "./behavior-command.js";
@@ -50,7 +51,7 @@ import { protectedSecrets, redact } from "./behavior-command.js";
 export const MULTI_AGENT_DIFFERENTIAL_STRATEGY: VerificationStrategyDescriptor =
   {
     id: "multi-agent-differential",
-    version: "2.0.0",
+    version: "3.0.0",
     displayName: "Multi-Agent Differential",
   };
 export interface MultiAgentDifferentialOptions {
@@ -60,7 +61,12 @@ export interface MultiAgentDifferentialOptions {
   maxTurns?: number;
   effort?: string;
   runtime?: BehaviorRuntime;
-  /** Supplied by the caller, never a model poll loop. Absent means input.translation is already materialized. */
+  /** Trusted caller authorization, separate from reference suitability. */
+  executionSides?: BehaviorSide[];
+  /** Read-only readiness notification for an already-prepared target, not a preparation job.
+   * Must not write project files, launch processes, or own resources. The caller joins
+   * all preparation before verify(); cancellation may stop waiting for this notification.
+   */
   waitForTarget?: (signal: AbortSignal) => Promise<void>;
 }
 class BehaviorFailure extends Error {
@@ -95,7 +101,7 @@ export class MultiAgentDifferentialStrategy implements VerificationStrategy {
     );
     const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
     const report: BehaviorReport = {
-      schemaVersion: "2.0",
+      schemaVersion: "3.0",
       stage: "eligibility",
       caseStatus: "not-executed",
       cases: [],
@@ -104,25 +110,39 @@ export class MultiAgentDifferentialStrategy implements VerificationStrategy {
       limitations,
     };
     const artifacts: VerificationArtifact[] = [];
-    const policy = resolveVerificationPolicy(input);
     const measure =
       context.measureStep ??
       (async <T>(_name: string, fn: () => T | Promise<T>) => fn());
     const runtime = this.options.runtime ?? createBehaviorRuntime(this.options);
-    let assessment = failureAssessment(
-      input,
-      "context_incomplete",
-      "Verification has not started.",
-    );
+    let assessment: VerificationAssessment = {
+      mode: "target_only",
+      referenceDecision: "undetermined",
+      referenceReason: "No validated test basis is available.",
+      executionStatus: "failed",
+      sourceAssessment: "not_checked",
+      targetAssessment: "inconclusive",
+      problems: [],
+    };
     try {
       combined.throwIfAborted();
-      assertEligibility(input);
+      report.classification = classifyReuse(input);
+      const allowed = this.options.executionSides ?? ["source", "target"];
+      if (
+        !allowed.includes("target") ||
+        (report.classification === "direct" && !allowed.includes("source"))
+      )
+        throw new BehaviorFailure(
+          "context_incomplete",
+          "not-executed",
+          "Required execution side is not authorized.",
+        );
       assertProjectRoots(context);
       const sourceRoot = context.workspace.sourceRoot;
       const targetRoot = context.workspace.targetRoot;
       const sourceBaseline = captureProjectBaseline(sourceRoot);
       const initialTargetBaseline = captureProjectBaseline(targetRoot);
       assertDeclaredSnapshot(input, sourceRoot, "source");
+      assertDeclaredSnapshot(input, targetRoot, "target");
       report.stage = "source";
       const sourceTestRoot = prepareTestDirectory(sourceRoot);
       const sourceSandbox = {
@@ -150,9 +170,38 @@ export class MultiAgentDifferentialStrategy implements VerificationStrategy {
       );
       const source = collected.manifest as BehaviorCollectionManifest;
       const observations = collected.observations;
+      const hasSource = observations.length > 0;
+      assessment = {
+        ...assessment,
+        mode: hasSource ? "differential" : "target_only",
+        referenceDecision: hasSource ? "accepted" : "rejected",
+        referenceReason: `Analyzer ${report.classification}; frozen cases use ${hasSource ? "replayed source observations and case-specific expectations" : "requirement-derived expectations only"}.`,
+        sourceAssessment: hasSource ? "inconclusive" : "not_checked",
+      };
+      assertTargetTransition(
+        initialTargetBaseline,
+        captureProjectBaseline(targetRoot),
+        new Set(),
+      );
+      const handoffFiles = [
+        ".forexplore-tests/manifest.json",
+        ".forexplore-tests/inputs.json",
+        ...source.testFiles,
+      ].map((path) => ({ path, content: readTestFile(sourceRoot, path) }));
+      const sourceHandoffBaseline = captureProjectBaseline(sourceRoot);
+      const checkHandoff = () => {
+        assertHash(sourceHandoffBaseline);
+        for (const file of handoffFiles)
+          if (readTestFile(sourceRoot, file.path) !== file.content)
+            throw new BehaviorFailure(
+              "workspace_integrity_violation",
+              "workspace-integrity-failed",
+              "Frozen Agent1 handoff changed.",
+            );
+      };
       const frozenCases = JSON.stringify(source.cases);
       report.sourceSnapshot = {
-        schemaVersion: "2.0",
+        schemaVersion: "3.0",
         subjectHash: sourceBaseline.hash,
         casesHash: hashContent(frozenCases),
         manifest: source,
@@ -165,10 +214,11 @@ export class MultiAgentDifferentialStrategy implements VerificationStrategy {
           report.sourceSnapshot,
         ),
       );
-      report.cases = observations.map((item) => ({
+      report.cases = source.cases.map((item) => ({
         caseId: item.caseId,
         caseStatus: "not-executed",
-        source: item,
+        expectation: item.expectation,
+        source: observations.find((row) => row.caseId === item.caseId) ?? null,
         target: null,
       }));
       report.stage = "waiting-target";
@@ -178,13 +228,9 @@ export class MultiAgentDifferentialStrategy implements VerificationStrategy {
           waitForReady(this.options.waitForTarget!, combined),
         );
       combined.throwIfAborted();
-      assertHash(sourceBaseline);
+      checkHandoff();
       const targetBaseline = captureProjectBaseline(targetRoot);
-      assertTargetTransition(
-        initialTargetBaseline,
-        targetBaseline,
-        new Set(input.translation.files.map((file) => file.path)),
-      );
+      assertTargetTransition(initialTargetBaseline, targetBaseline, new Set());
       assertDeclaredSnapshot(input, targetRoot, "target");
       report.targetSubjectHash = targetBaseline.hash;
       report.patchHash = input.translation.patchHash;
@@ -208,7 +254,7 @@ export class MultiAgentDifferentialStrategy implements VerificationStrategy {
           deadlineAt,
           combined,
           () => {
-            assertHash(sourceBaseline);
+            checkHandoff();
             assertHash(targetBaseline);
             assertDeclaredSnapshot(input, sourceRoot, "source");
             assertDeclaredSnapshot(input, targetRoot, "target");
@@ -217,29 +263,41 @@ export class MultiAgentDifferentialStrategy implements VerificationStrategy {
       );
       const targetObservations = verified.observations;
       report.stage = "comparison";
-      report.cases = observations.map((item) => {
+      report.cases = source.cases.map((item) => {
+        const sourceCase =
+          observations.find((row) => row.caseId === item.caseId) ?? null;
         const targetCase = targetObservations.find(
-          (other) => other.caseId === item.caseId,
+          (row) => row.caseId === item.caseId,
         )!;
+        const expected =
+          item.expectation.kind === "requirement"
+            ? item.expectation.expected
+            : sourceCase!;
         return {
           caseId: item.caseId,
-          source: item,
+          expectation: item.expectation,
+          expected,
+          source: sourceCase,
           target: targetCase,
-          caseStatus: isDeepStrictEqual(item, targetCase)
-            ? "verified-equivalent"
-            : "translation-divergence",
+          caseStatus: !isDeepStrictEqual(expected, targetCase)
+            ? "translation-divergence"
+            : item.expectation.kind === "source"
+              ? "verified-equivalent"
+              : "requirement-satisfied",
         };
       });
       report.caseStatus = report.cases.some(
         (item) => item.caseStatus === "translation-divergence",
       )
         ? "translation-divergence"
-        : "verified-equivalent";
-      const { testBasis: _testBasis, ...policyFields } = policy;
+        : report.cases.some(
+              (item) => item.caseStatus === "requirement-satisfied",
+            )
+          ? "requirement-satisfied"
+          : "verified-equivalent";
       assessment = {
-        ...policyFields,
+        ...assessment,
         executionStatus: "completed",
-        sourceAssessment: "inconclusive",
         targetAssessment:
           report.caseStatus === "translation-divergence"
             ? "bug_found"
@@ -251,7 +309,12 @@ export class MultiAgentDifferentialStrategy implements VerificationStrategy {
       report.caseStatus = failure.caseStatus;
       for (const item of report.cases)
         if (item.target === null) item.caseStatus = failure.caseStatus;
-      assessment = failureAssessment(input, failure.code, failure.message);
+      assessment = {
+        ...assessment,
+        executionStatus: failure.code === "cancelled" ? "cancelled" : "failed",
+        targetAssessment: "inconclusive",
+        problems: [{ code: failure.code, message: failure.message }],
+      };
     }
     const artifact = await persistBehaviorArtifact(
       context,
@@ -270,7 +333,7 @@ export class MultiAgentDifferentialStrategy implements VerificationStrategy {
             kind: "behavioral-divergence",
             caseId: item.caseId,
             message:
-              "Target observation differs from the accepted source record. Return this evidence to the upstream translator; no repair was attempted.",
+              "Target observation differs from the frozen case-specific expectation. Return this evidence to the upstream translator; no repair was attempted.",
             sourceObservation: parseBehaviorJson(JSON.stringify(item.source)),
             targetObservation: parseBehaviorJson(JSON.stringify(item.target)),
             evidenceArtifactIds: artifacts.map(({ id }) => id),
@@ -335,6 +398,48 @@ export class MultiAgentDifferentialStrategy implements VerificationStrategy {
         if (side === "source") {
           const collectedCases = (manifest as BehaviorCollectionManifest).cases;
           if (
+            collectedCases.some(
+              (item) => item.expectation.kind === "unresolved",
+            )
+          )
+            throw new BehaviorFailure(
+              "insufficient_test_basis",
+              "not-executed",
+              "Required case expectations remain unresolved.",
+            );
+          const hasSource = collectedCases.some(
+            (item) => item.expectation.kind === "source",
+          );
+          if (
+            (report.classification === "direct" &&
+              collectedCases.some(
+                (item) => item.expectation.kind !== "source",
+              )) ||
+            (report.classification === "not_applicable" && hasSource)
+          )
+            throw new BehaviorFailure(
+              "insufficient_test_basis",
+              "not-executed",
+              "Case expectation basis contradicts the selected reuse classification.",
+            );
+          if (!hasSource && report.sourceExecuted)
+            throw new BehaviorFailure(
+              "report_evidence_invalid",
+              "input-invalid",
+              "Design-only collection cannot hide source execution.",
+            );
+          if (
+            hasSource &&
+            !(this.options.executionSides ?? ["source", "target"]).includes(
+              "source",
+            )
+          )
+            throw new BehaviorFailure(
+              "context_incomplete",
+              "not-executed",
+              "Source replay is not authorized.",
+            );
+          if (
             frozenCases !== undefined &&
             JSON.stringify(collectedCases) !== frozenCases
           )
@@ -358,6 +463,12 @@ export class MultiAgentDifferentialStrategy implements VerificationStrategy {
             "workspace-integrity-failed",
             "Frozen inputs changed.",
           );
+        const replayCases =
+          side === "source"
+            ? cases!.filter((item) => item.expectation.kind === "source")
+            : cases!;
+        if (!replayCases.length) return { manifest, observations: [] };
+        if (side === "source") report.sourceExecuted = true;
         const stdout = await executeManifest(
           manifest,
           side,
@@ -376,7 +487,7 @@ export class MultiAgentDifferentialStrategy implements VerificationStrategy {
             manifest,
             observations: parseObservations(
               stdout,
-              cases!.map((item) => item.caseId),
+              replayCases.map((item) => item.caseId),
             ),
           };
         } catch (cause) {
@@ -433,6 +544,7 @@ export class MultiAgentDifferentialStrategy implements VerificationStrategy {
         input,
         side,
         side === "target" ? report.sourceSnapshot?.manifest.cases : undefined,
+        report.classification,
       ) +
       (side === "target"
         ? `\n<source-collection-context>\n${JSON.stringify({ notes: report.sourceSnapshot?.manifest.notes, testFiles: report.sourceSnapshot?.manifest.testFiles, subjectHash: report.sourceSnapshot?.subjectHash, observations: report.sourceSnapshot?.observations })}\n</source-collection-context>`
@@ -442,11 +554,26 @@ export class MultiAgentDifferentialStrategy implements VerificationStrategy {
         : "");
     const sessionId = `${side}-agent${attempt ? `-repair-${attempt}` : ""}`;
     let partialOutput = "";
-    let result;
+    let result: BehaviorAgentResult | undefined;
+    let commandEvidence: BehaviorCommandRecord[] = [];
+    let sessionError: string | undefined;
     try {
       result = await runtime.runAgent({
         side,
         sandbox,
+        executionSides:
+          side === "source"
+            ? report.classification === "not_applicable"
+              ? []
+              : (this.options.executionSides ?? ["source", "target"]).filter(
+                  (value) => value === "source",
+                )
+            : ["target"],
+        onEvidence: (records) => {
+          commandEvidence = records;
+          if (records.some((record) => record.side === "source"))
+            report.sourceExecuted = true;
+        },
         prompt,
         deadlineAt,
         signal,
@@ -459,25 +586,36 @@ export class MultiAgentDifferentialStrategy implements VerificationStrategy {
           );
         },
       });
+      commandEvidence = result.commandEvidence ?? commandEvidence;
     } catch (cause) {
+      sessionError = errorText(cause);
+      throw cause;
+    } finally {
       artifacts.push(
         await persistBehaviorArtifact(context, `${sessionId}-session`, {
           side,
           prompt,
-          stdout: partialOutput,
-          error: errorText(cause),
-          interrupted: true,
+          ...(result ?? {
+            stdout: partialOutput,
+            error: sessionError,
+            interrupted: true,
+          }),
+          commandEvidence,
         }),
       );
-      throw cause;
     }
-    artifacts.push(
-      await persistBehaviorArtifact(context, `${sessionId}-session`, {
-        side,
-        prompt,
-        ...result,
-      }),
-    );
+    if (commandEvidence.some((record) => record.side === "source"))
+      report.sourceExecuted = true;
+    if (
+      side === "source" &&
+      report.classification === "not_applicable" &&
+      commandEvidence.length
+    )
+      throw new BehaviorFailure(
+        "report_evidence_invalid",
+        "input-invalid",
+        "Design-only Agent1 executed a command.",
+      );
     signal.throwIfAborted();
     if (result.timedOut)
       throw new BehaviorFailure(
@@ -498,10 +636,20 @@ export class MultiAgentDifferentialStrategy implements VerificationStrategy {
         side === "source"
           ? parseCollectionManifest(text)
           : parseTargetManifest(text);
-      const files = manifest.testFiles.map((path) => ({
-        path,
-        content: readTestFile(sandbox.cwd, path),
-      }));
+      const files = manifest.testFiles.map((path) => {
+        if (
+          !isProjectTestPath(path) ||
+          Object.hasOwn(sandbox.baseline?.files ?? {}, path) ||
+          [
+            ".forexplore-tests/manifest.json",
+            ".forexplore-tests/inputs.json",
+          ].includes(path)
+        )
+          throw new Error(
+            "Manifest must identify newly authored project test files.",
+          );
+        return { path, content: readTestFile(sandbox.cwd, path) };
+      });
       artifacts.push(
         await persistBehaviorArtifact(
           context,
@@ -548,30 +696,25 @@ function agentFailureSummary(stdout: string, stderr: string): string {
   return stderr.slice(-2000);
 }
 
-function assertEligibility(input: VerificationInput): void {
-  const analysis = input.analysisReport;
-  const eligibility =
-    analysis && typeof analysis === "object" && !Array.isArray(analysis)
-      ? analysis.migrationEligibility
-      : null;
-  if (
-    !eligibility ||
-    typeof eligibility !== "object" ||
-    Array.isArray(eligibility) ||
-    eligibility.decision !== "eligible"
-  )
-    throw new BehaviorFailure(
-      "context_incomplete",
-      "not-executed",
-      "An explicit upstream migrationEligibility.decision=eligible is required. No agent was started.",
-    );
-  const policy = resolveVerificationPolicy(input);
-  if (policy.referenceDecision !== "accepted" || !policy.testBasis?.trim())
-    throw new BehaviorFailure(
-      "insufficient_test_basis",
-      "not-executed",
-      "An accepted reference and explicit test basis are required. This strategy does not perform target-only validation.",
-    );
+function classifyReuse(input: VerificationInput): ReuseClassification {
+  const report = input.analysisReport;
+  const applicability =
+    report && typeof report === "object" && !Array.isArray(report)
+      ? report.applicability
+      : undefined;
+  const level =
+    applicability &&
+    typeof applicability === "object" &&
+    !Array.isArray(applicability)
+      ? applicability.level
+      : undefined;
+  if (level === "direct" || level === "adapt") return level;
+  if (level === "reference" || level === "reject") return "not_applicable";
+  throw new BehaviorFailure(
+    "context_incomplete",
+    "not-executed",
+    "An explicit analysisReport.applicability.level of direct, adapt, reference, or reject is required. No agent was started.",
+  );
 }
 function assertTargetTransition(
   before: BehaviorProjectBaseline,
@@ -651,7 +794,7 @@ async function waitForReady(
   }
 }
 async function executeManifest(
-  manifest: BehaviorTargetManifest,
+  manifest: BehaviorTargetManifest | BehaviorCollectionManifest,
   side: BehaviorSide,
   sandbox: BehaviorExecutionScope,
   inputsPath: string,
@@ -662,6 +805,12 @@ async function executeManifest(
   attempt = 0,
   secrets = protectedSecrets(),
 ): Promise<string> {
+  if (!manifest.commands)
+    throw new BehaviorFailure(
+      "insufficient_test_basis",
+      "not-executed",
+      "Missing executable test commands.",
+    );
   const commands = [
     ...manifest.commands.setup,
     {

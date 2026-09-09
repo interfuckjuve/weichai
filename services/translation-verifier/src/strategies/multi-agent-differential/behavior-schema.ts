@@ -47,9 +47,11 @@ const properties = {
 export const collectionManifestSchema = {
   type: "object",
   additionalProperties: false,
-  required: ["schemaVersion", "testFiles", "notes", "commands", "cases"],
+  required: ["schemaVersion", "testFiles", "notes", "cases"],
   properties: {
     ...properties,
+    schemaVersion: { const: "3.0" },
+    testFiles: { ...properties.testFiles, minItems: 0 },
     cases: {
       type: "array",
       minItems: 1,
@@ -57,11 +59,41 @@ export const collectionManifestSchema = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["caseId", "intent", "input"],
+        required: ["caseId", "intent", "input", "expectation"],
         properties: {
           caseId: { type: "string", pattern: "^[a-zA-Z0-9_-]{1,100}$" },
           intent: { type: "string", minLength: 1, maxLength: 4000 },
           input: {},
+          setup: {},
+          operations: { type: "array", maxItems: 100, items: {} },
+          observe: {},
+          expectation: {
+            type: "object",
+            additionalProperties: false,
+            required: ["kind", "rationale", "provenance"],
+            properties: {
+              kind: { enum: ["source", "requirement", "unresolved"] },
+              rationale: { type: "string", pattern: "\\S", maxLength: 4000 },
+              provenance: {
+                type: "array",
+                minItems: 1,
+                maxItems: 100,
+                uniqueItems: true,
+                items: { type: "string", pattern: "\\S", maxLength: 4000 },
+              },
+              expected: { type: "object" },
+            },
+            oneOf: [
+              {
+                properties: { kind: { const: "requirement" } },
+                required: ["expected"],
+              },
+              {
+                properties: { kind: { enum: ["source", "unresolved"] } },
+                not: { required: ["expected"] },
+              },
+            ],
+          },
         },
       },
     },
@@ -159,6 +191,22 @@ export function parseCollectionManifest(
     new Set(value.cases.map((item) => item.caseId)).size !== value.cases.length
   )
     throw new Error("Duplicate caseId.");
+  for (const item of value.cases) {
+    if (item.expectation.kind === "requirement")
+      parseObservations(JSON.stringify([item.expectation.expected]), [
+        item.caseId,
+      ]);
+  }
+  const sourceCases = value.cases.some(
+    (item) => item.expectation.kind === "source",
+  );
+  if (sourceCases && (!value.commands || !value.testFiles.length))
+    throw new Error("Source expectations require executable source tests.");
+  if (
+    !sourceCases &&
+    (value.commands || value.testFiles.length || value.resultFile)
+  )
+    throw new Error("Design-only collections cannot declare source execution.");
   return normalizeTestFiles(value);
 }
 export function parseTargetManifest(text: string): BehaviorTargetManifest {
@@ -169,7 +217,9 @@ export function parseTargetManifest(text: string): BehaviorTargetManifest {
     );
   return normalizeTestFiles(value);
 }
-function normalizeTestFiles<T extends BehaviorTargetManifest>(manifest: T): T {
+function normalizeTestFiles<
+  T extends Pick<BehaviorTargetManifest, "testFiles" | "resultFile">,
+>(manifest: T): T {
   for (const path of manifest.testFiles) {
     if (
       path.startsWith("/") ||

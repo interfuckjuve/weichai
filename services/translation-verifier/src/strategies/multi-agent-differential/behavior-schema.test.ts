@@ -27,10 +27,21 @@ afterEach(() => {
     rmSync(dir, { recursive: true, force: true });
 });
 const manifest = () => ({
-  schemaVersion: "2.0",
+  schemaVersion: "3.0",
   notes: "Uses real project tests.",
   testFiles: ["tests/runner.py"],
-  cases: [{ caseId: "one", intent: "empty input", input: {} }],
+  cases: [
+    {
+      caseId: "one",
+      intent: "empty input",
+      input: {},
+      expectation: {
+        kind: "source",
+        rationale: "Retain behavior",
+        provenance: ["analysisReport.applicability"],
+      },
+    },
+  ],
   commands: {
     setup: [],
     run: { executable: "python3", args: [".forexplore-tests/runner.py"] },
@@ -83,7 +94,49 @@ describe("behavior JSON boundaries", () => {
     );
   });
   it("rejects target manifests that attempt to redefine frozen cases", () => {
-    expect(() => parseTargetManifest(JSON.stringify(manifest()))).toThrow();
+    expect(() =>
+      parseTargetManifest(
+        JSON.stringify({ ...manifest(), schemaVersion: "2.0" }),
+      ),
+    ).toThrow();
+  });
+  it("rejects v2 collections instead of silently assigning provenance", () => {
+    expect(() =>
+      parseCollectionManifest(
+        JSON.stringify({ ...manifest(), schemaVersion: "2.0" }),
+      ),
+    ).toThrow();
+  });
+  it("accepts design-only requirement exceptions but rejects unbound expected case IDs", () => {
+    const collection = {
+      schemaVersion: "3.0",
+      notes: "Target contract",
+      testFiles: [],
+      cases: [
+        {
+          caseId: "bad",
+          intent: "Reject invalid input",
+          input: null,
+          expectation: {
+            kind: "requirement",
+            rationale: "Required error",
+            provenance: ["request.requirement"],
+            expected: {
+              caseId: "bad",
+              outcome: "exception",
+              error: { category: "invalid-input", message: "invalid" },
+            },
+          },
+        },
+      ],
+    };
+    expect(
+      parseCollectionManifest(JSON.stringify(collection)).testFiles,
+    ).toEqual([]);
+    collection.cases[0].expectation.expected.caseId = "forged";
+    expect(() => parseCollectionManifest(JSON.stringify(collection))).toThrow(
+      "exactly once",
+    );
   });
   it("requires each actual observation exactly once and validates outcome payloads", () => {
     const good = [{ caseId: "one", outcome: "return", value: null }];

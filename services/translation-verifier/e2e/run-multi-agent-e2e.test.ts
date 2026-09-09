@@ -29,9 +29,18 @@ const runtime: BehaviorRuntime = {
       JSON.stringify(
         task.side === "source"
           ? {
-              schemaVersion: "2.0",
+              schemaVersion: "3.0",
               cases: [
-                { caseId: "case-1", intent: "body", input: { body: "YWJj" } },
+                {
+                  caseId: "case-1",
+                  intent: "body",
+                  input: { body: "YWJj" },
+                  expectation: {
+                    kind: "source",
+                    rationale: "Preserve body transfer",
+                    provenance: ["analysisReport.applicability"],
+                  },
+                },
               ],
               testFiles: [".forexplore-tests/harness.json"],
               resultFile: ".forexplore-tests/observations.json",
@@ -276,7 +285,7 @@ describe("multi-agent differential E2E", () => {
         },
       },
     );
-    expect(events).toEqual(["agent-source", "prepare", "agent-target"]);
+    expect(events).toEqual(["prepare", "agent-source", "agent-target"]);
     expect(targetSawInputs).toBe(true);
     expect(result.preparationEvidencePath).toBeDefined();
     expect(
@@ -297,7 +306,7 @@ describe("multi-agent differential E2E", () => {
     ).toBeTruthy();
   });
 
-  it("stops agent2 when live target preparation fails", async () => {
+  it("stops both agents when project preparation fails", async () => {
     const paths = await roots();
     const sides: string[] = [];
     const result = await executeMultiAgentE2E(
@@ -328,8 +337,8 @@ describe("multi-agent differential E2E", () => {
         }),
       },
     );
-    expect(sides).toEqual(["source"]);
-    expect(result.result.targetAssessment).toBe("inconclusive");
+    expect(sides).toEqual([]);
+    expect(result.result.targetAssessment).toBe("not_checked");
     expect(result.result.problems[0]?.code).toBe("environment_unavailable");
     expect(
       JSON.parse(await readFile(result.preparationEvidencePath!, "utf8")),
@@ -408,7 +417,7 @@ describe("multi-agent differential E2E", () => {
     ).rejects.toThrow("explicit prepareProjects seam");
     expect(started).toBe(false);
   });
-  it("fails closed for an ineligible input before starting agents", async () => {
+  it("fails closed for invalid classification before starting agents", async () => {
     expect(
       parseMultiAgentArgs(["--strategy", "multi-agent-differential", "--live"]),
     ).toMatchObject({ live: true });
@@ -424,7 +433,7 @@ describe("multi-agent differential E2E", () => {
     const input = fileUploadInput("correct", "multipart-read-body");
     input.analysisReport = {
       scope: "test",
-      migrationEligibility: { decision: "ineligible" },
+      applicability: { level: "invalid" },
     };
     const result = await executeMultiAgentE2E(
       {
