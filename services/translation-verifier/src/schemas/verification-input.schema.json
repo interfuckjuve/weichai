@@ -106,7 +106,7 @@
     },
     "verificationPolicy": {
       "type": "object",
-      "description": "Host-owned reference trust decision and independent test basis. Omission never authorizes source execution.",
+      "description": "Legacy strategy-specific reference decision and test basis. Resource access and autonomous strategy decisions are configured separately by the Host and selected strategy.",
       "required": [
         "referenceDecision",
         "reason"

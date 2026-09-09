@@ -96,8 +96,22 @@ export interface VerificationResult
       "issues" | "artifacts" | "strategyReport"
     > {}
 
+export interface VerificationPreparedProjects {
+  /** Explicitly authorized independent copies. The caller owns cleanup and supplies the translated target. */
+  sourceRoot?: string;
+  targetRoot: string;
+}
+
+export interface VerificationRunOptions {
+  strategyId?: string;
+  keepWorkspace?: boolean;
+  preparedProjects?: VerificationPreparedProjects;
+}
+
 export interface VerificationStrategyContext {
   workspace: {
+    /** Cleanup ownership of project roots only; root/evidence remain framework-owned. */
+    projectOwnership?: "framework" | "caller";
     root: string;
     sourceRoot: string;
     targetRoot: string;
@@ -120,8 +134,17 @@ export interface VerificationStrategy {
   ): Promise<VerificationStrategyOutput>;
 }
 
+export interface VerificationWorkspaceRequirements {
+  /** Resource availability for analysis, not authorization to trust source behavior. */
+  source: boolean;
+}
+
 export interface VerificationStrategyProvider {
   descriptor: VerificationStrategyDescriptor;
+  /** Pure declaration evaluated before workspace preparation; must not create an Agent. */
+  workspaceRequirements?(
+    input: VerificationInput,
+  ): VerificationWorkspaceRequirements;
   create(): VerificationStrategy;
 }
 

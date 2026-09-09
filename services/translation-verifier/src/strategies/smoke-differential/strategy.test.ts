@@ -49,6 +49,96 @@ afterEach(() => {
 });
 
 describe("DifferentialSmokeStrategy", () => {
+  it("rejects caller-prepared projects through the service before smoke execution", async () => {
+    const value = input();
+    const sourceRoot = join(root, "prepared-source");
+    const targetRoot = join(root, "prepared-target");
+    mkdirSync(join(sourceRoot, "src"), { recursive: true });
+    mkdirSync(join(targetRoot, "src"), { recursive: true });
+    const sourceFile = value.request.sourceBundle.files[0]!;
+    writeFileSync(join(sourceRoot, sourceFile.path), sourceFile.content);
+    writeFileSync(
+      join(targetRoot, "src/Target.cs"),
+      value.translation.generatedContent,
+    );
+    const fakeRunSmoke = vi.fn(async () => ({
+      ...validAssessment(),
+      summary: "same",
+      durationMs: 0,
+      report: validSmokeReport(),
+    }));
+    const receipt = await createDefaultVerificationService({
+      workspaceRoot: join(root, "workspaces"),
+      artifactRoot: join(root, "artifacts"),
+      runSmokeImpl: fakeRunSmoke,
+    }).verifyWithReceipt(value, {
+      preparedProjects: { sourceRoot, targetRoot },
+    });
+    expect(receipt.result.executionStatus).toBe("failed");
+    expect(receipt.result.targetAssessment).toBe("inconclusive");
+    expect(receipt.result.problems).toContainEqual(
+      expect.objectContaining({
+        code: "context_incomplete",
+        message: expect.stringContaining("prepared projects are not supported"),
+      }),
+    );
+    expect(receipt.resultArtifact).toBeDefined();
+    expect(fakeRunSmoke).not.toHaveBeenCalled();
+    expect(readFileSync(join(sourceRoot, sourceFile.path), "utf8")).toBe(
+      sourceFile.content,
+    );
+    expect(readFileSync(join(targetRoot, "src/Target.cs"), "utf8")).toBe(
+      value.translation.generatedContent,
+    );
+  });
+
+  it.each([
+    "sourceRoot",
+    "targetRoot",
+    "strategyRoot",
+    "evidenceRoot",
+  ] as const)(
+    "rejects a %s outside the legacy baseline layout even without ownership metadata",
+    async (field) => {
+      const workspace = context();
+      workspace.workspace[field] = join(root, "external");
+      mkdirSync(workspace.workspace[field]);
+      const fakeRunSmoke = vi.fn(async () => ({
+        ...validAssessment(),
+        summary: "same",
+        durationMs: 0,
+        report: validSmokeReport(),
+      }));
+      const result = await new DifferentialSmokeStrategy({
+        runSmokeImpl: fakeRunSmoke,
+      }).verify(input(), workspace);
+      expect(result.executionStatus).toBe("failed");
+      expect(result.problems).toContainEqual(
+        expect.objectContaining({ code: "context_incomplete" }),
+      );
+      expect(fakeRunSmoke).not.toHaveBeenCalled();
+      expect(existsSync(join(workspace.workspace.root, "baseline.json"))).toBe(
+        false,
+      );
+      expect(workspace.writeArtifact).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps legacy Host-policy equality inside smoke", async () => {
+    const strategy = new DifferentialSmokeStrategy({
+      runSmokeImpl: async () => ({
+        ...validAssessment(),
+        referenceReason: "Agent substituted a different reference reason",
+        summary: "same",
+        durationMs: 0,
+        report: validSmokeReport(),
+      }),
+    });
+    await expect(strategy.verify(input(), context())).rejects.toThrow(
+      "Host reference decision",
+    );
+  });
+
   it.each([
     [10_000, 5000],
     [500, 1500],
@@ -490,6 +580,7 @@ describe("createDefaultVerificationService", () => {
           );
           return { stdout: "done", exitCode: 0 };
         },
+        shutdownTimeoutMs: 100,
         runSmokeImpl: async (...args) =>
           recording.measureStep("run-agent-session", async () => {
             try {
@@ -513,6 +604,12 @@ describe("createDefaultVerificationService", () => {
             result: {
               executionStatus: "cancelled",
               targetAssessment: "inconclusive",
+              problems: expect.arrayContaining([
+                expect.objectContaining({
+                  code: "internal_error",
+                  message: expect.stringContaining("cleanup skipped"),
+                }),
+              ]),
             },
           });
         } else {

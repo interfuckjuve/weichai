@@ -17,7 +17,12 @@ import type {
 
 export type StrategyExecutionOutcome =
   | { kind: "output"; output: VerificationStrategyOutput }
-  | { kind: "failure"; error: unknown; discardArtifacts: boolean };
+  | {
+      kind: "failure";
+      error: unknown;
+      discardArtifacts: boolean;
+      shutdownConfirmed: boolean;
+    };
 
 export async function runStrategy(
   provider: VerificationStrategyProvider,
@@ -26,15 +31,24 @@ export async function runStrategy(
   signal: AbortSignal,
   writtenArtifacts: () => VerificationArtifact[],
   callerSignal?: AbortSignal,
+  shutdownTimeoutMs = 5_000,
 ): Promise<StrategyExecutionOutcome> {
   try {
     signal.throwIfAborted();
     const strategy = provider.create();
     signal.throwIfAborted();
-    const rawOutput = await waitForStrategy(
+    const settled = await waitForStrategy(
       strategy.verify(input, context, signal),
       signal,
+      shutdownTimeoutMs,
     );
+    if (!settled.confirmed) {
+      return {
+        ...strategyExecutionFailure(signal.reason, callerSignal),
+        shutdownConfirmed: false,
+      };
+    }
+    const rawOutput = settled.value;
     markVerificationPhase("result-normalization-and-artifact-validation");
     const output = normalizeVerificationStrategyOutput(input, rawOutput);
     if (signal.aborted || callerSignal?.aborted) {
@@ -93,6 +107,7 @@ export function strategyExecutionFailure(
     kind: "failure",
     error: callerSignal?.aborted ? callerCancellation(callerSignal) : error,
     discardArtifacts: error instanceof VerificationArtifactPersistenceError,
+    shutdownConfirmed: true,
   };
 }
 
@@ -108,7 +123,8 @@ function callerCancellation(signal: AbortSignal): DOMException {
 function waitForStrategy<T>(
   strategyPromise: Promise<T>,
   signal: AbortSignal,
-): Promise<T> {
+  shutdownTimeoutMs: number,
+): Promise<{ confirmed: true; value: T } | { confirmed: false }> {
   // Always consume the promise, including synchronous caller cancellation during verify().
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -121,21 +137,15 @@ function waitForStrategy<T>(
       callback();
     };
     const onAbort = (): void => {
-      // Allow cooperative strategies to validate and persist partial reports, without waiting indefinitely.
+      // Expiry ends the Host wait, not the strategy's resource ownership.
       abortTimer ??= setTimeout(
-        () =>
-          finish(() =>
-            reject(
-              signal.reason ??
-                new DOMException("This operation was aborted", "AbortError"),
-            ),
-          ),
-        250,
+        () => finish(() => resolve({ confirmed: false })),
+        shutdownTimeoutMs,
       );
     };
     signal.addEventListener("abort", onAbort, { once: true });
     strategyPromise.then(
-      (value) => finish(() => resolve(value)),
+      (value) => finish(() => resolve({ confirmed: true, value })),
       (error: unknown) => finish(() => reject(error)),
     );
     if (signal.aborted) onAbort();

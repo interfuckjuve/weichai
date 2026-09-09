@@ -18,7 +18,7 @@ describe("translation-verifier entry", () => {
     type Receipt = packageVerifier.VerificationReceipt;
     type VerifyArgs = [
       Input,
-      { strategyId?: string; keepWorkspace?: boolean }?,
+      packageVerifier.VerificationRunOptions?,
       AbortSignal?,
     ];
     expectTypeOf<packageVerifier.VerificationService["verify"]>().toEqualTypeOf<

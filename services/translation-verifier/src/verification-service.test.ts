@@ -64,6 +64,274 @@ afterEach(() => {
 });
 
 describe("VerificationService", () => {
+  it("lets strategy resource requirements disclose source context without accepting a reference", async () => {
+    const p = provider("autonomous", async (value, context) => {
+      expect(
+        readFileSync(
+          join(context.workspace.sourceRoot, "src/source.ts"),
+          "utf8",
+        ),
+      ).toBe(sourceContent);
+      return okResult(value, descriptor("autonomous"));
+    });
+    const receipt = await serviceWith([p], "autonomous").verifyWithReceipt(
+      input(),
+    );
+    expect(receipt.result.executionStatus).toBe("completed");
+    expect(receipt.resultArtifact).toBeDefined();
+  });
+
+  it("persists a strategy-owned reference decision without a Host test basis", async () => {
+    const receipt = await serviceWith(
+      [
+        provider("autonomous", async () => ({
+          ...reportAssessment(),
+          mode: "differential",
+          referenceDecision: "accepted",
+          referenceReason:
+            "The strategy inspected the supplied requirements and source behavior.",
+          sourceAssessment: "inconclusive",
+          summary: "observations agree",
+          issues: [],
+          artifacts: [],
+          strategyReport: { basis: "Requirement: return one" },
+        })),
+      ],
+      "autonomous",
+    ).verifyWithReceipt(input());
+    expect(receipt.result).toMatchObject({
+      executionStatus: "completed",
+      mode: "differential",
+      referenceDecision: "accepted",
+    });
+    expect(receipt.resultArtifact).toBeDefined();
+    expect(() =>
+      assertVerificationReceipt(receipt, input(), descriptor("autonomous")),
+    ).not.toThrow();
+  });
+
+  it("uses caller-prepared project roots without reapplying patches or cleaning their contents", async () => {
+    const sourceRoot = join(root, "prepared-source");
+    const targetRoot = join(root, "prepared-target");
+    mkdirSync(join(sourceRoot, "src"), { recursive: true });
+    mkdirSync(join(targetRoot, "src"), { recursive: true });
+    writeFileSync(join(sourceRoot, "src/source.ts"), sourceContent);
+    writeFileSync(join(targetRoot, "src/target.py"), translatedTargetContent);
+    writeFileSync(join(targetRoot, "fixture.bin"), Buffer.from([0, 1, 255]));
+    let attemptRoot = "";
+    const p = provider("prepared", async (value, context) => {
+      attemptRoot = context.workspace.root;
+      expect(context.workspace.sourceRoot).toBe(sourceRoot);
+      expect(context.workspace.targetRoot).toBe(targetRoot);
+      expect(context.workspace.projectOwnership).toBe("caller");
+      expect(readFileSync(join(targetRoot, "fixture.bin"))).toEqual(
+        Buffer.from([0, 1, 255]),
+      );
+      return okResult(value, descriptor("prepared"));
+    });
+    const receipt = await serviceWith([p], "prepared").verifyWithReceipt(
+      input(),
+      {
+        preparedProjects: { sourceRoot, targetRoot },
+      },
+    );
+    expect(receipt.result.executionStatus, receipt.result.summary).toBe(
+      "completed",
+    );
+    expect(receipt.resultArtifact).toBeDefined();
+    expect(existsSync(attemptRoot)).toBe(false);
+    expect(readFileSync(join(targetRoot, "src/target.py"), "utf8")).toBe(
+      translatedTargetContent,
+    );
+    expect(readFileSync(join(sourceRoot, "src/source.ts"), "utf8")).toBe(
+      sourceContent,
+    );
+  });
+
+  it.each([
+    "source-mismatch",
+    "target-mismatch",
+    "missing-source",
+    "same-roots",
+    "nested-roots",
+    "storage-overlap",
+    "symlink-file",
+    "hardlink-file",
+  ] as const)(
+    "rejects invalid prepared projects (%s) before strategy creation and preserves caller files",
+    async (violation) => {
+      const sourceRoot = join(root, "prepared-source");
+      let targetRoot = join(root, "prepared-target");
+      mkdirSync(join(sourceRoot, "src"), { recursive: true });
+      mkdirSync(join(targetRoot, "src"), { recursive: true });
+      const sourceFile = join(sourceRoot, "src/source.ts");
+      writeFileSync(sourceFile, sourceContent);
+      writeFileSync(join(targetRoot, "src/target.py"), translatedTargetContent);
+      if (violation === "source-mismatch") writeFileSync(sourceFile, "wrong");
+      if (violation === "target-mismatch")
+        writeFileSync(join(targetRoot, "src/target.py"), originalTargetContent);
+      if (violation === "same-roots") targetRoot = sourceRoot;
+      if (violation === "nested-roots") {
+        targetRoot = join(sourceRoot, "nested");
+        mkdirSync(targetRoot);
+      }
+      if (violation === "storage-overlap") {
+        targetRoot = workspaceRoot;
+        mkdirSync(targetRoot);
+      }
+      if (violation === "symlink-file" || violation === "hardlink-file") {
+        const original = join(root, "original.ts");
+        writeFileSync(original, sourceContent);
+        rmSync(sourceFile);
+        if (violation === "symlink-file") fs.symlinkSync(original, sourceFile);
+        else fs.linkSync(original, sourceFile);
+      }
+      const p = provider("prepared");
+      const create = vi.spyOn(p, "create");
+      const receipt = await serviceWith([p], "prepared").verifyWithReceipt(
+        input(),
+        {
+          preparedProjects: {
+            ...(violation === "missing-source" ? {} : { sourceRoot }),
+            targetRoot,
+          },
+        },
+      );
+      expect(receipt.result.executionStatus).toBe("failed");
+      expect(receipt.result.referenceDecision).toBe("undetermined");
+      expect(create).not.toHaveBeenCalled();
+      expect(existsSync(sourceFile)).toBe(true);
+      expect(existsSync(targetRoot)).toBe(true);
+      expect(receipt.resultArtifact).toBeDefined();
+    },
+  );
+
+  it.each(["artifacts", "workspaces", "requirements-failure"] as const)(
+    "does not write into a prepared project when %s storage overlaps it",
+    async (storage) => {
+      const sourceRoot = join(root, "prepared-source");
+      const targetRoot = join(root, "prepared-target");
+      mkdirSync(join(sourceRoot, "src"), { recursive: true });
+      mkdirSync(join(targetRoot, "src"), { recursive: true });
+      writeFileSync(join(sourceRoot, "src/source.ts"), sourceContent);
+      writeFileSync(join(targetRoot, "src/target.py"), translatedTargetContent);
+      const originalFiles = readdirSync(targetRoot, { recursive: true });
+      if (storage !== "workspaces") artifactRoot = join(targetRoot, "reports");
+      else workspaceRoot = join(targetRoot, "workspaces");
+      const p = provider("prepared");
+      if (storage === "requirements-failure")
+        p.workspaceRequirements = () => {
+          throw new Error("Unable to declare project requirements");
+        };
+      const create = vi.spyOn(p, "create");
+      const receipt = await serviceWith([p], "prepared").verifyWithReceipt(
+        input(),
+        { preparedProjects: { sourceRoot, targetRoot } },
+      );
+      expect(receipt.result.executionStatus).toBe("failed");
+      expect(create).not.toHaveBeenCalled();
+      expect(readdirSync(targetRoot, { recursive: true })).toEqual(
+        originalFiles,
+      );
+      expect(readFileSync(join(targetRoot, "src/target.py"), "utf8")).toBe(
+        translatedTargetContent,
+      );
+      if (storage !== "workspaces") {
+        expect(receipt.resultArtifact).toBeUndefined();
+        expect(receipt.result.artifacts).toEqual([]);
+        expect(receipt.result.problems).toContainEqual(
+          expect.objectContaining({ code: "artifact_persistence_failed" }),
+        );
+        expect(existsSync(artifactRoot)).toBe(false);
+      } else {
+        expect(receipt.resultArtifact).toBeDefined();
+        expect(existsSync(workspaceRoot)).toBe(false);
+      }
+    },
+  );
+
+  it.each([false, true])(
+    "honors target-only resource declarations with supplied source=%s",
+    async (supplySource) => {
+      const sourceRoot = join(root, "prepared-source");
+      mkdirSync(join(sourceRoot, "src"), { recursive: true });
+      writeFileSync(join(sourceRoot, "src/source.ts"), sourceContent);
+      const targetRoot = join(root, "prepared-target");
+      mkdirSync(join(targetRoot, "src"), { recursive: true });
+      writeFileSync(join(targetRoot, "src/target.py"), translatedTargetContent);
+      const p = provider("target", async (value, context) => {
+        expect(readdirSync(context.workspace.sourceRoot)).toEqual([]);
+        expect(context.workspace.targetRoot).toBe(targetRoot);
+        return okResult(value, descriptor("target"));
+      });
+      p.workspaceRequirements = () => ({ source: false });
+      const receipt = await serviceWith([p], "target").verifyWithReceipt(
+        input(),
+        {
+          preparedProjects: {
+            ...(supplySource ? { sourceRoot } : {}),
+            targetRoot,
+          },
+        },
+      );
+      expect(receipt.result.executionStatus).toBe("completed");
+      expect(existsSync(targetRoot)).toBe(true);
+    },
+  );
+
+  it.each(["failed", "cancelled"] as const)(
+    "does not invent an Agent reference decision after a %s dispatch",
+    async (state) => {
+      const value = input();
+      value.verificationPolicy = {
+        referenceDecision: "accepted",
+        reason: "Legacy Host decision",
+      };
+      const controller = new AbortController();
+      const p = provider("not-started", async () => {
+        throw new Error("failed before assessment");
+      });
+      if (state === "cancelled") controller.abort("caller stopped");
+      const receipt = await serviceWith([p], "not-started").verifyWithReceipt(
+        value,
+        {},
+        controller.signal,
+      );
+      expect(receipt.result).toMatchObject({
+        mode: "target_only",
+        referenceDecision: "undetermined",
+        executionStatus: state,
+        sourceAssessment: "not_checked",
+        targetAssessment: "inconclusive",
+      });
+    },
+  );
+
+  it("preserves prepared caller projects when a strategy fails or is cancelled", async () => {
+    const targetRoot = join(root, "prepared-target");
+    mkdirSync(join(targetRoot, "src"), { recursive: true });
+    writeFileSync(join(targetRoot, "src/target.py"), translatedTargetContent);
+    const p = provider("failing", async () => {
+      throw new Error("agent failed");
+    });
+    p.workspaceRequirements = () => ({ source: false });
+    const service = serviceWith([p], "failing");
+    for (const signal of [undefined, AbortSignal.abort("stop")]) {
+      const receipt = await service.verifyWithReceipt(
+        input(),
+        { preparedProjects: { targetRoot } },
+        signal,
+      );
+      expect(receipt.result.executionStatus).toBe(
+        signal ? "cancelled" : "failed",
+      );
+      expect(readFileSync(join(targetRoot, "src/target.py"), "utf8")).toBe(
+        translatedTargetContent,
+      );
+      expect(readdirSync(workspaceRoot)).toEqual([]);
+    }
+  });
+
   it("selects without enumeration and constructs exactly one strategy at dispatch", async () => {
     const p = provider("first");
     const create = vi.spyOn(p, "create");
@@ -612,7 +880,7 @@ describe("VerificationService", () => {
         }),
       ],
       "first",
-      { timeoutMs: 10 },
+      { timeoutMs: 10, shutdownTimeoutMs: 100 },
     );
     const measured = await measureVerification(async () => {
       const result = await service.verify(input());
@@ -1163,7 +1431,50 @@ describe("VerificationService", () => {
     );
   });
 
-  it("returns promptly on a non-cooperative strategy timeout and cleans the workspace", async () => {
+  it("joins delayed cooperative cancellation before deleting its workspace and preserves evidence", async () => {
+    const controller = new AbortController();
+    let workspace = "";
+    let stopped = false;
+    const receipt = await serviceWith(
+      [
+        provider("delayed-stop", async (value, context) => {
+          workspace = context.workspace.root;
+          controller.abort(new Error("caller stopped"));
+          await new Promise((resolve) => setTimeout(resolve, 350));
+          const artifact = await evidence(context);
+          stopped = true;
+          return {
+            ...okResult(value, descriptor("delayed-stop")),
+            artifacts: [artifact],
+          };
+        }),
+      ],
+      "delayed-stop",
+    ).verifyWithReceipt(input(), {}, controller.signal);
+
+    expect(stopped).toBe(true);
+    expect(existsSync(workspace)).toBe(false);
+    expect(receipt.result).toMatchObject({
+      executionStatus: "cancelled",
+      targetAssessment: "no_bug_observed",
+      problems: [{ code: "cancelled" }],
+      issues: [],
+    });
+    expect(receipt.result.artifacts).toHaveLength(1);
+    expect(
+      readFileSync(
+        join(artifactRoot, receipt.result.artifacts[0]!.path),
+        "utf8",
+      ),
+    ).toBe("xxx");
+    expect(
+      JSON.parse(
+        readFileSync(join(artifactRoot, receipt.resultArtifact!.path), "utf8"),
+      ),
+    ).toEqual(receipt.result);
+  });
+
+  it("bounds a non-cooperative timeout while preserving its workspace and reporting unconfirmed cleanup", async () => {
     const seenRoots: string[] = [];
     const service = serviceWith(
       [
@@ -1173,11 +1484,12 @@ describe("VerificationService", () => {
         }),
       ],
       "stuck",
-      { timeoutMs: 25 },
+      { timeoutMs: 25, shutdownTimeoutMs: 100 },
     );
 
     const startedAt = Date.now();
-    const result = await service.verify(input());
+    const receipt = await service.verifyWithReceipt(input());
+    const result = receipt.result;
 
     expect(Date.now() - startedAt).toBeLessThan(500);
     expect(result.targetAssessment).toBe("inconclusive");
@@ -1196,7 +1508,68 @@ describe("VerificationService", () => {
       frameworkError: "Verification strategy timed out",
       errorName: "TimeoutError",
     });
-    expect(existsSync(seenRoots[0]!)).toBe(false);
+    expect(existsSync(seenRoots[0]!)).toBe(true);
+    expect(result.problems).toContainEqual({
+      code: "internal_error",
+      message: expect.stringMatching(
+        /shutdown unconfirmed.*cleanup skipped.*Workspace preserved/,
+      ),
+    });
+    expect(
+      JSON.parse(
+        readFileSync(join(artifactRoot, receipt.resultArtifact!.path), "utf8"),
+      ),
+    ).toEqual(result);
+  });
+
+  it.each([0, -1, 0.5, Number.NaN, Number.POSITIVE_INFINITY, 2_147_483_648])(
+    "rejects invalid shutdown wait budget %s",
+    (shutdownTimeoutMs) => {
+      expect(() =>
+        serviceWith([provider("first")], "first", { shutdownTimeoutMs }),
+      ).toThrow(/shutdown timeout/i);
+    },
+  );
+
+  it("preserves active resources and cleanup diagnostics when the final receipt cannot be persisted", async () => {
+    const recorders = vi.spyOn(recording, "createRunRecorder");
+    let workspace = "";
+    let artifactPath = "";
+    const receipt = await serviceWith(
+      [
+        provider("stuck", async (_value, context) => {
+          workspace = context.workspace.root;
+          artifactPath = (await evidence(context)).path;
+          vi.mocked(fs.renameSync).mockImplementationOnce(() => {
+            throw new Error("receipt write failed");
+          });
+          return new Promise<VerificationResult>(() => {});
+        }),
+      ],
+      "stuck",
+      { timeoutMs: 10, shutdownTimeoutMs: 50 },
+    ).verifyWithReceipt(input());
+    expect(receipt.resultArtifact).toBeUndefined();
+    expect(receipt.result).toMatchObject({
+      executionStatus: "failed",
+      targetAssessment: "inconclusive",
+    });
+    expect(receipt.result.problems).toEqual([
+      expect.objectContaining({ code: "artifact_persistence_failed" }),
+      expect.objectContaining({
+        code: "internal_error",
+        message: expect.stringContaining("shutdown unconfirmed"),
+      }),
+    ]);
+    expect(existsSync(workspace)).toBe(true);
+    expect(readFileSync(join(artifactRoot, artifactPath), "utf8")).toBe("xxx");
+    const cleanup = recorders.mock.results[0]!.value.snapshot().stages.find(
+      (stage: { name: string }) => stage.name === "workspace-cleanup",
+    );
+    expect(cleanup).toMatchObject({
+      state: "failed",
+      error: expect.stringContaining("cleanup skipped"),
+    });
   });
 
   it.each(["timeout", "caller", "caller-after-timeout", "caller-sync"])(
@@ -1278,6 +1651,7 @@ describe("VerificationService", () => {
         }),
       ],
       "stuck",
+      { shutdownTimeoutMs: 100 },
     );
     const startedAt = Date.now();
     const receipt = await service.verifyWithReceipt(
@@ -1288,14 +1662,22 @@ describe("VerificationService", () => {
     expect(Date.now() - startedAt).toBeLessThan(500);
     expect(receipt.result).toMatchObject({
       executionStatus: "cancelled",
-      problems: [{ code: "cancelled", message: "caller stopped" }],
+      problems: [
+        { code: "cancelled", message: "caller stopped" },
+        {
+          code: "internal_error",
+          message: expect.stringContaining("shutdown unconfirmed"),
+        },
+      ],
     });
+    const preserved = readdirSync(workspaceRoot);
+    expect(preserved).toHaveLength(1);
     rejectLate(new Error("late failure"));
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(readdirSync(workspaceRoot)).toEqual([]);
+    expect(readdirSync(workspaceRoot)).toEqual(preserved);
   });
 
-  it("rejects late artifact writes after a timed-out strategy returns to the caller", async () => {
+  it("preserves the active workspace for late local writes but rejects late receipt artifact writes", async () => {
     let writeLateArtifact!: () =>
       | Promise<VerificationResult["artifacts"][number]>
       | VerificationResult["artifacts"][number];
@@ -1307,14 +1689,13 @@ describe("VerificationService", () => {
           writeLateArtifact = () => {
             const evidencePath = join(
               context.workspace.evidenceRoot,
-              "reports/late.json",
+              "late.json",
             );
-            mkdirSync(dirname(evidencePath), { recursive: true });
             writeFileSync(evidencePath, "{}\n", "utf8");
             return context.writeArtifact({
               id: "late-artifact",
               kind: "report",
-              path: "reports/late.json",
+              path: "late.json",
               contentHash: "0".repeat(64),
               mediaType: "application/json",
             });
@@ -1323,10 +1704,11 @@ describe("VerificationService", () => {
         }),
       ],
       "late-writer",
-      { timeoutMs: 25 },
+      { timeoutMs: 25, shutdownTimeoutMs: 100 },
     );
 
-    const result = await service.verify(input(), { keepWorkspace: true });
+    const receipt = await service.verifyWithReceipt(input());
+    const result = receipt.result;
     expect(result.targetAssessment).toBe("inconclusive");
     expect(keptWorkspace).toBeDefined();
     expect(existsSync(keptWorkspace!)).toBe(true);
@@ -1334,7 +1716,19 @@ describe("VerificationService", () => {
     await expect(
       Promise.resolve().then(() => writeLateArtifact()),
     ).rejects.toThrow(/closed/i);
-    expect(existsSync(join(artifactRoot, "reports/late.json"))).toBe(false);
+    expect(readFileSync(join(keptWorkspace!, "agent/late.json"), "utf8")).toBe(
+      "{}\n",
+    );
+    expect(
+      JSON.parse(
+        readFileSync(join(artifactRoot, receipt.resultArtifact!.path), "utf8"),
+      ),
+    ).toEqual(result);
+    expect(
+      readdirSync(
+        join(artifactRoot, receipt.resultArtifact!.path.split("/")[0]!),
+      ),
+    ).toEqual([receipt.resultArtifact!.path.split("/").at(-1)]);
   });
 
   it("requires result artifacts to match artifacts written through the workspace", async () => {
@@ -1425,7 +1819,11 @@ describe("VerificationService", () => {
 function serviceWith(
   providers: VerificationStrategyProvider[],
   defaultStrategyId: string,
-  options: { timeoutMs?: number; now?: () => string } = {},
+  options: {
+    timeoutMs?: number;
+    shutdownTimeoutMs?: number;
+    now?: () => string;
+  } = {},
 ): VerificationService {
   return new VerificationService({
     factory: new VerificationStrategyFactory(providers),

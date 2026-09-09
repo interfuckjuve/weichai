@@ -18,6 +18,7 @@ export type VerificationServiceRuntimeOptions = Pick<
   | "workspaceRoot"
   | "artifactRoot"
   | "timeoutMs"
+  | "shutdownTimeoutMs"
   | "now"
   | "runRoot"
   | "debug"
@@ -61,6 +62,9 @@ function runtimeOptions(
     ...(options.timeoutMs === undefined
       ? {}
       : { timeoutMs: options.timeoutMs }),
+    ...(options.shutdownTimeoutMs === undefined
+      ? {}
+      : { shutdownTimeoutMs: options.shutdownTimeoutMs }),
     ...(options.runRoot === undefined ? {} : { runRoot: options.runRoot }),
     ...(options.debug === undefined ? {} : { debug: options.debug }),
     ...(options.onRunRecorded === undefined

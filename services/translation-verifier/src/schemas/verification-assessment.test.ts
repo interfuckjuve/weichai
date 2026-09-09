@@ -108,9 +108,7 @@ describe("independent verification dimensions", () => {
         targetInput,
       ),
     ).toThrow("unexecuted source");
-    expect(() => assertVerificationAssessment(value, input)).toThrow(
-      "Host reference decision",
-    );
+    expect(() => assertVerificationAssessment(value, input)).not.toThrow();
   });
 
   it.each([

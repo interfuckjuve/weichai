@@ -4,7 +4,7 @@ import type {
   VerificationProblem,
 } from "./verification-types.js";
 
-/** Only a Host decision can authorize source execution; absence is not acceptance. */
+/** Legacy smoke policy; resource access and autonomous strategies do not use this decision. */
 export function resolveVerificationPolicy(
   input: Pick<VerificationInput, "verificationPolicy">,
 ): {
@@ -43,16 +43,11 @@ export function failureAssessment(
 
 export function assertVerificationAssessment(
   value: VerificationAssessment,
-  input: VerificationInput,
+  _input: VerificationInput,
 ): void {
-  const expected = resolveVerificationPolicy(input);
-  if (
-    value.mode !== expected.mode ||
-    value.referenceDecision !== expected.referenceDecision ||
-    value.referenceReason !== expected.referenceReason
-  )
+  if (value.mode === "differential" && value.referenceDecision !== "accepted")
     throw new Error(
-      "Verification assessment does not match the Host reference decision.",
+      "Differential verification requires an accepted reference.",
     );
   if (value.mode === "target_only" && value.sourceAssessment !== "not_checked")
     throw new Error(

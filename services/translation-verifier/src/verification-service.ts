@@ -2,6 +2,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { VerificationStrategyFactory } from "./workflow/strategy-registry.js";
 import type {
+  VerificationRunOptions,
   VerificationInput,
   VerificationReceipt,
   VerificationResult,
@@ -20,6 +21,8 @@ export interface VerificationServiceOptions {
   workspaceRoot?: string;
   artifactRoot?: string;
   timeoutMs?: number;
+  /** Maximum wait after interruption for strategy-owned work to stop; unconfirmed workspaces are preserved. */
+  shutdownTimeoutMs?: number;
   now?: () => string;
   /** Reserved, currently ignored; no production diagnostic run-root is implemented. */
   runRoot?: string;
@@ -39,8 +42,19 @@ export class VerificationService {
         "Verification timeout must be a positive number of milliseconds.",
       );
     }
+    const shutdownTimeoutMs = options.shutdownTimeoutMs ?? 5_000;
+    if (
+      !Number.isInteger(shutdownTimeoutMs) ||
+      shutdownTimeoutMs <= 0 ||
+      shutdownTimeoutMs > 2_147_483_647
+    ) {
+      throw new Error(
+        "Verification shutdown timeout must be a positive 32-bit integer of milliseconds.",
+      );
+    }
     this.#config = {
       ...options,
+      shutdownTimeoutMs,
       workspaceRoot:
         options.workspaceRoot ??
         join(tmpdir(), "forexplore-verification-workspaces"),
@@ -54,7 +68,7 @@ export class VerificationService {
 
   async verify(
     input: VerificationInput,
-    options: { strategyId?: string; keepWorkspace?: boolean } = {},
+    options: VerificationRunOptions = {},
     signal?: AbortSignal,
   ): Promise<VerificationResult> {
     return (await this.verifyWithReceipt(input, options, signal)).result;
@@ -62,7 +76,7 @@ export class VerificationService {
 
   async verifyWithReceipt(
     input: VerificationInput,
-    options: { strategyId?: string; keepWorkspace?: boolean } = {},
+    options: VerificationRunOptions = {},
     signal?: AbortSignal,
   ): Promise<VerificationReceipt> {
     return runVerification(this.#config, input, options, signal);
@@ -77,6 +91,10 @@ export type VerificationServiceConfiguration = VerificationServiceOptions &
   Required<
     Pick<
       VerificationServiceOptions,
-      "workspaceRoot" | "artifactRoot" | "timeoutMs" | "now"
+      | "workspaceRoot"
+      | "artifactRoot"
+      | "timeoutMs"
+      | "shutdownTimeoutMs"
+      | "now"
     >
   >;

@@ -458,7 +458,7 @@ describe("verification-types", () => {
     ).toThrow(/target-only verification cannot assess the unexecuted source/i);
   });
 
-  it("binds mode and reference decision to the Host verification policy", () => {
+  it("allows a strategy to determine reference suitability independently of legacy Host policy", () => {
     const acceptedInput = {
       ...input(),
       verificationPolicy: {
@@ -478,7 +478,20 @@ describe("verification-types", () => {
           sourceAssessment: "not_checked",
         }),
       ),
-    ).toThrow(/does not match the Host reference decision/i);
+    ).not.toThrow();
+  });
+
+  it("rejects differential execution without an accepted reference", () => {
+    expect(() =>
+      createVerificationResult(
+        input(),
+        descriptor,
+        outputFor(input(), {
+          mode: "differential",
+          referenceDecision: "rejected",
+        }),
+      ),
+    ).toThrow(/differential verification requires an accepted reference/i);
   });
 
   it.each(["pass", "warn", "fail", "unverified"])(

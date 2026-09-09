@@ -1,5 +1,5 @@
 import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { RepositoryIngestionJsonValue } from "@forexplore/contracts";
 import { measureStep } from "../../run-output/record-run.js";
 import { markVerificationPhase } from "../../run-output/measure-legacy-run.js";
@@ -15,6 +15,10 @@ import type {
   VerificationStrategyOutput,
   VerificationStrategyProvider,
 } from "../../schemas/verification-types.js";
+import {
+  failureAssessment,
+  resolveVerificationPolicy,
+} from "../../schemas/verification-assessment.js";
 import { prepareCallerOwnedWorkspace } from "./prepare-smoke-workspace.js";
 import { prepareSmokeInput } from "./prepare-smoke-input.js";
 import {
@@ -59,6 +63,29 @@ export class DifferentialSmokeStrategy implements VerificationStrategy {
     const measure = context.measureStep ?? measureStep;
     const preflight = await measure("check-applicability", () => {
       markVerificationPhase("strategy-capability-and-context-preflight");
+      const workspace = context.workspace;
+      if (
+        workspace.projectOwnership === "caller" ||
+        resolve(workspace.sourceRoot) !==
+          resolve(workspace.root, "source/project") ||
+        resolve(workspace.targetRoot) !==
+          resolve(workspace.root, "target/project") ||
+        resolve(workspace.strategyRoot) !== resolve(workspace.root, "agent") ||
+        resolve(workspace.evidenceRoot) !== resolve(workspace.root, "agent")
+      ) {
+        const summary =
+          "Legacy differential smoke requires framework-staged projects covered by its workspace baseline; prepared projects are not supported.";
+        return {
+          applicable: false as const,
+          output: {
+            ...failureAssessment(input, "context_incomplete", summary),
+            summary,
+            issues: [],
+            artifacts: [],
+            strategyReport: null,
+          },
+        };
+      }
       return prepareSmokeInput(input, context);
     });
     if (!preflight.applicable) return preflight.output;
@@ -85,6 +112,15 @@ export class DifferentialSmokeStrategy implements VerificationStrategy {
     const smoke = await measure("run-smoke", () =>
       run(preflight.job, options, signal),
     );
+    const expected = resolveVerificationPolicy(input);
+    if (
+      smoke.mode !== expected.mode ||
+      smoke.referenceDecision !== expected.referenceDecision ||
+      smoke.referenceReason !== expected.referenceReason
+    )
+      throw new Error(
+        "Verification assessment does not match the Host reference decision.",
+      );
     const artifact = await measure("persist-strategy-report", () => {
       markVerificationPhase("strategy-report-persistence");
       return writeSmokeReportArtifact(context, smoke);
@@ -114,6 +150,9 @@ export function createDifferentialSmokeProvider(
 ): VerificationStrategyProvider {
   return {
     descriptor: DIFFERENTIAL_SMOKE_STRATEGY,
+    workspaceRequirements: (input) => ({
+      source: resolveVerificationPolicy(input).mode === "differential",
+    }),
     create: () => new DifferentialSmokeStrategy(options),
   };
 }

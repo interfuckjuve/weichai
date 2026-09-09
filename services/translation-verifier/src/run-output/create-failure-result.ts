@@ -1,5 +1,6 @@
 import type {
   VerificationInput,
+  VerificationProblem,
   VerificationResult,
   VerificationStrategyDescriptor,
 } from "../schemas/verification-types.js";
@@ -14,6 +15,7 @@ export function createFailureResult(
   artifacts: VerificationResult["artifacts"],
   now: () => string,
   artifactFailure = false,
+  additionalProblems: VerificationProblem[] = [],
 ): VerificationResult {
   const message = errorMessage(error);
   const timeout = isNamedError(error, "TimeoutError");
@@ -21,21 +23,25 @@ export function createFailureResult(
     artifactFailure || error instanceof VerificationArtifactPersistenceError;
 
   const cancelled = isNamedError(error, "AbortError");
+  const assessment = failureAssessment(
+    {},
+    persistence
+      ? "artifact_persistence_failed"
+      : cancelled
+        ? "cancelled"
+        : timeout
+          ? "agent_timeout"
+          : "internal_error",
+    message,
+  );
   return createVerificationResult(
     input,
     descriptor,
     {
-      ...failureAssessment(
-        input,
-        persistence
-          ? "artifact_persistence_failed"
-          : cancelled
-            ? "cancelled"
-            : timeout
-              ? "agent_timeout"
-              : "internal_error",
-        message,
-      ),
+      ...assessment,
+      problems: [...assessment.problems, ...additionalProblems],
+      referenceReason:
+        "The strategy did not return a validated reference assessment.",
       summary: `Verification framework could not complete: ${message}`,
       issues: [
         {

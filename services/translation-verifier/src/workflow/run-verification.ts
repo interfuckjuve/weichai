@@ -10,7 +10,10 @@ import {
   type StepHandle,
 } from "../run-output/record-run.js";
 import { validateInput } from "./validate-input.js";
-import { createVerificationWorkspace } from "./prepare-strategy-workspace.js";
+import {
+  assertPreparedArtifactStorage,
+  createVerificationWorkspace,
+} from "./prepare-strategy-workspace.js";
 import {
   normalizeStrategyInterruption,
   runStrategy,
@@ -27,6 +30,7 @@ import { assertVerificationReceipt } from "../schemas/validate-verification-rece
 import { createVerificationResult } from "../schemas/materialize-verification-result.js";
 import { createFailureResult } from "../run-output/create-failure-result.js";
 import type {
+  VerificationRunOptions,
   VerificationInput,
   VerificationReceipt,
   VerificationResult,
@@ -36,7 +40,7 @@ import type {
 export async function runVerification(
   config: VerificationServiceConfiguration,
   input: VerificationInput,
-  options: { strategyId?: string; keepWorkspace?: boolean } = {},
+  options: VerificationRunOptions = {},
   signal?: AbortSignal,
 ): Promise<VerificationReceipt> {
   const recorder = createRunRecorder({ runId: randomUUID() });
@@ -51,6 +55,17 @@ export async function runVerification(
     let failure: unknown;
     let saveHandle: StepHandle | undefined;
     let saveFailure: unknown;
+    let cleanupUnconfirmed: Error | undefined;
+    const cleanupProblems = () =>
+      cleanupUnconfirmed
+        ? [
+            {
+              code: "internal_error" as const,
+              message: cleanupUnconfirmed.message,
+            },
+          ]
+        : [];
+    let artifactWritesClosed = false;
     try {
       const strategyId = options.strategyId ?? config.defaultStrategyId;
       const provider = await recorder.measureStep(
@@ -65,6 +80,10 @@ export async function runVerification(
       let outcome = await withStepContext(recorder, executeHandle, async () => {
         try {
           markVerificationPhase("workspace-creation");
+          assertPreparedArtifactStorage(
+            options.preparedProjects,
+            config.artifactRoot,
+          );
           const workspace = await recorder.measureStep(
             "prepare-strategy-workspace",
             { scope: "framework" },
@@ -73,9 +92,17 @@ export async function runVerification(
                 workspaceRoot: config.workspaceRoot,
                 artifactRoot: config.artifactRoot,
                 keepWorkspace: options.keepWorkspace,
+                requirements: provider.workspaceRequirements?.(input),
+                preparedProjects: options.preparedProjects,
               }),
           );
           store = workspace;
+          const writeArtifact = workspace.context.writeArtifact;
+          workspace.context.writeArtifact = (artifact) => {
+            if (artifactWritesClosed)
+              throw new Error("Verification workspace is closed.");
+            return writeArtifact(artifact);
+          };
           markVerificationPhase("deadline-and-strategy-dispatch");
           const timeoutSignal = AbortSignal.timeout(config.timeoutMs);
           combinedSignal =
@@ -85,22 +112,24 @@ export async function runVerification(
           workspace.context.deadlineAt = Date.now() + config.timeoutMs;
           workspace.context.measureStep = (name, work) =>
             recorder.measureStep(name, { scope: "strategy" }, work);
-          return await runStrategy(
+          const execution = await runStrategy(
             provider,
             input,
             workspace.context,
             combinedSignal,
             workspace.writtenArtifacts,
             signal,
+            config.shutdownTimeoutMs,
           );
+          if (execution.kind === "failure" && !execution.shutdownConfirmed) {
+            cleanupUnconfirmed = new Error(
+              `Strategy shutdown unconfirmed after ${config.shutdownTimeoutMs}ms; cleanup skipped. Workspace preserved at ${workspace.context.workspace.root}; existing artifacts preserved under ${config.artifactRoot}. Active work may still use these resources.`,
+            );
+          }
+          return execution;
         } catch (error) {
           return strategyExecutionFailure(error, signal);
         }
-      });
-      // Valid requests still receive an isolated Host report if workspace preparation failed.
-      store ??= createVerificationArtifactStore({
-        artifactRoot: config.artifactRoot,
-        durablePrefix: `attempt-${randomUUID()}`,
       });
       const { descriptor } = provider;
       let result: VerificationResult;
@@ -123,9 +152,12 @@ export async function runVerification(
                 input,
                 descriptor,
                 outcome.error,
-                outcome.discardArtifacts ? [] : store.writtenArtifacts(),
+                outcome.discardArtifacts
+                  ? []
+                  : (store?.writtenArtifacts() ?? []),
                 config.now,
                 outcome.discardArtifacts,
+                cleanupProblems(),
               );
       } catch (error) {
         recorder.endStep(executeHandle, stepFailureState(error), error);
@@ -144,6 +176,11 @@ export async function runVerification(
         return assertVerificationReceipt({ result }, input, descriptor);
       }
       try {
+        // Workspace failures may persist a Host report only when storage remains safe.
+        store ??= createVerificationArtifactStore({
+          artifactRoot: config.artifactRoot,
+          durablePrefix: `attempt-${randomUUID()}`,
+        });
         const receipt = saveReport(result, input, descriptor, store);
         receiptPersisted = true;
         return receipt;
@@ -161,6 +198,7 @@ export async function runVerification(
               [],
               config.now,
               true,
+              cleanupProblems(),
             ),
           },
           input,
@@ -179,8 +217,14 @@ export async function runVerification(
       });
       try {
         markVerificationPhase("workspace-cleanup");
-        store?.cleanup({ discardArtifacts: !receiptPersisted });
-        recorder.endStep(cleanup, "completed");
+        artifactWritesClosed = true;
+        if (cleanupUnconfirmed) {
+          recorder.endStep(cleanup, "failed", cleanupUnconfirmed);
+          saveFailure ??= cleanupUnconfirmed;
+        } else {
+          store?.cleanup({ discardArtifacts: !receiptPersisted });
+          recorder.endStep(cleanup, "completed");
+        }
         markVerificationPhase("response-ready");
       } catch (error) {
         recorder.endStep(cleanup, stepFailureState(error), error);

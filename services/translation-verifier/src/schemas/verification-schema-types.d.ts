@@ -309,7 +309,7 @@ export interface VerificationInput {
     [k: string]: unknown;
   };
   /**
-   * Host-owned reference trust decision and independent test basis. Omission never authorizes source execution.
+   * Legacy strategy-specific reference decision and test basis. Resource access and autonomous strategy decisions are configured separately by the Host and selected strategy.
    */
   verificationPolicy?: {
     referenceDecision: "accepted" | "rejected" | "undetermined";

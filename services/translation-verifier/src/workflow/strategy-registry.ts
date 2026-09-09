@@ -15,6 +15,9 @@ export class VerificationStrategyFactory {
       }
       this.#providers.set(descriptor.id, {
         descriptor,
+        ...(provider.workspaceRequirements
+          ? { workspaceRequirements: provider.workspaceRequirements }
+          : {}),
         create: provider.create,
       });
     }
@@ -26,7 +29,7 @@ export class VerificationStrategyFactory {
     if (provider === undefined) {
       throw new Error(`Unknown verification strategy: ${id}`);
     }
-    return { descriptor: { ...provider.descriptor }, create: provider.create };
+    return { ...provider, descriptor: { ...provider.descriptor } };
   }
 
   create(strategyId: string): VerificationStrategy {

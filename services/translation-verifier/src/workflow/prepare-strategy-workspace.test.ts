@@ -299,7 +299,7 @@ describe("createVerificationWorkspace", () => {
   });
 
   it.each(["rejected", "undetermined"] as const)(
-    "does not stage source code when reference decision is %s",
+    "does not stage source code when the strategy declines it despite reference decision %s",
     (referenceDecision) => {
       const value = input();
       value.verificationPolicy = {
@@ -310,6 +310,7 @@ describe("createVerificationWorkspace", () => {
       const workspace = createVerificationWorkspace(value, {
         workspaceRoot,
         artifactRoot,
+        requirements: { source: false },
       });
       try {
         expect(readdirSync(workspace.context.workspace.sourceRoot)).toEqual([]);
@@ -325,7 +326,7 @@ describe("createVerificationWorkspace", () => {
     },
   );
 
-  it("does not stage source code when no Host policy is supplied", () => {
+  it("stages source context without a Host policy by default", () => {
     const value = input();
     delete value.verificationPolicy;
     const workspace = createVerificationWorkspace(value, {
@@ -333,7 +334,12 @@ describe("createVerificationWorkspace", () => {
       artifactRoot,
     });
     try {
-      expect(readdirSync(workspace.context.workspace.sourceRoot)).toEqual([]);
+      expect(
+        readFileSync(
+          join(workspace.context.workspace.sourceRoot, "src/source.ts"),
+          "utf8",
+        ),
+      ).toBe(sourceContent);
     } finally {
       workspace.cleanup();
     }
