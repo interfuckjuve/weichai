@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   indexModuleHierarchy, type ModuleHierarchyPlanner,
   type ModuleArtifactRecord, type ProjectAnalysisPort, type ProjectAnalysisRecord, type ProjectAnalysisResult,
@@ -15,7 +15,7 @@ export interface ProjectAnalysisOptions {
   store: IndexStore;
   plan?(scope: ProjectAnalysisScope & { objective: string }): Promise<ProjectAnalysisResult>;
   hierarchyPlanner?: ModuleHierarchyPlanner;
-  hierarchy?: Omit<AdaptiveModuleOptions, 'planner' | 'readSource'>;
+  hierarchy?: Omit<AdaptiveModuleOptions, 'planner' | 'readSource' | 'decisionCache'>;
   /** Explicit capacity-test mode; directory groups are not functional module analysis. */
   allowStructuralFallback?: boolean;
   maxFilesPerModule?: number;
@@ -224,10 +224,35 @@ export class ProjectAnalysisCoordinator implements ProjectAnalysisPort {
           if (!this.options.hierarchyPlanner && !this.options.allowStructuralFallback) {
             throw new Error('Agent 功能模块分析服务未配置；基础索引和源码检索仍可使用。');
           }
+          const checkpointId = `module-decisions:${scope.projectId}:${adaptiveModuleAlgorithm}`;
+          const stored = (await (store.getModuleArtifacts ? store.getModuleArtifacts(scope, [checkpointId]) : store.listModuleArtifacts(scope)))
+            .find(artifact => artifact.moduleArtifactId === checkpointId && artifact.analysisHash === index.analysisHash);
+          const previous = stored?.payload as { version?: number; decisions?: Record<string, unknown> } | undefined;
+          const decisions: Record<string, unknown> = !force && previous?.version === 1 && previous.decisions &&
+            stored && stored.contentHash === createHash('sha256').update(canonical(stored.payload)).digest('hex') ? { ...previous.decisions } : {};
+          const executionId = randomUUID();
+          let saving = Promise.resolve();
+          const saveDecisions = async () => {
+            if (!await active()) throw new Error('Module decision snapshot is no longer active.');
+            const payload = { version: 1, executionId, decisions };
+            const now = new Date().toISOString();
+            await store.putModuleArtifact({ ...scope, moduleArtifactId: checkpointId, kind: 'other', status: 'current',
+              analysisHash: index.analysisHash, contentHash: createHash('sha256').update(canonical(payload)).digest('hex'),
+              createdAt: stored?.createdAt ?? now, updatedAt: now, payload: structuredClone(payload) });
+          };
+          await saveDecisions();
           const proposal = await buildAdaptiveModuleProposal(index, scope, projectAnalysisObjective, {
             ...this.options.hierarchy, requireModel: !this.options.allowStructuralFallback,
             planner: this.options.hierarchyPlanner, readSource: store.getSourceSlice?.bind(store),
+            decisionCache: {
+              read: async key => decisions[key],
+              write: (key, decision) => {
+                saving = saving.then(async () => { decisions[key] = structuredClone(decision); await saveDecisions(); });
+                return saving;
+              },
+            },
           });
+          await saving;
           if (!this.options.allowStructuralFallback && !proposal.hierarchy!.modelDecisionCount) {
             throw new Error('Agent 未能完成有效的功能模块分析，请检查模型服务后重试。');
           }

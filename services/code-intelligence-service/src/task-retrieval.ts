@@ -76,10 +76,10 @@ export class TaskRetrievalService implements TaskRetrievalPort {
       // Reuse the cached query embedding across channels and cap each channel independently.
       const documents: SearchDocumentRecord[] = [];
       const documentRanks = new Map<string, number>();
-      for (const kind of ['symbol', 'source-fragment', 'summary'] as const) {
-        signal.throwIfAborted();
-        const channel = await this.store.searchSearchDocuments(scope, request.requirement, candidateLimit, kind, signal);
-        channel.forEach((document, rank) => documentRanks.set(document.searchDocumentId, 1 / (61 + rank)));
+      const channels = await Promise.all((['symbol', 'source-fragment', 'summary'] as const).map(kind =>
+        this.store.searchSearchDocuments!(scope, request.requirement, candidateLimit, kind, signal)));
+      for (const channel of channels) {
+        channel.forEach((document, rank) => documentRanks.set(document.searchDocumentId, (documentRanks.get(document.searchDocumentId) ?? 0) + 1 / (61 + rank)));
         documents.push(...channel);
       }
       for (const document of documents) if (document.repositoryId !== scope.repositoryId || document.analysisRevision !== scope.analysisRevision) throw new Error('Search returned a document from another revision.');
@@ -281,9 +281,14 @@ export class TaskRetrievalService implements TaskRetrievalPort {
       if (!revision || !['ready', 'superseded'].includes(revision.status) || revision.analysisHash !== snapshot.analysisHash) throw new Error('Pinned revision changed or became unavailable during retrieval.');
     }
     signal.throwIfAborted();
+    const compileStarted = performance.now();
     const packet = compileTaskContext(request, { snapshots, routing, results: selected.map((hit) => hit.result), evidence, relations,
       gaps: [...new Map(gaps.map((gap) => [JSON.stringify(gap), gap])).values()].slice(0, 32), status: unavailable ? 'unavailable' : 'complete' }, Math.round(performance.now() - started));
     signal.throwIfAborted();
+    const sourceBytesRead = evidence.reduce((sum, item) => sum + Buffer.byteLength(item.content, 'utf8'), 0);
+    const sourceBytesDelivered = packet.evidence.reduce((sum, item) => sum + Buffer.byteLength(item.content, 'utf8'), 0);
+    packet.usage.retrieval = { sourceBytesRead, sourceBytesDelivered, sourceReadAmplification: sourceBytesDelivered ? sourceBytesRead / sourceBytesDelivered : null,
+      sourceExcerptsRead: evidence.length, recallAndExpansionMs: Math.round(compileStarted - started), compilationMs: Math.round(performance.now() - compileStarted) };
     packet.usage.latencyMs = Math.round(performance.now() - started);
     if (packet.usage.latencyMs > (request.budget.maxLatencyMs ?? 10000)) throw new Error('Task retrieval deadline exceeded during context compilation.');
     return packet;

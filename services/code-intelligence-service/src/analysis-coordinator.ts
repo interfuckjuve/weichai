@@ -113,7 +113,7 @@ export class AnalysisCoordinator {
   ) {
     this.#clock = options.clock ?? systemClock();
     this.#revisionIdGenerator = options.revisionIdGenerator ?? (() => `analysis-${randomUUID()}`);
-    this.#indexerVersion = options.indexerVersion ?? 'forexplore-code-intelligence/2.0';
+    this.#indexerVersion = options.indexerVersion ?? 'forexplore-code-intelligence/2.1';
   }
 
   async run(request: RunAnalysisRequest): Promise<AnalysisRunResult> {

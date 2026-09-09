@@ -18,7 +18,7 @@ import {
   type StructuralSourceFile,
 } from './structural-index.js';
 import type { TreeSitterFileIndex, TreeSitterIndexRequest } from './tree-sitter-indexer.js';
-import { parseSourceFiles } from './structural-parse-pool.js';
+import { parseSourceFiles, type ParsePoolOptions } from './structural-parse-pool.js';
 
 /**
  * Host-only input for a repository snapshot. `repositoryRoot` never crosses
@@ -38,6 +38,7 @@ export interface RepositoryStructuralScanRequest {
   retainSourceTexts?: boolean;
   signal?: AbortSignal;
   isolatedParsing?: boolean;
+  parserPool?: ParsePoolOptions;
 }
 
 /** A narrow adapter shape suitable for `AnalysisCoordinator` injection. */
@@ -64,6 +65,10 @@ const ignoredDirectoryNames = new Set([
 ]);
 
 const projectManifestNames = new Set([
+  'cmakelists.txt',
+  'compile_commands.json',
+  'oh-package.json5',
+  'build-profile.json5',
   'build.gradle',
   'build.gradle.kts',
   'cargo.toml',
@@ -274,7 +279,7 @@ export async function scanRepositoryStructuralIndex(
         if (!sourcePath || !languageRegistry.resolvePath(file.relativePath) || old && old.sha256 === file.sha256 && old.parseStatus !== 'failed' && !changed.has(file.relativePath)) return [];
         return [{ sourcePath, resultPath: `${sourcePath}.parsed.json`, relativePath: file.relativePath, sizeBytes: file.sizeBytes ?? 0 }];
       });
-      const stats = await parseSourceFiles(tasks, request.signal);
+      const stats = await parseSourceFiles(tasks, request.signal, request.parserPool);
       parserResources = stats;
       console.info('[forexplore:performance]', JSON.stringify({ stage: 'parser-pool-complete', ...stats, files: tasks.length }));
       indexFile = input => {

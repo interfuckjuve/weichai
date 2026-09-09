@@ -14,6 +14,8 @@ import {
 export interface WorkspaceTranslationRuntimeOptions {
   workspaceRoot: string;
   compileCommand: WorkspaceCompileCommand;
+  /** Host-owned immutable test harness and all its criteria/configuration files. */
+  verification?: { command: WorkspaceCompileCommand; protectedFiles: string[] };
   client: WorkspaceTranslationModelClient;
   /** Budget per start/resume, including Analyzer and repair turns. */
   maxModelTurns?: number;
@@ -24,7 +26,7 @@ export class WorkspaceTranslationError extends Error {
   constructor(readonly status: number, message: string) { super(message); }
 }
 
-const runningStatuses = new Set(["analyzing", "translating", "compiling"]);
+const runningStatuses = new Set(["analyzing", "translating", "compiling", "testing"]);
 const hash = (content: string | null) => content === null ? null : createHash("sha256").update(content).digest("hex");
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 
@@ -47,6 +49,12 @@ export class WorkspaceTranslationRuntime {
       throw new Error("Invalid workspace translation execution budget.");
     }
     this.files = new TranslationWorkspaceFiles(options.workspaceRoot);
+    if (options.verification) {
+      validateWorkspaceCompileCommand(options.verification.command);
+      if (!options.verification.protectedFiles.length || options.verification.protectedFiles.length > 100) throw new Error("Verification requires 1..100 protected criteria files.");
+      options.verification = structuredClone(options.verification);
+      for (const path of options.verification.protectedFiles) if (this.files.read(path) === null) throw new Error(`Verification criteria missing: ${path}`);
+    }
   }
 
   start(input: unknown): WorkspaceTranslationRun {
@@ -55,11 +63,21 @@ export class WorkspaceTranslationRuntime {
     catch (error) { throw new WorkspaceTranslationError(400, message(error)); }
     const request = structuredClone(input);
     for (const path of new Set([...request.workspaceFiles, ...request.writeFiles])) this.files.read(path);
+    const verification = this.options.verification;
+    if (verification && request.writeFiles.some(path => verification.protectedFiles.some(protectedPath => path.toLowerCase() === protectedPath.toLowerCase()))) {
+      throw new WorkspaceTranslationError(400, "Verification criteria cannot be included in writeFiles.");
+    }
     const now = new Date().toISOString();
     const run: WorkspaceTranslationRun = {
       id: randomUUID(), workspaceRoot: this.files.root, request, status: "analyzing",
       createdAt: now, updatedAt: now, completedSteps: [], changes: [], compilations: [],
       modelTurns: 0, acceptance: "compilation-only",
+      ...(verification ? { verification: { command: structuredClone(verification.command),
+        criteria: verification.protectedFiles.map(path => {
+          const value = hash(this.files.read(path));
+          if (!value) throw new WorkspaceTranslationError(409, `Verification criteria missing: ${path}`);
+          return { path, hash: value };
+        }), runs: [] } } : {}),
     };
     this.save(run);
     return this.launch(run);
@@ -94,7 +112,9 @@ export class WorkspaceTranslationRuntime {
     if (!["failed", "cancelled", "interrupted"].includes(run.status)) {
       throw new WorkspaceTranslationError(409, "Only failed, cancelled or interrupted runs can resume.");
     }
+    this.assertVerification(run);
     this.reconcile(run);
+    run.acceptance = "compilation-only";
     run.status = run.plan ? "translating" : "analyzing";
     delete run.error;
     this.save(run);
@@ -107,6 +127,7 @@ export class WorkspaceTranslationRuntime {
     if (run.status === "rolled-back") return run;
     // Preflight every file before restoring any of them. Later user edits are never overwritten.
     this.reconcile(run, true);
+    run.acceptance = "compilation-only";
     run.status = "rolling-back";
     this.save(run);
     try {
@@ -150,10 +171,11 @@ export class WorkspaceTranslationRuntime {
     const record = object(value);
     validateWorkspaceTranslationRequest(record.request);
     const run = record as unknown as WorkspaceTranslationRun;
-    if (run.id !== id || run.workspaceRoot !== this.files.root || run.acceptance !== "compilation-only" ||
+    if (run.id !== id || run.workspaceRoot !== this.files.root || !["compilation-only", "behavior-verified"].includes(run.acceptance) ||
       ![...runningStatuses, "completed", "failed", "cancelled", "interrupted", "rolling-back", "rolled-back"].includes(run.status) ||
       !Array.isArray(run.changes) || !Array.isArray(run.compilations) || !Array.isArray(run.completedSteps) ||
       !Number.isInteger(run.modelTurns) || run.modelTurns < 0) throw new Error("Invalid translation record.");
+    if (run.verification && (!Array.isArray(run.verification.criteria) || !run.verification.criteria.length || !Array.isArray(run.verification.runs))) throw new Error("Invalid verification record.");
     const paths = new Set<string>();
     for (const change of run.changes) {
       if (!change || !run.request.writeFiles.includes(change.path) || paths.has(change.path) ||
@@ -211,15 +233,31 @@ export class WorkspaceTranslationRuntime {
     return structuredClone(run);
   }
 
+  private assertVerification(run: WorkspaceTranslationRun): void {
+    const current = this.options.verification;
+    if (Boolean(current) !== Boolean(run.verification) || current && run.verification &&
+      (JSON.stringify(current.command) !== JSON.stringify(run.verification.command) ||
+       JSON.stringify(current.protectedFiles) !== JSON.stringify(run.verification.criteria.map(item => item.path)))) {
+      throw new Error("Verification policy changed; start a new translation run.");
+    }
+    for (const criterion of run.verification?.criteria ?? []) {
+      if (run.request.writeFiles.some(path => path.toLowerCase() === criterion.path.toLowerCase()) || hash(this.files.read(criterion.path)) !== criterion.hash) {
+        throw new Error(`Verification criteria changed: ${criterion.path}`);
+      }
+    }
+  }
+
   private snapshot(run: WorkspaceTranslationRun): string {
-    return JSON.stringify([...new Set([...run.request.workspaceFiles, ...run.request.writeFiles])]
+    return JSON.stringify([...new Set([...run.request.workspaceFiles, ...run.request.writeFiles, ...(run.verification?.criteria.map(item => item.path) ?? [])])]
       .sort().map((path) => [path, hash(this.files.read(path))]));
   }
 
   private async execute(run: WorkspaceTranslationRun, signal: AbortSignal): Promise<void> {
+    this.assertVerification(run);
     let analyzer = !run.plan;
     let revisionReason = "";
     let successfulSnapshot: string | undefined;
+    let verifiedSnapshot: string | undefined;
     const readHashes = new Map<string, string | null>();
     const readable = new Set([...run.request.workspaceFiles, ...run.request.writeFiles]);
     const makeMessages = (): DeepSeekToolMessage[] => [
@@ -227,7 +265,7 @@ export class WorkspaceTranslationRuntime {
       { role: "user", content: JSON.stringify({
         request: run.request, plan: run.plan, completedSteps: run.completedSteps,
         changes: run.changes.map(({ path, applied }) => ({ path, applied })),
-        latestCompilation: run.compilations.at(-1), revisionReason,
+        latestCompilation: run.compilations.at(-1), verificationRequired: Boolean(run.verification), latestVerification: run.verification?.runs.at(-1), revisionReason,
       }) },
     ];
     let messages = makeMessages();
@@ -304,6 +342,8 @@ export class WorkspaceTranslationRuntime {
               }
               change.pendingBefore = beforeWrite;
               successfulSnapshot = undefined;
+              verifiedSnapshot = undefined;
+              run.acceptance = "compilation-only";
               // A shared-file repair invalidates its steps and every dependent step.
               const invalid = new Set(run.plan!.steps.filter((step) => step.files.includes(path)).map((step) => step.id));
               for (const step of run.plan!.steps) if (step.dependsOn.some((id) => invalid.has(id))) invalid.add(step.id);
@@ -337,7 +377,10 @@ export class WorkspaceTranslationRuntime {
             }
             case "get_changes": result = run.changes; break;
             case "compile": {
+              this.assertVerification(run);
               this.reconcile(run);
+              verifiedSnapshot = undefined;
+              run.acceptance = "compilation-only";
               run.status = "compiling";
               this.save(run);
               const before = this.snapshot(run);
@@ -348,6 +391,25 @@ export class WorkspaceTranslationRuntime {
               result = { ...compilation, filesUnchanged: successfulSnapshot !== undefined };
               break;
             }
+            case "run_tests": {
+              this.assertVerification(run);
+              this.reconcile(run);
+              if (!run.verification) throw new Error("No host verification suite is configured.");
+              const before = this.snapshot(run);
+              if (!successfulSnapshot || before !== successfulSnapshot) throw new Error("Compile the latest files before running behavioral tests.");
+              verifiedSnapshot = undefined;
+              run.acceptance = "compilation-only";
+              run.status = "testing";
+              this.save(run);
+              const resultRun = await compileWorkspace(this.files.root, run.verification.command, signal);
+              const filesUnchanged = before === this.snapshot(run);
+              run.verification.runs.push({ ...resultRun, sourceSnapshot: hash(before)!, planHash: hash(JSON.stringify(run.plan))!, filesUnchanged });
+              this.assertVerification(run);
+              if (resultRun.success && filesUnchanged) verifiedSnapshot = before;
+              run.status = "translating";
+              result = { ...resultRun, filesUnchanged };
+              break;
+            }
             case "revise_plan": {
               if (typeof args.reason !== "string" || !args.reason.trim()) throw new Error("Plan revision requires a reason.");
               revisionReason = args.reason;
@@ -355,17 +417,22 @@ export class WorkspaceTranslationRuntime {
               delete run.plan;
               run.completedSteps = [];
               successfulSnapshot = undefined;
+              verifiedSnapshot = undefined;
+              run.acceptance = "compilation-only";
               transition = true;
               result = { accepted: true };
               break;
             }
             case "finish": {
+              this.assertVerification(run);
               this.reconcile(run);
+              if (run.verification && verifiedSnapshot !== this.snapshot(run)) throw new Error("Finish requires a passing behavioral verification after the latest changes.");
               if (!run.plan || run.plan.steps.some((step) => !run.completedSteps.includes(step.id)) ||
                 successfulSnapshot === undefined || successfulSnapshot !== this.snapshot(run)) {
                 throw new Error("Finish requires all plan steps and a passing compilation after the latest file changes.");
               }
               signal.throwIfAborted();
+              run.acceptance = run.verification ? "behavior-verified" : "compilation-only";
               run.status = "completed";
               this.save(run);
               return;

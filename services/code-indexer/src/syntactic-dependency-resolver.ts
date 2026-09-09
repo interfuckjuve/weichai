@@ -34,6 +34,7 @@ interface Resolution {
 }
 
 const sourceExtensions: Readonly<Record<string, readonly string[]>> = {
+  c: ['.h', '.c'], cpp: ['.h', '.hpp', '.cpp'], kotlin: ['.kt', '.kts'], arkts: ['.ets', '.ts'],
   csharp: ['.cs'],
   go: ['.go'],
   java: ['.java'],
@@ -83,6 +84,11 @@ function relativeCandidates(
   targetReference: string,
   languageId: LanguageId,
 ): { candidates: string[]; internal: boolean } {
+  if (languageId === 'c' || languageId === 'cpp') {
+    if (targetReference.startsWith('<')) return { candidates: [], internal: false };
+    const local = path.posix.normalize(path.posix.join(path.posix.dirname(sourceRelativePath), targetReference));
+    return { candidates: isInsideRepository(local) ? [local] : [], internal: true };
+  }
   if (!targetReference.startsWith('.')) return { candidates: [], internal: false };
   const sourceDirectory = path.posix.dirname(canonicalPath(sourceRelativePath));
   const base = path.posix.normalize(path.posix.join(sourceDirectory, targetReference));
@@ -148,7 +154,7 @@ function javaCandidates(targetReference: string, symbols: readonly SymbolRecord[
   const wildcard = targetReference.endsWith('.*');
   return symbols
     .filter((symbol) =>
-      symbol.languageId === 'java' &&
+      ['java', 'kotlin'].includes(symbol.languageId) &&
       (wildcard
         ? symbol.qualifiedName.startsWith(`${target}.`)
         : symbol.qualifiedName === target),
@@ -171,7 +177,7 @@ function candidatesForImport(
   symbols: readonly SymbolRecord[],
 ): { candidates: ResolutionCandidate[]; internal: boolean } {
   const languageId = imported.languageId;
-  if (languageId === 'java') {
+  if (languageId === 'java' || languageId === 'kotlin') {
     const candidates = javaCandidates(imported.targetReference, symbols);
     return { candidates, internal: candidates.length > 0 };
   }
@@ -196,7 +202,7 @@ function candidatesForImport(
  * a change to any same-language declaration can affect those edges.
  */
 export function syntacticDependencyCandidatePaths(imported: TreeSitterImport): string[] {
-  if (imported.languageId === 'java' || imported.languageId === 'csharp') return [];
+  if (imported.languageId === 'java' || imported.languageId === 'kotlin' || imported.languageId === 'csharp') return [];
   const resolution = imported.languageId === 'python'
     ? pythonCandidates(imported.relativePath, imported.targetReference)
     : imported.languageId === 'rust'

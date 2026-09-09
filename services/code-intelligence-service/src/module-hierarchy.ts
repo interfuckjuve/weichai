@@ -12,6 +12,12 @@ import type { IndexStore } from './index-store.js';
 export const adaptiveModuleAlgorithm = 'adaptive-module-tree/v1' as const;
 export interface AdaptiveModuleOptions {
   planner?: ModuleHierarchyPlanner;
+  /** Independent sibling decisions; parents are validated before children run. */
+  maxConcurrentDecisions?: number;
+  decisionCache?: {
+    read(key: string): Promise<unknown | undefined>;
+    write(key: string, decision: ModuleHierarchyDecision): Promise<void>;
+  };
   requireModel?: boolean;
   maxDepth?: number;
   maxNodes?: number;
@@ -91,6 +97,7 @@ export async function buildAdaptiveModuleProposal(
 ): Promise<ProjectModuleProposal> {
   const project = index.projects.find(value => value.projectId === scope.projectId);
   if (!project || index.repositoryId !== scope.repositoryId || index.analysisRevision !== scope.analysisRevision) throw new Error('Hierarchy scope does not match the indexed project.');
+  const concurrency = boundedInteger(options.maxConcurrentDecisions, 3, 16);
   const maxDepth = boundedInteger(options.maxDepth, 8, 32);
   const maxNodes = boundedInteger(options.maxNodes, 2048, 10000);
   const maxModelCalls = boundedInteger(options.maxModelCalls, 24, 1000);
@@ -137,9 +144,8 @@ export async function buildAdaptiveModuleProposal(
     modules.push(node); return node;
   };
   const queue: Work[] = files.length ? [{ files, depth: -1 }] : [];
-  for (let cursor = 0; cursor < queue.length; cursor++) {
+  const evaluate = async (work: Work) => {
     options.signal?.throwIfAborted();
-    const work = queue[cursor]!;
     const candidates = candidatesFor(work.files);
     const facts = metrics(work.files);
     let decision: ModuleHierarchyDecision | undefined;
@@ -147,8 +153,11 @@ export async function buildAdaptiveModuleProposal(
     let deferredReason: string | undefined;
     decisionCount++;
     const remainingMs = maxDurationMs - (performance.now() - started);
-    const canModel = options.planner && modelCalls < maxModelCalls && remainingMs > 0 && candidates.length > 0 && candidates.length <= 64;
+    const canModel = options.planner && remainingMs > 0 && candidates.length > 0 && candidates.length <= 64;
     if (canModel) {
+      // Reserve before the first await so siblings cannot oversubscribe the budget.
+      const reservedCall = modelCalls < maxModelCalls;
+      if (reservedCall) modelCalls++;
       const requestCandidates: ModuleHierarchyCandidate[] = candidates.map(candidate => ({
         id: candidate.id, name: candidate.name.slice(0, 160), relativePath: candidate.relativePath,
         ...metrics(candidate.files), languages: [...new Set(candidate.files.flatMap(file => file.languageId ? [file.languageId] : []))],
@@ -183,14 +192,26 @@ export async function buildAdaptiveModuleProposal(
         depth: work.depth + 1, metrics: facts, candidates: requestCandidates,
         dependencies: [...dependencies.values()].sort((a, b) => b.count - a.count).slice(0, 64), excerpts };
       try {
-        modelCalls++;
-        decision = parseModuleHierarchyDecision(await decideWithinDeadline(options.planner!, request, signal), request);
+        const cacheKey = digest([adaptiveModuleAlgorithm, objective, request]);
+        const cached = await options.decisionCache?.read(cacheKey);
+        signal.throwIfAborted();
+        if (cached !== undefined && reservedCall) modelCalls--;
+        if (cached === undefined && !reservedCall) {
+          deferredReason = 'Model refinement budget reached; further functional refinement remains pending.';
+          throw new Error(deferredReason);
+        }
+        decision = parseModuleHierarchyDecision(cached ?? await decideWithinDeadline(options.planner!, request, signal), request);
+        signal.throwIfAborted();
+        // Only validated, live attempts reach durable storage. A late model reply
+        // cannot write after the deadline race has rejected.
+        if (cached === undefined) await options.decisionCache?.write(cacheKey, decision);
         source = 'model'; modelDecisionCount++;
         if (!work.node) projectSummary = decision.description;
         if (decision.action === 'stop' && decision.stopReason === 'insufficient-evidence') deferredReason = decision.reason;
       } catch {
         options.signal?.throwIfAborted();
-        deferredReason = 'Model decision was unavailable or invalid; further functional refinement remains pending.';
+        decision = undefined;
+        deferredReason ??= 'Model decision was unavailable or invalid; further functional refinement remains pending.';
         risks.add(deferredReason);
       }
     } else if (options.planner && (modelCalls >= maxModelCalls || remainingMs <= 0)) {
@@ -215,34 +236,48 @@ export async function buildAdaptiveModuleProposal(
           reason: small ? 'The source scope is small enough to inspect directly; additional structural levels are unnecessary.' : 'No smaller supported directory boundary was found.' };
       if (options.requireModel || !small && !split) deferredReason ??= 'Further functional refinement requires additional evidence.';
     }
-    const childrenCount = decision.action === 'split' ? decision.children.length : 0;
-    const depthLimited = work.depth >= maxDepth - 1;
-    const nodeLimited = modules.length + childrenCount > maxNodes;
-    const deadlineReached = performance.now() - started >= maxDurationMs;
-    if (decision.action === 'split' && (depthLimited || nodeLimited || deadlineReached)) {
-      deferredReason = depthLimited ? 'Maximum module depth reached.' : nodeLimited ? 'Module node budget reached.' : 'Module modeling deadline reached.';
-      source = 'budget';
-      decision = { ...decision, action: 'stop' };
-    }
-    let node = work.node;
-    if (!node && decision.action === 'stop') node = makeNode(work.files, null, decision.name, decision.description, decision.nodeKind, decision.evidenceIds);
-    if (node) {
-      node.name = decision.name; node.description = decision.description; node.purpose = decision.description;
-      node.nodeKind = decision.nodeKind;
-      node.evidenceIds = decision.evidenceIds.length ? decision.evidenceIds : work.files.slice(0, 8).map(file => `file:${file.fileId}`);
-      node.refinement = { state: decision.action === 'split' ? 'split' : deferredReason ? 'deferred' : 'leaf',
-        reason: deferredReason ?? decision.reason, decisionSource: source };
-    }
-    if (decision.action === 'split') {
-      const byId = new Map(candidates.map(candidate => [candidate.id, candidate]));
-      for (const child of decision.children) {
-        const members = child.groupIds.flatMap(id => byId.get(id)!.files).sort((a, b) => a.relativePath.localeCompare(b.relativePath));
-        const next = makeNode(members, node?.id ?? null, child.name, child.description, child.nodeKind, child.evidenceIds);
-        queue.push({ files: members, node: next, depth: work.depth + 1 });
+    return { work, candidates, decision, source, deferredReason };
+  };
+  // Apply each bounded wave in stable queue order even if model replies arrive
+  // out of order. Node limits and child identities remain deterministic.
+  for (let cursor = 0; cursor < queue.length;) {
+    options.signal?.throwIfAborted();
+    const wave = queue.slice(cursor, cursor + concurrency);
+    cursor += wave.length;
+    const outcomes = await Promise.all(wave.map(evaluate));
+    for (const outcome of outcomes) {
+      const { work, candidates } = outcome;
+      let { decision, deferredReason } = outcome;
+      let source: ModuleRefinement['decisionSource'] = outcome.source;
+      const childrenCount = decision.action === 'split' ? decision.children.length : 0;
+      const depthLimited = work.depth >= maxDepth - 1;
+      const nodeLimited = modules.length + childrenCount > maxNodes;
+      const deadlineReached = performance.now() - started >= maxDurationMs;
+      if (decision.action === 'split' && (depthLimited || nodeLimited || deadlineReached)) {
+        deferredReason = depthLimited ? 'Maximum module depth reached.' : nodeLimited ? 'Module node budget reached.' : 'Module modeling deadline reached.';
+        source = 'budget';
+        decision = { ...decision, action: 'stop' };
       }
-    } else if (node) {
-      node.sourceFiles = work.files.map(file => file.relativePath);
-      node.symbolKeys = work.files.flatMap(file => (symbolsByPath.get(file.relativePath) ?? []).map(symbol => symbol.symbolKey));
+      let node = work.node;
+      if (!node && decision.action === 'stop') node = makeNode(work.files, null, decision.name, decision.description, decision.nodeKind, decision.evidenceIds);
+      if (node) {
+        node.name = decision.name; node.description = decision.description; node.purpose = decision.description;
+        node.nodeKind = decision.nodeKind;
+        node.evidenceIds = decision.evidenceIds.length ? decision.evidenceIds : work.files.slice(0, 8).map(file => `file:${file.fileId}`);
+        node.refinement = { state: decision.action === 'split' ? 'split' : deferredReason ? 'deferred' : 'leaf',
+          reason: deferredReason ?? decision.reason, decisionSource: source };
+      }
+      if (decision.action === 'split') {
+        const byId = new Map(candidates.map(candidate => [candidate.id, candidate]));
+        for (const child of decision.children) {
+          const members = child.groupIds.flatMap(id => byId.get(id)!.files).sort((a, b) => a.relativePath.localeCompare(b.relativePath));
+          const next = makeNode(members, node?.id ?? null, child.name, child.description, child.nodeKind, child.evidenceIds);
+          queue.push({ files: members, node: next, depth: work.depth + 1 });
+        }
+      } else if (node) {
+        node.sourceFiles = work.files.map(file => file.relativePath);
+        node.symbolKeys = work.files.flatMap(file => (symbolsByPath.get(file.relativePath) ?? []).map(symbol => symbol.symbolKey));
+      }
     }
   }
   const forest = indexModuleHierarchy(modules);

@@ -61,6 +61,46 @@ function assertOwnership(proposal: ProjectModuleProposal) {
 }
 
 describe('adaptive module hierarchy builder', () => {
+  it('runs independent siblings concurrently and applies results in stable order', async () => {
+    let active = 0, peak = 0;
+    const decide = async (request: ModuleHierarchyDecisionRequest) => {
+      active++; peak = Math.max(peak, active);
+      await new Promise(resolve => setTimeout(resolve, request.name === 'engine' ? 8 : 2));
+      active--;
+      return variablePlanner.decide(request);
+    };
+    const concurrent = await build(files, { planner: { decide }, maxConcurrentDecisions: 3 });
+    const serial = await build(files, { planner: variablePlanner, maxConcurrentDecisions: 1 });
+    expect(peak).toBeGreaterThan(1); expect(peak).toBeLessThanOrEqual(3);
+    expect(concurrent.proposal.modules).toEqual(serial.proposal.modules);
+    assertOwnership(concurrent.proposal);
+  });
+
+  it('reuses validated decisions after interruption and never persists a late timed-out reply', async () => {
+    const cache = new Map<string, unknown>();
+    const write = vi.fn(async (key: string, decision: ModuleHierarchyDecision) => { cache.set(key, structuredClone(decision)); });
+    const decisionCache = { read: async (key: string) => cache.get(key), write };
+    const decide = vi.fn(variablePlanner.decide);
+    const first = await build(files, { planner: { decide }, decisionCache });
+    const previousCalls = decide.mock.calls.length;
+    const second = await build(files, { planner: { decide }, decisionCache, maxModelCalls: 1 });
+    expect(decide).toHaveBeenCalledTimes(previousCalls);
+    expect(second.proposal.modules).toEqual(first.proposal.modules);
+    const late = vi.fn(async (request: ModuleHierarchyDecisionRequest) => {
+      await new Promise(resolve => setTimeout(resolve, 30));
+      return stop(request);
+    });
+    const expiredWrite = vi.fn(async () => {});
+    await build(files, { planner: { decide: late }, modelTimeoutMs: 3, decisionCache: { read: async () => undefined, write: expiredWrite } });
+    await new Promise(resolve => setTimeout(resolve, 40));
+    expect(expiredWrite).not.toHaveBeenCalled();
+  });
+
+  it('never exceeds the model call budget across concurrent siblings', async () => {
+    const decide = vi.fn(variablePlanner.decide);
+    await build(files, { planner: { decide }, maxConcurrentDecisions: 4, maxModelCalls: 2 });
+    expect(decide).toHaveBeenCalledTimes(2);
+  });
   it('publishes root functionality and keeps refinement rationale out of module purpose', async () => {
     const { proposal } = await build(files, { planner: { decide: async (request) => ({ ...stop(request),
       description: 'Provides document editing with durable storage and cached model state.',

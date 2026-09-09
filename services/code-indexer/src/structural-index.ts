@@ -1,3 +1,4 @@
+import { resolveCrossLanguageBindings } from './cross-language-bindings.js';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import type {
@@ -88,6 +89,10 @@ interface IndexedSource {
 }
 
 const configurationFileNames = new Set([
+  'cmakelists.txt',
+  'compile_commands.json',
+  'oh-package.json5',
+  'build-profile.json5',
   'build.gradle',
   'build.gradle.kts',
   'cargo.toml',
@@ -362,7 +367,7 @@ function importFromEdge(
 ): TreeSitterImport | undefined {
   const range = edge.evidenceRanges[0];
   if (!file?.languageId || !range || !edge.targetReference || edge.kind !== 'import') return undefined;
-  if (!['csharp', 'go', 'java', 'javascript', 'python', 'rust', 'typescript'].includes(file.languageId)) return undefined;
+  if (!['arkts', 'c', 'cpp', 'csharp', 'go', 'java', 'javascript', 'kotlin', 'python', 'rust', 'typescript'].includes(file.languageId)) return undefined;
   return {
     importKind: 'import',
     languageId: file.languageId as TreeSitterImport['languageId'],
@@ -378,7 +383,7 @@ function exportFromEdge(
 ): TreeSitterExport | undefined {
   const range = edge.evidenceRanges[0];
   if (edge.kind !== 'export' || !file?.languageId || !range) return undefined;
-  if (!['csharp', 'go', 'java', 'javascript', 'python', 'rust', 'typescript'].includes(file.languageId)) return undefined;
+  if (!['arkts', 'c', 'cpp', 'csharp', 'go', 'java', 'javascript', 'kotlin', 'python', 'rust', 'typescript'].includes(file.languageId)) return undefined;
   return {
     exportKind: edge.targetRelativePath ? 're-export' : 'declaration',
     languageId: file.languageId as TreeSitterExport['languageId'],
@@ -416,7 +421,7 @@ function edgeNeedsRebuild(input: {
   const exported = exportFromEdge(edge, source);
   const imported = importFromEdge(edge, source) ?? (exported ? importForExport(exported) : undefined);
   if (!imported) return false;
-  if ((imported.languageId === 'java' || imported.languageId === 'csharp') && input.changedLanguageIds.has(imported.languageId)) {
+  if (['java', 'kotlin'].includes(imported.languageId) && (input.changedLanguageIds.has('java') || input.changedLanguageIds.has('kotlin')) || imported.languageId === 'csharp' && input.changedLanguageIds.has('csharp')) {
     return true;
   }
   return syntacticDependencyCandidatePaths(imported).some((candidate) => changedPaths.has(candidate));
@@ -586,7 +591,7 @@ export function buildStructuralIndex(request: BuildStructuralIndexRequest): Stru
     const file = currentFilesByPath.get(relativePath) ?? previousFilesByPath.get(relativePath);
     return file?.languageId ? [file.languageId] : [];
   }));
-  const previousEdges = (previous?.dependencyEdges ?? []).filter((edge) => edge.provider === 'tree-sitter');
+  const previousEdges = (previous?.dependencyEdges ?? []).filter((edge) => edge.provider === 'tree-sitter' && !edge.kind.endsWith('-binding'));
   const previousEdgeByKey = new Map(previousEdges.map((edge) => [edgeKey(edge), edge]));
   const currentImports: TreeSitterImport[] = [];
   const currentExports: TreeSitterExport[] = [];
@@ -654,8 +659,11 @@ export function buildStructuralIndex(request: BuildStructuralIndexRequest): Stru
       !needEdgeRebuild(edge),
     )
     .map((edge) => rehydrateEdge(edge, request.repositoryId, request.analysisRevision));
+  const bindings = resolveCrossLanguageBindings({ repositoryId: request.repositoryId, analysisRevision: request.analysisRevision,
+    files: currentFiles, symbols, signal: request.signal,
+    read: relativePath => { const source = sources.get(relativePath); return source && !source.unavailableReason ? source.content : undefined; } });
   const dependencyById = new Map<string, DependencyEdgeRecord>();
-  for (const edge of [...reusedDependencies, ...rebuiltDependencies]) dependencyById.set(edge.dependencyEdgeId, edge);
+  for (const edge of [...reusedDependencies, ...rebuiltDependencies, ...bindings]) dependencyById.set(edge.dependencyEdgeId, edge);
   const dependencies = [...dependencyById.values()].sort((left, right) => compareText(left.dependencyEdgeId, right.dependencyEdgeId));
 
   const index: StructuralIndex = {
@@ -682,7 +690,7 @@ export function buildStructuralIndex(request: BuildStructuralIndexRequest): Stru
     stats: {
       changedFileCount: changedPaths.length,
       reparsedFileCount,
-      rebuiltDependencyEdgeCount: rebuiltDependencies.length,
+      rebuiltDependencyEdgeCount: rebuiltDependencies.length + bindings.length,
       reusedDependencyEdgeCount: reusedDependencies.length,
       reusedFileCount,
     },

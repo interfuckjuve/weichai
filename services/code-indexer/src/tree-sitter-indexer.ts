@@ -82,6 +82,12 @@ export interface TreeSitterIndexRequest {
 }
 
 const declarationKinds: Readonly<Record<string, StructuralSymbolKind>> = {
+  class_specifier: 'class',
+  struct_specifier: 'struct',
+  enum_specifier: 'enum',
+  namespace_definition: 'namespace',
+  object_declaration: 'class',
+  package_header: 'package',
   annotation_type_declaration: 'interface',
   class_declaration: 'class',
   class_definition: 'class',
@@ -138,6 +144,8 @@ const identifierNodeTypes = new Set([
   'package_identifier',
   'property_identifier',
   'qualified_name',
+  'qualified_identifier',
+  'simple_identifier',
   'scoped_identifier',
   'type_identifier',
 ]);
@@ -212,6 +220,14 @@ function declarationKind(node: Parser.SyntaxNode): StructuralSymbolKind | undefi
 }
 
 function nameNodeFor(node: Parser.SyntaxNode): Parser.SyntaxNode | undefined {
+  // Native function names can be nested under pointer/qualified declarators;
+  // inspecting the return type first would name `int sum()` as `int`.
+  let declarator = node.childForFieldName('declarator');
+  while (declarator) {
+    const nested = declarator.childForFieldName('declarator');
+    if (!nested) return declarator;
+    declarator = nested;
+  }
   for (const field of ['name', 'type', 'module_name']) {
     const candidate = node.childForFieldName(field);
     if (candidate) return candidate;
@@ -228,7 +244,7 @@ function declarationName(node: Parser.SyntaxNode, source: string): string | unde
 function signatureFor(node: Parser.SyntaxNode, source: string): string {
   const body = node.childForFieldName('body')
     ?? node.namedChildren.find((child) =>
-      ['block', 'class_body', 'declaration_list', 'interface_body', 'statement_block'].includes(child.type),
+      ['function_body', 'enum_class_body', 'block', 'class_body', 'declaration_list', 'interface_body', 'statement_block'].includes(child.type),
     );
   const end = body?.startIndex ?? node.endIndex;
   return normalizedText(source.slice(node.startIndex, end));
@@ -246,6 +262,7 @@ function declarationExported(
 ): boolean {
   if (parentExported(node)) return true;
   const text = sourceFor(node, source).trimStart();
+  if (languageId === 'kotlin') return !/\b(private|internal)\b/.test(signatureFor(node, source));
   if (languageId === 'rust') return /^pub(?:\s*\([^)]*\))?\b/.test(text);
   if (languageId === 'java' || languageId === 'csharp') return /^public\b/.test(text);
   if (languageId === 'go') return /^[A-Z]/.test(name);
@@ -272,7 +289,7 @@ function fileScopeName(
   languageId: TreeSitterLanguageId,
   source: string,
 ): string | undefined {
-  const fileScopeTypes = languageId === 'java'
+  const fileScopeTypes = languageId === 'kotlin' ? new Set(['package_header']) : languageId === 'java'
     ? new Set(['package_declaration'])
     : languageId === 'csharp'
       ? new Set(['file_scoped_namespace_declaration'])
@@ -376,9 +393,17 @@ function importTargets(
   languageId: TreeSitterLanguageId,
   source: string,
 ): Array<{ range: Parser.SyntaxNode; target: string }> {
-  if (languageId === 'javascript' || languageId === 'typescript') {
+  if (languageId === 'javascript' || languageId === 'typescript' || languageId === 'arkts') {
     const sourceNode = node.childForFieldName('source');
     return sourceNode ? [{ range: sourceNode, target: unquote(sourceFor(sourceNode, source)) }] : [];
+  }
+  if (languageId === 'c' || languageId === 'cpp') {
+    const target = node.childForFieldName('path');
+    return target ? [{ range: target, target: unquote(sourceFor(target, source)) }] : [];
+  }
+  if (languageId === 'kotlin') {
+    const target = sourceFor(node, source).replace(/^\s*import\s+/, '').replace(/\s+as\s+\w+\s*$/, '').trim();
+    return target ? [{ range: node, target }] : [];
   }
   if (languageId === 'java') {
     const target = sourceFor(node, source)
@@ -429,7 +454,7 @@ function collectImports(root: Parser.SyntaxNode, request: TreeSitterIndexRequest
         ? ['import_from_statement', 'import_statement']
         : request.language.languageId === 'rust'
           ? ['use_declaration']
-          : ['import_declaration', 'import_statement', 'using_directive'],
+          : ['import', 'import_header', 'preproc_include', 'import_declaration', 'import_statement', 'using_directive'],
   );
   const visit = (node: Parser.SyntaxNode): void => {
     if (importTypes.has(node.type)) {
@@ -478,7 +503,7 @@ function collectExports(
     });
   };
 
-  if (request.language.languageId === 'javascript' || request.language.languageId === 'typescript') {
+  if (request.language.languageId === 'javascript' || request.language.languageId === 'typescript' || request.language.languageId === 'arkts') {
     const visit = (node: Parser.SyntaxNode): void => {
       if (node.type === 'export_statement') {
         const sourceNode = node.childForFieldName('source');

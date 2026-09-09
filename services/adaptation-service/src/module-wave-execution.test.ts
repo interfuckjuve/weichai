@@ -67,6 +67,8 @@ async function repository(): Promise<string> {
   await mkdir(path.join(root, "src"));
   await writeFile(path.join(root, "src", "Service.cs"), "old implementation", "utf8");
   git(root, ["init"]);
+  // This fixture hashes LF bytes; do not inherit machine-specific checkout conversion.
+  git(root, ["config", "core.autocrlf", "false"]);
   git(root, ["config", "user.email", "forexplore@example.test"]);
   git(root, ["config", "user.name", "ForeXplore Test"]);
   git(root, ["add", "."]);

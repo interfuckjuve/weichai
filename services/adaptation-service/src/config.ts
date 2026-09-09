@@ -20,6 +20,7 @@ export interface AdaptationServiceConfig {
   workspaceTranslation?: {
     bearerToken: string;
     compileCommand: WorkspaceCompileCommand;
+    verification?: { command: WorkspaceCompileCommand; protectedFiles: string[] };
     maxModelTurns: number;
     timeoutMs: number;
   };
@@ -88,8 +89,15 @@ function loadWorkspaceTranslationConfig(env: NodeJS.ProcessEnv): NonNullable<Ada
   try { compileCommand = JSON.parse(env.ADAPTATION_WORKSPACE_COMPILE_COMMAND ?? ""); }
   catch { throw new Error("ADAPTATION_WORKSPACE_COMPILE_COMMAND must be a JSON command object."); }
   validateWorkspaceCompileCommand(compileCommand);
+  let verification: NonNullable<AdaptationServiceConfig["workspaceTranslation"]>["verification"];
+  if (env.ADAPTATION_WORKSPACE_VERIFICATION) {
+    const value = JSON.parse(env.ADAPTATION_WORKSPACE_VERIFICATION);
+    validateWorkspaceCompileCommand(value.command);
+    if (!Array.isArray(value.protectedFiles) || !value.protectedFiles.length || value.protectedFiles.some((path: unknown) => typeof path !== "string")) throw new Error("Verification protectedFiles must be a nonempty path array.");
+    verification = value;
+  }
   return {
-    bearerToken, compileCommand,
+    bearerToken, compileCommand, ...(verification ? { verification } : {}),
     maxModelTurns: positiveInteger(env.ADAPTATION_WORKSPACE_MAX_TURNS, 80, "ADAPTATION_WORKSPACE_MAX_TURNS"),
     timeoutMs: positiveInteger(env.ADAPTATION_WORKSPACE_TIMEOUT_MS, 1_800_000, "ADAPTATION_WORKSPACE_TIMEOUT_MS"),
   };

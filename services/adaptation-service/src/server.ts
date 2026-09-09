@@ -32,6 +32,7 @@ async function main(): Promise<void> {
     workspaceTranslationRuntime = new WorkspaceTranslationRuntime({
       workspaceRoot: config.projectRoot,
       compileCommand: config.workspaceTranslation.compileCommand,
+      verification: config.workspaceTranslation.verification,
       maxModelTurns: config.workspaceTranslation.maxModelTurns,
       timeoutMs: config.workspaceTranslation.timeoutMs,
       client: createWorkspaceTranslationModelClient({ apiKey: config.apiKey, temperature: 0 }),

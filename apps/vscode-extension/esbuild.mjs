@@ -1,3 +1,4 @@
+import { createRequire } from 'node:module';
 import esbuild from 'esbuild';
 import { cp, mkdir, rm } from 'node:fs/promises';
 import path from 'node:path';
@@ -11,6 +12,9 @@ const extensionOutputDirectory = process.env.FOREXPLORE_EXTENSION_OUTPUT_DIRECTO
 const nativeRuntimePackages = [
   'node-gyp-build',
   'tree-sitter',
+  'tree-sitter-c',
+  'tree-sitter-cpp',
+  '@tree-sitter-grammars/tree-sitter-kotlin',
   'tree-sitter-c-sharp',
   'tree-sitter-go',
   'tree-sitter-java',
@@ -51,9 +55,10 @@ await esbuild.build({
 const nativeModulesDirectory = path.join(extensionOutputDirectory, 'node_modules');
 await rm(nativeModulesDirectory, { recursive: true, force: true });
 await mkdir(nativeModulesDirectory, { recursive: true });
+const indexerRequire = createRequire(path.join(workspaceDirectory, 'services', 'code-indexer', 'package.json'));
 await Promise.all(nativeRuntimePackages.map(async (packageName) => {
   await cp(
-    path.join(workspaceDirectory, 'node_modules', packageName),
+    path.dirname(indexerRequire.resolve(`${packageName}/package.json`)),
     path.join(nativeModulesDirectory, packageName),
     { recursive: true, dereference: true },
   );

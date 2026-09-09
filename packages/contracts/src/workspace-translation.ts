@@ -45,7 +45,7 @@ export interface WorkspaceCompilation {
 }
 
 export type WorkspaceTranslationStatus =
-  | "analyzing" | "translating" | "compiling" | "completed"
+  | "analyzing" | "translating" | "compiling" | "testing" | "completed"
   | "failed" | "cancelled" | "interrupted" | "rolling-back" | "rolled-back";
 
 export interface WorkspaceTranslationChange {
@@ -72,6 +72,11 @@ export interface WorkspaceTranslationRun {
   compilations: WorkspaceCompilation[];
   modelTurns: number;
   error?: string;
-  /** Deliberately does not attest to behavioral equivalence. */
-  acceptance: "compilation-only";
+  /** A passing fixed test suite is evidence, not a proof of all behaviors. */
+  acceptance: "compilation-only" | "behavior-verified";
+  verification?: {
+    command: WorkspaceCompileCommand;
+    criteria: Array<{ path: string; hash: string }>;
+    runs: Array<WorkspaceCompilation & { sourceSnapshot: string; planHash: string; filesUnchanged: boolean }>;
+  };
 }

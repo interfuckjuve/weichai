@@ -65,6 +65,26 @@ function hierarchicalResult(index: StructuralIndex, scope: ProjectAnalysisScope)
 }
 
 describe('project understanding lifecycle', () => {
+  it('reuses durable validated decisions after recreating the coordinator', async () => {
+    const { runtime, scopes } = await setup();
+    const scope = scopes[0]!;
+    const decide = vi.fn(async (request: ModuleHierarchyDecisionRequest) => coherentDecision(request));
+    const first = new ProjectAnalysisCoordinator({ store: runtime.store, hierarchyPlanner: { decide } });
+    await first.ensure(scope);
+    expect((await first.read(scope)).state).toBe('ready');
+    const calls = decide.mock.calls.length;
+    const artifacts = await runtime.store.listModuleArtifacts(scope);
+    expect(artifacts.some(value => value.moduleArtifactId.startsWith('module-decisions:'))).toBe(true);
+    const job = artifacts.find(value => value.moduleArtifactId.startsWith('project-job:'))!;
+    const payload = { ...structuredClone(job.payload) as ProjectAnalysisRecord, state: 'analyzing' as const };
+    await runtime.store.putModuleArtifact({ ...job, payload, contentHash: projectPlanHash(payload).slice('sha256:'.length) });
+    const restored = new ProjectAnalysisCoordinator({ store: runtime.store, hierarchyPlanner: { decide } });
+    await restored.ensure(scope);
+    expect((await restored.read(scope)).state).toBe('ready');
+    expect(decide).toHaveBeenCalledTimes(calls);
+    await restored.ensure(scope, true);
+    expect(decide.mock.calls.length).toBeGreaterThan(calls);
+  });
   it('normalizes workbench retry messages before sending strict model evidence', async () => {
     const { runtime, scopes } = await setup();
     const scope = scopes[0]!;
@@ -207,7 +227,7 @@ describe('project understanding lifecycle', () => {
     const scope = scopes[0]!;
     const baseline = new ProjectAnalysisCoordinator({ store: runtime.store, allowStructuralFallback: true });
     await baseline.ensure(scope);
-    const job = (await runtime.store.listModuleArtifacts(scope)).find((artifact) => artifact.kind === 'other')!;
+    const job = (await runtime.store.listModuleArtifacts(scope)).find((artifact) => artifact.moduleArtifactId.startsWith('project-job:'))!;
     const payload = { ...structuredClone(job.payload) as ProjectAnalysisRecord, state: 'analyzing' as const };
     await runtime.store.putModuleArtifact({ ...job, payload, contentHash: projectPlanHash(payload).slice('sha256:'.length) });
     const hidden = await new ProjectAnalysisCoordinator({ store: runtime.store }).read(scope);
