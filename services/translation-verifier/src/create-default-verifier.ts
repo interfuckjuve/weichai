@@ -11,6 +11,10 @@ import {
   createMultiAgentDifferentialProvider,
   type MultiAgentDifferentialOptions,
 } from "./strategies/multi-agent-differential/strategy.js";
+import {
+  createSingleAgentDifferentialProvider,
+  type SingleAgentDifferentialOptions,
+} from "./strategies/single-agent-differential/strategy.js";
 import { VerificationStrategyFactory } from "./workflow/strategy-registry.js";
 
 export type VerificationServiceRuntimeOptions = Pick<
@@ -29,6 +33,7 @@ export function createDefaultVerificationService(
   options: DifferentialSmokeStrategyOptions &
     VerificationServiceRuntimeOptions & {
       multiAgent?: MultiAgentDifferentialOptions;
+      singleAgent?: SingleAgentDifferentialOptions;
     } = {},
 ): VerificationService {
   const factory = new VerificationStrategyFactory([
@@ -40,6 +45,14 @@ export function createDefaultVerificationService(
       maxTurns: options.maxTurns,
       effort: options.effort,
       ...options.multiAgent,
+    }),
+    createSingleAgentDifferentialProvider({
+      apiKey: options.apiKey,
+      model: options.model,
+      timeoutMs: options.timeoutMs,
+      maxTurns: options.maxTurns,
+      effort: options.effort,
+      ...options.singleAgent,
     }),
   ]);
   return new VerificationService({

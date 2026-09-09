@@ -20,3 +20,4 @@ export { VerificationService } from "./verification-service.js";
 export { createDefaultVerificationService } from "./create-default-verifier.js";
 export { DIFFERENTIAL_SMOKE_STRATEGY } from "./strategies/smoke-differential/strategy.js";
 export { MULTI_AGENT_DIFFERENTIAL_STRATEGY } from "./strategies/multi-agent-differential/strategy.js";
+export { SINGLE_AGENT_DIFFERENTIAL_STRATEGY } from "./strategies/single-agent-differential/strategy.js";

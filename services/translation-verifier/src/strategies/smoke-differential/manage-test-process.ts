@@ -245,6 +245,8 @@ export function runManagedProcess(
     env: NodeJS.ProcessEnv;
     deadlineAt: number;
     maxOutputBytes?: number;
+    /** Host lifecycle hook; runs synchronously while the new process is owned here. */
+    onSpawn?: (pid: number) => void;
     /** Best-effort live observer, independent of retained stdout limits. */
     onStdoutChunk?: (chunk: Buffer) => void;
     /** 终止升级与管道排空宽限(ms);缺省 DEFAULT_CLEANUP_GRACE_MS。 */
@@ -264,6 +266,14 @@ export function runManagedProcess(
       detached: process.platform !== "win32",
       stdio: ["ignore", "pipe", "pipe"],
     });
+    if (child.pid !== undefined && input.onSpawn) {
+      try {
+        input.onSpawn(child.pid);
+      } catch (error) {
+        void terminateProcessTree(child, "SIGKILL", graceMs).then(() => reject(error));
+        return;
+      }
+    }
     const stdout = boundedOutput(maxBytes);
     const stderr = boundedOutput(maxBytes);
     child.stdout?.on("data", (chunk: Buffer) => {

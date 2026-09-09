@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   readdirSync,
   rmSync,
   writeFileSync,
@@ -20,6 +21,9 @@ import {
 } from "./run-output/measure-legacy-run.js";
 import * as recording from "./run-output/record-run.js";
 import { VerificationService } from "./verification-service.js";
+import { createSingleAgentDifferentialProvider } from "./strategies/single-agent-differential/strategy.js";
+import { BEHAVIOR_COMMAND_ENTRY } from "./strategies/multi-agent-differential/behavior-command.js";
+import * as processes from "./strategies/smoke-differential/manage-test-process.js";
 import { VerificationStrategyFactory } from "./workflow/strategy-registry.js";
 import { resolveVerificationPolicy } from "./schemas/verification-assessment.js";
 import type { VerificationAssessment } from "./schemas/verification-types.js";
@@ -1430,6 +1434,123 @@ describe("VerificationService", () => {
       "Verification framework could not complete: Verification strategy timed out",
     );
   });
+
+  it("joins real proxy cancellation before returning a single-agent receipt and deleting its workspace", async () => {
+    workspaceRoot = join(realpathSync(root), "workspaces");
+    artifactRoot = join(realpathSync(root), "artifacts");
+    const controller = new AbortController();
+    const actual = processes.runManagedProcess;
+    let pid: number | undefined;
+    let workspace = "";
+    let sessionStopped = false;
+    let proxy: ReturnType<typeof actual> | undefined;
+    vi.spyOn(processes, "runManagedProcess").mockImplementation(
+      async (command, signal) => {
+        const response = {
+          exitCode: 0,
+          timedOut: false,
+          durationMs: 1,
+          stdout: "",
+          stderr: "",
+        };
+        if (command.args.includes("--version"))
+          return { ...response, stdout: "2.1.236" };
+        if (!command.args.includes("--print")) return actual(command, signal);
+        workspace = dirname(dirname(command.cwd));
+        const pidFile = join(command.cwd, ".forexplore-tests/pid.txt");
+        writeFileSync(join(command.cwd, ".forexplore-tests/plan.json"), "{}");
+        proxy = actual(
+          {
+            command: process.execPath,
+            args: [
+              "--import",
+              import.meta.resolve("tsx"),
+              BEHAVIOR_COMMAND_ENTRY,
+              "--project",
+              "target",
+              "--",
+              "node",
+              "-e",
+              `process.on('SIGTERM',()=>{}); require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(()=>{},1000);`,
+            ],
+            cwd: command.cwd,
+            env: command.env,
+            deadlineAt: command.deadlineAt,
+          },
+          signal,
+        );
+        // Consume failure immediately while the fixture waits for the nested process to start.
+        const joined = proxy.then(
+          () => {},
+          () => {},
+        );
+        try {
+          for (
+            let attempt = 0;
+            attempt < 300 && !existsSync(pidFile);
+            attempt++
+          )
+            await new Promise((resolve) => setTimeout(resolve, 10));
+          expect(existsSync(pidFile)).toBe(true);
+          pid = Number(readFileSync(pidFile, "utf8"));
+          controller.abort(new Error("caller stopped"));
+          await joined;
+          sessionStopped = true;
+          return response;
+        } finally {
+          controller.abort();
+          await joined;
+        }
+      },
+    );
+    try {
+      const provider = createSingleAgentDifferentialProvider({
+        apiKey: "local-test-key",
+      });
+      const receipt = await serviceWith(
+        [provider],
+        provider.descriptor.id,
+      ).verifyWithReceipt(input(), {}, controller.signal);
+      expect(
+        sessionStopped,
+        receipt.result.problems.map((problem) => problem.message).join("; "),
+      ).toBe(true);
+      expect(pid).toBeDefined();
+      expect(() => process.kill(pid!, 0)).toThrow();
+      expect(existsSync(workspace)).toBe(false);
+      expect(receipt.result.executionStatus).toBe("cancelled");
+      expect(
+        receipt.result.problems.some((problem) =>
+          problem.message.includes("shutdown unconfirmed"),
+        ),
+      ).toBe(false);
+      const session = receipt.result.artifacts.find((artifact) =>
+        artifact.id.endsWith(":single-agent-session"),
+      );
+      expect(session).toBeDefined();
+      expect(
+        JSON.parse(readFileSync(join(artifactRoot, session!.path), "utf8")),
+      ).toHaveProperty("commandEvidence");
+      expect(
+        JSON.parse(
+          readFileSync(
+            join(artifactRoot, receipt.resultArtifact!.path),
+            "utf8",
+          ),
+        ),
+      ).toEqual(receipt.result);
+    } finally {
+      controller.abort();
+      if (pid) {
+        try {
+          process.kill(-pid, "SIGKILL");
+        } catch {
+          /* Already stopped. */
+        }
+      }
+      await proxy?.catch(() => {});
+    }
+  }, 15_000);
 
   it("joins delayed cooperative cancellation before deleting its workspace and preserves evidence", async () => {
     const controller = new AbortController();

@@ -915,6 +915,7 @@ describe("createDefaultVerificationService", () => {
     expect(service.listStrategies().map(({ id }) => id)).toEqual([
       DIFFERENTIAL_SMOKE_STRATEGY.id,
       "multi-agent-differential",
+      "single-agent-differential",
     ]);
   });
 });

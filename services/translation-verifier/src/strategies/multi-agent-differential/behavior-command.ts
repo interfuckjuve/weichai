@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   accessSync,
@@ -7,8 +8,18 @@ import {
   readFileSync,
   realpathSync,
   statSync,
+  writeFileSync,
+  existsSync,
+  readdirSync,
 } from "node:fs";
-import { basename, delimiter, isAbsolute, join, resolve } from "node:path";
+import {
+  basename,
+  delimiter,
+  isAbsolute,
+  join,
+  resolve,
+  relative,
+} from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   runManagedProcess,
@@ -18,12 +29,16 @@ import {
   assertProjectBaseline,
   hashContent,
   inside,
+  readTestFile,
+  captureProjectBaseline,
+  isProjectTestPath,
   type BehaviorProjectBaseline,
 } from "./behavior-workspace.js";
 import type {
   BehaviorCommand,
   BehaviorExecutionScope,
   BehaviorProcessResult,
+  BehaviorSide,
 } from "./behavior-types.js";
 
 export const BEHAVIOR_COMMAND_ENTRY = fileURLToPath(
@@ -64,6 +79,14 @@ export interface BehaviorCommandControl {
   env: NodeJS.ProcessEnv;
   secrets: string[];
   evidencePath?: string;
+  processRegistryPath?: string;
+  side?: BehaviorSide;
+  /** A Host-only frozen snapshot is shared by all project controls. */
+  expectation?: { file: string; snapshot: string; targetRoot: string };
+}
+export interface BehaviorSessionControl {
+  projects: Partial<Record<BehaviorSide, BehaviorCommandControl>>;
+  executionSides: BehaviorSide[];
 }
 
 export function buildEnvironment(): NodeJS.ProcessEnv {
@@ -158,6 +181,14 @@ export function captureFrozenFiles(
 }
 
 export function assertCommandIntegrity(control: BehaviorCommandControl): void {
+  if (control.expectation && existsSync(control.expectation.snapshot)) {
+    const { file, snapshot, targetRoot } = control.expectation;
+    if (
+      readTestFile(targetRoot, relative(targetRoot, file)) !==
+      readFileSync(snapshot, "utf8")
+    )
+      throw new Error("Frozen test plan integrity violation.");
+  }
   for (const baseline of control.baselines) assertProjectBaseline(baseline);
   for (const [file, hash] of Object.entries(control.frozenFiles)) {
     const metadata = lstatSync(file);
@@ -224,11 +255,62 @@ export function resolveBehaviorCommand(
   return installed;
 }
 
+function appendCommandEvidence(
+  control: BehaviorCommandControl,
+  record: unknown,
+): void {
+  if (!control.evidencePath) return;
+  const line = `${JSON.stringify(record)}\n`;
+  const size = existsSync(control.evidencePath)
+    ? statSync(control.evidencePath).size
+    : 0;
+  if (size + Buffer.byteLength(line) > 8 * 1024 * 1024)
+    throw new Error("Host command evidence exceeds session budget.");
+  appendFileSync(control.evidencePath, line, { mode: 0o600 });
+}
+
+function captureCommandTests(
+  control: BehaviorCommandControl,
+): Record<string, string> {
+  const root = control.scope.cwd;
+  const original = control.baselines.find(
+    (baseline) => baseline.root === root,
+  )!;
+  const paths = Object.keys(captureProjectBaseline(root).files).filter(
+    (path) => !Object.hasOwn(original.files, path) && isProjectTestPath(path),
+  );
+  const walk = (directory: string): void => {
+    if (!existsSync(join(root, directory))) return;
+    if (lstatSync(join(root, directory)).isSymbolicLink())
+      throw new Error("Linked generated test directory is not allowed.");
+    for (const entry of readdirSync(join(root, directory), {
+      withFileTypes: true,
+    })) {
+      const path = `${directory}/${entry.name}`;
+      if (entry.isDirectory()) walk(path);
+      else paths.push(path);
+    }
+  };
+  walk(".forexplore-tests");
+  const files: Record<string, string> = Object.create(null);
+  let bytes = 0;
+  for (const path of paths) {
+    const content = readTestFile(root, path);
+    bytes += Buffer.byteLength(content);
+    if (bytes > 4 * 1024 * 1024 || Object.keys(files).length >= 200)
+      throw new Error("Generated test evidence exceeds budget.");
+    if (redact(content, control.secrets) !== content)
+      throw new Error("Test evidence contains protected credential material.");
+    files[path] = content;
+  }
+  return files;
+}
+
 export async function runBehaviorCommand(
   command: BehaviorCommand,
   control: BehaviorCommandControl,
   signal?: AbortSignal,
-): Promise<BehaviorProcessResult> {
+): Promise<BehaviorProcessResult & { commandId: string }> {
   signal?.throwIfAborted();
   if (!Number.isFinite(control.deadlineAt) || control.deadlineAt <= Date.now())
     throw new Error("Behavior execution deadline has expired.");
@@ -236,7 +318,33 @@ export async function runBehaviorCommand(
   if (scope.cwd !== control.scope.cwd) throw new Error("Command cwd changed.");
   assertCommandIntegrity(control);
   const executable = resolveBehaviorCommand(command, control);
+  const testFiles = control.side ? captureCommandTests(control) : undefined;
+  const commandId = randomUUID();
+  const startedAt = Date.now();
+  const commandRecord = {
+    commandId,
+    ...(control.side ? { side: control.side, testFiles } : {}),
+    command: {
+      executable: command.executable,
+      args: command.args.map((arg) => redact(arg, control.secrets)),
+    },
+    cwd: scope.cwd,
+  };
+  if (control.side)
+    appendCommandEvidence(control, {
+      ...commandRecord,
+      completed: false,
+      exitCode: null,
+      timedOut: false,
+      durationMs: 0,
+      stdout: "",
+      stderr: "Command started; completion has not been recorded.",
+      baselineValid: true,
+      credentialHit: false,
+    });
   let result: BehaviorProcessResult;
+  let processError: unknown;
+  let childPid: number | undefined;
   try {
     result = await runManagedProcess(
       {
@@ -245,12 +353,38 @@ export async function runBehaviorCommand(
         cwd: scope.cwd,
         env: sanitizedBuildEnvironment(control.env),
         deadlineAt: control.deadlineAt,
+        cleanupGraceMs: 250,
+        onSpawn: (pid) => {
+          childPid = pid;
+          if (control.processRegistryPath)
+            appendFileSync(
+              control.processRegistryPath,
+              `${JSON.stringify({ pid, active: true })}\n`,
+              { mode: 0o600 },
+            );
+        },
       },
       signal,
     );
   } catch (error) {
-    assertCommandIntegrity(control);
-    throw error;
+    processError = error;
+    result = {
+      exitCode: null,
+      timedOut: Date.now() >= control.deadlineAt,
+      durationMs: Date.now() - startedAt,
+      stdout: "",
+      stderr: redact(
+        error instanceof Error ? error.message : String(error),
+        control.secrets,
+      ),
+    };
+  } finally {
+    if (childPid) await stopCommandProcessGroup(childPid);
+    if (childPid && control.processRegistryPath)
+      appendFileSync(
+        control.processRegistryPath,
+        `${JSON.stringify({ pid: childPid, active: false })}\n`,
+      );
   }
   let integrityError: unknown;
   try {
@@ -265,28 +399,80 @@ export async function runBehaviorCommand(
     stdout,
     stderr: redact(result.stderr, control.secrets),
   };
-  if (control.evidencePath)
-    appendFileSync(
-      control.evidencePath,
-      JSON.stringify({
-        commandId: randomUUID(),
-        command: {
-          executable: command.executable,
-          args: command.args.map((arg) => redact(arg, control.secrets)),
-        },
-        cwd: scope.cwd,
-        ...safeResult,
-        baselineValid: !integrityError,
-        credentialHit,
-      }) + "\n",
-      { mode: 0o600 },
-    );
+  appendCommandEvidence(control, {
+    ...commandRecord,
+    ...safeResult,
+    completed: true,
+    baselineValid: !integrityError,
+    credentialHit,
+  });
   if (integrityError) throw integrityError;
+  if (processError) throw processError;
   if (credentialHit)
     throw new Error(
       "Command output contains protected credential material; comparison refused.",
     );
-  return { ...result, stderr: safeResult.stderr };
+  return { ...result, commandId, stderr: safeResult.stderr };
+}
+
+/** Called only after the Agent process group has stopped, before evidence or cleanup. */
+export async function stopRegisteredCommands(path: string): Promise<void> {
+  if (!existsSync(path)) return;
+  const active = new Set<number>();
+  for (const line of readFileSync(path, "utf8").split("\n").filter(Boolean)) {
+    let record: { pid: number; active: boolean };
+    try {
+      record = JSON.parse(line) as typeof record;
+    } catch (cause) {
+      throw new Error("Invalid Host process registry.", { cause });
+    }
+    if (!Number.isSafeInteger(record.pid) || record.pid <= 1)
+      throw new Error("Invalid Host process registry.");
+    if (record.active) active.add(record.pid);
+    else active.delete(record.pid);
+  }
+  for (const pid of active) await stopCommandProcessGroup(pid);
+}
+
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+    throw error;
+  }
+}
+
+async function stopCommandProcessGroup(pid: number): Promise<void> {
+  if (process.platform === "win32") {
+    if (!processExists(pid)) return;
+    await new Promise<void>((resolvePromise, reject) =>
+      execFile("taskkill", ["/PID", String(pid), "/T", "/F"], (error) => {
+        try {
+          if (error && processExists(pid)) reject(error);
+          else resolvePromise();
+        } catch (cause) {
+          reject(cause);
+        }
+      }),
+    );
+  } else {
+    const deadline = Date.now() + 2000;
+    while (true) {
+      try {
+        process.kill(-pid, "SIGKILL");
+        if (!processExists(-pid)) return;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "ESRCH") return;
+        if (code !== "EPERM") throw error;
+      }
+      if (Date.now() >= deadline)
+        throw new Error("Command process cleanup could not be confirmed.");
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+    }
+  }
 }
 
 /** Only the command is agent-selected. Scope, environment, baseline and deadline
@@ -295,26 +481,55 @@ export async function runBehaviorCommand(
 export async function runBehaviorCommandCli(
   argv: string[],
   env = process.env,
+  signal?: AbortSignal,
 ): Promise<number> {
   const controlPath = env[BEHAVIOR_CONTROL_ENV];
   if (!controlPath || !isAbsolute(controlPath))
     throw new Error("Missing Host command control.");
-  let control: BehaviorCommandControl;
+  let loaded: BehaviorCommandControl | BehaviorSessionControl;
   try {
-    control = JSON.parse(
-      readFileSync(controlPath, "utf8"),
-    ) as BehaviorCommandControl;
+    loaded = JSON.parse(readFileSync(controlPath, "utf8")) as
+      BehaviorCommandControl | BehaviorSessionControl;
   } catch {
     throw new Error("Invalid Host command control.");
   }
+  let control: BehaviorCommandControl;
+  if ("projects" in loaded) {
+    const side = argv[1] as BehaviorSide;
+    if (
+      argv[0] !== "--project" ||
+      !["source", "target"].includes(side) ||
+      !loaded.executionSides.includes(side) ||
+      !loaded.projects[side]
+    )
+      throw new Error(
+        "A Host-authorized --project source|target selector is required.",
+      );
+    control = loaded.projects[side]!;
+    argv = argv.slice(2);
+    assertCommandIntegrity(control);
+    if (side === "target" && control.expectation) {
+      const { file, snapshot, targetRoot } = control.expectation;
+      const plan = readTestFile(targetRoot, relative(targetRoot, file));
+      try {
+        writeFileSync(snapshot, plan, { flag: "wx", mode: 0o600 });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      }
+      assertCommandIntegrity(control);
+    }
+  } else control = loaded;
   if (argv[0] !== "--" || argv.length < 2)
     throw new Error("Expected -- <tool> <args...>.");
   const result = await runBehaviorCommand(
     { executable: argv[1]!, args: argv.slice(2) },
     control,
+    signal,
   );
   process.stdout.write(result.stdout);
   process.stderr.write(result.stderr);
+  if (control.side)
+    process.stderr.write(`\nFOREXPLORE_COMMAND_ID=${result.commandId}\n`);
   return result.timedOut ? 1 : (result.exitCode ?? 1);
 }
 
@@ -322,15 +537,27 @@ if (
   process.argv[1] &&
   resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 ) {
-  runBehaviorCommandCli(process.argv.slice(2)).then(
-    (code) => {
-      process.exitCode = code;
-    },
-    () => {
-      process.stderr.write(
-        "Behavior command rejected or failed; Host command evidence must be checked.\n",
-      );
-      process.exitCode = 1;
-    },
-  );
+  const controller = new AbortController();
+  const abort = () =>
+    controller.abort(
+      new DOMException("Command proxy terminated", "AbortError"),
+    );
+  process.on("SIGTERM", abort);
+  process.on("SIGINT", abort);
+  runBehaviorCommandCli(process.argv.slice(2), process.env, controller.signal)
+    .finally(() => {
+      process.removeListener("SIGTERM", abort);
+      process.removeListener("SIGINT", abort);
+    })
+    .then(
+      (code) => {
+        process.exitCode = code;
+      },
+      () => {
+        process.stderr.write(
+          "Behavior command rejected or failed; Host command evidence must be checked.\n",
+        );
+        process.exitCode = 1;
+      },
+    );
 }

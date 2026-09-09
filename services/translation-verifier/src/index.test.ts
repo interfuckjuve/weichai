@@ -11,6 +11,15 @@ const {
   failureAssessment,
 } = verifier;
 describe("translation-verifier entry", () => {
+  it("lists the autonomous baseline alongside the existing strategies", () => {
+    expect(
+      createDefaultVerificationService().listStrategies().map(({ id }) => id),
+    ).toEqual([
+      "differential-smoke",
+      "multi-agent-differential",
+      "single-agent-differential",
+    ]);
+  });
   it("preserves public verification and result-builder signatures", () => {
     type Input = packageVerifier.VerificationInput;
     type Descriptor = packageVerifier.VerificationStrategyDescriptor;
@@ -52,6 +61,7 @@ describe("translation-verifier entry", () => {
       [
         "DIFFERENTIAL_SMOKE_STRATEGY",
         "MULTI_AGENT_DIFFERENTIAL_STRATEGY",
+        "SINGLE_AGENT_DIFFERENTIAL_STRATEGY",
         "VerificationService",
         "VerificationStrategyFactory",
         "assertVerificationInput",

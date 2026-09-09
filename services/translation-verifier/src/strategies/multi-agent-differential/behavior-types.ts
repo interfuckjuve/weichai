@@ -79,8 +79,34 @@ export interface BehaviorExecutionScope {
   /** Original caller-owned files, retained across a bounded test-harness repair. */
   baseline?: BehaviorProjectBaseline;
 }
+export interface BehaviorCommandRecord extends BehaviorProcessResult {
+  commandId: string;
+  /** False means the process/proxy stopped before completion evidence was recorded. */
+  completed?: boolean;
+  side?: BehaviorSide;
+  command: BehaviorCommand;
+  cwd: string;
+  baselineValid: boolean;
+  credentialHit: boolean;
+  /** New test/helper files as they existed immediately before this command. */
+  testFiles?: Record<string, string>;
+}
+export interface BehaviorAgentResult extends BehaviorProcessResult {
+  /** Host-held records, never reconstructed from Agent-writable files. */
+  commandEvidence?: BehaviorCommandRecord[];
+  /** Exact plan captured by the Host before the first target command. */
+  frozenPlan?: string;
+}
 export interface BehaviorAgentTask {
   side: BehaviorSide;
+  /** A single session can use only these preconfigured command projects. */
+  additionalProjects?: Partial<Record<BehaviorSide, BehaviorExecutionScope>>;
+  executionSides?: BehaviorSide[];
+  sessionRole?: "single-agent";
+  /** Freeze this project file before any target command, not after observations. */
+  expectationFile?: string;
+  /** Final Host evidence is delivered even when the session fails. */
+  onEvidence?: (evidence: BehaviorCommandRecord[], frozenPlan?: string) => void;
   sandbox: BehaviorExecutionScope;
   prompt: string;
   /** Redacted cumulative stream, bounded by the runtime. */
@@ -88,6 +114,7 @@ export interface BehaviorAgentTask {
   deadlineAt: number;
   signal?: AbortSignal;
 }
+
 export interface BehaviorCommandTask {
   command: BehaviorCommand;
   sandbox: BehaviorExecutionScope;
@@ -95,9 +122,10 @@ export interface BehaviorCommandTask {
   signal?: AbortSignal;
 }
 export interface BehaviorRuntime {
-  runAgent(task: BehaviorAgentTask): Promise<BehaviorProcessResult>;
+  runAgent(task: BehaviorAgentTask): Promise<BehaviorAgentResult>;
   runCommand(task: BehaviorCommandTask): Promise<BehaviorProcessResult>;
 }
+
 export interface BehaviorSourceSnapshot {
   schemaVersion: "2.0";
   subjectHash: string;
