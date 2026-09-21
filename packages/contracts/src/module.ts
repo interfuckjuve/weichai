@@ -34,6 +34,8 @@ export interface ModuleTarget {
   documentation?: string;
   line?: number;
   implementationStatus?: ImplementationStatus;
+  /** Current source text of the target file, read by the host for side-by-side review. */
+  source?: string;
   /** Complete module boundary when the target is a reviewed project module. */
   module?: {
     repositoryId?: string;

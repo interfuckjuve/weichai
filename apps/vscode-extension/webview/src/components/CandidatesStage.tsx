@@ -3,12 +3,14 @@ import {
   Box,
   CheckCircle2,
   Code2,
+  Columns2,
   FileCode2,
   GitBranch,
   PackageSearch,
   Sparkles,
+  Target,
 } from 'lucide-react';
-import type { SearchCandidate } from '@forexplore/contracts';
+import type { ModuleTarget, SearchCandidate } from '@forexplore/contracts';
 import type { WorkflowEvent, WorkflowState } from '@forexplore/workflow-core';
 import { selectedCandidate } from '@forexplore/workflow-core';
 
@@ -122,7 +124,7 @@ export function CandidatesStage({
         )}
       </section>
 
-      {candidate ? <CandidateDetail candidate={candidate} /> : (
+      {candidate ? <CandidateDetail target={state.target} candidate={candidate} /> : (
         state.candidates.length > 0 ? (
           <section className="candidate-selection-prompt">
             <CheckCircle2 size={16} />
@@ -163,7 +165,7 @@ export function CandidatesStage({
   );
 }
 
-function CandidateDetail({ candidate }: { candidate: SearchCandidate }) {
+function CandidateDetail({ target, candidate }: { target: ModuleTarget | null; candidate: SearchCandidate }) {
   const module = candidate.sourceModule ?? moduleIdentity(candidate.path);
   return (
     <section className="candidate-detail" aria-label="已选候选详情">
@@ -189,7 +191,7 @@ function CandidateDetail({ candidate }: { candidate: SearchCandidate }) {
         <p>尚无匹配证据：{candidate.moduleMatch?.missingApis.join('、') || '暂无'}；行为待验证</p>
         {candidate.moduleMatch?.previewTruncated ? <p>以下为部分源码预览</p> : null}
       </details> : null}
-      <pre className="code-preview"><code>{candidate.preview}</code></pre>
+      <CodeComparison target={target} candidate={candidate} />
 
       <details className="candidate-evidence">
         <summary>查看匹配依据、依赖与风险</summary>
@@ -228,6 +230,37 @@ function CandidateDetail({ candidate }: { candidate: SearchCandidate }) {
           </div>
         </dl>
       </details>
+    </section>
+  );
+}
+
+function CodeComparison({ target, candidate }: { target: ModuleTarget | null; candidate: SearchCandidate }) {
+  const targetSource = target?.source?.trim();
+  return (
+    <section className="code-comparison" aria-label="目标模块与参考实现代码对比">
+      <header className="code-comparison-header">
+        <span className="code-comparison-col-label is-target">
+          <Target size={12} /> 目标模块 <small>{target?.language ?? '—'}</small>
+        </span>
+        <span className="code-comparison-col-label is-reference">
+          <Columns2 size={12} /> 参考实现 <small>{candidate.language}</small>
+        </span>
+      </header>
+      <div className="code-comparison-panes">
+        <div className="code-comparison-pane is-target">
+          {targetSource ? (
+            <pre className="code-preview"><code>{targetSource}</code></pre>
+          ) : (
+            <div className="code-comparison-fallback">
+              <span>目标源码暂不可用，以下为目标契约</span>
+              <pre className="code-preview"><code>{target?.signature || '（无签名）'}</code></pre>
+            </div>
+          )}
+        </div>
+        <div className="code-comparison-pane is-reference">
+          <pre className="code-preview"><code>{candidate.preview}</code></pre>
+        </div>
+      </div>
     </section>
   );
 }

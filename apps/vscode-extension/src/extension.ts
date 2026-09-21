@@ -852,7 +852,7 @@ async function selectWorkspaceTarget(targetId: string): Promise<void> {
       selectedCandidateId: null,
       adaptation: null,
     };
-    publish({ type: 'TARGET_SELECTED', target });
+    publish({ type: 'TARGET_SELECTED', target: { ...target, source: activeRun.originalContent } });
   } catch (error) {
     publishError(errorMessage(error, '切换目标失败'));
   }

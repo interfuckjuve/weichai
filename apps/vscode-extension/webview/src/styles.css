@@ -1256,6 +1256,70 @@ button:disabled {
   white-space: pre;
 }
 
+.code-comparison {
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.code-comparison-header {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+}
+
+.code-comparison-col-label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 10px;
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.code-comparison-col-label small {
+  font-weight: 400;
+  opacity: 0.8;
+}
+
+.code-comparison-col-label.is-target {
+  border-right: 1px solid var(--border);
+  color: var(--accent);
+}
+
+.code-comparison-panes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+}
+
+.code-comparison-pane {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.code-comparison-pane.is-target {
+  border-right: 1px solid var(--border);
+}
+
+.code-comparison-pane .code-preview {
+  max-height: 360px;
+  height: 100%;
+  border-radius: 0;
+  margin: 0;
+}
+
+.code-comparison-fallback {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  font-size: 9px;
+  color: var(--muted);
+}
+
 .candidate-evidence {
   margin-top: 10px;
   padding-top: 9px;
