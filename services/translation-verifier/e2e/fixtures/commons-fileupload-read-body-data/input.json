@@ -1,0 +1,148 @@
+{
+  "schemaVersion": "2.0",
+  "sourceLanguage": "csharp",
+  "targetLanguage": "java",
+  "sourceProjectPath": "reference-project",
+  "targetProjectPath": "target-project-after",
+  "subject": {
+    "sourceFunction": {
+      "path": "src/Commons/FileUpload/MultipartStream.cs",
+      "name": "ReadBodyData",
+      "signature": "public int ReadBodyData(Stream? output)"
+    },
+    "targetFunction": {
+      "path": "src/main/java/org/apache/commons/fileupload/MultipartStream.java",
+      "name": "readBodyData",
+      "signature": "public int readBodyData(OutputStream output) throws MalformedStreamException, IOException"
+    },
+    "requirement": "Read the body data of the current multipart encapsulation up to, but excluding, the next boundary. Write the body bytes to the supplied output stream when it is non-null, discard them when output is null, return the number of body bytes processed, preserve the boundary state for the following readBoundary call, and do not close the caller-owned output stream. Unexpected end-of-stream or malformed multipart input must be reported through the target API's checked exceptions. The C# reference supplies behavioral evidence; Java streaming and exception conventions remain authoritative."
+  },
+  "analysisReport": {
+    "schemaVersion": "1.0",
+    "applicability": {
+      "level": "adapt",
+      "confidence": 0.96,
+      "reasons": [
+        "MultipartStream has corresponding public APIs and responsibilities in both projects.",
+        "The target method is a streaming adaptation from C# Stream to Java OutputStream.",
+        "The target project already provides ItemInputStream and Streams.copy helpers for boundary-aware copying."
+      ]
+    },
+    "behaviorMapping": [
+      {
+        "requirement": "Process only the current multipart body and stop before the next boundary.",
+        "status": "covered",
+        "candidateEvidence": [
+          "The C# implementation reads the current parsed part body.",
+          "The Java ItemInputStream stops at the boundary separator."
+        ],
+        "targetAction": "Copy from a new boundary-aware ItemInputStream."
+      },
+      {
+        "requirement": "Write body bytes when an output is supplied and support discard mode when it is null.",
+        "status": "covered",
+        "candidateEvidence": [
+          "The C# implementation conditionally writes to the supplied stream."
+        ],
+        "targetAction": "Delegate nullable output handling to the existing Streams.copy helper."
+      },
+      {
+        "requirement": "Return the number of body bytes processed without closing the caller output.",
+        "status": "covered",
+        "candidateEvidence": [
+          "The C# implementation returns the body length and leaves the output lifetime to the caller."
+        ],
+        "targetAction": "Return the copy count and pass false for closeOutputStream."
+      }
+    ],
+    "contractMapping": [
+      {
+        "source": "Stream? output",
+        "target": "OutputStream output",
+        "action": "adapt",
+        "note": "Java preserves the nullable discard convention through the existing copy utility."
+      },
+      {
+        "source": "int body length",
+        "target": "int bytes copied",
+        "action": "preserve",
+        "note": "The target API returns int as declared by the existing method contract."
+      }
+    ],
+    "dependencyPlan": [
+      {
+        "sourceDependency": "MultipartStream body parser",
+        "targetDependency": "MultipartStream.ItemInputStream",
+        "action": "reuse-existing"
+      },
+      {
+        "sourceDependency": "Output stream copy",
+        "targetDependency": "org.apache.commons.fileupload.util.Streams.copy",
+        "action": "reuse-existing"
+      }
+    ],
+    "implementationPlan": [
+      "Create a boundary-aware ItemInputStream for the current encapsulation.",
+      "Copy its bytes to the caller output without closing that output.",
+      "Return the number of copied bytes and allow existing checked exceptions to propagate."
+    ],
+    "risks": [
+      "The Java target streams data incrementally while the C# reference materializes parsed parts.",
+      "The target project contains unrelated skeleton TODOs outside this selected method."
+    ],
+    "assumptions": [
+      "The existing ItemInputStream preserves the boundary for readBoundary().",
+      "Streams.copy accepts a null output for discard mode and does not close it when requested."
+    ],
+    "unresolved": []
+  },
+  "migrationPlan": {
+    "taskId": "multipart-read-body-data",
+    "scope": "selected MultipartStream.readBodyData method",
+    "sourceProject": "C# Commons FileUpload reference",
+    "targetProject": "Java Commons FileUpload skeleton",
+    "changedFiles": [
+      "src/main/java/org/apache/commons/fileupload/MultipartStream.java"
+    ],
+    "implementationNotes": [
+      "Use the existing boundary-aware ItemInputStream.",
+      "Use Streams.copy with closeOutputStream=false.",
+      "Do not reimplement the multipart boundary scanner in the translated method."
+    ]
+  },
+  "translation": {
+    "round": 1,
+    "files": [
+      {
+        "path": "src/main/java/org/apache/commons/fileupload/MultipartStream.java",
+        "status": "modified",
+        "additions": 1,
+        "deletions": 3,
+        "expectedOriginalSha256": "26478391769f37a2fc1acb1e664d439037c74bc7206e6a5f2ecd8feaa6c4f2ae",
+        "hunks": [
+          {
+            "header": "@@ -624,3 +624,1 @@",
+            "lines": [
+              {
+                "type": "remove",
+                "content": "        // TODO(translation): stream bytes up to, but excluding, the next"
+              },
+              {
+                "type": "remove",
+                "content": "        // boundary without consuming the boundary needed by readBoundary()."
+              },
+              {
+                "type": "remove",
+                "content": "        throw new UnsupportedOperationException(\"TODO: read multipart body data\");"
+              },
+              {
+                "type": "add",
+                "content": "        return (int) Streams.copy(newInputStream(), output, false);"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>commons-fileupload</groupId>
+  <artifactId>commons-fileupload-java-skeleton</artifactId>
+  <version>1.5-skeleton</version>
+  <name>Apache Commons FileUpload 1.5 Java Skeleton</name>
+
+  <properties>
+    <maven.compiler.release>8</maven.compiler.release>
+    <project.build.sourceEncoding>ISO-8859-1</project.build.sourceEncoding>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>commons-io</groupId>
+      <artifactId>commons-io</artifactId>
+      <version>2.11.0</version>
+    </dependency>
+    <dependency>
+      <groupId>javax.servlet</groupId>
+      <artifactId>servlet-api</artifactId>
+      <version>2.4</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>portlet-api</groupId>
+      <artifactId>portlet-api</artifactId>
+      <version>1.0</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>junit</groupId>
+      <artifactId>junit</artifactId>
+      <version>4.13.2</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.2.5</version>
+      </plugin>
+    </plugins>
+  </build>
+</project>
