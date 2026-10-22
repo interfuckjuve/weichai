@@ -206,27 +206,41 @@ async function runTestsForSubjects(
     if (!executable || executable.includes("\0") || args.some((arg) => arg.includes("\0")) || !Number.isInteger(timeoutMs) || timeoutMs <= 0) {
       throw new Error("Host target test command is invalid.");
     }
+    context.budget?.assertActive();
     const startedAt = Date.now();
+    const signal = context.budget?.signal;
     const processResult = await new Promise<{ exitCode: number | null; signal?: string; stdout: string; stderr: string; timedOut: boolean }>((resolve) => {
       const child = spawn(executable, args, { cwd: context.runtime.targetProjectPath, shell: false, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
       let stdout = "", stderr = "", timedOut = false, settled = false;
       let timer: ReturnType<typeof setTimeout> | undefined;
+      let killTimer: ReturnType<typeof setTimeout> | undefined;
       const append = (current: string, chunk: Buffer | string) => {
         const next = current + chunk.toString();
         return next.length <= MAX_TEST_OUTPUT_CHARS ? next : next.slice(0, MAX_TEST_OUTPUT_CHARS);
       };
+      const terminate = () => {
+        child.kill("SIGTERM");
+        // Guarantee cancellation even when the test process ignores SIGTERM.
+        killTimer ??= setTimeout(() => child.kill("SIGKILL"), 2_000);
+      };
+      const abort = () => terminate();
       const finish = (value: { exitCode: number | null; signal?: string }) => {
         if (settled) return;
         settled = true;
         if (timer !== undefined) clearTimeout(timer);
+        if (killTimer !== undefined) clearTimeout(killTimer);
+        signal?.removeEventListener("abort", abort);
         resolve({ ...value, stdout, stderr, timedOut });
       };
       child.stdout?.on("data", (chunk) => { stdout = append(stdout, chunk); });
       child.stderr?.on("data", (chunk) => { stderr = append(stderr, chunk); });
       child.once("error", (error) => { stderr = append(stderr, error.message); finish({ exitCode: null }); });
-      child.once("close", (exitCode, signal) => { finish({ exitCode, signal: signal ?? undefined }); });
-      timer = setTimeout(() => { timedOut = true; child.kill("SIGTERM"); }, timeoutMs);
+      child.once("close", (exitCode, closeSignal) => { finish({ exitCode, signal: closeSignal ?? undefined }); });
+      if (signal?.aborted) abort();
+      else signal?.addEventListener("abort", abort, { once: true });
+      timer = setTimeout(() => { timedOut = true; terminate(); }, timeoutMs);
     });
+    context.budget?.assertActive();
     const evidence = await collectCoverage(context, coverageRun, subjects);
     const status = processResult.timedOut || processResult.exitCode !== 0 || evidence.executionErrors > 0 || (evidence.tests?.failed ?? 0) > 0 || evidence.tests?.executed === 0 ? "failure" as const : "success" as const;
     const failures = status === "failure" ? [{
@@ -360,7 +374,17 @@ async function configureRunnerCoverage(context: RunnerContext, testPaths: readon
   if (runner === "pytest") {
     const pythonFunctions: Array<{ path: string; functions: PythonFunction[] }> = [];
     for (const subject of subjects) {
-      const { stdout } = await runFile(context.runtime.targetTest.executable, ["-c", PYTHON_FUNCTIONS, resolveSafePath(root, subject.path)], { cwd: root, timeout: Math.min(10_000, context.budget?.remainingMs() ?? 10_000), maxBuffer: 1_000_000 });
+      context.budget?.assertActive();
+      const { stdout } = await runFile(
+        context.runtime.targetTest.executable,
+        ["-c", PYTHON_FUNCTIONS, resolveSafePath(root, subject.path)],
+        {
+          cwd: root,
+          timeout: Math.min(10_000, context.budget?.remainingMs() ?? 10_000),
+          maxBuffer: 1_000_000,
+          ...(context.budget ? { signal: context.budget.signal } : {}),
+        },
+      );
       pythonFunctions.push({ path: subject.path, functions: jsonReport(stdout) });
     }
     return { ...run, pythonFunctions,
