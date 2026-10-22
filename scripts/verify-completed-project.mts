@@ -8,12 +8,15 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 import { spawnSync } from 'node:child_process';
 import { parse } from 'dotenv';
 import { discoverExecutableFunctions } from './module-function-mapping.js';
-import { createAgentHost } from '../services/translation-verifier/src/host/runtime.js';
-import { createTranslationVerifierModelClient } from '../services/translation-verifier/src/host/model-client.js';
+import { createLangChainFunctionGroupAgentHost } from '../services/translation-verifier/src/host/langchain-runtime.js';
 import { resolveTestEnvironment } from '../services/translation-verifier/src/host/test-environment.js';
 import { createFunctionGroupVerifier } from '../services/translation-verifier/src/function-group-verify.js';
-import type { SingleAgentFunctionGroupTerminalResult } from '../services/translation-verifier/src/strategies/single-agent-function-group/strategy.js';
-import type { FunctionGroupTestRun } from '../services/translation-verifier/src/host/tools/common.js';
+import {
+  createOfflineVerifierChatModel,
+  createOfflineVerifierEvidence,
+  isOfflineVerifierTraceEvent,
+  recordOfflineVerifierEvent,
+} from './translation-verifier-offline.js';
 
 function argument(name: string, fallback?: string): string {
   const index = process.argv.indexOf('--' + name);
@@ -65,14 +68,13 @@ if (existsSync(envPath)) for (const [key, value] of Object.entries(parse(readFil
 const key = process.env.DEEPSEEK_API_KEY;
 if (!key) throw new Error('Configured verifier model credential is required.');
 const results: unknown[] = [];
+const verifierModel = createOfflineVerifierChatModel(process.env);
 for (const item of inventory) {
   console.log('Verifying ' + item.moduleId);
   const evidencePath = join(output, item.moduleId + '.jsonl');
-  const runs: FunctionGroupTestRun[] = [];
-  let testVersion = 0;
-  const host = createAgentHost<SingleAgentFunctionGroupTerminalResult>({
-    modelClient: createTranslationVerifierModelClient({ apiKey: key,
-      apiBase: process.env.DEEPSEEK_API_BASE, model: process.env.DEEPSEEK_MODEL }),
+  const evidence = createOfflineVerifierEvidence();
+  const host = createLangChainFunctionGroupAgentHost({
+    model: verifierModel,
     limits: { maxDurationMs: 900_000, maxTurns: 64 },
     resolveToolContext: async task => {
       const environment = await resolveTestEnvironment(task);
@@ -91,20 +93,18 @@ for (const item of inventory) {
       };
     },
     traceLogger: event => {
-      if (!['tool.started', 'tool.completed', 'tool.failed', 'run.completed', 'run.failed'].includes(event.event)) return;
-      if (event.event.startsWith('tool.') && !['write_target_test', 'run_function_group_tests', 'finish_function_group', 'report_uncertain'].includes(String(event.toolName))) return;
+      if (!isOfflineVerifierTraceEvent(event)) return;
       appendFileSync(evidencePath, JSON.stringify(event, (_, value) => typeof value === 'string' ? value.split(key).join('[REDACTED]') : value) + '\n');
-      if (event.event === 'tool.started' && event.toolName === 'write_target_test') {
-        const write = JSON.parse(String(event.arguments));
-        const versionRoot = join(output, 'test-versions', item.moduleId, String(++testVersion));
-        mkdirSync(versionRoot, { recursive: true });
-        writeFileSync(join(versionRoot, basename(write.path)), write.content);
-      }
-      if (event.event === 'tool.completed' && event.toolName === 'run_function_group_tests') {
-        const run = event.output as FunctionGroupTestRun;
-        runs.push(run);
-        console.log(item.moduleId + ': tests=' + run.tests.executed + ' failed=' + run.tests.failed +
-          ' covered=' + run.functions.filter(fn => fn.executed).length + '/' + run.functions.length);
+      if (!recordOfflineVerifierEvent(evidence, event)) return;
+      // The accepted observation comes from the Host revalidation, never from
+      // the Agent's own tool call or memory of it.
+      const observation = evidence.finalObservation;
+      if (event.event === 'host.revalidation.completed' && observation) {
+        console.log(item.moduleId + ': revalidation round=' + (evidence.finalObservationRound ?? '-') +
+          ' status=' + observation.status + ' tests=' + observation.tests.executed +
+          ' failed=' + observation.tests.failed +
+          ' covered=' + observation.functions.filter(fn => fn.executed).length + '/' + observation.functions.length +
+          ' reports=' + (observation.reportPaths?.join(',') || 'none'));
       }
     },
   });
@@ -119,7 +119,10 @@ for (const item of inventory) {
   } catch (error) {
     result = { status: 'failure', error: error instanceof Error ? error.message : String(error) };
   }
-  results.push({ moduleId: item.moduleId, result, testRuns: runs });
+  results.push({ moduleId: item.moduleId, result,
+    finalObservation: evidence.finalObservation ?? null,
+    finalObservationRound: evidence.finalObservationRound ?? null,
+    toolEventCount: evidence.toolEvents.length });
   writeFileSync(join(output, 'verification.json'), JSON.stringify(results, null, 2));
   console.log(item.moduleId + ': ' + JSON.stringify(result));
 }

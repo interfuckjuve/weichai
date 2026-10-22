@@ -76,10 +76,12 @@ import { CodexWorkspaceTranslationRuntime } from '../services/adaptation-service
 import { prepareProjectIntegrationContext } from '../services/adaptation-service/src/project-integration-context.js';
 import { prepareDeepSeekCodexHome } from '../services/adaptation-service/src/codex-experiment-home.js';
 import { createHttpServer } from '../services/adaptation-service/src/http-server.js';
-import { createAgentHost } from '../services/translation-verifier/src/host/runtime.js';
-import { createTranslationVerifierModelClient } from '../services/translation-verifier/src/host/model-client.js';
+import { createLangChainFunctionGroupAgentHost } from '../services/translation-verifier/src/host/langchain-runtime.js';
 import { createFunctionGroupVerifier } from '../services/translation-verifier/src/function-group-verify.js';
-import type { SingleAgentFunctionGroupTerminalResult } from '../services/translation-verifier/src/strategies/single-agent-function-group/strategy.js';
+import {
+  createOfflineVerifierChatModel,
+  isOfflineVerifierTraceEvent,
+} from './translation-verifier-offline.js';
 import type { FunctionGroupVerificationInput, FunctionGroupVerificationResult } from '../services/translation-verifier/src/types.js';
 import { buildModuleFunctionMapping, discoverExecutableFunctions, expandClassLevelFunctions, type ModuleFunctionMapping } from './module-function-mapping.js';
 import { runIntegrationPlanAgent } from '../services/adaptation-service/src/integration-plan-agent.js';
@@ -1177,17 +1179,8 @@ try {
           entry.verificationDisposition = 'agent-uncertain';
           console.log('    函数组验证：跳过（目标模块没有可验证函数）');
         } else {
-        const verificationHost = createAgentHost<SingleAgentFunctionGroupTerminalResult>({
-          modelClient: createTranslationVerifierModelClient({
-            apiKey: () => modelApiKey!,
-            apiBase: process.env.DEEPSEEK_API_BASE,
-            model: process.env.DEEPSEEK_MODEL,
-            maxOutputTokens: Number(process.env.TRANSLATION_VERIFIER_MAX_OUTPUT_TOKENS ?? 16_384),
-            requestRetry: {
-              maxAttempts: Number(process.env.TRANSLATION_VERIFIER_REQUEST_ATTEMPTS ?? 3),
-              delayMs: Number(process.env.TRANSLATION_VERIFIER_REQUEST_RETRY_DELAY_MS ?? 750),
-            },
-          }),
+        const verificationHost = createLangChainFunctionGroupAgentHost({
+          model: createOfflineVerifierChatModel(process.env),
           limits: {
             maxDurationMs: Number(process.env.TRANSLATION_VERIFIER_MAX_DURATION_MS ?? 600_000),
             maxTurns: Number(process.env.TRANSLATION_VERIFIER_MAX_TURNS ?? 48),
@@ -1205,8 +1198,7 @@ try {
           traceLogger: event => {
             // Save generated tests and real Host test facts once, without
             // duplicating every model request or full historical source read.
-            if (!['tool.started', 'tool.completed', 'tool.failed', 'run.completed', 'run.failed'].includes(event.event)) return;
-            if (event.event.startsWith('tool.') && !['write_target_test', 'run_function_group_tests', 'finish_function_group', 'report_uncertain'].includes(String(event.toolName))) return;
+            if (!isOfflineVerifierTraceEvent(event)) return;
             entry.verifierEvidencePath ??= `${outputPath}.${index + 1}-verifier.jsonl`;
             appendFileSync(entry.verifierEvidencePath, `${JSON.stringify(event)}\n`);
           },

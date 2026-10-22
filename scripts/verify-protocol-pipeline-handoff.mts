@@ -9,8 +9,9 @@ import { validateWorkspaceTranslationRequest } from '../services/adaptation-serv
 import { CodexWorkspaceTranslationRuntime } from '../services/adaptation-service/src/codex-workspace-translation-runtime.js';
 import { prepareProjectIntegrationContext } from '../services/adaptation-service/src/project-integration-context.js';
 import { ensureGlobalProtocol, loadGlobalProtocol, mergeGlobalProtocol, persistGlobalProtocol, projectModuleProtocol, recordProtocolChecks } from '../services/adaptation-service/src/protocol-sidecar.js';
-import { createRequirementFunctionGroupTask, createSingleAgentFunctionGroupTask } from '../services/translation-verifier/src/strategies/single-agent-function-group/strategy.js';
+import { createFunctionGroupFinalReportTask, createRequirementFunctionGroupFinalReportTask } from '../services/translation-verifier/src/strategies/single-agent-function-group/strategy.js';
 import { discoverExecutableFunctions } from './module-function-mapping.js';
+import { verifierTaskInputs } from './translation-verifier-offline.js';
 
 // Run only a protocol transport/persistence probe. The local receiver validates
 // requests and records them; it never invokes a translation or verification Agent.
@@ -96,12 +97,14 @@ try {
     const functions = discoverExecutableFunctions(Object.fromEntries(module.sourceFiles.map((file: string) => [file, contents[file]])));
     if (functions.length) {
       const inputBase = { schemaVersion: '3.1' as const, sourceLanguage: 'Java', targetLanguage: 'Java', targetProjectPath: targetRoot, requirement, moduleProtocol: projected };
-      const requirementTask = createRequirementFunctionGroupTask({ ...inputBase, mode: 'requirement', functions: functions.map(target => ({ target })) } as any);
+      const requirementTask = createRequirementFunctionGroupFinalReportTask({ ...inputBase, mode: 'requirement', functions: functions.map(target => ({ target })) } as any);
       // Source/target equal here only to inspect translation-mode task assembly;
       // no equivalence test or verification run is claimed.
-      const translationTask = createSingleAgentFunctionGroupTask({ ...inputBase, sourceProjectPath: targetRoot, functions: functions.map(target => ({ source: target, target })) } as any);
+      const translationTask = createFunctionGroupFinalReportTask({ ...inputBase, sourceProjectPath: targetRoot, functions: functions.map(target => ({ source: target, target })) } as any);
       for (const task of [requirementTask, translationTask]) for (const entry of [...projected.boundaries, ...projected.sharedContracts]) assert.ok(task.userPrompt.includes(entry.id), 'Verifier task omitted ' + entry.id);
-      await save(module.id + '.verifier-task-inputs.json', { requirement: requirementTask.functionGroup, translation: translationTask.functionGroup });
+      // Read the business input from taskContext only; the removed duplicated
+      // task field is not a second source of truth.
+      await save(module.id + '.verifier-task-inputs.json', verifierTaskInputs({ requirement: requirementTask, translation: translationTask }));
     }
     await save(module.id + '.request.json', input);
     await save(module.id + '.runtime-prompts.json', prompts);
