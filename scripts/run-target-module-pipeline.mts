@@ -76,10 +76,13 @@ import { CodexWorkspaceTranslationRuntime } from '../services/adaptation-service
 import { prepareProjectIntegrationContext } from '../services/adaptation-service/src/project-integration-context.js';
 import { prepareDeepSeekCodexHome } from '../services/adaptation-service/src/codex-experiment-home.js';
 import { createHttpServer } from '../services/adaptation-service/src/http-server.js';
-import { createAgentHost } from '../services/translation-verifier/src/host/runtime.js';
-import { createTranslationVerifierModelClient } from '../services/translation-verifier/src/host/model-client.js';
+import { createLangChainFunctionGroupAgentHost } from '../services/translation-verifier/src/host/langchain-runtime.js';
 import { createFunctionGroupVerifier } from '../services/translation-verifier/src/function-group-verify.js';
-import type { SingleAgentFunctionGroupTerminalResult } from '../services/translation-verifier/src/strategies/single-agent-function-group/strategy.js';
+import {
+  classifyOfflineVerifierFailure,
+  createOfflineVerifierChatModel,
+  isOfflineVerifierTraceEvent,
+} from './translation-verifier-offline.js';
 import type { FunctionGroupVerificationInput, FunctionGroupVerificationResult } from '../services/translation-verifier/src/types.js';
 import { buildModuleFunctionMapping, discoverExecutableFunctions, expandClassLevelFunctions, type ModuleFunctionMapping } from './module-function-mapping.js';
 import { runIntegrationPlanAgent } from '../services/adaptation-service/src/integration-plan-agent.js';
@@ -137,20 +140,6 @@ const outputPath = resolve(argument('out', 'results/target-module-pipeline.json'
 const adaptationApiUrl = argument('adaptation', process.env.ADAPTATION_API_URL ?? 'http://127.0.0.1:8788')!;
 const semanticPort = Number(argument('semantic-port', process.env.FOREXPLORE_SEMANTIC_QUERY_PORT ?? '8790'));
 const assetRoot = resolve('experiments/enterprise-asset-upgrade/source-repositories');
-
-function classifyVerifierFailure(description: string): {
-  reason: 'agent-timeout' | 'model-failure' | 'test-environment-failure';
-  kind: 'environment' | 'unknown';
-} {
-  const text = description.toLowerCase();
-  if (text.includes('exhausted its') || text.includes('turn budget') || text.includes('tool-call budget') || text.includes('time budget') || /context.*budget/.test(text)) {
-    return { reason: 'agent-timeout', kind: 'unknown' };
-  }
-  if (text.includes('model request') || text.includes('invalid completion') || text.includes('api key')) {
-    return { reason: 'model-failure', kind: 'unknown' };
-  }
-  return { reason: 'test-environment-failure', kind: 'environment' };
-}
 
 function classifyVerifierDisposition(result: FunctionGroupVerificationResult): ModuleReport['verificationDisposition'] {
   if (result.status === 'success') return 'verified';
@@ -1177,17 +1166,8 @@ try {
           entry.verificationDisposition = 'agent-uncertain';
           console.log('    函数组验证：跳过（目标模块没有可验证函数）');
         } else {
-        const verificationHost = createAgentHost<SingleAgentFunctionGroupTerminalResult>({
-          modelClient: createTranslationVerifierModelClient({
-            apiKey: () => modelApiKey!,
-            apiBase: process.env.DEEPSEEK_API_BASE,
-            model: process.env.DEEPSEEK_MODEL,
-            maxOutputTokens: Number(process.env.TRANSLATION_VERIFIER_MAX_OUTPUT_TOKENS ?? 16_384),
-            requestRetry: {
-              maxAttempts: Number(process.env.TRANSLATION_VERIFIER_REQUEST_ATTEMPTS ?? 3),
-              delayMs: Number(process.env.TRANSLATION_VERIFIER_REQUEST_RETRY_DELAY_MS ?? 750),
-            },
-          }),
+        const verificationHost = createLangChainFunctionGroupAgentHost({
+          model: createOfflineVerifierChatModel(process.env),
           limits: {
             maxDurationMs: Number(process.env.TRANSLATION_VERIFIER_MAX_DURATION_MS ?? 600_000),
             maxTurns: Number(process.env.TRANSLATION_VERIFIER_MAX_TURNS ?? 48),
@@ -1203,10 +1183,10 @@ try {
             maxToolCallsPerTurn: Number(process.env.TRANSLATION_VERIFIER_MAX_TOOL_CALLS_PER_TURN ?? 16),
           },
           traceLogger: event => {
-            // Save generated tests and real Host test facts once, without
-            // duplicating every model request or full historical source read.
-            if (!['tool.started', 'tool.completed', 'tool.failed', 'run.completed', 'run.failed'].includes(event.event)) return;
-            if (event.event.startsWith('tool.') && !['write_target_test', 'run_function_group_tests', 'finish_function_group', 'report_uncertain'].includes(String(event.toolName))) return;
+            // Save test tools, Agent invocations, Host revalidations and run
+            // outcomes. The Host bounds tool payloads to 24k characters, and
+            // the accepted observation comes from host.revalidation.completed.
+            if (!isOfflineVerifierTraceEvent(event)) return;
             entry.verifierEvidencePath ??= `${outputPath}.${index + 1}-verifier.jsonl`;
             appendFileSync(entry.verifierEvidencePath, `${JSON.stringify(event)}\n`);
           },
@@ -1244,7 +1224,7 @@ try {
             entry.translationVerification = await verifyFunctionGroup(verificationInput, verificationStrategy, 'verify');
           } catch (error) {
             const description = error instanceof Error ? error.message : String(error);
-            const classification = classifyVerifierFailure(description);
+            const classification = classifyOfflineVerifierFailure(description);
             const retainedTestEvidence = (error as { testEvidence?: FunctionGroupVerificationResult['testEvidence'] })?.testEvidence
               ?? verificationInput.testEvidence;
             entry.translationVerification = {
