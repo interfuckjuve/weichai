@@ -1,8 +1,13 @@
 import { ChatOpenAI } from "@langchain/openai";
-import type {
-  TranslationVerifierApiKey,
-  TranslationVerifierRequestRetry,
-} from "./model-client.js";
+
+/** Credential is a caller-owned value or a late resolver; it never becomes prompt text. */
+export type TranslationVerifierApiKey = string | (() => string);
+
+/** Total transport attempts and delay for one model request. */
+export type TranslationVerifierRequestRetry = {
+  maxAttempts?: number;
+  delayMs?: number;
+};
 
 /** Keep these aligned with the legacy adapter defaults. */
 const DEFAULT_API_BASE = "https://api.deepseek.com/v1";

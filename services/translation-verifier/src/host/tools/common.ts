@@ -22,13 +22,6 @@ export type HostTool<Input, Output> = {
   inputSchema: Record<string, unknown>;
   parse(input: unknown): Input;
   execute(input: Input): Promise<Output>;
-  /** A terminal tool can return feedback and keep the Agent running. */
-  isTerminal?(output: Output): boolean;
-};
-
-export type FinishFeedback = {
-  outcome: "continue";
-  feedback: string[];
 };
 
 export type HostToolFactory = (context: ToolContext) => HostTool<any, any>;
@@ -126,13 +119,7 @@ export type ToolRuntimeContext = AgentTaskContext & {
   cleanup?: () => Promise<void>;
 };
 
-export type ToolState = {
-  lastTargetTest?: TargetTestResult;
-  lastFunctionGroupTest?: FunctionGroupTestRun;
-};
-
 export type ToolContext = {
-  state: ToolState;
   budget?: AgentRunBudget;
   runtime: ToolRuntimeContext;
   runner: BoundTestRunner;

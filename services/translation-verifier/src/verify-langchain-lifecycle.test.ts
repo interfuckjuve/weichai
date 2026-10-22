@@ -10,6 +10,7 @@ import { createVerifier } from "./verify.js";
 import { createLangChainAgentHost } from "./host/langchain-runtime.js";
 import { AgentRunFailure } from "./host/agent.js";
 import type { AgentWorkLogEvent } from "./host/work-log.js";
+import type { AgentTraceEvent } from "./host/trace-log.js";
 import type { ToolRuntimeContext } from "./host/tools/common.js";
 import type { VerificationInput } from "./types.js";
 
@@ -187,6 +188,7 @@ function verifier(fixture: Fixture, model: ScriptedChatModel, extra: {
     maxResponseCharacters?: number;
   };
   events?: AgentWorkLogEvent[];
+  trace?: AgentTraceEvent[];
   onEvent?: (event: AgentWorkLogEvent) => void;
 } = {}) {
   return createVerifier(createLangChainAgentHost({
@@ -194,6 +196,7 @@ function verifier(fixture: Fixture, model: ScriptedChatModel, extra: {
     resolveToolContext: fixture.resolveToolContext,
     ...(extra.signal ? { signal: extra.signal } : {}),
     ...(extra.limits ? { limits: extra.limits } : {}),
+    ...(extra.trace ? { traceLogger: (event: AgentTraceEvent) => extra.trace!.push(event) } : {}),
     ...(extra.events || extra.onEvent
       ? {
           workLogger: (event: AgentWorkLogEvent) => {
@@ -364,6 +367,46 @@ describe("LangChain run budgets", () => {
 
     expect((failure as Error).message).toMatch(/time budget/i);
     expect(fixture.cleanupCalls).toBe(1);
+  });
+});
+
+describe("LangChain model-visible tool diagnostics", () => {
+  it("bounds model-visible diagnostics while the trace keeps the complete observation", async () => {
+    const fixture = await createFixture(
+      passingTest,
+      `${RUNNER_SCRIPT}\nprocess.stdout.write('BEGIN ' + 'x'.repeat(50_000) + ' END');\n`,
+    );
+    const trace: AgentTraceEvent[] = [];
+    const model = new ScriptedChatModel([
+      () => toolCall("run_target_tests", {}, "run-1"),
+      () => finalReport(report("no-bug")),
+    ]);
+
+    const result = await verifier(fixture, model, {
+      limits: { maxContextCharacters: 40_000 },
+      trace,
+    })(fixture.input, "single-agent", "verify");
+
+    expect(result.status).toBe("success");
+    const toolMessage = model.observations[1]!.find(
+      (message): message is ToolMessage => message instanceof ToolMessage,
+    );
+    expect(toolMessage).toBeDefined();
+    const visible = JSON.parse(String(toolMessage!.content)) as {
+      stdout: string;
+      tests: unknown;
+      reportPaths: string[];
+    };
+    // Head and tail stay visible so the Agent can keep debugging; the raw
+    // 50k dump never reaches the model and cannot exhaust the context.
+    expect(visible.stdout).toContain("BEGIN");
+    expect(visible.stdout).toContain("END");
+    expect(JSON.stringify(visible).length).toBeLessThan(20_000);
+    expect(String(toolMessage!.content)).toContain("additional diagnostic characters");
+    expect(visible.tests).toEqual({ executed: 1, passed: 1, failed: 0, skipped: 0 });
+    expect(visible.reportPaths).toEqual(expect.arrayContaining(["target/site/jacoco/jacoco.xml"]));
+    const completed = trace.find(event => event.event === "tool.completed");
+    expect(String((completed!.output as { stdout: string }).stdout).length).toBeGreaterThan(50_000);
   });
 });
 

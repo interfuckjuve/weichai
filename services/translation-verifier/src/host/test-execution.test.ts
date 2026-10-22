@@ -23,7 +23,6 @@ async function fixture(runner: TestRunner = "jest"): Promise<ToolContext> {
     coverage: { status: "available", targetFunction: { name: "run", executed: true, lineCoverage: 100, branchCoverage: null } },
   };
   return {
-    state: {},
     runtime: {
       sourceLanguage: "TypeScript", targetLanguage: "TypeScript", sourceProjectPath: root, targetProjectPath: root,
       sourcePath: target.path, targetPath: target.path, targetFunction: target,
@@ -104,7 +103,6 @@ describe("shared test execution", () => {
     const context = await fixture();
     await file(context, "tests/translation-verifier/old.test.ts");
     await file(context, "tests/translation-verifier/new.test.ts");
-    context.state.lastTargetTest = { status: "failure", timedOut: false, exitCode: 1, stdout: "old", stderr: "", durationMs: 1 };
     const result = await runTargetTests(context);
     expect(context.runner.runSuite).toHaveBeenCalledOnce();
     expect(context.runner.runSuite).toHaveBeenCalledWith([
@@ -112,7 +110,6 @@ describe("shared test execution", () => {
     ]);
     expect(context.runner.run).not.toHaveBeenCalled();
     expect(result).toMatchObject({ status: "success", reportPaths: [] });
-    expect(context.state.lastTargetTest).toBe(result);
   });
 
   it("fails safely when an injected runner cannot run multiple files together", async () => {
@@ -121,7 +118,6 @@ describe("shared test execution", () => {
     await file(context, "tests/translation-verifier/two.test.ts");
     delete context.runner.runSuite;
     await expect(runTargetTests(context)).rejects.toThrow("must support runSuite");
-    expect(context.state.lastTargetTest).toBeUndefined();
     expect(context.runner.run).not.toHaveBeenCalled();
   });
 
@@ -129,8 +125,6 @@ describe("shared test execution", () => {
     const context = await fixture();
     await file(context, "tests/translation-verifier/old.test.ts", "old test");
     await file(context, "tests/translation-verifier/nested/new.test.ts", "new test");
-    const previous = groupResult(context);
-    context.state.lastFunctionGroupTest = previous;
     const observation = {
       ...groupResult(context),
       status: "failure" as const,
@@ -150,18 +144,14 @@ describe("shared test execution", () => {
     expect(result).toMatchObject({ status: "failure", tests: observation.tests, testCases: observation.testCases, reportPaths: ["tests.json"] });
     expect(result.failures).toEqual(observation.failures);
     expect(result).not.toHaveProperty("testEvidence");
-    expect(context.state).toEqual({ lastFunctionGroupTest: result });
-    expect(context.state.lastFunctionGroupTest).not.toBe(previous);
     expect(await readdir(context.runtime.targetProjectPath)).toEqual(["tests"]);
   });
 
-  it("clears the latest group observation if suite execution cannot complete", async () => {
+  it("leaves no stored observation when suite execution cannot complete", async () => {
     const context = await fixture();
     await file(context, "tests/translation-verifier/existing.test.ts");
-    context.state.lastFunctionGroupTest = groupResult(context);
     context.functionGroupRunner = { run: vi.fn(async () => { throw new Error("runner unavailable"); }) };
     await expect(runFunctionGroupTests(context)).rejects.toThrow("runner unavailable");
-    expect(context.state.lastFunctionGroupTest).toBeUndefined();
     expect(await readdir(context.runtime.targetProjectPath)).toEqual(["tests"]);
   });
 

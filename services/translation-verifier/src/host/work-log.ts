@@ -3,10 +3,6 @@ import { dirname } from "node:path";
 
 export type AgentWorkLogEventName =
   | "run.started"
-  | "turn.started"
-  | "model.completed"
-  | "model.failed"
-  | "agent.continued"
   | "tool.started"
   | "tool.completed"
   | "tool.failed"

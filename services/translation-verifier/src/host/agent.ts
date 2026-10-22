@@ -1,30 +1,21 @@
-import type { VerificationSubject } from "../types.js";
 import type {
   AgentTaskContext,
   HostToolFactory,
 } from "./tools/common.js";
-import type { FunctionGroupVerificationInput, RequirementFunctionGroupVerificationInput } from "../types.js";
 
-export type { VerificationSubject } from "../types.js";
 export type { AgentTaskContext, ToolRuntimeContext } from "./tools/common.js";
 
 export type AgentToolFactory = HostToolFactory;
 
 /**
- * `terminal-tools`: the Agent must call finish/report_uncertain.
- * `final-report`: the Agent ends naturally with a plain JSON report message.
+ * One Agent call: the Host prompt plus the tool capabilities the strategy
+ * selected. The Agent ends the call by answering without a tool call.
  */
-export type AgentTaskProtocol = "terminal-tools" | "final-report";
-
 export type AgentTask = {
-  subject: VerificationSubject;
   taskContext: AgentTaskContext;
-  /** Present only for the function-group strategy. */
-  functionGroup?: FunctionGroupVerificationInput | RequirementFunctionGroupVerificationInput;
   systemPrompt: string;
   userPrompt: string;
   tools: readonly AgentToolFactory[];
-  terminalTools: readonly string[];
 };
 
 export type AgentRunLimits = {
@@ -70,10 +61,6 @@ export class AgentRunFailure extends Error {
 export type AgentRunBudget = {
   readonly signal: AbortSignal;
   readonly deadlineAt: number;
-  readonly turns: number;
-  readonly toolCalls: number;
-  startTurn(toolCalls: number): void;
-  addToolCalls(toolCalls: number): void;
   assertActive(): void;
   remainingMs(): number;
   dispose(): void;
@@ -94,8 +81,6 @@ export function createAgentRunBudget(
   const timer = setTimeout(() => {
     controller.abort(new Error("Agent run time budget exceeded."));
   }, limits.maxDurationMs);
-  let turns = 0;
-  let toolCalls = 0;
   let disposed = false;
 
   const assertActive = (): void => {
@@ -112,36 +97,6 @@ export function createAgentRunBudget(
   return {
     signal: controller.signal,
     deadlineAt,
-    get turns() {
-      return turns;
-    },
-    get toolCalls() {
-      return toolCalls;
-    },
-    startTurn(count) {
-      assertActive();
-      if (turns >= limits.maxTurns) {
-        throw new Error(`Agent exhausted its ${limits.maxTurns}-turn budget.`);
-      }
-      validateToolCallCount(count, limits.maxToolCallsPerTurn);
-      if (toolCalls + count > limits.maxToolCalls) {
-        throw new Error(
-          `Agent exhausted its ${limits.maxToolCalls}-tool-call budget.`,
-        );
-      }
-      turns += 1;
-      toolCalls += count;
-    },
-    addToolCalls(count) {
-      assertActive();
-      validateToolCallCount(count, limits.maxToolCallsPerTurn);
-      if (toolCalls + count > limits.maxToolCalls) {
-        throw new Error(
-          `Agent exhausted its ${limits.maxToolCalls}-tool-call budget.`,
-        );
-      }
-      toolCalls += count;
-    },
     assertActive,
     remainingMs() {
       assertActive();
@@ -154,14 +109,6 @@ export function createAgentRunBudget(
       signal?.removeEventListener("abort", abort);
     },
   };
-}
-
-function validateToolCallCount(count: number, maximum: number): void {
-  if (!Number.isInteger(count) || count < 0 || count > maximum) {
-    throw new Error(
-      `Agent turn tool-call budget exceeded: maximum is ${maximum}.`,
-    );
-  }
 }
 
 export function validateAgentRunLimits(limits: AgentRunLimits): void {
@@ -185,7 +132,5 @@ export function validateAgentRunLimits(limits: AgentRunLimits): void {
 }
 
 export interface AgentHost<Result = unknown> {
-  /** How the Agent ends: a legacy terminal tool or a plain final report message. */
-  readonly taskProtocol?: AgentTaskProtocol;
   run(task: AgentTask): Result | Promise<Result>;
 }

@@ -180,8 +180,14 @@ export async function revalidateFunctionGroup(
   return { observation: result, feedback };
 }
 
+/**
+ * Identity of a requested or observed target function. A missing signature and
+ * an empty signature are different identities, so the key encodes the property
+ * presence instead of collapsing both into an empty string. The public input
+ * duplicate rule keeps its own normalization and is not affected.
+ */
 function targetKey(target: VerificationFunction): string {
-  return `${target.path}\0${target.name}\0${target.signature ?? ""}`;
+  return JSON.stringify({ path: target.path, name: target.name, signature: target.signature });
 }
 
 function targetLabel(target: VerificationFunction): string {

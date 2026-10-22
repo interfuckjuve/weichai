@@ -65,17 +65,9 @@ async function createFixtureInput(): Promise<VerificationInput> {
     },
   };
 }
-const successfulHostResult = {
-  testExecutionStatus: "success" as const,
-  translationStatus: "success" as const,
-  targetTest: {
-    status: "success" as const,
-    timedOut: false,
-    exitCode: 0,
-    stdout: "verified",
-    stderr: "",
-    durationMs: 1,
-  },
+const noBugResult = {
+  verdict: "no-bug" as const,
+  summary: "The target function passed the complete dedicated test folder.",
 };
 
 describe("createVerifier", () => {
@@ -85,7 +77,7 @@ describe("createVerifier", () => {
     const verify = createVerifier({
       run: (task) => {
         tasks.push(task);
-        return successfulHostResult;
+        return noBugResult;
       },
     });
 
@@ -94,16 +86,16 @@ describe("createVerifier", () => {
     });
     expect(tasks).toHaveLength(1);
     const task = tasks[0]!;
-    expect(task.subject).toEqual(testInput.subject);
     expect(task.taskContext.targetFunction).toEqual(testInput.subject.targetFunction);
     expect(task.systemPrompt).toContain("translation verification agent");
     expect(task.userPrompt).toContain("src/source.py");
     expect(task.userPrompt).toContain("target_fn in src/target.py");
     expect(task.userPrompt).toContain("src/target.py");
-    expect(task.terminalTools).toEqual(["finish", "report_uncertain"]);
+    expect(task).not.toHaveProperty("terminalTools");
+    expect(task).not.toHaveProperty("subject");
+    expect(task).not.toHaveProperty("functionGroup");
 
     const resolvedContext = {
-      state: {},
       runtime: {
         sourceLanguage: testInput.sourceLanguage,
         targetLanguage: testInput.targetLanguage,
@@ -128,8 +120,6 @@ describe("createVerifier", () => {
       "read_target_file",
       "write_target_test",
       "run_target_tests",
-      "finish",
-      "report_uncertain",
     ]);
     const sourceList = task.tools[0]!(context);
     const targetList = task.tools[2]!(context);
@@ -148,7 +138,6 @@ describe("createVerifier", () => {
     expect(writeTest).toContain("dedicated project-relative test folder: tests");
     expect(writeTest).toContain("not writable");
     expect(task.tools[5]!(context).description).toContain("fixed Host-selected pytest");
-    expect(task.tools[6]!(context).description).toContain("Python to Python verification");
     for (const factory of task.tools) {
       expect(factory(context).description).not.toContain("You");
     }
@@ -158,19 +147,11 @@ describe("createVerifier", () => {
     const testInput = await createFixtureInput();
     const verify = createVerifier({
       run: () => ({
-        outcome: "uncertain" as const,
-        testExecutionStatus: "failure" as const,
+        verdict: "uncertain" as const,
+        summary: "A requirement remains unresolved.",
         issue: {
           kind: "environment" as const,
           description: "The target test environment is unavailable.",
-        },
-        targetTest: {
-          status: "failure" as const,
-          timedOut: false,
-          exitCode: null,
-          stdout: "",
-          stderr: "missing dependency",
-          durationMs: 2,
         },
       }),
     });
@@ -183,28 +164,23 @@ describe("createVerifier", () => {
       },
     });
   });
-  it.each(["finish", "uncertain"])("preserves Host coverage through %s", async (terminal) => {
+  it("preserves the Host observation and issue of a reported defect", async () => {
     const targetFunction = {
       name: "target_fn", executed: true, lineCoverage: 100, branchCoverage: null,
     };
-    const targetTest = {
-      ...successfulHostResult.targetTest,
-      coverage: { status: "available" as const, targetFunction },
-    };
-    const issue = { kind: "test" as const, description: "More evidence is needed." };
-    const result = terminal === "finish"
-      ? { ...successfulHostResult, targetTest }
-      : { outcome: "uncertain" as const, testExecutionStatus: "success" as const, issue, targetTest };
-    const verify = createVerifier({ run: () => result });
+    const issue = { kind: "translation" as const, description: "The target returns a wrong value." };
+    const verify = createVerifier({
+      run: () => ({ verdict: "bug-found" as const, summary: "The requirement is violated.", issue, targetFunction }),
+    });
     await expect(verify(input, "single-agent", "verify")).resolves.toEqual({
-      status: terminal === "finish" ? "success" : "failure",
-      ...(terminal === "uncertain" ? { issue } : {}),
+      status: "failure",
+      issue,
       targetFunction,
     });
   });
 
   it("rejects an unsupported strategy", async () => {
-    const verify = createVerifier({ run: () => successfulHostResult });
+    const verify = createVerifier({ run: () => noBugResult });
 
     await expect(verify(input, "black-box", "verify")).rejects.toThrow(
       "Unknown verification strategy: black-box",
@@ -212,7 +188,7 @@ describe("createVerifier", () => {
   });
 
   it("rejects prepare for the single-phase strategy", async () => {
-    const verify = createVerifier({ run: () => successfulHostResult });
+    const verify = createVerifier({ run: () => noBugResult });
 
     await expect(verify(input, "single-agent", "prepare")).rejects.toThrow(
       "Verification strategy single-agent does not implement phase: prepare",

@@ -15,38 +15,14 @@ describe("AgentRunBudget", () => {
       expect(() => budget.assertActive()).toThrow('project cancelled');
     } finally { budget.dispose(); }
   });
-  it("counts turns and tool calls within the configured limits", () => {
-    const budget = createAgentRunBudget({
-      maxDurationMs: 10_000,
-      maxTurns: 2,
-      maxToolCalls: 3,
-      maxToolCallsPerTurn: 2,
-    });
+  it("aborts when the run time budget expires", async () => {
+    const budget = createAgentRunBudget({ maxDurationMs: 5 });
     try {
-      budget.startTurn(2);
-      budget.startTurn(1);
-      expect(budget.turns).toBe(2);
-      expect(budget.toolCalls).toBe(3);
-      expect(() => budget.startTurn(0)).toThrow("2-turn budget");
-    } finally {
-      budget.dispose();
-    }
+      await new Promise(resolve => setTimeout(resolve, 20));
+      expect(budget.signal.aborted).toBe(true);
+      expect(() => budget.assertActive()).toThrow("time budget");
+    } finally { budget.dispose(); }
   });
-
-  it("rejects a model response above the per-turn call limit", () => {
-    const budget = createAgentRunBudget({
-      maxDurationMs: 10_000,
-      maxTurns: 2,
-      maxToolCalls: 10,
-      maxToolCallsPerTurn: 2,
-    });
-    try {
-      expect(() => budget.startTurn(3)).toThrow("maximum is 2");
-    } finally {
-      budget.dispose();
-    }
-  });
-
   it("rejects invalid limits and stops after disposal", () => {
     expect(() =>
       validateAgentRunLimits({

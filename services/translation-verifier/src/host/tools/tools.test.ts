@@ -3,34 +3,26 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { createFinishTool } from "./finish.js";
 import { createListFilesTool, createListTargetFilesTool } from "./list-files.js";
 import { createReadSourceFileTool } from "./read-source-file.js";
 import { createReadTargetFileTool } from "./read-target-file.js";
-import { createReportUncertainTool } from "./report-uncertain.js";
 import { createRunTargetTestsTool } from "./run-target-tests.js";
 import { createWriteTargetTestTool } from "./write-target-test.js";
+import { revalidateTargetReport } from "../revalidation.js";
 import type {
   TargetTest,
+  TargetTestResult,
   ToolContext,
-  ToolState,
 } from "./common.js";
 
 const roots: string[] = [];
 
-function expectContinue<T>(tool: { isTerminal?: (output: T) => boolean }, output: T, feedback: string) {
-  expect(output).toMatchObject({ outcome: "continue", feedback: expect.arrayContaining([expect.stringContaining(feedback)]) });
-  expect(tool.isTerminal?.(output)).toBe(false);
-}
-
 function toolContext(
   sourceProjectPath: string,
   targetProjectPath: string,
-  state: ToolState = {},
   targetTest: TargetTest = { executable: process.execPath, args: ["-e", ""] },
 ): ToolContext {
   const context = {
-    state,
     runtime: {
       sourceLanguage: "Python",
       targetLanguage: "Java",
@@ -106,7 +98,6 @@ describe("verification host tools", () => {
     const result = await createRunTargetTestsTool()(context).execute({ path: "tests/agent/example.custom" });
     expect(calls).toEqual(["tests/agent/example.custom"]);
     expect(result).toMatchObject({ status: "success", stdout: "bound runner", tests: { executed: 1 }, coverage: { status: "available" } });
-    expect(context.state.lastTargetTest).toBe(result);
     expect(result.reportPaths).toEqual(["TestResults/tests.trx"]);
     const reader = createReadTargetFileTool()(context);
     expect(await reader.execute(reader.parse({ path: result.reportPaths![0] })))
@@ -161,7 +152,7 @@ describe("verification host tools", () => {
     await writeFile(join(sourceRoot, "src/other.py"), "return 2\n");
     await writeFile(join(targetRoot, "src/target.java"), "return 1;\n");
 
-    const context = toolContext(sourceRoot, targetRoot, {}, {
+    const context = toolContext(sourceRoot, targetRoot, {
       executable: process.execPath,
       args: ["tests/agent/verification.js"],
     });
@@ -169,7 +160,6 @@ describe("verification host tools", () => {
     const readTarget = createReadTargetFileTool()(context);
     const writeTest = createWriteTargetTestTool()(context);
     const runTests = createRunTargetTestsTool()(context);
-    const finish = createFinishTool()(context);
 
     await expect(() =>
       readSource.parse({ path: "../target/src/target.java" }),
@@ -211,11 +201,12 @@ describe("verification host tools", () => {
       stdout: "verified",
     });
 
-    const completion = await finish.execute(finish.parse({
-      testExecutionStatus: "success", translationStatus: "success",
-    }));
-    expectContinue(finish, completion, "complete test folder must compile and execute");
-    expect(completion.targetTest.tests?.executed).toBe(0);
+    const revalidation = await revalidateTargetReport(context, {
+      verdict: "no-bug",
+      summary: "The target function is verified.",
+    });
+    expect(revalidation.feedback.join("\n")).toContain("complete test folder must compile and execute");
+    expect(revalidation.observation.tests?.executed).toBe(0);
   });
 
   it("accepts Host function coverage without enforcing a percentage threshold", async () => {
@@ -223,44 +214,51 @@ describe("verification host tools", () => {
     await mkdir(join(root, "tests/agent"), { recursive: true });
     await writeFile(join(root, "tests/agent/coverage.test.js"), "test");
     const targetFunction = { name: "target_fn", executed: true, lineCoverage: 25, branchCoverage: null };
-    const context = toolContext(root, root, {
-      lastTargetTest: {
-        status: "success", timedOut: false, exitCode: 0, stdout: "", stderr: "", durationMs: 1,
-        tests: { executed: 1, passed: 1, failed: 0, skipped: 0 },
-        coverage: { status: "available", targetFunction },
-      },
-    });
-    const observed = context.state.lastTargetTest!;
-    context.runner = { run: async () => ({ ...observed }) };
-    const finish = createFinishTool()(context);
-    const input = finish.parse({ testExecutionStatus: "success", translationStatus: "success" });
-    const accepted = await finish.execute(input);
-    expect(accepted.targetTest.coverage).toEqual({ status: "available", targetFunction });
-    expect(finish.isTerminal?.(accepted)).toBe(true);
-    expect(() => finish.parse({ ...input, targetFunction })).toThrow("finish requires");
-    observed.coverage = { status: "available", targetFunction: { ...targetFunction, executed: false } };
-    const uncovered = await finish.execute(input);
-    expectContinue(finish, uncovered, "must execute the requested target function");
-    expect(uncovered.targetTest.coverage).toEqual(observed.coverage);
-    observed.coverage = { status: "unavailable", reason: "report missing" };
-    const unavailable = await finish.execute(input);
-    expectContinue(finish, unavailable, "must execute the requested target function");
-    expect(unavailable.targetTest.coverage).toEqual({ status: "unavailable", reason: "report missing" });
-    observed.tests = { executed: 0, passed: 0, failed: 0, skipped: 1 };
-    expectContinue(finish, await finish.execute(input), "compile and execute");
-    observed.tests = { executed: 1, passed: 1, failed: 0, skipped: 1 };
-    observed.coverage = { status: "available", targetFunction };
-    expectContinue(finish, await finish.execute(input), "without skipped tests");
+    const observation: TargetTestResult = {
+      status: "success", timedOut: false, exitCode: 0, stdout: "", stderr: "", durationMs: 1,
+      tests: { executed: 1, passed: 1, failed: 0, skipped: 0 },
+      coverage: { status: "available", targetFunction },
+    };
+    const noBug = { verdict: "no-bug" as const, summary: "The target function is verified." };
+    const context = toolContext(root, root);
+    context.runner = { run: async () => ({ ...observation }) };
+    const accepted = await revalidateTargetReport(context, noBug);
+    expect(accepted.feedback).toEqual([]);
+    expect(accepted.observation.coverage).toEqual({ status: "available", targetFunction });
+    context.runner = { run: async () => ({
+      ...observation,
+      coverage: { status: "available" as const, targetFunction: { ...targetFunction, executed: false } },
+    }) };
+    expect((await revalidateTargetReport(context, noBug)).feedback.join("\n"))
+      .toContain("must execute the requested target function");
+    context.runner = { run: async () => ({
+      ...observation,
+      coverage: { status: "unavailable" as const, reason: "report missing" },
+    }) };
+    const unavailable = await revalidateTargetReport(context, noBug);
+    expect(unavailable.feedback.join("\n")).toContain("must execute the requested target function");
+    expect(unavailable.observation.coverage).toEqual({ status: "unavailable", reason: "report missing" });
+    context.runner = { run: async () => ({ ...observation, tests: { executed: 0, passed: 0, failed: 0, skipped: 1 } }) };
+    expect((await revalidateTargetReport(context, noBug)).feedback.join("\n"))
+      .toContain("complete test folder must compile and execute");
+    context.runner = { run: async () => ({ ...observation, tests: { executed: 1, passed: 1, failed: 0, skipped: 1 } }) };
+    expect((await revalidateTargetReport(context, noBug)).feedback.join("\n"))
+      .toContain("without skipped tests");
   });
 
-  it("invalidates a previous successful run even if the next run cannot start", async () => {
+  it("rejects an unknown test path before the runner starts", async () => {
     const root = await mkdtemp(join(tmpdir(), "translation-verifier-tools-")); roots.push(root);
-    const context = toolContext(root, root, {
-      lastTargetTest: { status: "success", timedOut: false, exitCode: 0, stdout: "", stderr: "", durationMs: 1 },
-    });
+    const context = toolContext(root, root);
+    const calls: string[] = [];
+    context.runner = {
+      run: async path => {
+        calls.push(path);
+        return { status: "success", timedOut: false, exitCode: 0, stdout: "", stderr: "", durationMs: 1 };
+      },
+    };
     const run = createRunTargetTestsTool()(context);
     await expect(run.execute(run.parse({ path: "tests/agent/missing.js" }))).rejects.toThrow("does not exist");
-    expect(context.state.lastTargetTest).toBeUndefined();
+    expect(calls).toEqual([]);
   });
 
   it("allows a new test path inside a Host-configured test root", async () => {
@@ -362,7 +360,7 @@ describe("verification host tools", () => {
     expect(calls).toEqual([]);
   });
 
-  it("reruns the complete current suite at finish instead of accepting an earlier passing file", async () => {
+  it("reruns the complete current suite during revalidation instead of accepting an earlier passing file", async () => {
     const root = await mkdtemp(join(tmpdir(), "translation-verifier-finish-suite-"));
     roots.push(root);
     await mkdir(join(root, "tests/agent"), { recursive: true });
@@ -383,20 +381,24 @@ describe("verification host tools", () => {
     await createRunTargetTestsTool()(context).execute({ path: "tests/agent/passing.test.js" });
     await writeFile(join(root, "tests/agent/regression.test.js"), "test");
     calls.length = 0;
-    const finish = createFinishTool()(context);
-    const rejected = await finish.execute({ testExecutionStatus: "success", translationStatus: "success" });
-    expectContinue(finish, rejected, "Host result");
-    expect(rejected.targetTest).toMatchObject({ status: "failure", tests: { executed: 2, failed: 1 } });
-    expect(calls).toEqual(["tests/agent/passing.test.js", "tests/agent/regression.test.js"]);
-    const accepted = await finish.execute({
-      testExecutionStatus: "failure", translationStatus: "failure",
-      issue: { kind: "translation", description: "The new test exposes incorrect behavior." },
+    const rejected = await revalidateTargetReport(context, {
+      verdict: "no-bug",
+      summary: "The target function is verified.",
     });
-    expect(accepted).toMatchObject({ targetTest: { status: "failure", tests: { executed: 2, failed: 1 } } });
-    expect(finish.isTerminal?.(accepted)).toBe(true);
+    expect(rejected.feedback.join("\n")).toContain("requires every test in the dedicated folder to pass");
+    expect(rejected.observation).toMatchObject({ status: "failure", tests: { executed: 2, failed: 1 } });
+    expect(calls).toEqual(["tests/agent/passing.test.js", "tests/agent/regression.test.js"]);
+    const accepted = await revalidateTargetReport(context, {
+      verdict: "bug-found",
+      summary: "The new test exposes incorrect behavior.",
+      issue: { kind: "translation", description: "The new test exposes incorrect behavior." },
+      affectedTargets: [{ path: "src/target.java", name: "target_fn" }],
+    });
+    expect(accepted.feedback).toEqual([]);
+    expect(accepted.observation).toMatchObject({ status: "failure", tests: { executed: 2, failed: 1 } });
   });
 
-  it("rejects a translation defect report when a suite file cannot compile", async () => {
+  it("rejects a defect report while a suite file cannot compile, then accepts the repaired suite", async () => {
     const root = await mkdtemp(join(tmpdir(), "translation-verifier-finish-compile-"));
     roots.push(root);
     await mkdir(join(root, "tests/agent"), { recursive: true });
@@ -406,102 +408,71 @@ describe("verification host tools", () => {
       status: "failure", timedOut: false, exitCode: 1, stdout: "", stderr: "SyntaxError", durationMs: 1,
       tests: { executed: 0, passed: 0, failed: 0, skipped: 0 },
     }) };
-    const finish = createFinishTool()(context);
-    const output = await finish.execute({
-      testExecutionStatus: "failure", translationStatus: "failure",
-      issue: { kind: "translation", description: "The function is incorrect." },
-    });
-    expectContinue(finish, output, "compile and execute");
-    expect(output.targetTest).toMatchObject({ stderr: "SyntaxError", tests: { executed: 0 } });
+    const defect = {
+      verdict: "bug-found" as const,
+      summary: "The function is incorrect.",
+      issue: { kind: "translation" as const, description: "The function is incorrect." },
+      affectedTargets: [{ path: "src/target.java", name: "target_fn" }],
+    };
+    const output = await revalidateTargetReport(context, defect);
+    expect(output.feedback.join("\n")).toContain("compile and execute");
+    expect(output.observation).toMatchObject({ stderr: "SyntaxError", tests: { executed: 0 } });
     await createWriteTargetTestTool()(context).execute({ path: "tests/agent/broken.test.js", content: "test('repaired', () => {})" });
     context.runner = { run: async () => ({
       status: "success", timedOut: false, exitCode: 0, stdout: "repaired", stderr: "", durationMs: 1,
       tests: { executed: 1, passed: 1, failed: 0, skipped: 0 },
       coverage: { status: "available", targetFunction: { name: "target_fn", executed: true, lineCoverage: 100, branchCoverage: null } },
     }) };
-    const repaired = await finish.execute({ testExecutionStatus: "success", translationStatus: "success" });
-    expect(finish.isTerminal?.(repaired)).toBe(true);
-    expect(repaired.targetTest).toMatchObject({ status: "success", stdout: "repaired", tests: { failed: 0 } });
+    const repaired = await revalidateTargetReport(context, {
+      verdict: "no-bug",
+      summary: "The repaired suite executes the target function.",
+    });
+    expect(repaired.feedback).toEqual([]);
+    expect(repaired.observation).toMatchObject({ status: "success", stdout: "repaired", tests: { failed: 0 } });
   });
 
-  it("requires all finish statuses to match", async () => {
+  it("keeps a failing assertion distinct from a broken execution", async () => {
     const root = await mkdtemp(join(tmpdir(), "translation-verifier-tools-"));
     roots.push(root);
-    const context = toolContext(root, root, {
-      lastTargetTest: {
-        status: "failure",
-        timedOut: false,
-        exitCode: 1,
-        stdout: "",
-        stderr: "expected 1, received 2",
-        durationMs: 4,
-        tests: { executed: 1, passed: 0, failed: 1, skipped: 0 },
-        coverage: { status: "available", targetFunction: { name: "target_fn", executed: true, lineCoverage: 100, branchCoverage: null } },
-      },
-    });
     await mkdir(join(root, "tests/agent"), { recursive: true });
     await writeFile(join(root, "tests/agent/failure.test.js"), "test");
-    const observed = context.state.lastTargetTest!;
-    context.runner = { run: async () => ({ ...observed }) };
-    const finish = createFinishTool()(context);
-    const reportUncertain = createReportUncertainTool()(context);
-
-    await expect(
-      reportUncertain.execute(
-        reportUncertain.parse({
-          issue: { kind: "test", description: "The fixture is missing." },
-        }),
-      ),
-    ).resolves.toMatchObject({
-      outcome: "uncertain",
-      testExecutionStatus: "failure",
-      issue: { kind: "test" },
-    });
-
-    await expect(
-      finish.execute(
-        finish.parse({
-          testExecutionStatus: "failure",
-          translationStatus: "failure",
-          issue: {
-            kind: "translation",
-            description: "The translated method returned the wrong value.",
-          },
-        }),
-      ),
-    ).resolves.toMatchObject({
-      testExecutionStatus: "failure",
-      translationStatus: "failure",
-      issue: { kind: "translation" },
-      targetTest: { status: "failure" },
-    });
-    observed.executionErrors = 1;
-    expectContinue(finish, await finish.execute({ testExecutionStatus: "failure", translationStatus: "failure",
-      issue: { kind: "translation", description: "Assertion failed alongside a compiler error." } }), "compile and execute");
-    observed.executionErrors = 0;
-    expectContinue(finish, await finish.execute(finish.parse({
-      testExecutionStatus: "failure", translationStatus: "success",
-    })), "finish.translationStatus does not match the Host result");
-    const mismatched = await finish.execute(finish.parse({
-      testExecutionStatus: "success", translationStatus: "success",
-    }));
-    expectContinue(finish, mismatched, "finish.testExecutionStatus does not match the Host result");
-    expect(mismatched.targetTest).toMatchObject({ stderr: "expected 1, received 2", status: "failure" });
+    const failureObservation: TargetTestResult = {
+      status: "failure",
+      timedOut: false,
+      exitCode: 1,
+      stdout: "",
+      stderr: "expected 1, received 2",
+      durationMs: 4,
+      tests: { executed: 1, passed: 0, failed: 1, skipped: 0 },
+      coverage: { status: "available", targetFunction: { name: "target_fn", executed: true, lineCoverage: 100, branchCoverage: null } },
+    };
+    const defect = {
+      verdict: "bug-found" as const,
+      summary: "The translated method returned the wrong value.",
+      issue: { kind: "translation" as const, description: "The translated method returned the wrong value." },
+      affectedTargets: [{ path: "src/target.java", name: "target_fn" }],
+    };
+    const context = toolContext(root, root);
+    context.runner = { run: async () => ({ ...failureObservation }) };
+    const accepted = await revalidateTargetReport(context, defect);
+    expect(accepted.feedback).toEqual([]);
+    expect(accepted.observation).toMatchObject({ status: "failure", stderr: "expected 1, received 2" });
+    context.runner = { run: async () => ({ ...failureObservation, executionErrors: 1 }) };
+    expect((await revalidateTargetReport(context, defect)).feedback.join("\n"))
+      .toContain("compile and execute");
   });
 
-
-  it("does not allow finish without any test in the authorized suite", async () => {
+  it("rejects a no-bug report without any test in the authorized suite", async () => {
     const root = await mkdtemp(join(tmpdir(), "translation-verifier-tools-"));
     roots.push(root);
     const context = toolContext(root, root);
-    const finish = createFinishTool()(context);
 
-    const output = await finish.execute(finish.parse({
-      testExecutionStatus: "failure", translationStatus: "failure",
-      issue: { kind: "translation", description: "The translated method returned the wrong value." },
-    }));
-    expectContinue(finish, output, "complete test folder must compile and execute");
-    expect(output.targetTest.tests?.executed).toBe(0);
+    const output = await revalidateTargetReport(context, {
+      verdict: "no-bug",
+      summary: "The target function is verified.",
+    });
+    expect(output.feedback.join("\n")).toContain("complete test folder must compile and execute");
+    expect(output.observation.tests?.executed).toBe(0);
   });
 
   it("classifies a timed out test execution as failure", async () => {
@@ -509,7 +480,7 @@ describe("verification host tools", () => {
     roots.push(root);
     await mkdir(join(root, "tests/agent"), { recursive: true });
     await writeFile(join(root, "tests/agent/timeout.js"), "test");
-    const context = toolContext(root, root, {}, {
+    const context = toolContext(root, root, {
       executable: process.execPath,
       args: ["-e", "setTimeout(() => {}, 1000)"],
       timeoutMs: 10,

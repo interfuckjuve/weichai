@@ -47,7 +47,7 @@ import { emitAgentWorkLog, type AgentWorkLogger } from "./work-log.js";
 import {
   defaultToolContextResolver,
   type ToolContextResolver,
-} from "./runtime.js";
+} from "./tool-context.js";
 import { randomUUID } from "node:crypto";
 
 export type LangChainAgentHostOptions = {
@@ -83,7 +83,8 @@ export type LangChainFunctionGroupHostResult = {
 const DEFAULT_MAX_FEEDBACK_ROUNDS = 4;
 /** Keep the model-visible feedback bounded; the full observation stays in the trace. */
 const MAX_FEEDBACK_CHARS = 12_000;
-const MAX_TRACE_PAYLOAD_CHARS = 4_000;
+/** Bound only the opt-in trace input payload; tool results stay complete in the trace. */
+const MAX_TRACE_PAYLOAD_CHARS = 24_000;
 /**
  * Host tools that touch the target working directory run one at a time, so a
  * batched framework tool call cannot read a half-written test file, rewrite a
@@ -108,7 +109,7 @@ type ObservationSummary = {
 /** One Host ownership contract per task shape: runner binding, revalidation, feedback and accepted result. */
 type Acceptance<Observation extends ObservationSummary, Result> = {
   /** Host-owned runners bound for this task shape. */
-  bindRunner(context: Omit<ToolContext, "state" | "runner" | "functionGroupRunner">): Pick<ToolContext, "runner" | "functionGroupRunner">;
+  bindRunner(context: Omit<ToolContext, "runner" | "functionGroupRunner">): Pick<ToolContext, "runner" | "functionGroupRunner">;
   revalidate(
     context: ToolContext,
     report?: FinalReportClaim,
@@ -153,7 +154,6 @@ export function createLangChainAgentHost(
   options: LangChainAgentHostOptions,
 ): AgentHost<LangChainAgentHostResult> {
   return {
-    taskProtocol: "final-report",
     run: task => runLangChainTask(options, task, TARGET_ACCEPTANCE),
   };
 }
@@ -163,7 +163,6 @@ export function createLangChainFunctionGroupAgentHost(
   options: LangChainAgentHostOptions,
 ): AgentHost<LangChainFunctionGroupHostResult> {
   return {
-    taskProtocol: "final-report",
     run: task => runLangChainTask(options, task, FUNCTION_GROUP_ACCEPTANCE),
   };
 }
@@ -189,7 +188,6 @@ async function runLangChainTask<Observation extends ObservationSummary, Result>(
     cleanup = runtime.cleanup;
     budget.assertActive();
     const context: ToolContext = {
-      state: {},
       budget,
       runtime,
       ...acceptance.bindRunner({ budget, runtime }),
@@ -224,7 +222,15 @@ async function runLangChainTask<Observation extends ObservationSummary, Result>(
       });
       const response = await agent.invoke(
         { messages: [input] },
-        { configurable: { thread_id: threadId }, signal: budget.signal },
+        {
+          configurable: { thread_id: threadId },
+          signal: budget.signal,
+          // Every middleware hook and tool dispatch is a graph superstep, so
+          // the framework default of 25 would stop a normal multi-tool run
+          // long before the Host's own model/tool budgets. The Host budgets
+          // remain the authoritative limits.
+          recursionLimit: recursionLimitFor(limits),
+        },
       );
       budget.assertActive();
       const messages = (response as { messages?: BaseMessage[] }).messages ?? [];
@@ -548,9 +554,11 @@ function bindLangChainTools(
           toolName: hostTool.name,
           ...(toolCallId ? { toolCallId } : {}),
           elapsedMs: Math.round(performance.now() - startedAt),
-          output: boundedValue(output, MAX_TRACE_PAYLOAD_CHARS),
+          // The detailed trace keeps the complete Host observation; only the
+          // model-visible tool message is bounded below.
+          output,
         }));
-        return output;
+        return modelVisibleToolOutput(hostTool.name, output);
       } catch (error) {
         emitAgentWorkLog(options.workLogger, {
           ...workEvent(runId, "tool.failed"),
@@ -623,6 +631,11 @@ function createRunLimitMiddleware(limits: AgentRunLimits) {
   });
 }
 
+/** Graph supersteps needed to reach the Host-enforced budgets, never a new budget. */
+function recursionLimitFor(limits: AgentRunLimits): number {
+  return 4 * limits.maxTurns + 2 * limits.maxToolCalls + 16;
+}
+
 function messageCharacters(message: BaseMessage): number {
   let characters = messageText(message).length;
   const calls = (message as { tool_calls?: Array<{ name?: string; args?: unknown }> }).tool_calls;
@@ -642,6 +655,40 @@ function valueCharacters(value: unknown): number {
   } catch {
     return 0;
   }
+}
+
+/**
+ * Bound the diagnostics the model sees for one test-run result while keeping
+ * the Host-owned facts (status, tests, coverage, functions, report paths)
+ * intact. Compiler dumps and reflection probes must not exhaust the context in
+ * one tool call, so head and tail are kept with an explicit retention marker.
+ * The trace keeps the complete observation.
+ */
+function modelVisibleToolOutput(name: string, value: unknown): unknown {
+  if (
+    !["run_target_tests", "run_function_group_tests", "write_target_test"].includes(name) ||
+    typeof value !== "object" || value === null || Array.isArray(value)
+  ) {
+    return value;
+  }
+  const output = value as Record<string, unknown>;
+  const bounded = (text: unknown, limit: number): unknown => {
+    if (typeof text !== "string" || text.length <= limit) return text;
+    const half = Math.floor(limit / 2);
+    return `${text.slice(0, half)}\n[Host retained ${text.length - limit} additional diagnostic characters]\n${text.slice(-half)}`;
+  };
+  return {
+    ...output,
+    ...(output.targetTest ? { targetTest: modelVisibleToolOutput("run_target_tests", output.targetTest) } : {}),
+    ...(output.functionGroupTest ? { functionGroupTest: modelVisibleToolOutput("run_function_group_tests", output.functionGroupTest) } : {}),
+    ...(typeof output.stdout === "string" ? { stdout: bounded(output.stdout, 8_000) } : {}),
+    ...(typeof output.stderr === "string" ? { stderr: bounded(output.stderr, 4_000) } : {}),
+    ...(Array.isArray(output.failures) ? {
+      failures: output.failures.slice(0, 8).map(failure => typeof failure === "object" && failure !== null
+        ? { ...failure, message: bounded(failure.message, 2_000) } : failure),
+      ...(output.failures.length > 8 ? { omittedFailureCount: output.failures.length - 8 } : {}),
+    } : {}),
+  };
 }
 
 function boundedValue(value: unknown, maximum: number): unknown {

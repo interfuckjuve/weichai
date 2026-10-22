@@ -77,8 +77,6 @@ export function createWriteTargetTestTool(): HostToolFactory {
         const target = resolveSafePath(context.runtime.targetProjectPath, path);
         await mkdir(dirname(target), { recursive: true });
         await writeFile(target, input.content, { encoding: "utf8" });
-        context.state.lastTargetTest = undefined;
-        context.state.lastFunctionGroupTest = undefined;
         return { path };
       },
     };

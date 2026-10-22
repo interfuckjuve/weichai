@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import { createFunctionGroupVerifier } from "./function-group-verify.js";
 import type { AgentTask } from "./host/agent.js";
 import type { FunctionGroupVerificationInput, RequirementFunctionGroupVerificationInput } from "./types.js";
-import { createRequirementFunctionGroupTask, createSingleAgentFunctionGroupTask } from "./strategies/single-agent-function-group/strategy.js";
+import {
+  createFunctionGroupFinalReportTask,
+  createRequirementFunctionGroupFinalReportTask,
+} from "./strategies/single-agent-function-group/strategy.js";
 
 const input: FunctionGroupVerificationInput = {
   schemaVersion: "3.1",
@@ -23,20 +26,34 @@ const input: FunctionGroupVerificationInput = {
   ],
 };
 
+function observedFunctions(includeSource: boolean) {
+  return input.functions.map(({ source, target }) => ({
+    ...(includeSource ? { source } : {}),
+    target,
+    status: "passed" as const,
+    executed: true,
+    lineCoverage: 100,
+    branchCoverage: null,
+  }));
+}
+
 describe("createFunctionGroupVerifier", () => {
   it("keeps execution evidence without labeling an uncertain requirement verified", async () => {
-    const verify = createFunctionGroupVerifier({ run: async () => ({
-      outcome: "uncertain" as const, testExecutionStatus: "success" as const,
-      issue: { kind: "unknown" as const, description: "A public requirement remains ambiguous." },
-      functionGroupTest: { status: "success" as const, reason: "verified" as const, testPaths: ["tests/group.py"],
-        tests: { executed: 1, passed: 1, failed: 0, skipped: 0 },
-        functions: input.functions.map(({ target }) => ({ target, status: "passed" as const,
-          executed: true, lineCoverage: 100, branchCoverage: null })),
-        failures: [], stdout: "", stderr: "", exitCode: 0 },
-    }) });
+    const verify = createFunctionGroupVerifier({
+      run: async () => ({
+        verdict: "uncertain" as const,
+        summary: "A public requirement remains ambiguous.",
+        issue: { kind: "unknown" as const, description: "A public requirement remains ambiguous." },
+        functions: observedFunctions(true),
+      }),
+    });
     const result = await verify(input, "single-agent-function-group", "verify");
     expect(result.status).toBe("failure");
     expect(result.reason).toBeUndefined();
+    expect(result.issue).toEqual({
+      kind: "unknown",
+      description: "A public requirement remains ambiguous.",
+    });
     expect(result.functions.every(fn => fn.executed)).toBe(true);
   });
 
@@ -46,25 +63,9 @@ describe("createFunctionGroupVerifier", () => {
       run: (value) => {
         task = value;
         return {
-          testExecutionStatus: "success" as const,
-          translationStatus: "success" as const,
-          functionGroupTest: {
-            status: "success" as const,
-            testPaths: ["tests/all.test.py"],
-            tests: { executed: 1, passed: 1, failed: 0, skipped: 0 },
-            functions: input.functions.map(({ source, target }) => ({
-            source,
-            target,
-            status: "passed" as const,
-            executed: true,
-            lineCoverage: 100,
-            branchCoverage: null,
-            })),
-            failures: [],
-            stdout: "",
-            stderr: "",
-            exitCode: 0,
-          },
+          verdict: "no-bug" as const,
+          summary: "Every listed target passed the complete suite.",
+          functions: observedFunctions(true),
         };
       },
     });
@@ -72,27 +73,17 @@ describe("createFunctionGroupVerifier", () => {
     await expect(
       verify(input, "single-agent-function-group", "verify"),
     ).resolves.toMatchObject({ status: "success" });
-    expect(task?.functionGroup).toEqual(input);
+    expect(task?.taskContext.functionGroup).toEqual(input);
+    expect(task).not.toHaveProperty("functionGroup");
+    expect(task).not.toHaveProperty("subject");
     expect(task?.userPrompt).toContain("calculatePrice");
     expect(task?.userPrompt).toContain("apply");
   });
 
   it("does not accept the function-level strategy name", async () => {
-    const verify = createFunctionGroupVerifier({ run: async () => ({
-      testExecutionStatus: "failure",
-      translationStatus: "failure",
-      issue: { kind: "unknown", description: "failed" },
-      functionGroupTest: {
-        status: "failure",
-        testPaths: [],
-        tests: { executed: 0, passed: 0, failed: 0, skipped: 0 },
-        functions: [],
-        failures: [],
-        stdout: "",
-        stderr: "",
-        exitCode: 1,
-      },
-    }) });
+    const verify = createFunctionGroupVerifier({
+      run: async () => ({ verdict: "no-bug", summary: "unused", functions: observedFunctions(true) }),
+    });
 
     await expect(
       verify(input, "single-agent" as "single-agent-function-group", "verify"),
@@ -109,10 +100,9 @@ describe("createFunctionGroupVerifier", () => {
       .rejects.toThrow("Duplicate target function");
   });
 
-  it("exposes the function-group tool set without changing function-level names", () => {
-    const task = createSingleAgentFunctionGroupTask(input);
+  it("exposes the function-group tool set without a terminal tool", () => {
+    const task = createFunctionGroupFinalReportTask(input);
     expect(task.tools.map((factory) => factory({
-      state: {},
       runtime: {
         sourceLanguage: input.sourceLanguage,
         targetLanguage: input.targetLanguage,
@@ -137,8 +127,6 @@ describe("createFunctionGroupVerifier", () => {
       "read_target_file",
       "write_target_test",
       "run_function_group_tests",
-      "finish_function_group",
-      "report_uncertain",
     ]);
   });
 
@@ -157,18 +145,15 @@ describe("createFunctionGroupVerifier", () => {
       run: (value) => {
         task = value;
         return {
-          testExecutionStatus: "success" as const,
-          translationStatus: "success" as const,
-          functionGroupTest: {
-            status: "success" as const,
-            testPaths: ["tests/TenantScope.test.cs"],
-            tests: { executed: 1, passed: 1, failed: 0, skipped: 0 },
-            functions: [{ target: requirementInput.functions[0]!.target, status: "passed" as const, executed: true, lineCoverage: 100, branchCoverage: null }],
-            failures: [],
-            stdout: "",
-            stderr: "",
-            exitCode: 0,
-          },
+          verdict: "no-bug" as const,
+          summary: "The requirement is satisfied by the listed target.",
+          functions: [{
+            target: requirementInput.functions[0]!.target,
+            status: "passed" as const,
+            executed: true,
+            lineCoverage: 100,
+            branchCoverage: null,
+          }],
         };
       },
     });
@@ -176,7 +161,6 @@ describe("createFunctionGroupVerifier", () => {
       .resolves.toMatchObject({ status: "success" });
     expect(task?.userPrompt).toContain("Reject expired tenant scopes.");
     expect(task?.tools.map((factory) => factory({
-      state: {},
       runtime: {
         sourceLanguage: "C#", targetLanguage: "C#", sourceProjectPath: "/tmp/target", targetProjectPath: "/tmp/target",
         sourcePath: "src/TenantScope.cs", targetPath: "src/TenantScope.cs",
@@ -188,7 +172,9 @@ describe("createFunctionGroupVerifier", () => {
       functionGroupRunner: { run: async () => { throw new Error("unused"); } },
     })).map((tool) => tool.name)).toEqual([
       "list_target_files", "read_target_file", "write_target_test",
-      "run_function_group_tests", "finish_function_group", "report_uncertain",
+      "run_function_group_tests",
     ]);
+    expect(createRequirementFunctionGroupFinalReportTask(requirementInput).taskContext.functionGroup)
+      .toEqual(requirementInput);
   });
 });

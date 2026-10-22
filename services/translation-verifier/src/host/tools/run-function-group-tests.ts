@@ -54,13 +54,12 @@ export function createRunFunctionGroupTestsTool(): HostToolFactory {
   };
 }
 
-/** Shared execution path for the Agent tool and Host finish check. */
+/** Shared execution path for the Agent test tool and Host revalidation. */
 export async function runFunctionGroupTests(
   context: ToolContext,
   input: RunFunctionGroupTestsInput = {},
 ): Promise<FunctionGroupTestRun> {
   context.budget?.assertActive();
-  context.state.lastFunctionGroupTest = undefined;
   if (!context.functionGroupRunner) throw new Error("Function-group execution requires a function-group test runner.");
   const mappings = context.runtime.functionGroup?.functions;
   if (!mappings?.length) throw new Error("Function-group execution requires at least one target function.");
@@ -83,6 +82,5 @@ export async function runFunctionGroupTests(
     reportPaths: observation.reportPaths ?? [],
   };
   context.budget?.assertActive();
-  context.state.lastFunctionGroupTest = result;
   return result;
 }

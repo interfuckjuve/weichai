@@ -51,13 +51,12 @@ export function createRunTargetTestsTool(): HostToolFactory {
   };
 }
 
-/** Shared execution path for the Agent tool and Host finish check. */
+/** Shared execution path for the Agent test tool and Host revalidation. */
 export async function runTargetTests(
   context: ToolContext,
   input: RunTargetTestsInput = {},
 ): Promise<TargetTestResult> {
   context.budget?.assertActive();
-  context.state.lastTargetTest = undefined;
   const testPaths = await resolveTestPaths(context, input.path === undefined ? undefined : [input.path]);
   const singleFile = input.path !== undefined && testPaths.length === 1 && testPaths[0] === input.path;
   let observation: TargetTestResult;
@@ -83,6 +82,5 @@ export async function runTargetTests(
     reportPaths: observation.reportPaths ?? [],
   };
   context.budget?.assertActive();
-  context.state.lastTargetTest = result;
   return result;
 }
