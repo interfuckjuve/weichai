@@ -18,6 +18,7 @@ import type {
 
 const DEFAULT_MAX_OUTPUT_TOKENS = 16_384;
 const DEFAULT_REQUEST_ATTEMPTS = 3;
+const DEFAULT_REQUEST_RETRY_DELAY_MS = 750;
 
 function integer(value: string | undefined, fallback: number): number {
   const parsed = Number(value ?? fallback);
@@ -41,6 +42,7 @@ export function offlineVerifierModelOptions(
     maxOutputTokens: integer(env.TRANSLATION_VERIFIER_MAX_OUTPUT_TOKENS, DEFAULT_MAX_OUTPUT_TOKENS),
     requestRetry: {
       maxAttempts: integer(env.TRANSLATION_VERIFIER_REQUEST_ATTEMPTS, DEFAULT_REQUEST_ATTEMPTS),
+      delayMs: integer(env.TRANSLATION_VERIFIER_REQUEST_RETRY_DELAY_MS, DEFAULT_REQUEST_RETRY_DELAY_MS),
     },
     ...(request ? { request } : {}),
   };

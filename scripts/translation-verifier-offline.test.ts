@@ -74,12 +74,21 @@ describe('offline verifier model mapping', () => {
       DEEPSEEK_MODEL: 'deepseek-test',
       TRANSLATION_VERIFIER_MAX_OUTPUT_TOKENS: '321',
       TRANSLATION_VERIFIER_REQUEST_ATTEMPTS: '2',
+      TRANSLATION_VERIFIER_REQUEST_RETRY_DELAY_MS: '500',
     })).toEqual({
       apiKey: 'sk-offline-secret',
       apiBase: 'https://example.test/v1/',
       model: 'deepseek-test',
       maxOutputTokens: 321,
-      requestRetry: { maxAttempts: 2 },
+      requestRetry: { maxAttempts: 2, delayMs: 500 },
+    });
+  });
+
+  it('keeps the legacy retry defaults when the environment does not set them', () => {
+    expect(offlineVerifierModelOptions({ DEEPSEEK_API_KEY: 'sk-offline-secret' })).toEqual({
+      apiKey: 'sk-offline-secret',
+      maxOutputTokens: 16_384,
+      requestRetry: { maxAttempts: 3, delayMs: 750 },
     });
   });
 
