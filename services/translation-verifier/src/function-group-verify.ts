@@ -1,7 +1,7 @@
 import {
   createRequirementFunctionGroupStrategy,
   createSingleAgentFunctionGroupStrategy,
-  type SingleAgentFunctionGroupTerminalResult,
+  type SingleAgentFunctionGroupHostResult,
 } from "./strategies/single-agent-function-group/strategy.js";
 import type { AgentHost } from "./host/agent.js";
 import type {
@@ -55,7 +55,7 @@ function validateRequirementFunctionGroupInput(input: RequirementFunctionGroupVe
 }
 
 export function createFunctionGroupVerifier(
-  host: AgentHost<SingleAgentFunctionGroupTerminalResult>,
+  host: AgentHost<SingleAgentFunctionGroupHostResult>,
 ): FunctionGroupVerificationRunner {
   const strategies: Readonly<
     Record<string, FunctionGroupVerificationStrategy<FunctionGroupVerificationResult>>

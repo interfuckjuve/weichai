@@ -21,13 +21,21 @@ import {
   type AgentRunLimits,
   type AgentTask,
 } from "./agent.js";
-import { bindTestRunner } from "./test-runner.js";
+import { bindFunctionGroupTestRunner, bindTestRunner } from "./test-runner.js";
 import {
+  revalidateFunctionGroupReport,
   revalidateTargetReport,
   type FinalReportClaim,
 } from "./revalidation.js";
 import type {
+  FunctionGroupFunctionResult,
+  ProtocolCheck,
+  VerificationReason,
+} from "../types.js";
+import type {
+  FunctionGroupTestRun,
   HostTool,
+  TargetTestResult,
   ToolContext,
   ToolRuntimeContext,
 } from "./tools/common.js";
@@ -62,6 +70,16 @@ export type LangChainAgentHostResult = {
   targetFunction?: TargetFunctionCoverage;
 };
 
+/** Accepted function-group report plus the Host's fresh per-function observation. */
+export type LangChainFunctionGroupHostResult = {
+  verdict: FinalReportClaim["verdict"];
+  summary: string;
+  issue?: VerificationIssue;
+  functions: FunctionGroupFunctionResult[];
+  reason?: VerificationReason;
+  protocolChecks?: ProtocolCheck[];
+};
+
 const DEFAULT_MAX_FEEDBACK_ROUNDS = 4;
 /** Keep the model-visible feedback bounded; the full observation stays in the trace. */
 const MAX_FEEDBACK_CHARS = 12_000;
@@ -79,6 +97,53 @@ const SERIAL_TOOLS = new Set([
   "list_target_files",
 ]);
 
+/** Shared shape of the fresh Host observation both task kinds report on. */
+type ObservationSummary = {
+  status: "success" | "failure";
+  exitCode: number | null;
+  timedOut?: boolean;
+  tests?: { executed: number };
+};
+
+/** One Host ownership contract per task shape: runner binding, revalidation, feedback and accepted result. */
+type Acceptance<Observation extends ObservationSummary, Result> = {
+  /** Host-owned runners bound for this task shape. */
+  bindRunner(context: Omit<ToolContext, "state" | "runner" | "functionGroupRunner">): Pick<ToolContext, "runner" | "functionGroupRunner">;
+  revalidate(
+    context: ToolContext,
+    report?: FinalReportClaim,
+  ): Promise<{ observation: Observation; feedback: string[] }>;
+  accept(report: FinalReportClaim, observation: Observation): Result;
+  feedback(feedback: readonly string[], observation: Observation): string;
+  /** Extra Host setup lines for the model-visible task. */
+  setup: readonly string[];
+};
+
+const TARGET_ACCEPTANCE: Acceptance<TargetTestResult, LangChainAgentHostResult> = {
+  bindRunner: context => ({ runner: bindTestRunner(context) }),
+  revalidate: (context, report) => revalidateTargetReport(context, report),
+  accept: (report, observation) => acceptedResult(report, observation),
+  feedback: (feedback, observation) => feedbackMessage(feedback, observation),
+  setup: [
+    "- Every test path passed to write_target_test and run_target_tests must start with one of those exact roots.",
+    "- Write and run tests only inside that dedicated folder. Start by running ALL existing tests in it with run_target_tests and path omitted.",
+  ],
+};
+
+const FUNCTION_GROUP_ACCEPTANCE: Acceptance<FunctionGroupTestRun, LangChainFunctionGroupHostResult> = {
+  bindRunner: context => ({
+    runner: bindTestRunner(context),
+    functionGroupRunner: bindFunctionGroupTestRunner(context),
+  }),
+  revalidate: (context, report) => revalidateFunctionGroupReport(context, report),
+  accept: (report, observation) => acceptedFunctionGroupResult(report, observation),
+  feedback: (feedback, observation) => functionGroupFeedbackMessage(feedback, observation),
+  setup: [
+    "- Every test path passed to write_target_test and run_function_group_tests must start with one of those exact roots.",
+    "- Write and run tests only inside that dedicated folder. Start by running ALL existing tests in it with run_function_group_tests and paths omitted.",
+  ],
+};
+
 /**
  * Create the LangChain Host: it runs the framework Agent loop (model, tools,
  * message history) and keeps only the application-level cycle of
@@ -87,152 +152,167 @@ const SERIAL_TOOLS = new Set([
 export function createLangChainAgentHost(
   options: LangChainAgentHostOptions,
 ): AgentHost<LangChainAgentHostResult> {
+  return {
+    taskProtocol: "final-report",
+    run: task => runLangChainTask(options, task, TARGET_ACCEPTANCE),
+  };
+}
+
+/** The same Host loop for translation-fidelity and requirement function groups. */
+export function createLangChainFunctionGroupAgentHost(
+  options: LangChainAgentHostOptions,
+): AgentHost<LangChainFunctionGroupHostResult> {
+  return {
+    taskProtocol: "final-report",
+    run: task => runLangChainTask(options, task, FUNCTION_GROUP_ACCEPTANCE),
+  };
+}
+
+async function runLangChainTask<Observation extends ObservationSummary, Result>(
+  options: LangChainAgentHostOptions,
+  task: AgentTask,
+  acceptance: Acceptance<Observation, Result>,
+): Promise<Result> {
   const limits: AgentRunLimits = { ...DEFAULT_AGENT_RUN_LIMITS, ...options.limits };
   const maxFeedbackRounds = options.maxFeedbackRounds ?? DEFAULT_MAX_FEEDBACK_ROUNDS;
   const resolveToolContext = options.resolveToolContext ?? defaultToolContextResolver;
+  const runId = randomUUID();
+  const startedAt = performance.now();
+  const budget = createAgentRunBudget(limits, Date.now(), options.signal);
+  emitAgentWorkLog(options.workLogger, { ...workEvent(runId, "run.started") });
+  emitAgentTrace(options.traceLogger, traceEvent(runId, "run.started"));
+  let cleanup: (() => Promise<void>) | undefined;
+  let serializer: WorkspaceSerializer | undefined;
+  try {
+    budget.assertActive();
+    const runtime = await resolveToolContext(task.taskContext);
+    cleanup = runtime.cleanup;
+    budget.assertActive();
+    const context: ToolContext = {
+      state: {},
+      budget,
+      runtime,
+      ...acceptance.bindRunner({ budget, runtime }),
+    };
+    const bound = bindLangChainTools(task, context, options, runId);
+    serializer = bound.serializer;
+    const agent = createAgent({
+      model: options.model,
+      tools: bound.tools,
+      systemPrompt: withRuntimeInstructions(task.systemPrompt, runtime, acceptance.setup),
+      checkpointer: new MemorySaver(),
+      middleware: [
+        createRunLimitMiddleware(limits),
+        modelCallLimitMiddleware({
+          threadLimit: limits.maxTurns,
+          exitBehavior: "error",
+        }),
+        toolCallLimitMiddleware({
+          threadLimit: limits.maxToolCalls,
+          exitBehavior: "error",
+        }),
+      ],
+    });
+    const threadId = randomUUID();
+    let input: BaseMessage = new HumanMessage(task.userPrompt);
 
-  return {
-    taskProtocol: "final-report",
-    async run(task) {
-      const runId = randomUUID();
-      const startedAt = performance.now();
-      const budget = createAgentRunBudget(limits, Date.now(), options.signal);
-      emitAgentWorkLog(options.workLogger, { ...workEvent(runId, "run.started") });
-      emitAgentTrace(options.traceLogger, traceEvent(runId, "run.started"));
-      let cleanup: (() => Promise<void>) | undefined;
-      let serializer: WorkspaceSerializer | undefined;
-      try {
-        budget.assertActive();
-        const runtime = await resolveToolContext(task.taskContext);
-        cleanup = runtime.cleanup;
-        budget.assertActive();
-        const context: ToolContext = {
-          state: {},
-          budget,
-          runtime,
-          runner: bindTestRunner({ budget, runtime }),
-        };
-        const bound = bindLangChainTools(task, context, options, runId);
-        serializer = bound.serializer;
-        const agent = createAgent({
-          model: options.model,
-          tools: bound.tools,
-          systemPrompt: withRuntimeInstructions(task.systemPrompt, runtime),
-          checkpointer: new MemorySaver(),
-          middleware: [
-            createRunLimitMiddleware(limits),
-            modelCallLimitMiddleware({
-              threadLimit: limits.maxTurns,
-              exitBehavior: "error",
-            }),
-            toolCallLimitMiddleware({
-              threadLimit: limits.maxToolCalls,
-              exitBehavior: "error",
-            }),
-          ],
-        });
-        const threadId = randomUUID();
-        let input: BaseMessage = new HumanMessage(task.userPrompt);
+    for (let round = 1; ; round += 1) {
+      budget.assertActive();
+      emitAgentWorkLog(options.workLogger, {
+        ...workEvent(runId, "agent.invocation.started"),
+        turn: round,
+      });
+      const response = await agent.invoke(
+        { messages: [input] },
+        { configurable: { thread_id: threadId }, signal: budget.signal },
+      );
+      budget.assertActive();
+      const messages = (response as { messages?: BaseMessage[] }).messages ?? [];
+      const last = messages[messages.length - 1];
+      const parsed = parseFinalReport(last);
+      emitAgentWorkLog(options.workLogger, {
+        ...workEvent(runId, "agent.invocation.completed"),
+        turn: round,
+        status: parsed.report?.verdict,
+        outcome: parsed.problems.length === 0 ? "valid-report" : "invalid-report",
+      });
+      emitAgentTrace(options.traceLogger, traceEvent(runId, "agent.invocation.completed", {
+        round,
+        verdict: parsed.report?.verdict,
+        content: messageText(last).slice(0, 4_000),
+      }));
 
-        for (let round = 1; ; round += 1) {
-          budget.assertActive();
-          emitAgentWorkLog(options.workLogger, {
-            ...workEvent(runId, "agent.invocation.started"),
-            turn: round,
-          });
-          const response = await agent.invoke(
-            { messages: [input] },
-            { configurable: { thread_id: threadId }, signal: budget.signal },
-          );
-          budget.assertActive();
-          const messages = (response as { messages?: BaseMessage[] }).messages ?? [];
-          const last = messages[messages.length - 1];
-          const parsed = parseFinalReport(last);
-          emitAgentWorkLog(options.workLogger, {
-            ...workEvent(runId, "agent.invocation.completed"),
-            turn: round,
-            status: parsed.report?.verdict,
-            outcome: parsed.problems.length === 0 ? "valid-report" : "invalid-report",
-          });
-          emitAgentTrace(options.traceLogger, traceEvent(runId, "agent.invocation.completed", {
-            round,
-            verdict: parsed.report?.verdict,
-            content: messageText(last).slice(0, 4_000),
-          }));
+      const revalidation = await acceptance.revalidate(context, parsed.report);
+      emitAgentWorkLog(options.workLogger, {
+        ...workEvent(runId, "host.revalidation.completed"),
+        turn: round,
+        status: revalidation.observation.status,
+        exitCode: revalidation.observation.exitCode,
+        timedOut: revalidation.observation.timedOut,
+        toolCallCount: revalidation.observation.tests?.executed,
+        outcome: revalidation.feedback.length === 0 ? "accepted" : "feedback",
+      });
+      emitAgentTrace(options.traceLogger, traceEvent(runId, "host.revalidation.completed", {
+        round,
+        observation: revalidation.observation,
+        feedback: revalidation.feedback,
+      }));
 
-          const revalidation = await revalidateTargetReport(context, parsed.report);
-          emitAgentWorkLog(options.workLogger, {
-            ...workEvent(runId, "host.revalidation.completed"),
-            turn: round,
-            status: revalidation.observation.status,
-            exitCode: revalidation.observation.exitCode,
-            timedOut: revalidation.observation.timedOut,
-            toolCallCount: revalidation.observation.tests?.executed,
-            outcome: revalidation.feedback.length === 0 ? "accepted" : "feedback",
-          });
-          emitAgentTrace(options.traceLogger, traceEvent(runId, "host.revalidation.completed", {
-            round,
-            observation: revalidation.observation,
-            feedback: revalidation.feedback,
-          }));
-
-          const feedback = [...parsed.problems, ...revalidation.feedback];
-          if (feedback.length === 0 && parsed.report !== undefined) {
-            const result = acceptedResult(parsed.report, revalidation.observation);
-            emitAgentWorkLog(options.workLogger, {
-              ...workEvent(runId, "run.completed", {
-                elapsedMs: elapsedMs(startedAt),
-                outcome: result.verdict,
-              }),
-            });
-            emitAgentTrace(options.traceLogger, traceEvent(runId, "run.completed", {
-              elapsedMs: elapsedMs(startedAt),
-              verdict: result.verdict,
-            }));
-            return result;
-          }
-          if (round > maxFeedbackRounds) {
-            throw new AgentRunFailure(
-              "budget",
-              `Agent run budget exhausted: no accepted final report within ${maxFeedbackRounds} feedback rounds.`,
-            );
-          }
-          budget.assertActive();
-          input = new HumanMessage(feedbackMessage(feedback, revalidation.observation));
-          emitAgentWorkLog(options.workLogger, {
-            ...workEvent(runId, "agent.feedback.appended"),
-            turn: round,
-            messageCount: feedback.length,
-          });
-        }
-      } catch (error) {
-        const failure = classifyRunFailure(error, budget);
+      const feedback = [...parsed.problems, ...revalidation.feedback];
+      if (feedback.length === 0 && parsed.report !== undefined) {
+        const result = acceptance.accept(parsed.report, revalidation.observation);
         emitAgentWorkLog(options.workLogger, {
-          ...workEvent(runId, "run.failed", {
+          ...workEvent(runId, "run.completed", {
             elapsedMs: elapsedMs(startedAt),
-            ...errorFields(failure),
+            outcome: parsed.report.verdict,
           }),
         });
-        emitAgentTrace(options.traceLogger, traceEvent(runId, "run.failed", {
+        emitAgentTrace(options.traceLogger, traceEvent(runId, "run.completed", {
           elapsedMs: elapsedMs(startedAt),
-          ...errorFields(failure),
+          verdict: parsed.report.verdict,
         }));
-        throw failure;
-      } finally {
-        try {
-          // Let the in-flight workspace operation settle before the harness is
-          // released; queued operations see the closed queue and never start.
-          await serializer?.close();
-        } finally {
-          try {
-            await cleanup?.();
-          } finally {
-            budget.dispose();
-          }
-        }
+        return result;
       }
-    },
-  };
+      if (round > maxFeedbackRounds) {
+        throw new AgentRunFailure(
+          "budget",
+          `Agent run budget exhausted: no accepted final report within ${maxFeedbackRounds} feedback rounds.`,
+        );
+      }
+      budget.assertActive();
+      input = new HumanMessage(acceptance.feedback(feedback, revalidation.observation));
+      emitAgentWorkLog(options.workLogger, {
+        ...workEvent(runId, "agent.feedback.appended"),
+        turn: round,
+        messageCount: feedback.length,
+      });
+    }
+  } catch (error) {
+    const failure = classifyRunFailure(error, budget);
+    emitAgentWorkLog(options.workLogger, {
+      ...workEvent(runId, "run.failed", {
+        elapsedMs: elapsedMs(startedAt),
+        ...errorFields(failure),
+      }),
+    });
+    emitAgentTrace(options.traceLogger, traceEvent(runId, "run.failed", {
+      elapsedMs: elapsedMs(startedAt),
+      ...errorFields(failure),
+    }));
+    throw failure;
+  } finally {
+    try {
+      // Let the in-flight workspace operation settle before the harness is
+      // released; queued operations see the closed queue and never start.
+      await serializer?.close();
+    } finally {
+      try {
+        await cleanup?.();
+      } finally {
+        budget.dispose();
+      }
+    }
+  }
 }
 
 type ParsedReport = {
@@ -280,6 +360,13 @@ export function parseFinalReport(message: BaseMessage | undefined): ParsedReport
   const targets = affectedTargets !== undefined && "targets" in affectedTargets
     ? affectedTargets.targets
     : undefined;
+  const protocolChecks = parseProtocolChecks(record.protocolChecks);
+  if (protocolChecks !== undefined && "problem" in protocolChecks) {
+    problems.push(protocolChecks.problem);
+  }
+  const checks = protocolChecks !== undefined && "checks" in protocolChecks
+    ? protocolChecks.checks
+    : undefined;
 
   if (verdict === "no-bug" && issueValue !== undefined) {
     problems.push("A no-bug report must not include an issue.");
@@ -306,9 +393,41 @@ export function parseFinalReport(message: BaseMessage | undefined): ParsedReport
       summary: (summary as string).trim(),
       ...(issueValue ? { issue: issueValue } : {}),
       ...(targets ? { affectedTargets: targets } : {}),
+      ...(checks ? { protocolChecks: checks } : {}),
     },
     problems,
   };
+}
+
+/** Function-group protocol checks stay bounded, mirroring the existing public shape. */
+function parseProtocolChecks(value: unknown):
+  | { checks: ProtocolCheck[] }
+  | { problem: string }
+  | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > 3) {
+    return { problem: "protocolChecks must be a list of at most three checks." };
+  }
+  const checks: ProtocolCheck[] = [];
+  for (const item of value) {
+    if (typeof item !== "object" || item === null || Array.isArray(item)) {
+      return { problem: "Each protocolChecks entry needs ruleId and status." };
+    }
+    const record = item as Record<string, unknown>;
+    if (typeof record.ruleId !== "string" || record.ruleId.trim().length === 0) {
+      return { problem: "Each protocolChecks entry needs a non-empty ruleId." };
+    }
+    if (!["passed", "failed", "ambiguous", "not-applicable"].includes(String(record.status))) {
+      return { problem: "Each protocolChecks status must be passed, failed, ambiguous, or not-applicable." };
+    }
+    checks.push({
+      ruleId: record.ruleId.trim(),
+      status: record.status as ProtocolCheck["status"],
+      ...(typeof record.testName === "string" ? { testName: record.testName } : {}),
+      ...(typeof record.note === "string" ? { note: record.note } : {}),
+    });
+  }
+  return { checks };
 }
 
 function parseIssue(value: unknown):
@@ -579,14 +698,78 @@ function acceptedResult(
   return {
     verdict: report.verdict,
     summary: report.summary,
-    ...(report.verdict === "bug-found" && report.issue
-      ? { issue: { kind: "translation" as const, description: report.issue.description } }
-      : {}),
-    ...(report.verdict === "uncertain" && report.issue
-      ? { issue: { kind: "unknown" as const, description: report.issue.description } }
-      : {}),
+    ...acceptedIssue(report),
     ...(targetFunction ? { targetFunction: { ...targetFunction } } : {}),
   };
+}
+
+/** The public issue kind follows the accepted verdict, never the model's self-description. */
+function acceptedIssue(report: FinalReportClaim): { issue?: VerificationIssue } {
+  if (report.verdict === "bug-found" && report.issue) {
+    return { issue: { kind: "translation", description: report.issue.description } };
+  }
+  if (report.verdict === "uncertain" && report.issue) {
+    return { issue: { kind: "unknown", description: report.issue.description } };
+  }
+  return {};
+}
+
+function acceptedFunctionGroupResult(
+  report: FinalReportClaim,
+  observation: FunctionGroupTestRun,
+): LangChainFunctionGroupHostResult {
+  return {
+    verdict: report.verdict,
+    summary: report.summary,
+    ...acceptedIssue(report),
+    functions: observation.functions.map(item => ({
+      ...item,
+      ...(item.source ? { source: { ...item.source } } : {}),
+      target: { ...item.target },
+    })),
+    ...(observation.reason && observation.reason !== "verified" ? { reason: observation.reason } : {}),
+    ...(report.protocolChecks ? { protocolChecks: report.protocolChecks } : {}),
+  };
+}
+
+function functionGroupFeedbackMessage(
+  feedback: readonly string[],
+  observation: FunctionGroupTestRun,
+): string {
+  const failedCases = (observation.testCases ?? []).filter(item => item.status === "failed").slice(0, 5);
+  return [
+    "The Host did not accept your final report. Continue in this same task, fix the same tests in the same working directory, and end with a corrected final JSON report.",
+    "",
+    "Fresh Host revalidation of the complete dedicated test folder:",
+    `- status: ${observation.status}`,
+    `- timed out: ${observation.timedOut === true}`,
+    `- execution errors: ${observation.executionErrors ?? 0}`,
+    `- tests executed: ${observation.tests.executed}, passed: ${observation.tests.passed}, failed: ${observation.tests.failed}, skipped: ${observation.tests.skipped}`,
+    ...(failedCases.length > 0
+      ? [
+        "- failed test cases:",
+        ...failedCases.map(item => `  - ${item.id}${item.message ? `: ${boundedText(item.message, 500)}` : ""}`),
+      ]
+      : []),
+    "- target function coverage from this run:",
+    ...observation.functions.map(item =>
+      `  - ${item.target.path}#${item.target.name}${item.target.signature ? ` (${item.target.signature})` : ""}: executed=${item.executed}, status=${item.status}, line=${item.lineCoverage ?? "null"}, branch=${item.branchCoverage ?? "null"}${item.coverageIssue ? `, issue=${item.coverageIssue}` : ""}`,
+    ),
+    `- report paths: ${observation.reportPaths?.join(", ") || "(none)"}`,
+    // Maven and other JVM runners usually report compilation problems on stdout.
+    ...(observation.stdout.trim() ? [`- stdout: ${boundedText(observation.stdout.trim(), 2_000)}`] : []),
+    ...(observation.stderr.trim() ? [`- stderr: ${boundedText(observation.stderr.trim(), 2_000)}`] : []),
+    "",
+    "Unmet completion conditions:",
+    ...feedback.map(item => `- ${item}`),
+  ].join("\n");
+}
+
+/** Bound model-visible diagnostics; the Host trace keeps the complete observation. */
+function boundedText(text: string, limit: number): string {
+  return text.length <= limit
+    ? text
+    : `${text.slice(0, limit)}\n[Host retained ${text.length - limit} additional diagnostic characters]`;
 }
 
 function feedbackMessage(
@@ -620,6 +803,7 @@ function feedbackMessage(
 function withRuntimeInstructions(
   systemPrompt: string,
   runtime: ToolRuntimeContext,
+  setup: readonly string[],
 ): string {
   return [
     systemPrompt,
@@ -627,8 +811,7 @@ function withRuntimeInstructions(
     "Host test setup (authoritative):",
     `- Test framework: ${runtime.testRunner}`,
     `- Authorized test roots: ${runtime.testRoots.join(", ")}`,
-    "- Every test path passed to write_target_test and run_target_tests must start with one of those exact roots.",
-    "- Write and run tests only inside that dedicated folder. Start by running ALL existing tests in it with run_target_tests and path omitted.",
+    ...setup,
     "- After your final report the Host reruns the complete dedicated folder itself and may append feedback; your report is a candidate conclusion, not an accepted result.",
   ].join("\n");
 }
