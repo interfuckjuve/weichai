@@ -86,6 +86,43 @@ export function isOfflineVerifierTraceEvent(
   return true;
 }
 
+export type OfflineVerifierFailure = {
+  reason: 'agent-timeout' | 'model-failure' | 'test-environment-failure';
+  kind: 'environment' | 'unknown';
+};
+
+/**
+ * Map a failed verifier run onto the existing public failure reasons. Budget,
+ * context/response exhaustion and model transport errors stay operational
+ * failures, never a production defect or an environment verdict.
+ */
+export function classifyOfflineVerifierFailure(description: string): OfflineVerifierFailure {
+  const text = description.toLowerCase();
+  if (
+    text.includes('exhausted its') ||
+    text.includes('budget exhausted') ||
+    text.includes('turn budget') ||
+    text.includes('tool-call budget') ||
+    text.includes('time budget') ||
+    text.includes('feedback rounds') ||
+    /context.*budget/.test(text)
+  ) {
+    return { reason: 'agent-timeout', kind: 'unknown' };
+  }
+  if (
+    text.includes('model request') ||
+    text.includes('invalid completion') ||
+    text.includes('api key') ||
+    text.includes('model failure') ||
+    text.includes('api connection') ||
+    text.includes('rate limit') ||
+    text.includes('authentication')
+  ) {
+    return { reason: 'model-failure', kind: 'unknown' };
+  }
+  return { reason: 'test-environment-failure', kind: 'environment' };
+}
+
 export type OfflineVerifierEvidence = {
   /** Agent-side test tool activity, without payloads in the current Host. */
   toolEvents: AgentTraceEvent[];

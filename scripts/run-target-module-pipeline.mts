@@ -79,6 +79,7 @@ import { createHttpServer } from '../services/adaptation-service/src/http-server
 import { createLangChainFunctionGroupAgentHost } from '../services/translation-verifier/src/host/langchain-runtime.js';
 import { createFunctionGroupVerifier } from '../services/translation-verifier/src/function-group-verify.js';
 import {
+  classifyOfflineVerifierFailure,
   createOfflineVerifierChatModel,
   isOfflineVerifierTraceEvent,
 } from './translation-verifier-offline.js';
@@ -139,20 +140,6 @@ const outputPath = resolve(argument('out', 'results/target-module-pipeline.json'
 const adaptationApiUrl = argument('adaptation', process.env.ADAPTATION_API_URL ?? 'http://127.0.0.1:8788')!;
 const semanticPort = Number(argument('semantic-port', process.env.FOREXPLORE_SEMANTIC_QUERY_PORT ?? '8790'));
 const assetRoot = resolve('experiments/enterprise-asset-upgrade/source-repositories');
-
-function classifyVerifierFailure(description: string): {
-  reason: 'agent-timeout' | 'model-failure' | 'test-environment-failure';
-  kind: 'environment' | 'unknown';
-} {
-  const text = description.toLowerCase();
-  if (text.includes('exhausted its') || text.includes('turn budget') || text.includes('tool-call budget') || text.includes('time budget') || /context.*budget/.test(text)) {
-    return { reason: 'agent-timeout', kind: 'unknown' };
-  }
-  if (text.includes('model request') || text.includes('invalid completion') || text.includes('api key')) {
-    return { reason: 'model-failure', kind: 'unknown' };
-  }
-  return { reason: 'test-environment-failure', kind: 'environment' };
-}
 
 function classifyVerifierDisposition(result: FunctionGroupVerificationResult): ModuleReport['verificationDisposition'] {
   if (result.status === 'success') return 'verified';
@@ -1236,7 +1223,7 @@ try {
             entry.translationVerification = await verifyFunctionGroup(verificationInput, verificationStrategy, 'verify');
           } catch (error) {
             const description = error instanceof Error ? error.message : String(error);
-            const classification = classifyVerifierFailure(description);
+            const classification = classifyOfflineVerifierFailure(description);
             const retainedTestEvidence = (error as { testEvidence?: FunctionGroupVerificationResult['testEvidence'] })?.testEvidence
               ?? verificationInput.testEvidence;
             entry.translationVerification = {

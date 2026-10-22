@@ -9,6 +9,7 @@ import {
 import type { AgentTraceEvent } from '../services/translation-verifier/src/host/trace-log.js';
 import type { FunctionGroupTestRun } from '../services/translation-verifier/src/host/tools/common.js';
 import {
+  classifyOfflineVerifierFailure,
   createOfflineVerifierChatModel,
   createOfflineVerifierEvidence,
   isOfflineVerifierTraceEvent,
@@ -115,6 +116,28 @@ describe('offline verifier model mapping', () => {
     expect(calls[0]!.body.max_tokens).toBe(321);
     // The credential stays in transport configuration, never in model-visible messages.
     expect(JSON.stringify(calls[0]!.body.messages)).not.toContain('sk-offline-secret');
+  });
+});
+
+describe('offline verifier failure classification', () => {
+  it('classifies the LangChain run failures as non-defect operational errors', () => {
+    for (const message of [
+      'Agent run budget exhausted: 64 tool calls exceed the 16-call per-turn limit.',
+      'Agent run context budget exhausted: 2000000 characters exceed the 1500000-character limit.',
+      'Agent run response budget exhausted: 40000 characters exceed the 20000-character limit.',
+      'Agent did not produce an accepted final report within 4 feedback rounds.',
+    ]) {
+      expect(classifyOfflineVerifierFailure(message)).toEqual({ reason: 'agent-timeout', kind: 'unknown' });
+    }
+    for (const message of [
+      'Agent run model failure: 401 Unauthorized',
+      'Model request failed after 3 attempts.',
+      'Invalid completion returned by the provider.',
+    ]) {
+      expect(classifyOfflineVerifierFailure(message)).toEqual({ reason: 'model-failure', kind: 'unknown' });
+    }
+    expect(classifyOfflineVerifierFailure('Compilation failed with CS0246 in OrderTests.cs'))
+      .toEqual({ reason: 'test-environment-failure', kind: 'environment' });
   });
 });
 
