@@ -48,6 +48,25 @@ export const DEFAULT_AGENT_RUN_LIMITS: Readonly<AgentRunLimits> = {
   maxResponseCharacters: 1_100_000,
 };
 
+/**
+ * A run failed for an operational reason, not because verification found a
+ * production defect. Callers can classify these without parsing messages.
+ * `budget` also covers time/model/tool/context exhaustion.
+ */
+export type AgentRunFailureReason = "budget" | "context" | "model";
+
+export class AgentRunFailure extends Error {
+  readonly name = "AgentRunFailure";
+
+  constructor(
+    readonly reason: AgentRunFailureReason,
+    message: string,
+    options?: { cause?: unknown },
+  ) {
+    super(message, options);
+  }
+}
+
 export type AgentRunBudget = {
   readonly signal: AbortSignal;
   readonly deadlineAt: number;

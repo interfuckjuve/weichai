@@ -1,5 +1,6 @@
 import {
   createAgent,
+  createMiddleware,
   HumanMessage,
   modelCallLimitMiddleware,
   tool as frameworkTool,
@@ -12,9 +13,11 @@ import type { ClientTool } from "@langchain/core/tools";
 import type { JsonSchema7Type } from "@langchain/core/utils/json_schema";
 import type { TargetFunctionCoverage, VerificationIssue } from "../types.js";
 import {
+  AgentRunFailure,
   createAgentRunBudget,
   DEFAULT_AGENT_RUN_LIMITS,
   type AgentHost,
+  type AgentRunBudget,
   type AgentRunLimits,
   type AgentTask,
 } from "./agent.js";
@@ -60,11 +63,20 @@ export type LangChainAgentHostResult = {
 };
 
 const DEFAULT_MAX_FEEDBACK_ROUNDS = 4;
-/** Host tools that touch the shared dedicated test folder run one at a time. */
+/** Keep the model-visible feedback bounded; the full observation stays in the trace. */
+const MAX_FEEDBACK_CHARS = 12_000;
+const MAX_TRACE_PAYLOAD_CHARS = 4_000;
+/**
+ * Host tools that touch the target working directory run one at a time, so a
+ * batched framework tool call cannot read a half-written test file, rewrite a
+ * test while its process runs, or release the harness mid-operation.
+ */
 const SERIAL_TOOLS = new Set([
   "write_target_test",
   "run_target_tests",
   "run_function_group_tests",
+  "read_target_file",
+  "list_target_files",
 ]);
 
 /**
@@ -88,6 +100,7 @@ export function createLangChainAgentHost(
       emitAgentWorkLog(options.workLogger, { ...workEvent(runId, "run.started") });
       emitAgentTrace(options.traceLogger, traceEvent(runId, "run.started"));
       let cleanup: (() => Promise<void>) | undefined;
+      let serializer: WorkspaceSerializer | undefined;
       try {
         budget.assertActive();
         const runtime = await resolveToolContext(task.taskContext);
@@ -99,13 +112,15 @@ export function createLangChainAgentHost(
           runtime,
           runner: bindTestRunner({ budget, runtime }),
         };
-        const tools = bindLangChainTools(task, context, options, runId);
+        const bound = bindLangChainTools(task, context, options, runId);
+        serializer = bound.serializer;
         const agent = createAgent({
           model: options.model,
-          tools,
+          tools: bound.tools,
           systemPrompt: withRuntimeInstructions(task.systemPrompt, runtime),
           checkpointer: new MemorySaver(),
           middleware: [
+            createRunLimitMiddleware(limits),
             modelCallLimitMiddleware({
               threadLimit: limits.maxTurns,
               exitBehavior: "error",
@@ -177,10 +192,12 @@ export function createLangChainAgentHost(
             return result;
           }
           if (round > maxFeedbackRounds) {
-            throw new Error(
-              `Agent did not produce an accepted final report within ${maxFeedbackRounds} feedback rounds.`,
+            throw new AgentRunFailure(
+              "budget",
+              `Agent run budget exhausted: no accepted final report within ${maxFeedbackRounds} feedback rounds.`,
             );
           }
+          budget.assertActive();
           input = new HumanMessage(feedbackMessage(feedback, revalidation.observation));
           emitAgentWorkLog(options.workLogger, {
             ...workEvent(runId, "agent.feedback.appended"),
@@ -189,22 +206,29 @@ export function createLangChainAgentHost(
           });
         }
       } catch (error) {
+        const failure = classifyRunFailure(error, budget);
         emitAgentWorkLog(options.workLogger, {
           ...workEvent(runId, "run.failed", {
             elapsedMs: elapsedMs(startedAt),
-            ...errorFields(error),
+            ...errorFields(failure),
           }),
         });
         emitAgentTrace(options.traceLogger, traceEvent(runId, "run.failed", {
           elapsedMs: elapsedMs(startedAt),
-          error: errorMessage(error),
+          ...errorFields(failure),
         }));
-        throw error;
+        throw failure;
       } finally {
         try {
-          await cleanup?.();
+          // Let the in-flight workspace operation settle before the harness is
+          // released; queued operations see the closed queue and never start.
+          await serializer?.close();
         } finally {
-          budget.dispose();
+          try {
+            await cleanup?.();
+          } finally {
+            budget.dispose();
+          }
         }
       }
     },
@@ -334,27 +358,96 @@ function parseAffectedTargets(value: unknown):
   return { targets };
 }
 
+type WorkspaceSerializer = {
+  run<T>(operation: () => Promise<T>): Promise<T>;
+  close(): Promise<void>;
+};
+
+/** One queue per run: serializes shared-directory tools and can close before cleanup. */
+function createWorkspaceSerializer(budget: AgentRunBudget): WorkspaceSerializer {
+  let tail: Promise<unknown> = Promise.resolve();
+  let closed = false;
+  const enter = async <T>(operation: () => Promise<T>): Promise<T> => {
+    if (closed) {
+      throw new Error("The Agent run is finishing; workspace operations are closed.");
+    }
+    budget.assertActive();
+    return operation();
+  };
+  return {
+    run<T>(operation: () => Promise<T>): Promise<T> {
+      const next = tail.then(
+        () => enter(operation),
+        () => enter(operation),
+      );
+      tail = next.catch(() => undefined);
+      return next;
+    },
+    async close(): Promise<void> {
+      closed = true;
+      await tail;
+    },
+  };
+}
+
 function bindLangChainTools(
   task: AgentTask,
   context: ToolContext,
   options: LangChainAgentHostOptions,
   runId: string,
-): ClientTool[] {
-  let queue: Promise<unknown> = Promise.resolve();
-  const serialize = <T>(run: () => Promise<T>): Promise<T> => {
-    const next = queue.then(run, run);
-    queue = next.catch(() => undefined);
-    return next;
-  };
-  return task.tools.map((factory) => {
+): { tools: ClientTool[]; serializer: WorkspaceSerializer } {
+  const serializer = createWorkspaceSerializer(context.budget!);
+  const tools = task.tools.map((factory) => {
     const hostTool: HostTool<unknown, unknown> = factory(context);
-    const execute = async (input: unknown): Promise<unknown> => {
-      const run = async () => hostTool.execute(hostTool.parse(input));
-      const output = SERIAL_TOOLS.has(hostTool.name) ? await serialize(run) : await run();
-      emitAgentTrace(options.traceLogger, traceEvent(runId, "tool.completed", {
+    const execute = async (input: unknown, config?: FrameworkToolConfig): Promise<unknown> => {
+      const toolCallId = config?.toolCall?.id;
+      const startedAt = performance.now();
+      emitAgentWorkLog(options.workLogger, {
+        ...workEvent(runId, "tool.started"),
         toolName: hostTool.name,
+        ...(toolCallId ? { toolCallId } : {}),
+        argumentCharacters: valueCharacters(input),
+      });
+      emitAgentTrace(options.traceLogger, traceEvent(runId, "tool.started", {
+        toolName: hostTool.name,
+        ...(toolCallId ? { toolCallId } : {}),
+        input: boundedValue(input, MAX_TRACE_PAYLOAD_CHARS),
       }));
-      return output;
+      try {
+        const run = async () => hostTool.execute(hostTool.parse(input));
+        const output = SERIAL_TOOLS.has(hostTool.name)
+          ? await serializer.run(run)
+          : await run();
+        emitAgentWorkLog(options.workLogger, {
+          ...workEvent(runId, "tool.completed"),
+          toolName: hostTool.name,
+          ...(toolCallId ? { toolCallId } : {}),
+          outputCharacters: valueCharacters(output),
+          elapsedMs: Math.round(performance.now() - startedAt),
+        });
+        emitAgentTrace(options.traceLogger, traceEvent(runId, "tool.completed", {
+          toolName: hostTool.name,
+          ...(toolCallId ? { toolCallId } : {}),
+          elapsedMs: Math.round(performance.now() - startedAt),
+          output: boundedValue(output, MAX_TRACE_PAYLOAD_CHARS),
+        }));
+        return output;
+      } catch (error) {
+        emitAgentWorkLog(options.workLogger, {
+          ...workEvent(runId, "tool.failed"),
+          toolName: hostTool.name,
+          ...(toolCallId ? { toolCallId } : {}),
+          elapsedMs: Math.round(performance.now() - startedAt),
+          ...errorFields(error),
+        });
+        emitAgentTrace(options.traceLogger, traceEvent(runId, "tool.failed", {
+          toolName: hostTool.name,
+          ...(toolCallId ? { toolCallId } : {}),
+          elapsedMs: Math.round(performance.now() - startedAt),
+          ...errorFields(error),
+        }));
+        throw error;
+      }
     };
     return frameworkTool(execute, {
       name: hostTool.name,
@@ -362,6 +455,118 @@ function bindLangChainTools(
       schema: hostTool.inputSchema as JsonSchema7Type,
     });
   });
+  return { tools, serializer };
+}
+
+type FrameworkToolConfig = { toolCall?: { id?: string } };
+
+/**
+ * Host-side residual limits that framework middleware does not express:
+ * thread context size, per-response size and per-turn tool calls. All counts
+ * are derived from persisted thread state, so feedback rounds do not reset them.
+ */
+function createRunLimitMiddleware(limits: AgentRunLimits) {
+  return createMiddleware({
+    name: "TranslationVerifierRunLimit",
+    beforeModel: (state: { messages?: BaseMessage[] }) => {
+      const messages = state.messages ?? [];
+      const characters = messages.reduce(
+        (total, message) => total + messageCharacters(message),
+        0,
+      );
+      if (characters > limits.maxContextCharacters) {
+        throw new AgentRunFailure(
+          "context",
+          `Agent run context budget exhausted: ${characters} characters exceed the ${limits.maxContextCharacters}-character limit.`,
+        );
+      }
+    },
+    afterModel: (state: { messages?: BaseMessage[] }) => {
+      const messages = state.messages ?? [];
+      const last = messages[messages.length - 1];
+      if (last === undefined) return;
+      const characters = messageCharacters(last);
+      if (characters > limits.maxResponseCharacters) {
+        throw new AgentRunFailure(
+          "context",
+          `Agent run response budget exhausted: ${characters} characters exceed the ${limits.maxResponseCharacters}-character limit.`,
+        );
+      }
+      const calls = (last as unknown as { tool_calls?: unknown[] }).tool_calls;
+      const toolCalls = Array.isArray(calls) ? calls.length : 0;
+      if (toolCalls > limits.maxToolCallsPerTurn) {
+        throw new AgentRunFailure(
+          "budget",
+          `Agent run budget exhausted: ${toolCalls} tool calls exceed the ${limits.maxToolCallsPerTurn}-call per-turn limit.`,
+        );
+      }
+    },
+  });
+}
+
+function messageCharacters(message: BaseMessage): number {
+  let characters = messageText(message).length;
+  const calls = (message as { tool_calls?: Array<{ name?: string; args?: unknown }> }).tool_calls;
+  if (Array.isArray(calls)) {
+    for (const call of calls) {
+      characters += (call?.name?.length ?? 0) + valueCharacters(call?.args);
+    }
+  }
+  return characters;
+}
+
+function valueCharacters(value: unknown): number {
+  if (typeof value === "string") return value.length;
+  if (value === undefined) return 0;
+  try {
+    return JSON.stringify(value)?.length ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
+function boundedValue(value: unknown, maximum: number): unknown {
+  if (typeof value === "string") {
+    return value.length <= maximum ? value : `${value.slice(0, maximum)}...(truncated)`;
+  }
+  try {
+    const text = JSON.stringify(value) ?? "";
+    return text.length <= maximum
+      ? value
+      : `${text.slice(0, maximum)}...(truncated)`;
+  } catch {
+    return "(unserializable value)";
+  }
+}
+
+/**
+ * Operational failures must stay distinguishable from a reported production
+ * defect upstream: budget/context/time exhaustion, model failures and
+ * cancellation are not verification results.
+ */
+function classifyRunFailure(error: unknown, budget: AgentRunBudget): unknown {
+  if (budget.signal.aborted) return budget.signal.reason ?? error;
+  const message = errorMessage(error);
+  if (error instanceof AgentRunFailure) return error;
+  if (/context budget exhausted|response budget exhausted/i.test(message)) {
+    return new AgentRunFailure("context", message, { cause: error });
+  }
+  const name = error instanceof Error ? error.name : "";
+  if (
+    name === "ModelCallLimitMiddlewareError" ||
+    name === "ToolCallLimitExceededError" ||
+    /call limits? exceeded/i.test(message)
+  ) {
+    return new AgentRunFailure("budget", `Agent run budget exhausted: ${message}`, { cause: error });
+  }
+  if (
+    typeof (error as { status?: unknown })?.status === "number" ||
+    /APIError|APIConnection|Authentication|RateLimit|OpenAI/i.test(name) ||
+    (/model|completion|api key/i.test(message) && !/budget/i.test(message))
+  ) {
+    return new AgentRunFailure("model", `Agent run model failure: ${message}`, { cause: error });
+  }
+  return error;
 }
 
 function acceptedResult(
@@ -390,7 +595,7 @@ function feedbackMessage(
 ): string {
   const tests = observation.tests;
   const coverage = observation.coverage;
-  return [
+  const message = [
     "The Host did not accept your final report. Continue in this same task, fix the same tests in the same working directory, and end with a corrected final JSON report.",
     "",
     "Fresh Host revalidation of the complete dedicated test folder:",
@@ -407,6 +612,9 @@ function feedbackMessage(
     "Unmet completion conditions:",
     ...feedback.map(item => `- ${item}`),
   ].join("\n");
+  return message.length <= MAX_FEEDBACK_CHARS
+    ? message
+    : `${message.slice(0, MAX_FEEDBACK_CHARS)}\n...(feedback truncated; the complete Host observation is in the run trace)`;
 }
 
 function withRuntimeInstructions(
@@ -460,5 +668,8 @@ function errorMessage(error: unknown): string {
 }
 
 function errorFields(error: unknown): Record<string, unknown> {
-  return { error: errorMessage(error) };
+  return {
+    error: errorMessage(error),
+    errorType: error instanceof Error ? error.name : typeof error,
+  };
 }
