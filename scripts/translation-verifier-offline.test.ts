@@ -306,10 +306,10 @@ describe('offline verifier task handoff', () => {
     };
     const requirementTask = createRequirementFunctionGroupFinalReportTask(requirementInput);
     const translationTask = createFunctionGroupFinalReportTask(translationInput);
-    // The removed duplicate source is ignored; only taskContext carries the input.
+    // Only taskContext carries the business input; the task has no duplicate copy.
     const inputs = verifierTaskInputs({
-      requirement: { ...requirementTask, functionGroup: undefined },
-      translation: { ...translationTask, functionGroup: undefined },
+      requirement: requirementTask,
+      translation: translationTask,
     });
     expect(inputs.requirement).toEqual(requirementInput);
     expect(inputs.translation).toEqual(translationInput);
@@ -331,7 +331,7 @@ describe('offline verifier task handoff', () => {
       functions: functions.map(target => ({ target })),
     });
     expect(() => verifierTaskInputs({
-      requirement: { ...task, taskContext: { ...task.taskContext, functionGroup: undefined }, functionGroup: undefined },
+      requirement: { ...task, taskContext: { ...task.taskContext, functionGroup: undefined } },
       translation: task,
     })).toThrow(/function-group context/);
   });

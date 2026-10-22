@@ -1,5 +1,8 @@
 # RECAST 当前项目自动流水线：数据流、提示词与示例输出
 
+> 历史状态说明：本文件是迁移前（自研 Agent 循环 + `finish`/`finish_function_group`/`report_uncertain` 终态工具）的数据流快照。Verifier 相关段落已按当前 LangChain Host 更新；仍保留的旧提示词摘录（附录 A8/A9 等）与已删除的 `runtime.ts`、`finish*.ts`、`test-evidence.ts` 路径仅是历史记录，不是当前实现。当前实现见 [translation-verifier README](../services/translation-verifier/README.md) 与 `src/host/langchain-runtime.ts`、`src/host/revalidation.ts`。
+
+
 本文按 **2026-10-21 Windows 工作区源码**整理，核对时 Git HEAD 为 `c7e94daae187bbdd9e77d9a1756d5369a1cf6086`。描述的是 VS Code 前端点击“开始执行”所走的 `ProjectPipelineHost → ProjectPipeline → ProjectPipelineBackend`，不是早期实验驱动或手动波次迁移流程。
 
 **当前实际行为：需求 + 已导入骨架 → 固定建模版本 → 按依赖串行生成模块 → 编译与模块 Verifier → 项目 Integration → 最终项目验证 → 独立输出目录中的本地 Git 提交。** 四个常驻 worker、按独立分组并行调度尚未实现。
@@ -63,7 +66,7 @@ flowchart TD
 | 排序与自动选择 | 模型排序器 + Host 过滤 | `/v1/retrieval-rerank` | 排序、选择理由、代码证据、缺口 |
 | Analyzer | 独立只读 Codex CLI 调用 | `codex exec --ephemeral` | Markdown 计划、Host 提取的证据包 |
 | Translator / Direct Translator | Codex CLI + Host diff/编译 | `codex exec --ephemeral` | 生产代码差异、编译记录 |
-| Verifier | 模型工具循环 + 受控测试 Host | 独立的 chat/completions 客户端 | 测试、执行结果、逐函数结论、失败证据 |
+| Verifier | LangChain Host（自然结束 + Host 复验） | LangChain `createAgent` + `ChatOpenAI` 集成 | 测试、执行结果、逐函数结论、失败证据 |
 | 测试纠错复核 | 独立只读模型对话 | Verifier 模型客户端 | 确认或拒绝纠错、替代用例 ID |
 | 项目 Integration | 可读完整项目的 Codex CLI | 专用 integration prompt | 跨模块修复、临时断言和执行记录 |
 | 最终验证与交付 | Host + 再次运行模块 Verifier | 复用 Verifier 提示词 | 最终快照上的结论、本地提交、报告 |
@@ -559,7 +562,8 @@ user prompt 带语言、完整 requirement、函数列表/映射、ModuleProtoco
 ```text
 list_target_files → read_target_file → write_target_test
 → run_function_group_tests → 必要时纠正测试并重新运行
-→ finish_function_group 或 report_uncertain
+→ 以普通最终消息返回 JSON 结论（no-bug / bug-found / uncertain）
+→ Host 复验完整目录，必要时在同一会话追加反馈
 ```
 
 需求模式只有目标读取/测试工具；对照模式增加 `list_source_files/read_source_file`。模型不能自行改生产代码或决定测试执行结果；真实执行由 Host 受控 runner 完成。
@@ -572,7 +576,7 @@ list_target_files → read_target_file → write_target_test
 
 C# 无现成测试工程时，Host 可建立临时 xUnit/Test SDK/Coverlet harness，引用一个生产 `.csproj`；当前自动构造路径要求无测试工程时恰好一个生产项目，复杂 solution 不能假设自动兼容。Java、Python、JS 分别有对应 Maven/Gradle、pytest、Jest/Vitest 等环境解析路径。
 
-测试执行要有真实测试报告和函数执行/覆盖证据。没有统一写死“所有函数 100% 行/分支覆盖率”的门槛，但 `finish_function_group` 会检查每个目标函数通过且实际执行、至少一个用例执行、没有失败、测试版本未在末次执行后变化、Host 状态一致和协议结论。
+测试执行要有真实测试报告和函数执行/覆盖证据。没有统一写死“所有函数 100% 行/分支覆盖率”的门槛；Host 在 Agent 每次自然结束后重新运行完整专用目录，并逐个核对请求函数：`no-bug` 要求套件通过且全部目标有执行证据，`bug-found` 要求有效失败断言且被点名目标有执行证据（其余保留 `unverified`），`uncertain` 要求套件通过、全部目标执行且存在具体需求歧义。
 
 ### 7.4 输出怎样交回流水线
 
@@ -608,11 +612,13 @@ C# 无现成测试工程时，Host 可建立临时 xUnit/Test SDK/Coverlet harne
 
 修复反馈注入 Translator 的内容是实际 Host 观察：`attempt/status/reason/issue/functions`；Translator 没有权限改 Verifier 测试和标准。
 
-源码：[project-module-verifier.ts](../apps/vscode-extension/src/project-module-verifier.ts)、[strategy.ts](../services/translation-verifier/src/strategies/single-agent-function-group/strategy.ts)、[runtime.ts](../services/translation-verifier/src/host/runtime.ts)、[test-environment.ts](../services/translation-verifier/src/host/test-environment.ts)、[finish-function-group.ts](../services/translation-verifier/src/host/tools/finish-function-group.ts)。
+源码：[project-module-verifier.ts](../apps/vscode-extension/src/project-module-verifier.ts)、[strategy.ts](../services/translation-verifier/src/strategies/single-agent-function-group/strategy.ts)、[langchain-runtime.ts](../services/translation-verifier/src/host/langchain-runtime.ts)、[revalidation.ts](../services/translation-verifier/src/host/revalidation.ts)、[test-environment.ts](../services/translation-verifier/src/host/test-environment.ts)。
 
 <a id="test-correction"></a>
 
-## 8. 测试纠错复核：为何全绿仍可能未确定
+## 8. 测试纠错复核：为何全绿仍可能未确定（historical）
+
+> 本节描述迁移前“独立只读模型复核纠错”的旧链路；该链路与 `test-evidence.ts` 已随终态工具一起移除，当前 Host 只做确定性复验并在同一会话追加反馈。以下内容仅作历史记录。
 
 Host 保存每个执行过的失败和不可变测试版本。原样重跑同一个测试通过，可以以 `unchanged-test-replayed` 消解相应失败；修改了原失败测试则需要关联精确 `failureId`，不能靠删除、改名、换成普通成功用例抹掉失败。
 
@@ -860,8 +866,8 @@ The event identity and final state must appear in the audit record.
 | 建模分支与 ready/projection 状态 | [project-analysis.ts](../services/code-intelligence-service/src/project-analysis.ts) |
 | Codex 实际 prompts、staging、diff、编译 | [codex-workspace-translation-runtime.ts](../services/adaptation-service/src/codex-workspace-translation-runtime.ts) |
 | 函数发现、映射、验证模式 | [project-module-verifier.ts](../apps/vscode-extension/src/project-module-verifier.ts) |
-| 验证循环、工具和预算 | [Verifier Host](../services/translation-verifier/src/host/runtime.ts) |
-| 历史失败与纠错复核 | [test-evidence.ts](../services/translation-verifier/src/host/test-evidence.ts) |
+| 验证循环、工具和预算 | [Verifier Host](../services/translation-verifier/src/host/langchain-runtime.ts) |
+| 历史失败与纠错复核（historical，当前无此文件） | 已移除；当前仅保留 Host 复验观察 |
 
 <a id="prompts"></a>
 
@@ -1302,7 +1308,9 @@ export const implementationReferenceInstruction = "任务是找到能借鉴的�
 ```
 
 
-### A8. 两种函数组 Verifier：system、user 与工具集合
+### A8. 两种函数组 Verifier：system、user 与工具集合（historical 摘录）
+
+> 以下提示词摘录来自终态工具时代，含 `finish_function_group`/`report_uncertain` 与 `terminalTools`；当前任务提示词要求以普通最终消息返回 JSON 报告，源码见 [strategy.ts](../services/translation-verifier/src/strategies/single-agent-function-group/strategy.ts)。
 
 源码：[services/translation-verifier/src/strategies/single-agent-function-group/strategy.ts](../services/translation-verifier/src/strategies/single-agent-function-group/strategy.ts#L47)。
 
@@ -1445,7 +1453,9 @@ export function createRequirementFunctionGroupTask(
 ```
 
 
-### A9. Verifier Host 动态追加与继续消息
+### A9. Verifier Host 动态追加与继续消息（historical 摘录）
+
+> 当前 Host 只追加“Host 复验未接受”的反馈消息，并复用同一 LangChain 会话；不再有 `continuePrompt` 或终态工具。
 
 源码：[services/translation-verifier/src/host/runtime.ts](../services/translation-verifier/src/host/runtime.ts#L191)。
 
