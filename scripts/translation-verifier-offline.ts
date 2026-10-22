@@ -248,8 +248,8 @@ export type OfflineVerifierTaskInputs = {
 };
 
 /**
- * Read the business input from the task context only. `AgentTask.functionGroup`
- * is a duplicate source kept for the legacy Host and must not be read here.
+ * Read the business input from the task context only; the Host receives it
+ * through `taskContext.functionGroup` and the task carries no duplicate copy.
  */
 export function verifierTaskInputs(tasks: {
   requirement: AgentTask;

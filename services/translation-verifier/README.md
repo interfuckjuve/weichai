@@ -1,6 +1,6 @@
 # Translation Verifier
 
-`translation-verifier` checks whether translated target functions preserve the required behavior, or verifies target functions directly against supplied requirements when no reliable source mapping exists. The Agent first runs all existing tests in its dedicated test folder, repairs stale tests where justified by changed source APIs or declared contracts, and then adds meaningful tests for every upstream target function. Host-controlled finish tools rerun the entire folder before returning a normalized result.
+`translation-verifier` checks whether translated target functions preserve the required behavior, or verifies target functions directly against supplied requirements when no reliable source mapping exists. The Agent first runs all existing tests in its dedicated test folder, repairs stale tests where justified by changed source APIs or declared contracts, and then adds meaningful tests for every upstream target function. The Agent ends a call by answering without a tool call, and the Host then reruns the entire folder and validates the Agent's conclusion before returning a normalized result.
 
 ## Project Access
 
@@ -64,13 +64,24 @@ The Host resolves that task context into an internal runtime context before bind
 
 ## Calling the Verifier
 
-Create an `AgentHost` with a provider-neutral `AgentModelClient`, then create the public runner:
+Create a LangChain `BaseChatModel` for the configured provider, wrap it in the Host, then create the public runner:
 
 ```ts
+const host = createLangChainAgentHost({
+  model: createTranslationVerifierChatModel({
+    apiKey: () => process.env.DEEPSEEK_API_KEY ?? "",
+    // Optional: defaults to the standard DeepSeek endpoint and model.
+    apiBase: process.env.DEEPSEEK_API_BASE,
+    model: process.env.DEEPSEEK_MODEL,
+  }),
+});
+
 const verify = createVerifier(host);
 
 const result = await verify(input, "single-agent", "verify");
 ```
+
+`createLangChainFunctionGroupAgentHost` provides the same loop for translation-fidelity and requirement function groups. Both Hosts use LangChain `createAgent` with framework tools and an in-run `MemorySaver` thread, so model calls, tool dispatch and message history belong to the framework. The Host keeps only the application cycle: invoke the Agent, revalidate the complete dedicated folder, append feedback to the same session, and invoke again.
 
 The public result is always normalized to:
 
@@ -87,30 +98,41 @@ type VerificationResult = {
 };
 ```
 
-A successful `finish` produces `status: "success"` only when the Host reruns the complete dedicated test folder, observes at least one executed test with no test failures, and fresh coverage identifies the requested target function as executed. `finish_function_group` additionally requires Host evidence that **every** upstream target function executed. Every test must compile even when reporting a production defect; failing requirement assertions may remain and must produce a failure report rather than being weakened to fit the implementation. The Agent cannot provide or override coverage values. Percentages do not have a minimum threshold; `null` indicates no measurable lines or branches. `report_uncertain` produces `status: "failure"` with an issue describing why verification could not be completed reliably.
+The Agent ends a call with an ordinary assistant message containing a JSON report with `verdict` (`no-bug`, `bug-found` or `uncertain`) and a non-empty `summary`. A `no-bug` report carries no issue; `bug-found` carries a concrete `translation` issue and the affected requested targets; `uncertain` carries an `unknown` issue that names the unresolved contract or missing semantic evidence. There is no terminal tool, no structured-output tool and no forced continuation after a text-only answer.
+
+The report is a candidate conclusion. After every natural ending the Host reruns the complete dedicated folder and applies one acceptance matrix to all three modes:
+
+| Agent verdict | Host observation | Outcome |
+| --- | --- | --- |
+| `no-bug` | complete suite compiled and passed, no skips, every requested target executed | `status: "success"` |
+| `bug-found` | valid failing assertion, execution evidence for the named targets, other targets may stay unverified | `status: "failure"` with a `translation` issue |
+| `uncertain` | complete suite passed with execution evidence for every target and a concrete ambiguity | `status: "failure"` with an `unknown` issue |
+| any | compile/collection/setup error, timeout, zero executed tests, skipped tests, stale reports, missing or contradictory evidence | not accepted; feedback continues in the same session or the run fails operationally |
+
+A `no-bug` success additionally requires fresh Host coverage that identifies the requested target function as executed; function groups require Host evidence for **every** requested target. Every test must compile even when reporting a production defect; failing requirement assertions may remain and must produce a failure report rather than being weakened to fit the implementation. The Agent cannot provide or override test counts or coverage values. Percentages do not have a minimum threshold; `null` indicates no measurable lines or branches, and `null` is not zero coverage.
 
 ## Baseline and Final Suite
 
 At the start of a run, the Agent inspects its dedicated folder and runs all existing tests by omitting `path` from `run_target_tests` or `paths` from `run_function_group_tests`. An empty folder is the only case where it proceeds directly to authoring tests. Existing tests should pass with no skipped tests before new cases are added. When they do not, the Agent diagnoses compilation errors, stale fixtures or expectations, and real production regressions. Changed source APIs or declared contracts can justify rewriting tests; implementation behavior alone cannot justify erasing a valid requirement assertion. Actual requirement defects remain failing evidence even when they prevent a passing baseline.
 
-After adding or updating tests for every listed target, the Agent calls `finish` or `finish_function_group`. The Host discovers the dedicated folder using framework naming conventions and test annotations, runs the complete selection together once, and collects current test counts and per-function coverage. A separate full-suite run immediately before `finish` is unnecessary. Every test must compile and execute without skips; assertions exposing production bugs may fail. Success requires the current suite to pass and every listed target to execute.
+After adding or updating tests for every listed target, the Agent ends the call with its JSON report. The Host then discovers the dedicated folder using framework naming conventions and test annotations, runs the complete selection together, and collects current test counts and per-function coverage. A separate full-suite run immediately before the final message is unnecessary, and the Host never trusts an earlier run. Every test must compile and execute without skips; assertions exposing production bugs may fail.
 
-Unmet completion checks return `{ outcome: "continue", feedback, targetTest }` or `{ outcome: "continue", feedback, functionGroupTest }` to the Agent. This is a normal tool result: the Host keeps the Agent loop running so it can inspect diagnostics and `reportPaths`, fix tests, add missing function coverage, and retry. Compilation, collection, runner errors, skipped tests, missing coverage, or a success claim contradicted by failed tests all produce this feedback. A confirmed production defect can finish with matching failure statuses and a concrete issue. Invalid tool arguments or infrastructure exceptions are still returned as tool errors; cancellation and exhausted budgets end the run.
+Unmet completion conditions are appended to the same session as a new user feedback message that carries the fresh observation, failed test cases, per-function coverage, diagnostics and `reportPaths`. The Agent keeps its earlier messages, tool results and report, repairs the same tests in the same working directory, and ends again. Compilation, collection, runner errors, skipped tests, missing coverage, a conclusion contradicted by the fresh result, or an invalid report all produce this feedback. The feedback budget and the model/tool/time budgets are cumulative across rounds; running out of feedback rounds is an operational failure, not a production defect. Invalid tool arguments or infrastructure exceptions are returned as tool errors; cancellation and exhausted budgets end the run.
 
-The Host keeps only the latest test observation. It does not maintain a failure ledger, immutable test snapshots, revision history, correction metadata, or a correction reviewer. Framework reports and optional diagnostic logs remain available. Existing public `testEvidence` type fields remain deprecated because callers may read older stored results; incoming legacy metadata is ignored and current verification never emits it.
+The Host computes each round's observation from that round's execution and keeps no history ledger: no failure ledger, immutable test snapshots, revision history, correction metadata, or correction reviewer. Framework reports and optional diagnostic logs remain available. Existing public `testEvidence` type fields remain deprecated because callers may read older stored results; incoming legacy metadata is ignored and current verification never emits it.
 
 ## Target Function Coverage
 
-The task's target function identity (path, name, and optional signature) is bound by the Host. Before binding Agent tools, the Host injects a fixed test runner. `run-target-tests.ts` and `run-function-group-tests.ts` export the execution functions shared by their Agent tool wrappers and the finish tools. These functions obtain authorized test selections from the runner, execute them, and update the latest observation. Finish calls the same functions with paths omitted to require the complete dedicated folder.
+The task's target function identity (path, name, and optional signature) is bound by the Host. Before binding Agent tools, the Host injects a fixed test runner. `run-target-tests.ts` and `run-function-group-tests.ts` export the execution functions shared by their Agent tool wrappers and Host revalidation. These functions obtain authorized test selections from the runner and execute them. Revalidation calls the same functions with paths omitted to require the complete dedicated folder.
 
 ```text
-finish / finish_function_group
+Host revalidation (after every natural Agent ending)
   -> runTargetTests / runFunctionGroupTests (also used by Agent run tools)
   -> test-runner.ts: path selection, process execution, report collection
   -> coverage-reports.ts: test counts and per-function coverage parsing
 ```
 
-`test-runner.ts` owns directory expansion, file selection, fixed framework commands, shared process execution with timeout/output limits, and report collection for all six runners. Reports remain at framework-default locations; the Host cleans only its temporary Gradle init script. `coverage-reports.ts` owns report parsing, including JaCoCo shared by Maven and Gradle. Tool results include test counts and either available method coverage or an explicit unavailable reason. `finish` and `report_uncertain` preserve the current observation, and the strategy exposes available function coverage in the public result.
+`test-runner.ts` owns directory expansion, file selection, fixed framework commands, shared process execution with timeout/output limits, and report collection for all six runners. Reports remain at framework-default locations; the Host cleans only its temporary Gradle init script. `coverage-reports.ts` owns report parsing, including JaCoCo shared by Maven and Gradle. Tool results include test counts and either available method coverage or an explicit unavailable reason; model-visible stdout/stderr/failure messages are bounded while the trace keeps the complete observation. The final public coverage always comes from the last Host revalidation, and function ordering follows the requested input order.
 
 Maven uses JaCoCo coverage. The Host uses pinned JaCoCo 0.8.13 prepare-agent/report goals around the selected Surefire test. It leaves the default build and reporting directories intact, sets `-Djacoco.append=false` to replace execution data for the current run, and reads `target/site/jacoco/jacoco.xml` and `target/surefire-reports/TEST-*.xml`. Custom report directories and multi-module aggregation are not yet supported; missing or unchanged reports prevent successful verification. Maven may need to download JaCoCo from its configured repository on the first run.
 
@@ -138,43 +160,24 @@ The optional real-runner regression suite covers an invoked target, an unrelated
 TRANSLATION_VERIFIER_RUNNER_E2E=1 TRANSLATION_VERIFIER_RUNNER_DEPS=/path/to/deps node node_modules/vitest/vitest.mjs run services/translation-verifier/src services/translation-verifier/e2e/runner-coverage.e2e.test.ts services/translation-verifier/e2e/translation-verifier.e2e.test.ts --maxWorkers=2
 ```
 
-## Model Adapter Boundary
+## Model Integration Boundary
 
-The Host caller supplies a real model client. The API key belongs to the adapter boundary and is resolved when a model request is made; it is never part of `AgentTask`, prompts, tool arguments, or the tool transcript.
+The Host caller supplies a framework chat model. `createTranslationVerifierChatModel` maps the existing DeepSeek/OpenAI-compatible configuration onto `ChatOpenAI` through `configuration.baseURL` and keeps the credential a caller-owned value or late resolver, so it never becomes prompt text, tool arguments, or transcript content. Provider thinking is explicitly disabled and output tokens stay bounded.
 
-The current adapter speaks the existing DeepSeek/OpenAI-compatible chat-completions protocol:
+HTTP attempts default to three total attempts spaced 750 ms apart, only for transient failures (`408`, `429`, `500`, `502`, `503`, `504` and network errors). Both LangChain and the OpenAI SDK retry layers are disabled, so this single transport loop is the only retry path:
 
 ```ts
-import { createAgentHost } from "./src/host/runtime.js";
-import { createTranslationVerifierModelClient } from "./src/host/model-client.js";
-
-const modelClient = createTranslationVerifierModelClient({
+const model = createTranslationVerifierChatModel({
   apiKey: () => process.env.DEEPSEEK_API_KEY ?? "",
-  // Optional: defaults to the standard DeepSeek endpoint and model.
-  apiBase: process.env.DEEPSEEK_API_BASE,
-  model: process.env.DEEPSEEK_MODEL,
-});
-
-const host = createAgentHost({
-  modelClient,
-  limits: { maxTurns: 20 },
+  requestRetry: { maxAttempts: 3, delayMs: 750 },
 });
 ```
 
-`maxTurns` belongs to the Host Agent run budget. HTTP request attempts belong to the adapter and default to one attempt. Retry is opt-in and only applies to transient network/HTTP failures:
-
-```ts
-const modelClient = createTranslationVerifierModelClient({
-  apiKey: () => process.env.DEEPSEEK_API_KEY ?? "",
-  requestRetry: { maxAttempts: 2, delayMs: 250 },
-});
-```
-
-A retry does not create another Agent turn or change the transcript. The Host still correlates every returned tool call with its `toolCallId`, executes the tool, and sends tool failures back as a tool message so the Agent can continue or report uncertainty.
+A transport retry does not create another Agent invocation or change the transcript. The framework correlates every returned tool call with its `toolCallId`, executes the tool, and returns tool failures as tool messages so the Agent can continue. The Host still owns the fixed test commands, project roots, workspace serialization and all budgets.
 
 ## Agent Work Log
 
-The Host accepts an optional `workLogger`. It emits bounded JSON events for run start/finish, turn boundaries, model completion/failure, tool start/finish/failure, and continuation. Events contain counts, durations, tool names/IDs, statuses, and character lengths only. They do not contain prompts, model text, tool arguments, file contents, test stdout/stderr, issue descriptions, absolute project paths, or API keys.
+The Host accepts an optional `workLogger`. It emits bounded JSON events for run start/finish, Agent invocation start/completion, tool start/finish/failure, Host revalidation completion and appended feedback. Events contain counts, durations, tool names/IDs, statuses, and character lengths only. They do not contain prompts, model text, tool arguments, file contents, test stdout/stderr, issue descriptions, absolute project paths, or API keys.
 
 For local inspection, the live E2E uses a mode `600` JSONL file:
 
@@ -182,12 +185,12 @@ For local inspection, the live E2E uses a mode `600` JSONL file:
 import { createJsonlAgentWorkLogger } from "./src/host/work-log.js";
 
 const workLogger = createJsonlAgentWorkLogger("logs/translation-verifier.jsonl");
-const host = createAgentHost({ modelClient, workLogger });
+const host = createLangChainAgentHost({ model, workLogger });
 ```
 
 ## Detailed Agent Trace
 
-For an explicit local debugging run, use the separate detailed trace logger. It records the model-visible transcript, visible assistant content, tool-call arguments, tool outputs, and failures as mode `600` JSONL. It does not record the HTTP authorization header, and the logger redacts the supplied API key. The current adapter disables provider thinking, so hidden chain-of-thought is not available; the trace contains only visible model content and actions:
+For an explicit local debugging run, use the separate detailed trace logger. It records Agent invocation completion, bounded tool-call arguments, complete tool outputs, revalidation observations and failures as mode `600` JSONL. It does not record the HTTP authorization header, and the logger redacts the supplied API key. The current adapter disables provider thinking, so hidden chain-of-thought is not available; the trace contains only visible model content and actions:
 
 ```ts
 import { createJsonlAgentTraceLogger } from "./src/host/trace-log.js";
@@ -196,7 +199,7 @@ const traceLogger = createJsonlAgentTraceLogger(
   "logs/translation-verifier-trace.jsonl",
   [process.env.DEEPSEEK_API_KEY ?? ""],
 );
-const host = createAgentHost({ modelClient, traceLogger });
+const host = createLangChainAgentHost({ model, traceLogger });
 ```
 
 ## Live Model E2E

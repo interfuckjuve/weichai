@@ -71,7 +71,6 @@ async function contextWithRunner(
   };
   const functionGroupRunner: FunctionGroupTestRunner = { run: async () => observation };
   return {
-    state: {},
     runtime,
     runner: { run: async () => { throw new Error("unused target runner"); } },
     functionGroupRunner,

@@ -94,7 +94,7 @@ Verifier 可以处理必要的 Windows 差异：路径分隔符、`.cmd`/`.bat` 
 
 函数组 Host 结果的 `reason` 包括 `verified`、`not-executed`、`coverage-unavailable`、`test-failed`、`test-environment-failure`、`mapping-invalid`、`agent-timeout` 和 `model-failure`。当前这些原因由函数组测试运行结果提供；函数级入口仍使用原有结果结构。
 
-测试 Agent 必须根据 Host 结果调用 `finish_function_group` 或 `report_uncertain`，不能把未执行、覆盖率不可用或测试失败的函数自行改报为成功。
+测试 Agent 以普通最终消息返回 JSON 结论（`no-bug`、`bug-found` 或 `uncertain`），不再调用终态工具。Host 在每次自然结束后重新运行完整专用测试目录并逐个复核请求函数：`no-bug` 要求完整套件通过且全部目标有执行证据；`bug-found` 要求存在有效失败断言且被点名目标有执行证据，其余目标保留为 `unverified`；`uncertain` 要求套件通过、全部目标已执行且存在明确需求歧义。不能把未执行、覆盖率不可用或测试失败的函数自行改报为成功。
 
 ## 修改约束
 

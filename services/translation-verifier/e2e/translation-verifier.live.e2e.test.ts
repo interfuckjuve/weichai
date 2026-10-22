@@ -2,11 +2,10 @@ import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createVerifier } from "../src/verify.js";
-import { createAgentHost } from "../src/host/runtime.js";
-import { createTranslationVerifierModelClient } from "../src/host/model-client.js";
+import { createLangChainAgentHost } from "../src/host/langchain-runtime.js";
+import { createTranslationVerifierChatModel } from "../src/host/chat-model.js";
 import { createJsonlAgentWorkLogger } from "../src/host/work-log.js";
 import { createJsonlAgentTraceLogger } from "../src/host/trace-log.js";
-import type { SingleAgentTerminalResult } from "../src/strategies/single-agent/strategy.js";
 import type { VerificationResult } from "../src/types.js";
 import type { AgentWorkLogEvent } from "../src/host/work-log.js";
 import {
@@ -75,7 +74,6 @@ function summarizeTools(events: readonly AgentWorkLogEvent[]): Array<Record<stri
       const completed = events.find(
         (event) =>
           (event.event === "tool.completed" || event.event === "tool.failed") &&
-          event.turn === started.turn &&
           event.toolCallId === started.toolCallId,
       );
       return {
@@ -112,13 +110,14 @@ describe("translation verifier live model E2E", () => {
       const model = process.env.DEEPSEEK_MODEL?.trim() || "deepseek-flash";
       const workLogger = createJsonlAgentWorkLogger(logPath);
       const traceLogger = createJsonlAgentTraceLogger(tracePath, [apiKey]);
-      const modelClient = createTranslationVerifierModelClient({
+      const chatModel = createTranslationVerifierChatModel({
         apiKey: () => apiKey,
-        apiBase: process.env.DEEPSEEK_API_BASE,
+        ...(process.env.DEEPSEEK_API_BASE ? { apiBase: process.env.DEEPSEEK_API_BASE } : {}),
         model,
+        maxOutputTokens: positiveIntegerEnv("TRANSLATION_VERIFIER_LIVE_MAX_OUTPUT_TOKENS", 16_384),
       });
-      const host = createAgentHost<SingleAgentTerminalResult>({
-        modelClient,
+      const host = createLangChainAgentHost({
+        model: chatModel,
         workLogger,
         traceLogger,
         limits: {
@@ -151,10 +150,12 @@ describe("translation verifier live model E2E", () => {
         .split("\n")
         .filter(Boolean)
         .map((line) => JSON.parse(line) as AgentWorkLogEvent);
-      const completedRun = [...events].reverse().find((event) => event.event === "run.completed");
       const targetTest = [...events]
         .reverse()
         .find((event) => event.event === "tool.completed" && event.toolName === "run_target_tests");
+      const revalidation = [...events]
+        .reverse()
+        .find((event) => event.event === "host.revalidation.completed");
       const trace = await readFile(tracePath, "utf8");
       const traceEvents = trace
         .trim()
@@ -170,8 +171,11 @@ describe("translation verifier live model E2E", () => {
         phase: "verify",
         model,
         passed: runError === undefined && result?.status === "success",
-        turns: completedRun?.turns ?? Math.max(0, ...events.map((event) => event.turn ?? 0)),
-        totalToolCalls: completedRun?.totalToolCalls,
+        agentInvocations: events.filter((event) => event.event === "agent.invocation.started").length,
+        feedbackRounds: events.filter((event) => event.event === "agent.feedback.appended").length,
+        hostRevalidations: events.filter((event) => event.event === "host.revalidation.completed").length,
+        totalToolCalls: events.filter((event) => event.event === "tool.started").length,
+        ...(revalidation ? { revalidation: { status: revalidation.status, outcome: revalidation.outcome } } : {}),
         tools: summarizeTools(events),
         trace: {
           path: tracePath,
@@ -220,8 +224,8 @@ describe("translation verifier live model E2E", () => {
         ),
       ).toBe(true);
       expect(events.at(-1)?.event).toBe("run.completed");
-      expect(traceEvents.some((event) => event.event === "model.request")).toBe(true);
-      expect(traceEvents.some((event) => event.event === "model.response")).toBe(true);
+      expect(events.some((event) => event.event === "agent.invocation.completed")).toBe(true);
+      expect(events.some((event) => event.event === "host.revalidation.completed")).toBe(true);
       expect(
         traceEvents.some(
           (event) => event.event === "tool.started" && event.arguments !== undefined,

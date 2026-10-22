@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { describe, it, expect } from "vitest";
 import { resolveTestEnvironment } from "../src/host/test-environment.js";
 import { createRunTargetTestsTool } from "../src/host/tools/run-target-tests.js";
-import { createFinishTool } from "../src/host/tools/finish.js";
+import { revalidateTargetReport } from "../src/host/revalidation.js";
 import type { ToolContext, TestRunner } from "../src/host/tools/common.js";
 
 // Runtime dependencies live outside the repository; this suite never installs them.
@@ -66,32 +66,35 @@ suite("real target runner coverage", () => {
       }
       await put(testPath, good);
       const environment = await resolveTestEnvironment({ targetLanguage: language, targetProjectPath: root });
-      const resolvedContext: Omit<ToolContext, "runner"> = { state: {}, runtime: { sourceLanguage: language, targetLanguage: language,
+      const resolvedContext: Omit<ToolContext, "runner"> = { runtime: { sourceLanguage: language, targetLanguage: language,
         sourceProjectPath: root, targetProjectPath: root, sourcePath, targetPath: sourcePath,
         targetFunction: { path: sourcePath, name: functionName }, sourceDirectory: "src", targetDirectory: "src",
         testRoots: environment.testRoots, testRunner: environment.framework, targetTest: environment.targetTest } };
       const context: ToolContext = { ...resolvedContext, runner: bindTestRunner(resolvedContext) };
       const tool = createRunTargetTestsTool()(context);
-      const finish = createFinishTool()(context);
+      const noBug = { verdict: "no-bug" as const, summary: "The target function is verified." };
       const positive = await tool.execute({ path: testPath });
       expect(positive, JSON.stringify(positive) + positive.stderr + positive.stdout).toMatchObject({ status: "success", tests: { executed: 1, passed: 1, failed: 0 }, coverage: { status: "available", targetFunction: { name: functionName, executed: true } } });
       if (positive.coverage?.status === "available") {
         expect(positive.coverage.targetFunction.lineCoverage).toBeGreaterThan(0);
         expect(positive.coverage.targetFunction.branchCoverage).toBe(50);
       }
-      await expect(finish.execute({ testExecutionStatus: "success", translationStatus: "success" }))
-        .resolves.toMatchObject({ testExecutionStatus: "success", translationStatus: "success" });
+      const accepted = await revalidateTargetReport(context, noBug);
+      expect(accepted.feedback).toEqual([]);
+      expect(accepted.observation).toMatchObject({ status: "success", tests: { executed: 1, passed: 1 } });
       await put(testPath, unrelated);
       const negative = await tool.execute({ path: testPath });
       expect(negative, JSON.stringify(negative) + negative.stderr + negative.stdout).toMatchObject({ status: "success", tests: { executed: 1 }, coverage: { status: "available", targetFunction: { executed: false, lineCoverage: 0 } } });
-      await expect(finish.execute({ testExecutionStatus: "success", translationStatus: "success" }))
-        .resolves.toMatchObject({ outcome: "continue", targetTest: { coverage: { status: "available", targetFunction: { executed: false } } } });
+      const uncovered = await revalidateTargetReport(context, noBug);
+      expect(uncovered.feedback.join("\n")).toContain("must execute the requested target function");
+      expect(uncovered.observation).toMatchObject({ coverage: { status: "available", targetFunction: { executed: false } } });
       await put(testPath, failing);
       expect(await tool.execute({ path: testPath })).toMatchObject({ status: "failure", tests: { failed: 1 } });
       await put(testPath, skipped);
       expect(await tool.execute({ path: testPath })).toMatchObject({ tests: { executed: 0, skipped: 1 } });
-      await expect(finish.execute({ testExecutionStatus: "success", translationStatus: "success" }))
-        .resolves.toMatchObject({ outcome: "continue", targetTest: { tests: { executed: 0, skipped: 1 } } });
+      const skippedRun = await revalidateTargetReport(context, noBug);
+      expect(skippedRun.feedback.join("\n")).toContain("without skipped tests");
+      expect(skippedRun.observation).toMatchObject({ tests: { executed: 0, skipped: 1 } });
     } finally { if (process.env.TRANSLATION_VERIFIER_RUNNER_KEEP === "1") console.log("Fixture:", root); else await rm(root, { recursive: true, force: true }); }
   }, 300_000);
 });
