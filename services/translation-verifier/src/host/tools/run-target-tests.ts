@@ -1,35 +1,25 @@
+import { tool } from "langchain";
+import { z } from "zod";
 import { resolveTestPaths } from "../test-runner.js";
 import {
   relativePath,
-  type HostTool,
   type HostToolFactory,
   type ToolContext,
   type TargetTestResult,
 } from "./common.js";
 
-export type RunTargetTestsInput = {
-  path?: string;
-};
+const runTargetTestsSchema = z.strictObject({
+  path: z.string().optional(),
+});
 
-function parseRunTargetTestsInput(value: unknown): RunTargetTestsInput {
-  if (
-    typeof value !== "object" ||
-    value === null ||
-    Array.isArray(value) ||
-    Object.keys(value).some(key => key !== "path")
-  ) {
-    throw new Error("run_target_tests accepts only an optional path.");
-  }
-  const path = (value as { path?: unknown }).path;
-  return path === undefined ? {} : { path: relativePath(path, "test path") };
-}
+export type RunTargetTestsInput = z.infer<typeof runTargetTestsSchema>;
 
 function rootsDescription(testRoots: readonly string[]): string {
   return testRoots.length > 0 ? testRoots.join(", ") : "(none)";
 }
 
 export function createRunTargetTestsTool(): HostToolFactory {
-  return (context: ToolContext): HostTool<RunTargetTestsInput, TargetTestResult> => {
+  return (context: ToolContext) => {
     const testRoots = context.runtime.testRoots.map((root) =>
       relativePath(root, "test root"),
     );
@@ -37,17 +27,12 @@ export function createRunTargetTestsTool(): HostToolFactory {
       throw new Error("run_target_tests requires at least one test root.");
     }
 
-    return {
+    return tool(async (input: RunTargetTestsInput): Promise<TargetTestResult> =>
+      runTargetTests(context, input), {
       name: "run_target_tests",
       description: `Run an existing ${context.runtime.targetLanguage} target test file or every test in a directory inside this dedicated project-relative test folder: ${rootsDescription(testRoots)}. Pass the authorized folder itself or omit path to check all existing tests before adding tests. Files need not have been created or modified during this Agent run. Use the fixed Host-selected ${context.runtime.testRunner} command and its output as verification evidence. The result includes reportPaths for fresh test and coverage reports, relative to the target project; inspect them with read_target_file. An empty list means no fresh report was found.`,
-      inputSchema: {
-        type: "object",
-        additionalProperties: false,
-        properties: { path: { type: "string" } },
-      },
-      parse: parseRunTargetTestsInput,
-      execute: input => runTargetTests(context, input),
-    };
+      schema: runTargetTestsSchema,
+    });
   };
 }
 

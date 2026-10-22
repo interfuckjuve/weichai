@@ -1,10 +1,11 @@
 import { lstat, readdir } from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import { join, relative, sep } from "node:path";
+import { tool } from "langchain";
+import { z } from "zod";
 import {
   relativePath,
   resolveSafePath,
-  type HostTool,
   type HostToolFactory,
 } from "./common.js";
 
@@ -15,10 +16,12 @@ const NON_SOURCE_DIRECTORIES = new Set([
   "node_modules", ".venv", "venv", "__pycache__", ".pytest_cache", ".gradle",
 ]);
 
-type ListFilesInput = {
-  directory: string;
-  maxResults?: number;
-};
+const listFilesSchema = z.strictObject({
+  directory: z.string().describe("The authorized directory or one of its project-relative subdirectories."),
+  maxResults: z.number().int().min(1).max(MAX_RESULTS).optional(),
+});
+
+type ListFilesInput = z.infer<typeof listFilesSchema>;
 
 type ListFilesOutput = {
   files: string[];
@@ -46,47 +49,17 @@ function isAuthorizedDirectory(
   );
 }
 
-function parseListFilesInput(
-  value: unknown,
-  directories: readonly string[],
-): ListFilesInput {
-  if (
-    typeof value !== "object" ||
-    value === null ||
-    Array.isArray(value) ||
-    (Object.keys(value) as string[]).some(
-      (key) => key !== "directory" && key !== "maxResults",
-    ) ||
-    !("directory" in value)
-  ) {
-    throw new Error("list_files requires directory and optional maxResults.");
-  }
-
-  const input = value as { directory: unknown; maxResults?: unknown };
-  if (typeof input.directory !== "string") {
-    throw new Error("list_files.directory must be a string.");
-  }
-  const directory = normalizeDirectory(input.directory);
-  if (!isAuthorizedDirectory(directory, directories)) {
+/** Host-owned authorization: only strategy-selected directories may be listed. */
+function authorizeDirectory(
+  directory: string,
+  authorizedDirectories: readonly string[],
+): string {
+  if (!isAuthorizedDirectory(directory, authorizedDirectories)) {
     throw new Error(
       `list_files.directory is not authorized: ${displayDirectory(directory)}`,
     );
   }
-
-  if (input.maxResults === undefined) {
-    return { directory };
-  }
-  if (
-    typeof input.maxResults !== "number" ||
-    !Number.isInteger(input.maxResults) ||
-    input.maxResults < 1 ||
-    input.maxResults > MAX_RESULTS
-  ) {
-    throw new Error(
-      `list_files.maxResults must be an integer from 1 to ${MAX_RESULTS}.`,
-    );
-  }
-  return { directory, maxResults: input.maxResults };
+  return directory;
 }
 
 async function collectFiles(
@@ -162,35 +135,20 @@ export function createListFilesTool(
   root: string,
   allowedDirectories: readonly string[],
   description?: string,
-): HostTool<ListFilesInput, ListFilesOutput> {
+) {
   const directories = [...new Set(allowedDirectories.map(normalizeDirectory))];
   if (directories.length === 0) {
     throw new Error(`${name} requires at least one authorized directory.`);
   }
 
-  return {
+  return tool(async ({ directory, maxResults }: ListFilesInput): Promise<ListFilesOutput> => {
+    const authorized = authorizeDirectory(normalizeDirectory(directory), directories);
+    return collectFiles(root, authorized, maxResults ?? DEFAULT_MAX_RESULTS);
+  }, {
     name,
     description:
       description ??
       `List files recursively under these strategy-selected directories and their subdirectories: ${directories.map(displayDirectory).join(", ")}.`,
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      required: ["directory"],
-      properties: {
-        directory: {
-          type: "string",
-          description: "The authorized directory or one of its project-relative subdirectories.",
-        },
-        maxResults: { type: "integer", minimum: 1, maximum: MAX_RESULTS },
-      },
-    },
-    parse: (input) => parseListFilesInput(input, directories),
-    execute: async (input) =>
-      collectFiles(
-        root,
-        input.directory,
-        input.maxResults ?? DEFAULT_MAX_RESULTS,
-      ),
-  };
+    schema: listFilesSchema,
+  });
 }

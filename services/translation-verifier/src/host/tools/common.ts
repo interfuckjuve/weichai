@@ -1,4 +1,5 @@
 import type { BoundTestRunner } from "../test-runner.js";
+import type { StructuredToolInterface } from "@langchain/core/tools";
 import type {
   FunctionGroupVerificationInput,
   FunctionGroupFunctionResult,
@@ -16,15 +17,8 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 export const MAX_TEXT_FILE_CHARS = 256_000;
 export const MAX_TEST_OUTPUT_CHARS = 64_000;
 
-export type HostTool<Input, Output> = {
-  name: string;
-  description: string;
-  inputSchema: Record<string, unknown>;
-  parse(input: unknown): Input;
-  execute(input: Input): Promise<Output>;
-};
-
-export type HostToolFactory = (context: ToolContext) => HostTool<any, any>;
+/** A strategy-selected native LangChain tool bound to this run's Host context. */
+export type HostToolFactory = (context: ToolContext) => StructuredToolInterface;
 
 export type TestRunner =
   | "maven"

@@ -60,33 +60,35 @@ describe("function-group test tool", () => {
     await writeFile(join(root, "tests.xml"), "test report");
     const tool = createRunFunctionGroupTestsTool()(context);
     const paths = [firstTest, secondTest];
-    const actual = await tool.execute(tool.parse({ paths }));
+    const actual = await tool.invoke({ paths }) as FunctionGroupTestRun;
     expect(actual.testPaths).toEqual(paths);
     expect(actual.reportPaths).toEqual(["tests.xml"]);
     const reader = createReadTargetFileTool()(context);
-    expect(await reader.execute(reader.parse({ path: actual.reportPaths![0] })))
+    expect(await reader.invoke({ path: actual.reportPaths![0] }))
       .toEqual({ path: "tests.xml", content: "test report" });
-    await createWriteTargetTestTool()(context).execute({ path: firstTest, content: "def test_updated(): pass" });
-    expect((await reader.execute({ path: firstTest })).content).toBe("def test_updated(): pass");
-    await expect(tool.execute({ paths })).resolves.toMatchObject({ testPaths: paths });
+    await createWriteTargetTestTool()(context).invoke({ path: firstTest, content: "def test_updated(): pass" });
+    expect((await reader.invoke({ path: firstTest }) as { content: string }).content).toBe("def test_updated(): pass");
+    await expect(tool.invoke({ paths })).resolves.toMatchObject({ testPaths: paths });
     calls.length = 0;
-    await expect(tool.execute({ paths: ["tests/outside.test.py"] })).rejects.toThrow("outside the authorized test roots");
-    await expect(tool.execute({ paths: [firstTest, "tests/outside.test.py"] })).rejects.toThrow("outside the authorized test roots");
+    await expect(tool.invoke({ paths: ["tests/outside.test.py"] })).rejects.toThrow("outside the authorized test roots");
+    await expect(tool.invoke({ paths: [firstTest, "tests/outside.test.py"] })).rejects.toThrow("outside the authorized test roots");
     expect(calls).toEqual([]);
   });
 
   it("runs all current tests when paths are omitted", async () => {
     const { context, calls } = await fixture([firstTarget, secondTarget]);
     const tool = createRunFunctionGroupTestsTool()(context);
-    expect(tool.parse({})).toEqual({});
-    await expect(tool.execute(tool.parse({}))).resolves.toMatchObject({ testPaths: [secondTest, firstTest] });
+    // The schema rejects a fixed-command override or an empty selection.
+    await expect(tool.invoke({ command: "arbitrary" } as never)).rejects.toThrow();
+    await expect(tool.invoke({ paths: [] })).rejects.toThrow();
+    await expect(tool.invoke({})).resolves.toMatchObject({ testPaths: [secondTest, firstTest] });
     expect(calls).toEqual([[secondTest, firstTest]]);
   });
 
   it("allows an empty first baseline without invoking the runner", async () => {
     const { root, context, calls } = await fixture();
     await rm(join(root, testRoot), { recursive: true });
-    await expect(createRunFunctionGroupTestsTool()(context).execute({ paths: [testRoot] }))
+    await expect(createRunFunctionGroupTestsTool()(context).invoke({ paths: [testRoot] }))
       .resolves.toMatchObject({ status: "success", tests: { executed: 0 }, testPaths: [], reportPaths: [] });
     expect(calls).toEqual([]);
   });
@@ -96,15 +98,15 @@ describe("function-group test tool", () => {
     await writeFile(join(root, testRoot, "nested/fixture.txt"), "fixture");
     await mkdir(join(root, "tests/translation-verifier-other"));
     const tool = createRunFunctionGroupTestsTool()(context);
-    const result = await tool.execute({ paths: [testRoot, firstTest, `${testRoot}/nested`] });
+    const result = await tool.invoke({ paths: [testRoot, firstTest, `${testRoot}/nested`] }) as FunctionGroupTestRun;
     expect(result.testPaths).toEqual([secondTest, firstTest]);
     expect(calls).toEqual([[secondTest, firstTest]]);
     calls.length = 0;
-    await tool.execute({ paths: [`${testRoot}/nested`] });
+    await tool.invoke({ paths: [`${testRoot}/nested`] });
     expect(calls).toEqual([[secondTest]]);
     calls.length = 0;
     for (const outside of ["tests", "tests/translation-verifier-other"]) {
-      await expect(tool.execute({ paths: [testRoot, outside] })).rejects.toThrow("outside the authorized test roots");
+      await expect(tool.invoke({ paths: [testRoot, outside] })).rejects.toThrow("outside the authorized test roots");
     }
     expect(calls).toEqual([]);
   });

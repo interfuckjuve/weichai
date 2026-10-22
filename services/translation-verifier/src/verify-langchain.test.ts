@@ -370,9 +370,33 @@ describe("LangChain Host feedback continuation", () => {
     const result = await verifier(fixture, model)(fixture.input, "single-agent", "verify");
 
     expect(result.status).toBe("success");
-    expect(model.observations[1]!.some(message =>
-      message instanceof ToolMessage && /authorized test roots|outside/i.test(String(message.content)),
-    )).toBe(true);
+    const toolMessage = model.observations[1]!.find(
+      (message): message is ToolMessage => message instanceof ToolMessage,
+    );
+    // The framework keeps the tool-call correlation for the refused call.
+    expect(toolMessage?.tool_call_id).toBe("bad-write");
+    expect(toolMessage?.status).toBe("error");
+    expect(/authorized test roots|outside/i.test(String(toolMessage?.content))).toBe(true);
+  });
+
+  it("hands a schema rejection back to the same tool call without spending the run", async () => {
+    const fixture = await createFixture("class BehaviorTest { int requirement() { return 1; } }");
+    const model = new ScriptedChatModel([
+      () => toolCall("run_target_tests", { command: "mvn -q verify" }, "bad-args"),
+      () => finalReport(report("no-bug")),
+    ]);
+
+    const result = await verifier(fixture, model)(fixture.input, "single-agent", "verify");
+
+    expect(result.status).toBe("success");
+    const toolMessage = model.observations[1]!.find(
+      (message): message is ToolMessage => message instanceof ToolMessage && message.tool_call_id === "bad-args",
+    );
+    // Zod rejects the fixed-command override; the framework reports it back on
+    // the same tool call instead of failing the verification run.
+    expect(toolMessage).toBeDefined();
+    expect(toolMessage?.status).toBe("error");
+    expect(String(toolMessage?.content)).toMatch(/did not match expected schema|invalid/i);
   });
 
   it("stops before invoking the model when the run is already cancelled", async () => {

@@ -3,15 +3,13 @@ import {
   createMiddleware,
   HumanMessage,
   modelCallLimitMiddleware,
-  tool as frameworkTool,
   toolCallLimitMiddleware,
 } from "langchain";
 import { MemorySaver } from "@langchain/langgraph";
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import type { BaseMessage } from "@langchain/core/messages";
-import type { ClientTool } from "@langchain/core/tools";
-import type { JsonSchema7Type } from "@langchain/core/utils/json_schema";
-import type { TargetFunctionCoverage, VerificationIssue } from "../types.js";
+import type { StructuredToolInterface } from "@langchain/core/tools";
+import type { VerificationTestCase } from "../types.js";
 import {
   AgentRunFailure,
   createAgentRunBudget,
@@ -24,21 +22,29 @@ import { bindFunctionGroupTestRunner, bindTestRunner } from "./test-runner.js";
 import {
   revalidateFunctionGroupReport,
   revalidateTargetReport,
-  type FinalReportClaim,
 } from "./revalidation.js";
-import type {
-  FunctionGroupFunctionResult,
-  ProtocolCheck,
-  VerificationReason,
-  VerificationTestCase,
-} from "../types.js";
+import type { FinalReportClaim } from "./final-report.js";
+import {
+  acceptedFunctionGroupResult,
+  acceptedResult,
+  feedbackMessage,
+  functionGroupFeedbackMessage,
+  type AgentHostResult,
+  type FunctionGroupHostResult,
+} from "./host-result.js";
+import { parseFinalReport, type ParsedReport } from "./final-report.js";
+import { messageCharacters, messageText } from "./messages.js";
 import type {
   FunctionGroupTestRun,
-  HostTool,
   TargetTestResult,
   ToolContext,
   ToolRuntimeContext,
 } from "./tools/common.js";
+import {
+  createToolCallMiddleware,
+  createWorkspaceSerializer,
+  type WorkspaceSerializer,
+} from "./tool-middleware.js";
 import {
   emitAgentTrace,
   type AgentTraceLogger,
@@ -62,41 +68,7 @@ export type LangChainAgentHostOptions = {
   traceLogger?: AgentTraceLogger;
 };
 
-/** Accepted Agent report plus the Host's fresh observation of the target function. */
-export type LangChainAgentHostResult = {
-  verdict: FinalReportClaim["verdict"];
-  summary: string;
-  issue?: VerificationIssue;
-  targetFunction?: TargetFunctionCoverage;
-};
-
-/** Accepted function-group report plus the Host's fresh per-function observation. */
-export type LangChainFunctionGroupHostResult = {
-  verdict: FinalReportClaim["verdict"];
-  summary: string;
-  issue?: VerificationIssue;
-  functions: FunctionGroupFunctionResult[];
-  reason?: VerificationReason;
-  protocolChecks?: ProtocolCheck[];
-};
-
 const DEFAULT_MAX_FEEDBACK_ROUNDS = 4;
-/** Keep the model-visible feedback bounded; the full observation stays in the trace. */
-const MAX_FEEDBACK_CHARS = 12_000;
-/** Bound only the opt-in trace input payload; tool results stay complete in the trace. */
-const MAX_TRACE_PAYLOAD_CHARS = 24_000;
-/**
- * Host tools that touch the target working directory run one at a time, so a
- * batched framework tool call cannot read a half-written test file, rewrite a
- * test while its process runs, or release the harness mid-operation.
- */
-const SERIAL_TOOLS = new Set([
-  "write_target_test",
-  "run_target_tests",
-  "run_function_group_tests",
-  "read_target_file",
-  "list_target_files",
-]);
 
 /** Shared shape of the fresh Host observation both task kinds report on. */
 type ObservationSummary = {
@@ -120,7 +92,7 @@ type Acceptance<Observation extends ObservationSummary, Result> = {
   setup: readonly string[];
 };
 
-const TARGET_ACCEPTANCE: Acceptance<TargetTestResult, LangChainAgentHostResult> = {
+const TARGET_ACCEPTANCE: Acceptance<TargetTestResult, AgentHostResult> = {
   bindRunner: context => ({ runner: bindTestRunner(context) }),
   revalidate: (context, report) => revalidateTargetReport(context, report),
   accept: (report, observation) => acceptedResult(report, observation),
@@ -131,7 +103,7 @@ const TARGET_ACCEPTANCE: Acceptance<TargetTestResult, LangChainAgentHostResult> 
   ],
 };
 
-const FUNCTION_GROUP_ACCEPTANCE: Acceptance<FunctionGroupTestRun, LangChainFunctionGroupHostResult> = {
+const FUNCTION_GROUP_ACCEPTANCE: Acceptance<FunctionGroupTestRun, FunctionGroupHostResult> = {
   bindRunner: context => ({
     runner: bindTestRunner(context),
     functionGroupRunner: bindFunctionGroupTestRunner(context),
@@ -145,14 +117,9 @@ const FUNCTION_GROUP_ACCEPTANCE: Acceptance<FunctionGroupTestRun, LangChainFunct
   ],
 };
 
-/**
- * Create the LangChain Host: it runs the framework Agent loop (model, tools,
- * message history) and keeps only the application-level cycle of
- * "invoke -> revalidate the complete folder -> append feedback -> invoke again".
- */
 export function createLangChainAgentHost(
   options: LangChainAgentHostOptions,
-): AgentHost<LangChainAgentHostResult> {
+): AgentHost<AgentHostResult> {
   return {
     run: task => runLangChainTask(options, task, TARGET_ACCEPTANCE),
   };
@@ -161,7 +128,7 @@ export function createLangChainAgentHost(
 /** The same Host loop for translation-fidelity and requirement function groups. */
 export function createLangChainFunctionGroupAgentHost(
   options: LangChainAgentHostOptions,
-): AgentHost<LangChainFunctionGroupHostResult> {
+): AgentHost<FunctionGroupHostResult> {
   return {
     run: task => runLangChainTask(options, task, FUNCTION_GROUP_ACCEPTANCE),
   };
@@ -192,11 +159,13 @@ async function runLangChainTask<Observation extends ObservationSummary, Result>(
       runtime,
       ...acceptance.bindRunner({ budget, runtime }),
     };
-    const bound = bindLangChainTools(task, context, options, runId);
-    serializer = bound.serializer;
+    // Each factory returns one native LangChain tool bound to this run's
+    // authorization context; the framework owns dispatch and validation.
+    const tools: StructuredToolInterface[] = task.tools.map(factory => factory(context));
+    serializer = createWorkspaceSerializer(budget);
     const agent = createAgent({
       model: options.model,
-      tools: bound.tools,
+      tools,
       systemPrompt: withRuntimeInstructions(task.systemPrompt, runtime, acceptance.setup),
       checkpointer: new MemorySaver(),
       middleware: [
@@ -208,6 +177,13 @@ async function runLangChainTask<Observation extends ObservationSummary, Result>(
         toolCallLimitMiddleware({
           threadLimit: limits.maxToolCalls,
           exitBehavior: "error",
+        }),
+        createToolCallMiddleware({
+          runId,
+          serializer,
+          budget,
+          ...(options.workLogger ? { workLogger: options.workLogger } : {}),
+          ...(options.traceLogger ? { traceLogger: options.traceLogger } : {}),
         }),
       ],
     });
@@ -321,272 +297,6 @@ async function runLangChainTask<Observation extends ObservationSummary, Result>(
   }
 }
 
-type ParsedReport = {
-  report?: FinalReportClaim;
-  problems: string[];
-};
-
-const VERDICTS = new Set(["no-bug", "bug-found", "uncertain"]);
-
-/** Parse and shape-check the ordinary final assistant message. */
-export function parseFinalReport(message: BaseMessage | undefined): ParsedReport {
-  if (message === undefined) {
-    return { problems: ["The Agent ended without a final assistant message."] };
-  }
-  const text = messageText(message).trim();
-  if (text.length === 0) {
-    return { problems: ["The final assistant message is empty; end with the JSON verification report described in the task."] };
-  }
-  let value: unknown;
-  try {
-    value = JSON.parse(text);
-  } catch {
-    return { problems: ["The final assistant message is not valid JSON. End with the JSON verification report described in the task."] };
-  }
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return { problems: ["The final report must be a JSON object with verdict and summary."] };
-  }
-  const record = value as Record<string, unknown>;
-  const problems: string[] = [];
-  const verdict = record.verdict;
-  if (typeof verdict !== "string" || !VERDICTS.has(verdict)) {
-    problems.push("The final report verdict must be one of: no-bug, bug-found, uncertain.");
-  }
-  const summary = record.summary;
-  if (typeof summary !== "string" || summary.trim().length === 0) {
-    problems.push("The final report must include a non-empty summary.");
-  }
-  const issue = parseIssue(record.issue);
-  if (issue !== undefined && "problem" in issue) problems.push(issue.problem);
-  const issueValue = issue !== undefined && "issue" in issue ? issue.issue : undefined;
-  const affectedTargets = parseAffectedTargets(record.affectedTargets);
-  if (affectedTargets !== undefined && "problem" in affectedTargets) {
-    problems.push(affectedTargets.problem);
-  }
-  const targets = affectedTargets !== undefined && "targets" in affectedTargets
-    ? affectedTargets.targets
-    : undefined;
-  const protocolChecks = parseProtocolChecks(record.protocolChecks);
-  if (protocolChecks !== undefined && "problem" in protocolChecks) {
-    problems.push(protocolChecks.problem);
-  }
-  const checks = protocolChecks !== undefined && "checks" in protocolChecks
-    ? protocolChecks.checks
-    : undefined;
-
-  if (verdict === "no-bug" && issueValue !== undefined) {
-    problems.push("A no-bug report must not include an issue.");
-  }
-  if (verdict === "bug-found") {
-    if (issueValue?.kind !== "translation") {
-      problems.push("A bug-found report needs an issue with kind \"translation\" and a concrete description.");
-    }
-    if (targets === undefined || targets.length === 0) {
-      problems.push("A bug-found report needs a non-empty affectedTargets list.");
-    }
-  }
-  if (verdict === "uncertain") {
-    if (issueValue?.kind !== "unknown") {
-      problems.push("An uncertain report needs an issue with kind \"unknown\" explaining the missing requirement evidence.");
-    } else if (/^(uncertain|unknown|无法确定)[.。]?$/i.test(issueValue.description.trim())) {
-      problems.push("An uncertain report must explain the concrete ambiguity or missing evidence, not only state that the result is unknown.");
-    }
-  }
-  if (problems.length > 0) return { problems };
-  return {
-    report: {
-      verdict: verdict as FinalReportClaim["verdict"],
-      summary: (summary as string).trim(),
-      ...(issueValue ? { issue: issueValue } : {}),
-      ...(targets ? { affectedTargets: targets } : {}),
-      ...(checks ? { protocolChecks: checks } : {}),
-    },
-    problems,
-  };
-}
-
-/** Function-group protocol checks stay bounded, mirroring the existing public shape. */
-function parseProtocolChecks(value: unknown):
-  | { checks: ProtocolCheck[] }
-  | { problem: string }
-  | undefined {
-  if (value === undefined) return undefined;
-  if (!Array.isArray(value) || value.length > 3) {
-    return { problem: "protocolChecks must be a list of at most three checks." };
-  }
-  const checks: ProtocolCheck[] = [];
-  for (const item of value) {
-    if (typeof item !== "object" || item === null || Array.isArray(item)) {
-      return { problem: "Each protocolChecks entry needs ruleId and status." };
-    }
-    const record = item as Record<string, unknown>;
-    if (typeof record.ruleId !== "string" || record.ruleId.trim().length === 0) {
-      return { problem: "Each protocolChecks entry needs a non-empty ruleId." };
-    }
-    if (!["passed", "failed", "ambiguous", "not-applicable"].includes(String(record.status))) {
-      return { problem: "Each protocolChecks status must be passed, failed, ambiguous, or not-applicable." };
-    }
-    checks.push({
-      ruleId: record.ruleId.trim(),
-      status: record.status as ProtocolCheck["status"],
-      ...(typeof record.testName === "string" ? { testName: record.testName } : {}),
-      ...(typeof record.note === "string" ? { note: record.note } : {}),
-    });
-  }
-  return { checks };
-}
-
-function parseIssue(value: unknown):
-  | { issue: VerificationIssue }
-  | { problem: string }
-  | undefined {
-  if (value === undefined) return undefined;
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return { problem: "The final report issue must be an object with kind and description." };
-  }
-  const record = value as Record<string, unknown>;
-  const kind = record.kind;
-  const description = record.description;
-  if (kind !== "translation" && kind !== "test" && kind !== "environment" && kind !== "unknown") {
-    return { problem: "The final report issue kind is not supported." };
-  }
-  if (typeof description !== "string" || description.trim().length === 0) {
-    return { problem: "The final report issue needs a concrete description." };
-  }
-  return { issue: { kind, description: description.trim() } };
-}
-
-function parseAffectedTargets(value: unknown):
-  | { targets: FinalReportClaim["affectedTargets"] }
-  | { problem: string }
-  | undefined {
-  if (value === undefined) return undefined;
-  if (!Array.isArray(value) || value.length === 0) {
-    return { problem: "affectedTargets must be a non-empty list of requested target functions." };
-  }
-  const targets: NonNullable<FinalReportClaim["affectedTargets"]> = [];
-  for (const item of value) {
-    if (
-      typeof item !== "object" || item === null || Array.isArray(item) ||
-      typeof (item as Record<string, unknown>).path !== "string" ||
-      typeof (item as Record<string, unknown>).name !== "string"
-    ) {
-      return { problem: "Each affectedTargets entry needs a path and name." };
-    }
-    const record = item as Record<string, unknown>;
-    targets.push({
-      path: record.path as string,
-      name: record.name as string,
-      ...(typeof record.signature === "string" ? { signature: record.signature } : {}),
-    });
-  }
-  return { targets };
-}
-
-type WorkspaceSerializer = {
-  run<T>(operation: () => Promise<T>): Promise<T>;
-  close(): Promise<void>;
-};
-
-/** One queue per run: serializes shared-directory tools and can close before cleanup. */
-function createWorkspaceSerializer(budget: AgentRunBudget): WorkspaceSerializer {
-  let tail: Promise<unknown> = Promise.resolve();
-  let closed = false;
-  const enter = async <T>(operation: () => Promise<T>): Promise<T> => {
-    if (closed) {
-      throw new Error("The Agent run is finishing; workspace operations are closed.");
-    }
-    budget.assertActive();
-    return operation();
-  };
-  return {
-    run<T>(operation: () => Promise<T>): Promise<T> {
-      const next = tail.then(
-        () => enter(operation),
-        () => enter(operation),
-      );
-      tail = next.catch(() => undefined);
-      return next;
-    },
-    async close(): Promise<void> {
-      closed = true;
-      await tail;
-    },
-  };
-}
-
-function bindLangChainTools(
-  task: AgentTask,
-  context: ToolContext,
-  options: LangChainAgentHostOptions,
-  runId: string,
-): { tools: ClientTool[]; serializer: WorkspaceSerializer } {
-  const serializer = createWorkspaceSerializer(context.budget!);
-  const tools = task.tools.map((factory) => {
-    const hostTool: HostTool<unknown, unknown> = factory(context);
-    const execute = async (input: unknown, config?: FrameworkToolConfig): Promise<unknown> => {
-      const toolCallId = config?.toolCall?.id;
-      const startedAt = performance.now();
-      emitAgentWorkLog(options.workLogger, {
-        ...workEvent(runId, "tool.started"),
-        toolName: hostTool.name,
-        ...(toolCallId ? { toolCallId } : {}),
-        argumentCharacters: valueCharacters(input),
-      });
-      emitAgentTrace(options.traceLogger, traceEvent(runId, "tool.started", {
-        toolName: hostTool.name,
-        ...(toolCallId ? { toolCallId } : {}),
-        input: boundedValue(input, MAX_TRACE_PAYLOAD_CHARS),
-      }));
-      try {
-        const run = async () => hostTool.execute(hostTool.parse(input));
-        const output = SERIAL_TOOLS.has(hostTool.name)
-          ? await serializer.run(run)
-          : await run();
-        emitAgentWorkLog(options.workLogger, {
-          ...workEvent(runId, "tool.completed"),
-          toolName: hostTool.name,
-          ...(toolCallId ? { toolCallId } : {}),
-          outputCharacters: valueCharacters(output),
-          elapsedMs: Math.round(performance.now() - startedAt),
-        });
-        emitAgentTrace(options.traceLogger, traceEvent(runId, "tool.completed", {
-          toolName: hostTool.name,
-          ...(toolCallId ? { toolCallId } : {}),
-          elapsedMs: Math.round(performance.now() - startedAt),
-          // The detailed trace keeps the complete Host observation; only the
-          // model-visible tool message is bounded below.
-          output,
-        }));
-        return modelVisibleToolOutput(hostTool.name, output);
-      } catch (error) {
-        emitAgentWorkLog(options.workLogger, {
-          ...workEvent(runId, "tool.failed"),
-          toolName: hostTool.name,
-          ...(toolCallId ? { toolCallId } : {}),
-          elapsedMs: Math.round(performance.now() - startedAt),
-          ...errorFields(error),
-        });
-        emitAgentTrace(options.traceLogger, traceEvent(runId, "tool.failed", {
-          toolName: hostTool.name,
-          ...(toolCallId ? { toolCallId } : {}),
-          elapsedMs: Math.round(performance.now() - startedAt),
-          ...errorFields(error),
-        }));
-        throw error;
-      }
-    };
-    return frameworkTool(execute, {
-      name: hostTool.name,
-      description: hostTool.description,
-      schema: hostTool.inputSchema as JsonSchema7Type,
-    });
-  });
-  return { tools, serializer };
-}
-
-type FrameworkToolConfig = { toolCall?: { id?: string } };
-
 /**
  * Host-side residual limits that framework middleware does not express:
  * thread context size, per-response size and per-turn tool calls. All counts
@@ -632,77 +342,9 @@ function createRunLimitMiddleware(limits: AgentRunLimits) {
 }
 
 /** Graph supersteps needed to reach the Host-enforced budgets, never a new budget. */
+/** Graph supersteps needed to reach the Host-enforced budgets, never a new budget. */
 function recursionLimitFor(limits: AgentRunLimits): number {
   return 4 * limits.maxTurns + 2 * limits.maxToolCalls + 16;
-}
-
-function messageCharacters(message: BaseMessage): number {
-  let characters = messageText(message).length;
-  const calls = (message as { tool_calls?: Array<{ name?: string; args?: unknown }> }).tool_calls;
-  if (Array.isArray(calls)) {
-    for (const call of calls) {
-      characters += (call?.name?.length ?? 0) + valueCharacters(call?.args);
-    }
-  }
-  return characters;
-}
-
-function valueCharacters(value: unknown): number {
-  if (typeof value === "string") return value.length;
-  if (value === undefined) return 0;
-  try {
-    return JSON.stringify(value)?.length ?? 0;
-  } catch {
-    return 0;
-  }
-}
-
-/**
- * Bound the diagnostics the model sees for one test-run result while keeping
- * the Host-owned facts (status, tests, coverage, functions, report paths)
- * intact. Compiler dumps and reflection probes must not exhaust the context in
- * one tool call, so head and tail are kept with an explicit retention marker.
- * The trace keeps the complete observation.
- */
-function modelVisibleToolOutput(name: string, value: unknown): unknown {
-  if (
-    !["run_target_tests", "run_function_group_tests", "write_target_test"].includes(name) ||
-    typeof value !== "object" || value === null || Array.isArray(value)
-  ) {
-    return value;
-  }
-  const output = value as Record<string, unknown>;
-  const bounded = (text: unknown, limit: number): unknown => {
-    if (typeof text !== "string" || text.length <= limit) return text;
-    const half = Math.floor(limit / 2);
-    return `${text.slice(0, half)}\n[Host retained ${text.length - limit} additional diagnostic characters]\n${text.slice(-half)}`;
-  };
-  return {
-    ...output,
-    ...(output.targetTest ? { targetTest: modelVisibleToolOutput("run_target_tests", output.targetTest) } : {}),
-    ...(output.functionGroupTest ? { functionGroupTest: modelVisibleToolOutput("run_function_group_tests", output.functionGroupTest) } : {}),
-    ...(typeof output.stdout === "string" ? { stdout: bounded(output.stdout, 8_000) } : {}),
-    ...(typeof output.stderr === "string" ? { stderr: bounded(output.stderr, 4_000) } : {}),
-    ...(Array.isArray(output.failures) ? {
-      failures: output.failures.slice(0, 8).map(failure => typeof failure === "object" && failure !== null
-        ? { ...failure, message: bounded(failure.message, 2_000) } : failure),
-      ...(output.failures.length > 8 ? { omittedFailureCount: output.failures.length - 8 } : {}),
-    } : {}),
-  };
-}
-
-function boundedValue(value: unknown, maximum: number): unknown {
-  if (typeof value === "string") {
-    return value.length <= maximum ? value : `${value.slice(0, maximum)}...(truncated)`;
-  }
-  try {
-    const text = JSON.stringify(value) ?? "";
-    return text.length <= maximum
-      ? value
-      : `${text.slice(0, maximum)}...(truncated)`;
-  } catch {
-    return "(unserializable value)";
-  }
 }
 
 /**
@@ -713,7 +355,10 @@ function boundedValue(value: unknown, maximum: number): unknown {
 function classifyRunFailure(error: unknown, budget: AgentRunBudget): unknown {
   if (budget.signal.aborted) return budget.signal.reason ?? error;
   const message = errorMessage(error);
-  if (error instanceof AgentRunFailure) return error;
+  // A middleware already wrapped Host failures once; the typed reason still
+  // identifies an operational failure without re-deriving it from its text.
+  const typed = typedRunFailure(error);
+  if (typed !== undefined) return typed;
   if (/context budget exhausted|response budget exhausted/i.test(message)) {
     return new AgentRunFailure("context", message, { cause: error });
   }
@@ -735,136 +380,6 @@ function classifyRunFailure(error: unknown, budget: AgentRunBudget): unknown {
   return error;
 }
 
-function acceptedResult(
-  report: FinalReportClaim,
-  observation: Awaited<ReturnType<typeof revalidateTargetReport>>["observation"],
-): LangChainAgentHostResult {
-  const targetFunction = observation.coverage?.status === "available"
-    ? observation.coverage.targetFunction
-    : undefined;
-  return {
-    verdict: report.verdict,
-    summary: report.summary,
-    ...acceptedIssue(report),
-    ...(targetFunction ? { targetFunction: { ...targetFunction } } : {}),
-  };
-}
-
-/** The public issue kind follows the accepted verdict, never the model's self-description. */
-function acceptedIssue(report: FinalReportClaim): { issue?: VerificationIssue } {
-  if (report.verdict === "bug-found" && report.issue) {
-    return { issue: { kind: "translation", description: report.issue.description } };
-  }
-  if (report.verdict === "uncertain" && report.issue) {
-    return { issue: { kind: "unknown", description: report.issue.description } };
-  }
-  return {};
-}
-
-function acceptedFunctionGroupResult(
-  report: FinalReportClaim,
-  observation: FunctionGroupTestRun,
-): LangChainFunctionGroupHostResult {
-  return {
-    verdict: report.verdict,
-    summary: report.summary,
-    ...acceptedIssue(report),
-    functions: observation.functions.map(item => ({
-      ...item,
-      ...(item.source ? { source: { ...item.source } } : {}),
-      target: { ...item.target },
-    })),
-    ...(observation.reason && observation.reason !== "verified" ? { reason: observation.reason } : {}),
-    ...(report.protocolChecks ? { protocolChecks: report.protocolChecks } : {}),
-  };
-}
-
-/** One Host observation rendered for the model; both task shapes share these lines. */
-type FeedbackObservation = {
-  status: "success" | "failure";
-  exitCode: number | null;
-  timedOut?: boolean;
-  executionErrors?: number;
-  tests?: { executed: number; passed: number; failed: number; skipped: number };
-  testCases?: VerificationTestCase[];
-  stdout: string;
-  stderr: string;
-  reportPaths?: string[];
-};
-
-/**
- * Concrete diagnostics the Agent needs to repair the same tests: counts,
- * failed cases, report locations and the runner output (Maven and other JVM
- * runners usually report compilation problems on stdout).
- */
-function observationFeedbackLines(observation: FeedbackObservation): string[] {
-  const failedCases = (observation.testCases ?? []).filter(item => item.status === "failed").slice(0, 5);
-  return [
-    `- status: ${observation.status}`,
-    `- timed out: ${observation.timedOut === true}`,
-    `- execution errors: ${observation.executionErrors ?? 0}`,
-    observation.tests
-      ? `- tests executed: ${observation.tests.executed}, passed: ${observation.tests.passed}, failed: ${observation.tests.failed}, skipped: ${observation.tests.skipped}`
-      : "- no test summary was parsed",
-    ...(failedCases.length > 0
-      ? [
-        "- failed test cases:",
-        ...failedCases.map(item => `  - ${item.id}${item.message ? `: ${boundedText(item.message, 500)}` : ""}`),
-      ]
-      : []),
-    `- report paths: ${observation.reportPaths?.join(", ") || "(none)"}`,
-    ...(observation.stdout.trim() ? [`- stdout: ${boundedText(observation.stdout.trim(), 2_000)}`] : []),
-    ...(observation.stderr.trim() ? [`- stderr: ${boundedText(observation.stderr.trim(), 2_000)}`] : []),
-  ];
-}
-
-/** One bounded feedback message per round; the complete observation stays in the trace. */
-function hostFeedbackMessage(details: readonly string[], feedback: readonly string[]): string {
-  const message = [
-    "The Host did not accept your final report. Continue in this same task, fix the same tests in the same working directory, and end with a corrected final JSON report.",
-    "",
-    "Fresh Host revalidation of the complete dedicated test folder:",
-    ...details,
-    "",
-    "Unmet completion conditions:",
-    ...feedback.map(item => `- ${item}`),
-  ].join("\n");
-  return message.length <= MAX_FEEDBACK_CHARS
-    ? message
-    : `${message.slice(0, MAX_FEEDBACK_CHARS)}\n...(feedback truncated; the complete Host observation is in the run trace)`;
-}
-
-function functionGroupFeedbackMessage(
-  feedback: readonly string[],
-  observation: FunctionGroupTestRun,
-): string {
-  return hostFeedbackMessage([
-    ...observationFeedbackLines(observation),
-    "- target function coverage from this run:",
-    ...observation.functions.map(item =>
-      `  - ${item.target.path}#${item.target.name}${item.target.signature ? ` (${item.target.signature})` : ""}: executed=${item.executed}, status=${item.status}, line=${item.lineCoverage ?? "null"}, branch=${item.branchCoverage ?? "null"}${item.coverageIssue ? `, issue=${item.coverageIssue}` : ""}`,
-    ),
-  ], feedback);
-}
-
-/** Bound model-visible diagnostics; the Host trace keeps the complete observation. */
-function boundedText(text: string, limit: number): string {
-  return text.length <= limit
-    ? text
-    : `${text.slice(0, limit)}\n[Host retained ${text.length - limit} additional diagnostic characters]`;
-}
-
-function feedbackMessage(
-  feedback: readonly string[],
-  observation: Awaited<ReturnType<typeof revalidateTargetReport>>["observation"],
-): string {
-  const coverage = observation.coverage;
-  return hostFeedbackMessage([
-    ...observationFeedbackLines(observation),
-    `- target function executed: ${coverage?.status === "available" ? String(coverage.targetFunction.executed) : "unknown"}`,
-  ], feedback);
-}
-
 function withRuntimeInstructions(
   systemPrompt: string,
   runtime: ToolRuntimeContext,
@@ -881,20 +396,6 @@ function withRuntimeInstructions(
   ].join("\n");
 }
 
-function messageText(message: BaseMessage | undefined): string {
-  if (message === undefined) return "";
-  const content = message.content;
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content.map(block => {
-    if (typeof block === "string") return block;
-    if (typeof block === "object" && block !== null && "text" in block) {
-      return String((block as { text: unknown }).text ?? "");
-    }
-    return "";
-  }).join("");
-}
-
 function traceEvent(runId: string, event: string, fields: Record<string, unknown> = {}) {
   return { at: new Date().toISOString(), runId, event, ...fields };
 }
@@ -909,6 +410,16 @@ function workEvent(
 
 function elapsedMs(startedAt: number): number {
   return Math.round(performance.now() - startedAt);
+}
+
+/** The Host failure type may be wrapped by framework middleware; follow the cause chain. */
+function typedRunFailure(error: unknown): AgentRunFailure | undefined {
+  let current: unknown = error;
+  for (let depth = 0; depth < 8 && current instanceof Error; depth += 1) {
+    if (current instanceof AgentRunFailure) return current;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return undefined;
 }
 
 function errorMessage(error: unknown): string {

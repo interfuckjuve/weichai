@@ -68,12 +68,12 @@ describe("verification host tools", () => {
     context.runtime.targetDirectory = "src/Application";
     context.runtime.targetPath = "src/Application/Service.cs";
     const list = createListTargetFilesTool()(context);
-    const result = await list.execute(list.parse({ directory: "." }));
+    const result = await list.invoke({ directory: "." }) as { files: string[] };
     expect(result.files.sort()).toEqual(["bin/cli.js", "src/Application/Product.csproj", "src/Application/Service.cs", "src/Domain/Model.cs"]);
-    expect((await list.execute(list.parse({ directory: "src/Domain/" }))).files).toEqual(["src/Domain/Model.cs"]);
-    expect((await list.execute(list.parse({ directory: ".translation-verifier-tests/run/tests" }))).files)
+    expect((await list.invoke({ directory: "src/Domain/" }) as { files: string[] }).files).toEqual(["src/Domain/Model.cs"]);
+    expect((await list.invoke({ directory: ".translation-verifier-tests/run/tests" }) as { files: string[] }).files)
       .toEqual([".translation-verifier-tests/run/tests/ServiceTests.cs"]);
-    expect(() => list.parse({ directory: "../other" })).toThrow("safe project-relative path");
+    await expect(list.invoke({ directory: "../other" })).rejects.toThrow("safe project-relative path");
   });
   it("executes an injected runner without selecting a language or framework", async () => {
     const root = await mkdtemp(join(tmpdir(), "translation-verifier-bound-runner-"));
@@ -95,12 +95,12 @@ describe("verification host tools", () => {
         };
       },
     };
-    const result = await createRunTargetTestsTool()(context).execute({ path: "tests/agent/example.custom" });
+    const result = await createRunTargetTestsTool()(context).invoke({ path: "tests/agent/example.custom" }) as TargetTestResult;
     expect(calls).toEqual(["tests/agent/example.custom"]);
     expect(result).toMatchObject({ status: "success", stdout: "bound runner", tests: { executed: 1 }, coverage: { status: "available" } });
     expect(result.reportPaths).toEqual(["TestResults/tests.trx"]);
     const reader = createReadTargetFileTool()(context);
-    expect(await reader.execute(reader.parse({ path: result.reportPaths![0] })))
+    expect(await reader.invoke({ path: result.reportPaths![0] }))
       .toEqual({ path: "TestResults/tests.trx", content: "test report" });
   });
 
@@ -115,26 +115,27 @@ describe("verification host tools", () => {
 
     const list = createListFilesTool("list_source_files", root, ["src"]);
 
-    expect(list.inputSchema.properties).toMatchObject({
-      directory: {
-        type: "string",
-        description: expect.stringContaining("subdirectories"),
-      },
-    });
+    // The native tool exposes its own schema to the framework.
+    expect(list.name).toBe("list_source_files");
+    expect(list.description).toContain("src");
+    // Zod rejects structural input before the Host authorization runs.
+    await expect(list.invoke({ directory: 42 } as never)).rejects.toThrow();
+    await expect(list.invoke({ directory: "src", unexpected: true } as never)).rejects.toThrow();
+    await expect(list.invoke({ directory: "src", maxResults: 0 })).rejects.toThrow();
     await expect(
-      list.execute(list.parse({ directory: "src/nested" })),
+      list.invoke({ directory: "src/nested" }),
     ).resolves.toEqual({
       files: ["src/nested/helper.py"],
       truncated: false,
     });
-    expect(() => list.parse({ directory: "other" })).toThrow(
+    await expect(list.invoke({ directory: "other" })).rejects.toThrow(
       "not authorized",
     );
-    expect(() => list.parse({ directory: "src/../other" })).toThrow(
+    await expect(list.invoke({ directory: "src/../other" })).rejects.toThrow(
       "safe project-relative path",
     );
     await expect(
-      list.execute(list.parse({ directory: "src", maxResults: 1 })),
+      list.invoke({ directory: "src", maxResults: 1 }),
     ).resolves.toMatchObject({
       files: ["src/source.py"],
       truncated: true,
@@ -161,40 +162,35 @@ describe("verification host tools", () => {
     const writeTest = createWriteTargetTestTool()(context);
     const runTests = createRunTargetTestsTool()(context);
 
-    await expect(() =>
-      readSource.parse({ path: "../target/src/target.java" }),
-    ).toThrow("safe project-relative path");
+    await expect(readSource.invoke({ path: "../target/src/target.java" }))
+      .rejects.toThrow("safe project-relative path");
     await expect(
-      readSource.execute(readSource.parse({ path: "src/other.py" })),
+      readSource.invoke({ path: "src/other.py" }),
     ).resolves.toEqual({ path: "src/other.py", content: "return 2\n" });
     await expect(
-      readTarget.execute(readTarget.parse({ path: "src/target.java" })),
+      readTarget.invoke({ path: "src/target.java" }),
     ).resolves.toEqual({ path: "src/target.java", content: "return 1;\n" });
     await expect(
-      readTarget.execute(readTarget.parse({ path: "missing.java" })),
+      readTarget.invoke({ path: "missing.java" }),
     ).rejects.toThrow("File does not exist");
 
-    await writeTest.execute(
-      writeTest.parse({
-        path: "tests/agent/verification.js",
-        content: "process.stdout.write('verified')",
-      }),
-    );
+    await writeTest.invoke({
+      path: "tests/agent/verification.js",
+      content: "process.stdout.write('verified')",
+    });
     await expect(
-      readTarget.execute(readTarget.parse({ path: "tests/agent/verification.js" })),
+      readTarget.invoke({ path: "tests/agent/verification.js" }),
     ).resolves.toEqual({
       path: "tests/agent/verification.js",
       content: "process.stdout.write('verified')",
     });
-    expect(runTests.parse({})).toEqual({});
-    expect(() => runTests.parse({ command: "arbitrary" })).toThrow("accepts only an optional path");
-    await expect(() =>
-      runTests.parse({ path: "../src/target.java" }),
-    ).toThrow("safe project-relative path");
+    // The schema rejects a fixed-command override and a non-string path.
+    await expect(runTests.invoke({ command: "arbitrary" } as never)).rejects.toThrow();
+    await expect(runTests.invoke({ path: 42 } as never)).rejects.toThrow();
+    await expect(runTests.invoke({ path: "../src/target.java" }))
+      .rejects.toThrow("safe project-relative path");
 
-    const testResult = await runTests.execute(
-      runTests.parse({ path: "tests/agent/verification.js" }),
-    );
+    const testResult = await runTests.invoke({ path: "tests/agent/verification.js" }) as TargetTestResult;
     expect(testResult).toMatchObject({
       status: "success",
       timedOut: false,
@@ -257,7 +253,7 @@ describe("verification host tools", () => {
       },
     };
     const run = createRunTargetTestsTool()(context);
-    await expect(run.execute(run.parse({ path: "tests/agent/missing.js" }))).rejects.toThrow("does not exist");
+    await expect(run.invoke({ path: "tests/agent/missing.js" })).rejects.toThrow("does not exist");
     expect(calls).toEqual([]);
   });
 
@@ -268,17 +264,13 @@ describe("verification host tools", () => {
     const writeTest = createWriteTargetTestTool()(context);
 
     await expect(
-      writeTest.execute(
-        writeTest.parse({ path: "src/Target.java", content: "bad" }),
-      ),
+      writeTest.invoke({ path: "src/Target.java", content: "bad" }),
     ).rejects.toThrow("outside the authorized test roots");
     await expect(
-      writeTest.execute(
-        writeTest.parse({
-          path: "tests/agent/generated-check.js",
-          content: "test",
-        }),
-      ),
+      writeTest.invoke({
+        path: "tests/agent/generated-check.js",
+        content: "test",
+      }),
     ).resolves.toEqual({ path: "tests/agent/generated-check.js" });
   });
 
@@ -298,18 +290,18 @@ describe("verification host tools", () => {
     const run = createRunTargetTestsTool()(context);
     const write = createWriteTargetTestTool()(context);
     const path = "tests/translation-verifier/nested/existing.test.js";
-    await run.execute({ path });
-    await write.execute({ path, content: "updated" });
+    await run.invoke({ path });
+    await write.invoke({ path, content: "updated" });
     const read = createReadTargetFileTool()(context);
-    expect(await read.execute({ path })).toEqual({ path, content: "updated" });
-    await run.execute({ path });
+    expect(await read.invoke({ path })).toEqual({ path, content: "updated" });
+    await run.invoke({ path });
     expect(calls).toEqual([path, path]);
     for (const outside of ["tests/existing.test.js", "tests/translation-verifier-other/test.js", "src/Target.java"]) {
-      await expect(write.execute({ path: outside, content: "bad" })).rejects.toThrow("outside the authorized test roots");
-      await expect(run.execute({ path: outside })).rejects.toThrow("outside the authorized test roots");
+      await expect(write.invoke({ path: outside, content: "bad" })).rejects.toThrow("outside the authorized test roots");
+      await expect(run.invoke({ path: outside })).rejects.toThrow("outside the authorized test roots");
     }
     expect(calls).toEqual([path, path]);
-    expect((await read.execute({ path: "tests/existing.test.js" })).content).toBe("outside");
+    expect((await read.invoke({ path: "tests/existing.test.js" }) as { content: string }).content).toBe("outside");
   });
 
   it("allows an empty first baseline before the dedicated folder has been created", async () => {
@@ -317,7 +309,7 @@ describe("verification host tools", () => {
     roots.push(root);
     const context = toolContext(root, root);
     context.runner = { run: async () => { throw new Error("No tests should execute."); } };
-    await expect(createRunTargetTestsTool()(context).execute({ path: "tests/agent" }))
+    await expect(createRunTargetTestsTool()(context).invoke({ path: "tests/agent" }))
       .resolves.toMatchObject({ status: "success", tests: { executed: 0 }, reportPaths: [] });
   });
 
@@ -344,18 +336,18 @@ describe("verification host tools", () => {
       },
     };
     const tool = createRunTargetTestsTool()(context);
-    const result = await tool.execute(tool.parse({ path: "tests/agent" }));
+    const result = await tool.invoke({ path: "tests/agent" }) as TargetTestResult;
     expect(calls).toEqual(["tests/agent/first.test.js", "tests/agent/nested/second.test.js"]);
     expect(result.tests).toEqual({ executed: 2, passed: 2, failed: 0, skipped: 0 });
     calls.length = 0;
-    await tool.execute(tool.parse({}));
+    await tool.invoke({});
     expect(calls).toEqual(["tests/agent/first.test.js", "tests/agent/nested/second.test.js"]);
     calls.length = 0;
-    await tool.execute({ path: "tests/agent/nested" });
+    await tool.invoke({ path: "tests/agent/nested" });
     expect(calls).toEqual(["tests/agent/nested/second.test.js"]);
     calls.length = 0;
     for (const path of ["tests", "tests/agent-other"]) {
-      await expect(tool.execute({ path })).rejects.toThrow("outside the authorized test roots");
+      await expect(tool.invoke({ path })).rejects.toThrow("outside the authorized test roots");
     }
     expect(calls).toEqual([]);
   });
@@ -378,7 +370,7 @@ describe("verification host tools", () => {
       };
     };
     context.runner = { run: path => runSuite([path]), runSuite };
-    await createRunTargetTestsTool()(context).execute({ path: "tests/agent/passing.test.js" });
+    await createRunTargetTestsTool()(context).invoke({ path: "tests/agent/passing.test.js" });
     await writeFile(join(root, "tests/agent/regression.test.js"), "test");
     calls.length = 0;
     const rejected = await revalidateTargetReport(context, {
@@ -417,7 +409,7 @@ describe("verification host tools", () => {
     const output = await revalidateTargetReport(context, defect);
     expect(output.feedback.join("\n")).toContain("compile and execute");
     expect(output.observation).toMatchObject({ stderr: "SyntaxError", tests: { executed: 0 } });
-    await createWriteTargetTestTool()(context).execute({ path: "tests/agent/broken.test.js", content: "test('repaired', () => {})" });
+    await createWriteTargetTestTool()(context).invoke({ path: "tests/agent/broken.test.js", content: "test('repaired', () => {})" });
     context.runner = { run: async () => ({
       status: "success", timedOut: false, exitCode: 0, stdout: "repaired", stderr: "", durationMs: 1,
       tests: { executed: 1, passed: 1, failed: 0, skipped: 0 },
@@ -488,7 +480,7 @@ describe("verification host tools", () => {
     const runTests = createRunTargetTestsTool()(context);
 
     await expect(
-      runTests.execute(runTests.parse({ path: "tests/agent/timeout.js" })),
+      runTests.invoke({ path: "tests/agent/timeout.js" }),
     ).resolves.toMatchObject({ status: "failure", timedOut: true });
   });
 });

@@ -1,37 +1,21 @@
+import { tool } from "langchain";
+import { z } from "zod";
 import { resolveTestPaths } from "../test-runner.js";
 import {
   relativePath,
   type FunctionGroupTestRun,
-  type HostTool,
   type HostToolFactory,
   type ToolContext,
 } from "./common.js";
 
-export type RunFunctionGroupTestsInput = {
-  paths?: string[];
-};
+const runFunctionGroupTestsSchema = z.strictObject({
+  paths: z.array(z.string()).min(1).optional(),
+});
 
-function parseRunFunctionGroupTestsInput(value: unknown): RunFunctionGroupTestsInput {
-  if (
-    typeof value !== "object" ||
-    value === null ||
-    Array.isArray(value) ||
-    Object.keys(value).some(key => key !== "paths")
-  ) {
-    throw new Error("run_function_group_tests accepts only optional paths.");
-  }
-  const paths = (value as { paths?: unknown }).paths;
-  if (paths === undefined) return {};
-  if (!Array.isArray(paths) || paths.length === 0) {
-    throw new Error("run_function_group_tests requires at least one path.");
-  }
-  return {
-    paths: paths.map((path) => relativePath(path, "test path")),
-  };
-}
+export type RunFunctionGroupTestsInput = z.infer<typeof runFunctionGroupTestsSchema>;
 
 export function createRunFunctionGroupTestsTool(): HostToolFactory {
-  return (context: ToolContext): HostTool<RunFunctionGroupTestsInput, FunctionGroupTestRun> => {
+  return (context: ToolContext) => {
     const testRoots = context.runtime.testRoots.map((root) => relativePath(root, "test root"));
     if (testRoots.length === 0) {
       throw new Error("run_function_group_tests requires at least one test root.");
@@ -40,17 +24,12 @@ export function createRunFunctionGroupTestsTool(): HostToolFactory {
       throw new Error("run_function_group_tests requires a function-group test runner.");
     }
 
-    return {
+    return tool(async (input: RunFunctionGroupTestsInput): Promise<FunctionGroupTestRun> =>
+      runFunctionGroupTests(context, input), {
       name: "run_function_group_tests",
       description: `Run existing ${context.runtime.targetLanguage} target test files or all tests in selected directories for the bound function group inside the dedicated authorized test folder: ${testRoots.join(", ")}. Pass the authorized folder itself or omit paths to check all existing tests before adding tests. Files need not have been created or modified during this Agent run. The Host selects the test command and coverage targets. The result includes reportPaths for fresh test and coverage reports, relative to the target project; inspect them with read_target_file. An empty list means no fresh report was found.`,
-      inputSchema: {
-        type: "object",
-        additionalProperties: false,
-        properties: { paths: { type: "array", items: { type: "string" }, minItems: 1 } },
-      },
-      parse: parseRunFunctionGroupTestsInput,
-      execute: input => runFunctionGroupTests(context, input),
-    };
+      schema: runFunctionGroupTestsSchema,
+    });
   };
 }
 

@@ -407,6 +407,9 @@ describe("LangChain model-visible tool diagnostics", () => {
     expect(visible.reportPaths).toEqual(expect.arrayContaining(["target/site/jacoco/jacoco.xml"]));
     const completed = trace.find(event => event.event === "tool.completed");
     expect(String((completed!.output as { stdout: string }).stdout).length).toBeGreaterThan(50_000);
+    // The complete observation also stays attached to the tool message, so the
+    // Host can inspect it without re-running the suite.
+    expect(String((toolMessage!.artifact as { stdout: string }).stdout).length).toBeGreaterThan(50_000);
   });
 });
 

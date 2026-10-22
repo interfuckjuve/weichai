@@ -60,7 +60,9 @@ export type VerificationInput = {
 
 The `single-agent` strategy passes only task context and selects the tool capabilities it needs. It does not provide tool descriptions, project roots, test roots, runners, or executables.
 
-The Host resolves that task context into an internal runtime context before binding tools. Each tool owns its description template and reads the Host-injected runtime context to render language, logical path, test-root, and runner details. Absolute project paths and executable configuration remain Host-only.
+The Host resolves that task context into an internal runtime context before binding tools. Each tool factory returns one native LangChain `tool(fn, { name, description, schema })` bound to that run: the argument schema is a Zod object, so the framework validates and serializes tool input itself. Domain rules stay Host-owned inside the tool body: project-relative paths, the authorized test roots, the text-file size limit, and the fixed test command are never model-selectable. Each tool owns its description template and renders language, logical path, test-root, and runner details from the injected runtime context. Absolute project paths and executable configuration remain Host-only.
+
+Cross-cutting tool behavior lives in one framework middleware (`wrapToolCall`): one log event per call, serialized access to the shared target directory, the bounded model-visible test observation with the complete result kept as the `ToolMessage` artifact and in the trace, and a fatal path for budget, context and cancellation failures. Recoverable domain refusals and schema rejections come back as framework tool messages on the same `tool_call_id`, so the Agent can correct itself without a Host-side tool loop.
 
 ## Calling the Verifier
 

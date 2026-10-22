@@ -123,12 +123,10 @@ describe("createVerifier", () => {
     ]);
     const sourceList = task.tools[0]!(context);
     const targetList = task.tools[2]!(context);
-    expect(sourceList.inputSchema.properties).toMatchObject({
-      directory: {
-        type: "string",
-        description: expect.stringContaining("subdirectories"),
-      },
-    });
+    // The native tool keeps its own Zod schema for the framework.
+    expect(sourceList.name).toBe("list_source_files");
+    const sourceSchema = (sourceList as { schema?: { shape?: Record<string, unknown> } }).schema;
+    expect(sourceSchema?.shape).toHaveProperty("directory");
     expect(sourceList.description).toContain("Python source files");
     expect(targetList.description).toContain("Python target files");
     expect(task.tools[1]!(context).description).toContain("Python source project");

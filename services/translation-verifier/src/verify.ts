@@ -1,7 +1,5 @@
-import {
-  createSingleAgentStrategy,
-  type SingleAgentHostResult,
-} from "./strategies/single-agent/strategy.js";
+import { createSingleAgentStrategy } from "./strategies/single-agent/strategy.js";
+import type { AgentHostResult } from "./host/host-result.js";
 import type { AgentHost } from "./host/task.js";
 import type {
   VerificationInput,
@@ -18,7 +16,7 @@ export type VerificationRunner = (
 
 /** Build the public runner and keep strategy registration inside the verifier. */
 export function createVerifier(
-  host: AgentHost<SingleAgentHostResult>,
+  host: AgentHost<AgentHostResult>,
 ): VerificationRunner {
   const strategies: Readonly<
     Record<string, VerificationStrategy<VerificationResult>>

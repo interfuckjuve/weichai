@@ -1,4 +1,5 @@
 import type { AgentHost, AgentTask } from "../../host/task.js";
+import type { FunctionGroupHostResult } from "../../host/host-result.js";
 import {
   createListSourceFilesTool,
   createListTargetFilesTool,
@@ -11,30 +12,15 @@ import type {
   FunctionGroupVerificationInput,
   FunctionGroupVerificationResult,
   FunctionGroupVerificationStrategy,
-  FunctionGroupFunctionResult,
-  ProtocolCheck,
   RequirementFunctionGroupVerificationInput,
-  VerificationFunction,
-  VerificationIssue,
-  VerificationReason,
 } from "../../types.js";
 
 function formatFunction(path: string, name: string, signature?: string): string {
   return `${name}${signature ? ` (${signature})` : ""} in ${path}`;
 }
 
-/** Agent candidate conclusion accepted by the Host plus its fresh per-function observation. */
-export type SingleAgentFunctionGroupHostResult = {
-  verdict: "no-bug" | "bug-found" | "uncertain";
-  summary: string;
-  issue?: VerificationIssue;
-  functions: FunctionGroupFunctionResult[];
-  reason?: VerificationReason;
-  protocolChecks?: ProtocolCheck[];
-};
-
 function toVerificationResult(
-  result: SingleAgentFunctionGroupHostResult,
+  result: FunctionGroupHostResult,
 ): FunctionGroupVerificationResult {
   return {
     status: result.verdict === "no-bug" ? "success" : "failure",
@@ -46,7 +32,7 @@ function toVerificationResult(
 }
 
 export function createSingleAgentFunctionGroupStrategy(
-  host: AgentHost<SingleAgentFunctionGroupHostResult>,
+  host: AgentHost<FunctionGroupHostResult>,
 ): FunctionGroupVerificationStrategy<FunctionGroupVerificationResult> {
   return {
     verify: async (input) =>
@@ -119,7 +105,7 @@ export function createFunctionGroupFinalReportTask(
 
 /** Requirement-mode strategy: target-only tools, same Host-controlled runner. */
 export function createRequirementFunctionGroupStrategy(
-  host: AgentHost<SingleAgentFunctionGroupHostResult>,
+  host: AgentHost<FunctionGroupHostResult>,
 ): FunctionGroupVerificationStrategy<FunctionGroupVerificationResult> {
   return {
     verify: async (input) =>

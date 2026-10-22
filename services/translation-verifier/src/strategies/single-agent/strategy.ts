@@ -1,4 +1,5 @@
 import type { AgentHost, AgentTask } from "../../host/task.js";
+import type { AgentHostResult } from "../../host/host-result.js";
 import {
   createListSourceFilesTool,
   createListTargetFilesTool,
@@ -8,9 +9,7 @@ import { createReadTargetFileTool } from "../../host/tools/read-target-file.js";
 import { createRunTargetTestsTool } from "../../host/tools/run-target-tests.js";
 import { createWriteTargetTestTool } from "../../host/tools/write-target-test.js";
 import type {
-  TargetFunctionCoverage,
   VerificationInput,
-  VerificationIssue,
   VerificationResult,
   VerificationStrategy,
 } from "../../types.js";
@@ -20,16 +19,8 @@ function formatEntity(entity: { path: string; name: string; signature?: string }
   return `${entity.name}${signature} in ${entity.path}`;
 }
 
-/** Agent candidate conclusion accepted by the Host plus its fresh observation. */
-export type SingleAgentHostResult = {
-  verdict: "no-bug" | "bug-found" | "uncertain";
-  summary: string;
-  issue?: VerificationIssue;
-  targetFunction?: TargetFunctionCoverage;
-};
-
 function toVerificationResult(
-  result: SingleAgentHostResult,
+  result: AgentHostResult,
 ): VerificationResult {
   return {
     status: result.verdict === "no-bug" ? "success" : "failure",
@@ -90,7 +81,7 @@ export function createFinalReportTask(input: VerificationInput): AgentTask {
 
 /** The minimal strategy: compare source and target, test the target, then report. */
 export function createSingleAgentStrategy(
-  host: AgentHost<SingleAgentHostResult>,
+  host: AgentHost<AgentHostResult>,
 ): VerificationStrategy<VerificationResult> {
   return {
     verify: async (input) => {
