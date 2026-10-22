@@ -56,7 +56,7 @@ const run = (executed: number, reportPath: string): FunctionGroupTestRun => ({
   functions: [{
     target: { path: 'src/Service.cs', name: 'Run', signature: 'Service.Run' },
     executed: true,
-    status: 'success',
+    status: 'passed',
     lineCoverage: 90,
     branchCoverage: 80,
   }],
@@ -256,8 +256,26 @@ describe('offline verifier evidence', () => {
 
 describe('offline verifier task handoff', () => {
   const protocol = {
-    boundaries: [{ id: 'boundary-1', module: 'orders', name: 'Order boundary', rule: 'Reject empty ids.' }],
-    sharedContracts: [{ id: 'contract-1', name: 'Price contract', rule: 'Prices stay positive.' }],
+    version: 1 as const,
+    moduleId: 'orders',
+    sourceVersion: 1 as const,
+    invariants: [],
+    boundaries: [{
+      id: 'boundary-1',
+      module: 'orders',
+      responsibility: 'Owns order admission.',
+      source: 'module-confirmed' as const,
+      status: 'verified' as const,
+      note: 'Reject empty ids.',
+    }],
+    sharedContracts: [{
+      id: 'contract-1',
+      name: 'Price contract',
+      rule: 'Prices stay positive.',
+      source: 'requirement' as const,
+      status: 'fixed' as const,
+    }],
+    openQuestions: [],
   };
   const functions = [
     { path: 'src/Service.cs', name: 'Run', signature: 'Service.Run' },
