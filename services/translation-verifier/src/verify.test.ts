@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createVerifier } from "./verify.js";
-import type { AgentTask } from "./host/agent.js";
+import type { AgentTask } from "./host/task.js";
 import type { VerificationInput } from "./types.js";
 
 const input: VerificationInput = {

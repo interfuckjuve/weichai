@@ -3,7 +3,7 @@ import {
   createAgentRunBudget,
   DEFAULT_AGENT_RUN_LIMITS,
   validateAgentRunLimits,
-} from "./agent.js";
+} from "./run-budget.js";
 
 describe("AgentRunBudget", () => {
   it('propagates project cancellation to model and test tool budgets', () => {

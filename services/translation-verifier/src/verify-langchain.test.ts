@@ -82,7 +82,7 @@ type Fixture = {
   resolveToolContext: () => Promise<ToolRuntimeContext>;
 };
 
-async function createFixture(testContent?: string): Promise<Fixture> {
+async function createFixture(testContent?: string, runnerSuffix = ""): Promise<Fixture> {
   const root = await mkdtemp(join(tmpdir(), "verifier-langchain-"));
   modelRoots.push(root);
   await mkdir(join(root, "src"), { recursive: true });
@@ -93,7 +93,7 @@ async function createFixture(testContent?: string): Promise<Fixture> {
     "class Target { int targetFn() { return 1; } }",
   );
   if (testContent !== undefined) await writeFile(join(root, TEST_PATH), testContent);
-  await writeFile(join(root, "fake-runner.cjs"), RUNNER_SCRIPT);
+  await writeFile(join(root, "fake-runner.cjs"), `${RUNNER_SCRIPT}${runnerSuffix}`);
   const input: VerificationInput = {
     schemaVersion: "2.0",
     sourceLanguage: "Java",
@@ -257,6 +257,54 @@ describe("LangChain single-function verification", () => {
 });
 
 describe("LangChain Host feedback continuation", () => {
+  it("rejects a no-bug report while a protocol check is failed or ambiguous", async () => {
+    const fixture = await createFixture("class BehaviorTest { int requirement() { return 1; } }");
+    const model = new ScriptedChatModel([
+      () => finalReport(report("no-bug", {
+        protocolChecks: [
+          { ruleId: "module-contract", status: "failed", note: "price went negative" },
+          { ruleId: "error-shape", status: "ambiguous" },
+        ],
+      })),
+      () => finalReport(report("no-bug")),
+    ]);
+
+    const result = await verifier(fixture, model)(fixture.input, "single-agent", "verify");
+
+    expect(result.status).toBe("success");
+    const feedback = model.observations[1]!.find(message => message instanceof HumanMessage &&
+      String(message.content).includes("did not accept your final report"));
+    expect(feedback).toBeDefined();
+    expect(String(feedback!.content)).toContain("protocol checks are failed or ambiguous");
+    expect(String(feedback!.content)).toContain("module-contract");
+    expect(String(feedback!.content)).toContain("error-shape");
+  });
+
+  it("quotes the failing test case and the runner stdout in single-function feedback", async () => {
+    const fixture = await createFixture(
+      "class BehaviorTest { FAILING }",
+      "process.stdout.write('AssertionError: expected rejection at BehaviorTest.requirement\\n');\n",
+    );
+    const model = new ScriptedChatModel([
+      () => finalReport(report("no-bug")),
+      () => finalReport(report("bug-found", {
+        issue: { kind: "translation", description: "targetFn accepts input the requirement rejects." },
+        affectedTargets: [{ path: TARGET_PATH, name: "targetFn" }],
+      })),
+    ]);
+
+    const result = await verifier(fixture, model)(fixture.input, "single-agent", "verify");
+
+    expect(result.status).toBe("failure");
+    const feedback = String(model.observations[1]!.find(message => message instanceof HumanMessage &&
+      String(message.content).includes("did not accept your final report"))?.content);
+    // The Agent must see the concrete failed assertion and the runner stdout.
+    expect(feedback).toContain("failed test cases");
+    expect(feedback).toContain("expected rejection");
+    expect(feedback).toContain("- stdout:");
+    expect(feedback).toContain("AssertionError: expected rejection");
+  });
+
   it("feeds a compile failure back to the same Agent, which repairs the same test and passes revalidation", async () => {
     const fixture = await createFixture("class BehaviorTest { BROKEN }");
     const model = new ScriptedChatModel([

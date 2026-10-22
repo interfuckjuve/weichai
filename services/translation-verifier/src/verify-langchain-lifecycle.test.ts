@@ -8,7 +8,7 @@ import type { ChatResult } from "@langchain/core/outputs";
 import type { StructuredToolInterface } from "@langchain/core/tools";
 import { createVerifier } from "./verify.js";
 import { createLangChainAgentHost } from "./host/langchain-runtime.js";
-import { AgentRunFailure } from "./host/agent.js";
+import { AgentRunFailure } from "./host/run-budget.js";
 import type { AgentWorkLogEvent } from "./host/work-log.js";
 import type { AgentTraceEvent } from "./host/trace-log.js";
 import type { ToolRuntimeContext } from "./host/tools/common.js";

@@ -8,7 +8,7 @@ import type {
   VerificationReason,
   VerificationTestCase,
 } from "../../types.js";
-import type { AgentRunBudget } from "../agent.js";
+import type { AgentRunBudget } from "../run-budget.js";
 import { readFile } from "node:fs/promises";
 import { lstatSync, realpathSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";

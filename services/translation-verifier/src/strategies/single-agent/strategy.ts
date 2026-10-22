@@ -1,4 +1,4 @@
-import type { AgentHost, AgentTask } from "../../host/agent.js";
+import type { AgentHost, AgentTask } from "../../host/task.js";
 import {
   createListSourceFilesTool,
   createListTargetFilesTool,

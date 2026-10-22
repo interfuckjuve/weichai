@@ -11,7 +11,7 @@ import {
   createLangChainAgentHost,
   createLangChainFunctionGroupAgentHost,
 } from "../src/host/langchain-runtime.js";
-import { AgentRunFailure } from "../src/host/agent.js";
+import { AgentRunFailure } from "../src/host/run-budget.js";
 import type { AgentWorkLogEvent } from "../src/host/work-log.js";
 import type { AgentTraceEvent } from "../src/host/trace-log.js";
 import type {

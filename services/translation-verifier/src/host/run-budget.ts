@@ -1,23 +1,3 @@
-import type {
-  AgentTaskContext,
-  HostToolFactory,
-} from "./tools/common.js";
-
-export type { AgentTaskContext, ToolRuntimeContext } from "./tools/common.js";
-
-export type AgentToolFactory = HostToolFactory;
-
-/**
- * One Agent call: the Host prompt plus the tool capabilities the strategy
- * selected. The Agent ends the call by answering without a tool call.
- */
-export type AgentTask = {
-  taskContext: AgentTaskContext;
-  systemPrompt: string;
-  userPrompt: string;
-  tools: readonly AgentToolFactory[];
-};
-
 export type AgentRunLimits = {
   maxDurationMs: number;
   maxTurns: number;
@@ -129,8 +109,4 @@ export function validateAgentRunLimits(limits: AgentRunLimits): void {
   ) {
     throw new Error("Invalid Agent run limits.");
   }
-}
-
-export interface AgentHost<Result = unknown> {
-  run(task: AgentTask): Result | Promise<Result>;
 }

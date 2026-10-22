@@ -1224,7 +1224,9 @@ try {
             entry.translationVerification = await verifyFunctionGroup(verificationInput, verificationStrategy, 'verify');
           } catch (error) {
             const description = error instanceof Error ? error.message : String(error);
-            const classification = classifyOfflineVerifierFailure(description);
+            // The Host error keeps its operational reason; the pipeline does not
+            // re-derive it from localized message wording.
+            const classification = classifyOfflineVerifierFailure(error);
             const retainedTestEvidence = (error as { testEvidence?: FunctionGroupVerificationResult['testEvidence'] })?.testEvidence
               ?? verificationInput.testEvidence;
             entry.translationVerification = {

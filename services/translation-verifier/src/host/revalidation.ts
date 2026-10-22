@@ -74,8 +74,14 @@ export async function revalidateTargetReport(
     target.path !== requestedTarget.path || target.name !== requestedTarget.name ||
     (target.signature ?? undefined) !== (requestedTarget.signature ?? undefined));
 
-  if (report.verdict === "no-bug" && !suitePassed) {
-    feedback.push("A no-bug report requires every test in the dedicated folder to pass. Diagnose the failure or report the evidenced production bug; preserve valid failing requirement assertions.");
+  if (report.verdict === "no-bug") {
+    if (!suitePassed) {
+      feedback.push("A no-bug report requires every test in the dedicated folder to pass. Diagnose the failure or report the evidenced production bug; preserve valid failing requirement assertions.");
+    }
+    const unresolved = (report.protocolChecks ?? []).filter(check => check.status === "failed" || check.status === "ambiguous");
+    if (unresolved.length > 0) {
+      feedback.push(`A no-bug report cannot be accepted while protocol checks are failed or ambiguous: ${unresolved.map(check => check.ruleId).join(", ")}. Retain the failing assertion, resolve the ambiguity, or report the appropriate verdict.`);
+    }
   }
   if (report.verdict === "bug-found") {
     if (missingFailedAssertion) {

@@ -456,4 +456,33 @@ describe("LangChain function-group Host feedback", () => {
     expect(continuation).toContain("cannot find symbol");
     expect(continuation).toContain("- stdout:");
   });
+
+  it("bounds the function-group feedback by the same limit as the single-function feedback", async () => {
+    const fixture = await createFixture("class GroupTest { /* COVER_B COVER_C */ }");
+    // Many out-of-scope affectedTargets make the unmet-condition list unbounded.
+    const outOfScope = Array.from({ length: 600 }, (_, index) => ({
+      path: `src/Other${index}.java`,
+      name: `other${index}`,
+    }));
+    const model = new ScriptedChatModel([
+      () => finalReport(report("bug-found", {
+        issue: { kind: "translation", description: "A concrete defect description." },
+        affectedTargets: [{ path: ORDER_PATH, name: "calculatePrice" }, ...outOfScope],
+      })),
+      () => finalReport(report("no-bug")),
+    ]);
+
+    await groupVerifier(fixture, model)(
+      fixture.input,
+      "single-agent-function-group",
+      "verify",
+    );
+
+    const feedback = model.observations[1]!.find(message => message instanceof HumanMessage &&
+      String(message.content).includes("did not accept your final report"));
+    expect(feedback).toBeDefined();
+    // The model-visible feedback is bounded; the full observation stays in the trace.
+    expect(String(feedback!.content).length).toBeLessThanOrEqual(12_200);
+    expect(String(feedback!.content)).toContain("feedback truncated");
+  });
 });

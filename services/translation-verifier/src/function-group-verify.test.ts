@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createFunctionGroupVerifier } from "./function-group-verify.js";
-import type { AgentTask } from "./host/agent.js";
+import type { AgentTask } from "./host/task.js";
 import type { FunctionGroupVerificationInput, RequirementFunctionGroupVerificationInput } from "./types.js";
 import {
   createFunctionGroupFinalReportTask,

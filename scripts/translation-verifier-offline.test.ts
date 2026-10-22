@@ -17,6 +17,7 @@ import {
   recordOfflineVerifierEvent,
   verifierTaskInputs,
 } from './translation-verifier-offline.js';
+import { AgentRunFailure } from '../services/translation-verifier/src/host/run-budget.js';
 
 const completion = {
   id: 'completion-1',
@@ -121,6 +122,23 @@ describe('offline verifier model mapping', () => {
 
 describe('offline verifier failure classification', () => {
   it('classifies the LangChain run failures as non-defect operational errors', () => {
+    // The pipeline hands over the Host error itself, so a typed reason maps
+    // without depending on message wording or localization.
+    for (const reason of ['budget', 'context'] as const) {
+      expect(classifyOfflineVerifierFailure(new AgentRunFailure(reason, 'Verifier stopped operating.')))
+        .toEqual({ reason: 'agent-timeout', kind: 'unknown' });
+    }
+    expect(classifyOfflineVerifierFailure(new AgentRunFailure('model', 'Verifier provider failure.')))
+      .toEqual({ reason: 'model-failure', kind: 'unknown' });
+    // Middleware wraps a typed failure once, so the cause chain is consulted.
+    const wrapped = new Error('middleware failure');
+    (wrapped as { cause?: unknown }).cause = new AgentRunFailure('model', 'Verifier provider failure.');
+    expect(classifyOfflineVerifierFailure(wrapped)).toEqual({ reason: 'model-failure', kind: 'unknown' });
+    expect(classifyOfflineVerifierFailure(new Error('Compilation failed with CS0246 in OrderTests.cs')))
+      .toEqual({ reason: 'test-environment-failure', kind: 'environment' });
+  });
+
+  it('keeps the historical message classification for plain strings and messages', () => {
     for (const message of [
       'Agent run budget exhausted: 64 tool calls exceed the 16-call per-turn limit.',
       'Agent run context budget exhausted: 2000000 characters exceed the 1500000-character limit.',
@@ -189,12 +207,65 @@ describe('offline verifier evidence', () => {
 
   it('records tool failures without inventing an observation', () => {
     const evidence = createOfflineVerifierEvidence();
+    // The Host trace carries error and errorType; the artifact keeps both so a
+    // failed tool call is not silently reduced to a missing observation.
     expect(recordOfflineVerifierEvent(evidence, traceEvent('tool.failed', {
       toolName: 'run_function_group_tests',
-      message: 'authorized test root required',
+      error: 'authorized test root required',
+      errorType: 'Error',
     }))).toBe(true);
-    expect(evidence.toolFailures).toEqual([{ toolName: 'run_function_group_tests', message: 'authorized test root required' }]);
+    expect(evidence.toolFailures).toEqual([{
+      toolName: 'run_function_group_tests',
+      message: 'authorized test root required',
+      errorType: 'Error',
+    }]);
     expect(evidence.finalObservation).toBeUndefined();
+  });
+
+  it('drops the started write intent when its tool call fails', () => {
+    const evidence = createOfflineVerifierEvidence();
+    const path = '.translation-verifier-tests/java/FailedWrite.java';
+    recordOfflineVerifierEvent(evidence, traceEvent('tool.started', {
+      toolName: 'write_target_test',
+      toolCallId: 'call-4',
+      input: { path, content: 'class FailedWrite { BROKEN }' },
+    }));
+    recordOfflineVerifierEvent(evidence, traceEvent('tool.failed', {
+      toolName: 'write_target_test',
+      toolCallId: 'call-4',
+      error: 'Test path is outside the authorized test roots.',
+      errorType: 'Error',
+    }));
+    recordOfflineVerifierEvent(evidence, traceEvent('tool.completed', {
+      toolName: 'write_target_test',
+      toolCallId: 'call-4',
+      output: { path },
+    }), { readTestFile: requested => requested === path ? 'class Repaired { }' : undefined });
+    // The failed payload must never be recorded as the written test.
+    expect(evidence.testVersions).toEqual([{
+      path,
+      content: 'class Repaired { }',
+      source: 'written-file',
+    }]);
+  });
+
+  it('keeps started write intents inside one evidence object', () => {
+    const first = createOfflineVerifierEvidence();
+    const second = createOfflineVerifierEvidence();
+    const path = '.translation-verifier-tests/java/Isolated.java';
+    recordOfflineVerifierEvent(first, traceEvent('tool.started', {
+      toolName: 'write_target_test',
+      toolCallId: 'call-5',
+      input: { path, content: 'class First { }' },
+    }));
+    recordOfflineVerifierEvent(second, traceEvent('tool.completed', {
+      toolName: 'write_target_test',
+      toolCallId: 'call-5',
+      output: { path },
+    }), { readTestFile: requested => requested === path ? 'class Second { }' : undefined });
+    // Another run must not inherit this run's unfinished write intent.
+    expect(second.testVersions).toEqual([{ path, content: 'class Second { }', source: 'written-file' }]);
+    expect(first.testVersions).toEqual([]);
   });
 
   it('snapshots the written test from the tool payload when it is complete', () => {
@@ -361,5 +432,11 @@ describe('offline verifier script wiring', () => {
     expect(source).toContain('createRequirementFunctionGroupFinalReportTask');
     expect(source).toContain('createFunctionGroupFinalReportTask');
     expect(source).not.toContain('Task.functionGroup');
+  });
+
+  it('classifies the verifier failure from the error itself instead of its message', () => {
+    const source = read('run-target-module-pipeline.mts');
+    expect(source).toContain('classifyOfflineVerifierFailure(error)');
+    expect(source).not.toContain('classifyOfflineVerifierFailure(description)');
   });
 });

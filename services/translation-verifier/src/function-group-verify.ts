@@ -3,7 +3,7 @@ import {
   createSingleAgentFunctionGroupStrategy,
   type SingleAgentFunctionGroupHostResult,
 } from "./strategies/single-agent-function-group/strategy.js";
-import type { AgentHost } from "./host/agent.js";
+import type { AgentHost } from "./host/task.js";
 import type {
   FunctionGroupVerificationInput,
   FunctionGroupVerificationResult,

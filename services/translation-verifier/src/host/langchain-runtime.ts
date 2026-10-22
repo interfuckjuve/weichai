@@ -16,11 +16,10 @@ import {
   AgentRunFailure,
   createAgentRunBudget,
   DEFAULT_AGENT_RUN_LIMITS,
-  type AgentHost,
   type AgentRunBudget,
   type AgentRunLimits,
-  type AgentTask,
-} from "./agent.js";
+} from "./run-budget.js";
+import type { AgentHost, AgentTask } from "./task.js";
 import { bindFunctionGroupTestRunner, bindTestRunner } from "./test-runner.js";
 import {
   revalidateFunctionGroupReport,
@@ -31,6 +30,7 @@ import type {
   FunctionGroupFunctionResult,
   ProtocolCheck,
   VerificationReason,
+  VerificationTestCase,
 } from "../types.js";
 import type {
   FunctionGroupTestRun,
@@ -779,37 +779,72 @@ function acceptedFunctionGroupResult(
   };
 }
 
-function functionGroupFeedbackMessage(
-  feedback: readonly string[],
-  observation: FunctionGroupTestRun,
-): string {
+/** One Host observation rendered for the model; both task shapes share these lines. */
+type FeedbackObservation = {
+  status: "success" | "failure";
+  exitCode: number | null;
+  timedOut?: boolean;
+  executionErrors?: number;
+  tests?: { executed: number; passed: number; failed: number; skipped: number };
+  testCases?: VerificationTestCase[];
+  stdout: string;
+  stderr: string;
+  reportPaths?: string[];
+};
+
+/**
+ * Concrete diagnostics the Agent needs to repair the same tests: counts,
+ * failed cases, report locations and the runner output (Maven and other JVM
+ * runners usually report compilation problems on stdout).
+ */
+function observationFeedbackLines(observation: FeedbackObservation): string[] {
   const failedCases = (observation.testCases ?? []).filter(item => item.status === "failed").slice(0, 5);
   return [
-    "The Host did not accept your final report. Continue in this same task, fix the same tests in the same working directory, and end with a corrected final JSON report.",
-    "",
-    "Fresh Host revalidation of the complete dedicated test folder:",
     `- status: ${observation.status}`,
     `- timed out: ${observation.timedOut === true}`,
     `- execution errors: ${observation.executionErrors ?? 0}`,
-    `- tests executed: ${observation.tests.executed}, passed: ${observation.tests.passed}, failed: ${observation.tests.failed}, skipped: ${observation.tests.skipped}`,
+    observation.tests
+      ? `- tests executed: ${observation.tests.executed}, passed: ${observation.tests.passed}, failed: ${observation.tests.failed}, skipped: ${observation.tests.skipped}`
+      : "- no test summary was parsed",
     ...(failedCases.length > 0
       ? [
         "- failed test cases:",
         ...failedCases.map(item => `  - ${item.id}${item.message ? `: ${boundedText(item.message, 500)}` : ""}`),
       ]
       : []),
-    "- target function coverage from this run:",
-    ...observation.functions.map(item =>
-      `  - ${item.target.path}#${item.target.name}${item.target.signature ? ` (${item.target.signature})` : ""}: executed=${item.executed}, status=${item.status}, line=${item.lineCoverage ?? "null"}, branch=${item.branchCoverage ?? "null"}${item.coverageIssue ? `, issue=${item.coverageIssue}` : ""}`,
-    ),
     `- report paths: ${observation.reportPaths?.join(", ") || "(none)"}`,
-    // Maven and other JVM runners usually report compilation problems on stdout.
     ...(observation.stdout.trim() ? [`- stdout: ${boundedText(observation.stdout.trim(), 2_000)}`] : []),
     ...(observation.stderr.trim() ? [`- stderr: ${boundedText(observation.stderr.trim(), 2_000)}`] : []),
+  ];
+}
+
+/** One bounded feedback message per round; the complete observation stays in the trace. */
+function hostFeedbackMessage(details: readonly string[], feedback: readonly string[]): string {
+  const message = [
+    "The Host did not accept your final report. Continue in this same task, fix the same tests in the same working directory, and end with a corrected final JSON report.",
+    "",
+    "Fresh Host revalidation of the complete dedicated test folder:",
+    ...details,
     "",
     "Unmet completion conditions:",
     ...feedback.map(item => `- ${item}`),
   ].join("\n");
+  return message.length <= MAX_FEEDBACK_CHARS
+    ? message
+    : `${message.slice(0, MAX_FEEDBACK_CHARS)}\n...(feedback truncated; the complete Host observation is in the run trace)`;
+}
+
+function functionGroupFeedbackMessage(
+  feedback: readonly string[],
+  observation: FunctionGroupTestRun,
+): string {
+  return hostFeedbackMessage([
+    ...observationFeedbackLines(observation),
+    "- target function coverage from this run:",
+    ...observation.functions.map(item =>
+      `  - ${item.target.path}#${item.target.name}${item.target.signature ? ` (${item.target.signature})` : ""}: executed=${item.executed}, status=${item.status}, line=${item.lineCoverage ?? "null"}, branch=${item.branchCoverage ?? "null"}${item.coverageIssue ? `, issue=${item.coverageIssue}` : ""}`,
+    ),
+  ], feedback);
 }
 
 /** Bound model-visible diagnostics; the Host trace keeps the complete observation. */
@@ -823,28 +858,11 @@ function feedbackMessage(
   feedback: readonly string[],
   observation: Awaited<ReturnType<typeof revalidateTargetReport>>["observation"],
 ): string {
-  const tests = observation.tests;
   const coverage = observation.coverage;
-  const message = [
-    "The Host did not accept your final report. Continue in this same task, fix the same tests in the same working directory, and end with a corrected final JSON report.",
-    "",
-    "Fresh Host revalidation of the complete dedicated test folder:",
-    `- status: ${observation.status}`,
-    `- timed out: ${observation.timedOut}`,
-    `- execution errors: ${observation.executionErrors ?? 0}`,
-    ...(tests
-      ? [`- tests executed: ${tests.executed}, passed: ${tests.passed}, failed: ${tests.failed}, skipped: ${tests.skipped}`]
-      : ["- no test summary was parsed"]),
+  return hostFeedbackMessage([
+    ...observationFeedbackLines(observation),
     `- target function executed: ${coverage?.status === "available" ? String(coverage.targetFunction.executed) : "unknown"}`,
-    `- report paths: ${observation.reportPaths?.join(", ") || "(none)"}`,
-    ...(observation.stderr.trim() ? [`- stderr: ${observation.stderr.trim().slice(0, 2_000)}`] : []),
-    "",
-    "Unmet completion conditions:",
-    ...feedback.map(item => `- ${item}`),
-  ].join("\n");
-  return message.length <= MAX_FEEDBACK_CHARS
-    ? message
-    : `${message.slice(0, MAX_FEEDBACK_CHARS)}\n...(feedback truncated; the complete Host observation is in the run trace)`;
+  ], feedback);
 }
 
 function withRuntimeInstructions(

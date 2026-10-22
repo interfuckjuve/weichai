@@ -6,7 +6,7 @@
  * provider or starts a pipeline, so the deterministic script tests exercise
  * the same mapping the real callers use.
  */
-import type { AgentTask } from '../services/translation-verifier/src/host/agent.js';
+import type { AgentTask } from '../services/translation-verifier/src/host/task.js';
 import type { TranslationVerifierChatModelOptions } from '../services/translation-verifier/src/host/chat-model.js';
 import type { AgentTraceEvent } from '../services/translation-verifier/src/host/trace-log.js';
 import type { FunctionGroupTestRun } from '../services/translation-verifier/src/host/tools/common.js';
@@ -93,12 +93,32 @@ export type OfflineVerifierFailure = {
   kind: 'environment' | 'unknown';
 };
 
+/** The Host failure type carries the operational reason; wrappers keep it as a cause. */
+type TypedRunFailure = Error & { reason?: unknown; cause?: unknown };
+
+function runFailureReason(error: unknown): string | undefined {
+  let current: unknown = error;
+  for (let depth = 0; depth < 8 && current instanceof Error; depth += 1) {
+    const reason = (current as TypedRunFailure).reason;
+    if (reason === 'budget' || reason === 'context' || reason === 'model') return reason;
+    current = (current as TypedRunFailure).cause;
+  }
+  return undefined;
+}
+
 /**
  * Map a failed verifier run onto the existing public failure reasons. Budget,
  * context/response exhaustion and model transport errors stay operational
  * failures, never a production defect or an environment verdict.
+ *
+ * A typed Host failure decides from its own reason; the historical message
+ * classification stays as a fallback for wrapped or foreign errors.
  */
-export function classifyOfflineVerifierFailure(description: string): OfflineVerifierFailure {
+export function classifyOfflineVerifierFailure(error: unknown): OfflineVerifierFailure {
+  const reason = runFailureReason(error);
+  if (reason === 'budget' || reason === 'context') return { reason: 'agent-timeout', kind: 'unknown' };
+  if (reason === 'model') return { reason: 'model-failure', kind: 'unknown' };
+  const description = error instanceof Error ? error.message : String(error);
   const text = description.toLowerCase();
   if (
     text.includes('exhausted its') ||
@@ -133,7 +153,7 @@ export type OfflineTestVersion = {
   source: 'tool-input' | 'written-file';
 };
 
-export type OfflineToolFailure = { toolName: string; message?: string };
+export type OfflineToolFailure = { toolName: string; message?: string; errorType?: string };
 
 export type OfflineVerifierEvidence = {
   /** Agent-side test-run observations kept for existing artifact consumers. */
@@ -144,6 +164,8 @@ export type OfflineVerifierEvidence = {
   /** Fresh Host observation of the last revalidation round; the authoritative evidence. */
   finalObservation?: FunctionGroupTestRun;
   finalObservationRound?: number;
+  /** Started write intents of this run only, correlated with their completion by tool call id. */
+  pendingWrites: Map<string, PendingWrite>;
 };
 
 /** Narrow hooks: the scripts supply filesystem access, the evidence logic stays pure. */
@@ -153,7 +175,7 @@ export type OfflineVerifierEvidenceHooks = {
 };
 
 export function createOfflineVerifierEvidence(): OfflineVerifierEvidence {
-  return { testRuns: [], testVersions: [], toolFailures: [] };
+  return { testRuns: [], testVersions: [], toolFailures: [], pendingWrites: new Map() };
 }
 
 type PendingWrite = { path?: string; content?: string };
@@ -200,14 +222,21 @@ export function recordOfflineVerifierEvent(
     return true;
   }
   if (event.event === 'tool.started' && event.toolName === 'write_target_test') {
-    pendingWrites.set(writeKey(event), parseWriteInput(event.input));
+    evidence.pendingWrites.set(writeKey(event), parseWriteInput(event.input));
     return true;
   }
   if (event.event === 'tool.failed') {
+    const message = typeof event.error === 'string'
+      ? event.error
+      : typeof event.message === 'string' ? event.message : undefined;
     evidence.toolFailures.push({
       toolName: String(event.toolName),
-      ...(typeof event.message === 'string' ? { message: event.message } : {}),
+      ...(message === undefined ? {} : { message }),
+      ...(typeof event.errorType === 'string' ? { errorType: event.errorType } : {}),
     });
+    // A failed write never wrote its payload: drop the intent so a later
+    // completion cannot record the rejected content as the current test.
+    if (event.toolName === 'write_target_test') clearWriteIntent(evidence, event);
     return true;
   }
   if (event.event !== 'tool.completed') return false;
@@ -218,9 +247,8 @@ export function recordOfflineVerifierEvent(
   }
   if (event.toolName === 'write_target_test') {
     const key = writeKey(event);
-    const pending = pendingWrites.get(key) ?? pendingWrites.get('write_target_test');
-    pendingWrites.delete(key);
-    pendingWrites.delete('write_target_test');
+    const pending = evidence.pendingWrites.get(key) ?? evidence.pendingWrites.get('write_target_test');
+    clearWriteIntent(evidence, event);
     const path = completedWritePath(event.output) ?? pending?.path;
     if (path === undefined) return false;
     const payloadContent = pending?.content;
@@ -237,6 +265,14 @@ export function recordOfflineVerifierEvent(
 
 /** Started write intents, correlated with their completion by tool call id. */
 const pendingWrites = new Map<string, PendingWrite>();
+
+function clearWriteIntent(
+  evidence: OfflineVerifierEvidence,
+  event: Pick<AgentTraceEvent, 'event'> & { toolCallId?: unknown },
+): void {
+  evidence.pendingWrites.delete(writeKey(event));
+  evidence.pendingWrites.delete('write_target_test');
+}
 
 function writeKey(event: Pick<AgentTraceEvent, 'event'> & { toolCallId?: unknown }): string {
   return typeof event.toolCallId === 'string' ? event.toolCallId : 'write_target_test';

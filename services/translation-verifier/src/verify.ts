@@ -2,7 +2,7 @@ import {
   createSingleAgentStrategy,
   type SingleAgentHostResult,
 } from "./strategies/single-agent/strategy.js";
-import type { AgentHost } from "./host/agent.js";
+import type { AgentHost } from "./host/task.js";
 import type {
   VerificationInput,
   VerificationPhase,
