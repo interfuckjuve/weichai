@@ -483,6 +483,9 @@ describe("LangChain function-group Host feedback", () => {
     expect(feedback).toBeDefined();
     // The model-visible feedback is bounded; the full observation stays in the trace.
     expect(String(feedback!.content).length).toBeLessThanOrEqual(12_200);
-    expect(String(feedback!.content)).toContain("feedback truncated");
+    expect(String(feedback!.content)).toContain("truncated");
+    // The concrete rejection reason and the fresh report paths survive the bound.
+    expect(String(feedback!.content)).toContain("affectedTargets must stay inside the requested function-group scope");
+    expect(String(feedback!.content)).toContain("target/site/jacoco/jacoco.xml");
   });
 });

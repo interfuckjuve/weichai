@@ -11,6 +11,7 @@ import type {
   TargetTestResult,
   ToolContext,
 } from "./tools/common.js";
+import type { FinalReportClaim } from "./final-report.js";
 import { runFunctionGroupTests } from "./tools/run-function-group-tests.js";
 import { runTargetTests } from "./tools/run-target-tests.js";
 
@@ -24,17 +25,6 @@ export type Revalidation<Observation> = {
   observation: Observation;
   /** Unmet completion conditions to return to the Agent; empty when accepted. */
   feedback: string[];
-};
-
-/** The Agent's own conclusion in a plain final assistant message. */
-export type FinalReportClaim = {
-  verdict: "no-bug" | "bug-found" | "uncertain";
-  summary: string;
-  issue?: VerificationIssue;
-  /** Target functions the Agent identifies as affected by a reported bug. */
-  affectedTargets?: VerificationFunction[];
-  /** Function-group only: up to three bounded module-protocol checks. */
-  protocolChecks?: ProtocolCheck[];
 };
 
 export type TargetRevalidation = Revalidation<TargetTestResult>;

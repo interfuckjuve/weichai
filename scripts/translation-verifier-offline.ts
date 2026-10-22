@@ -263,9 +263,6 @@ export function recordOfflineVerifierEvent(
   return false;
 }
 
-/** Started write intents, correlated with their completion by tool call id. */
-const pendingWrites = new Map<string, PendingWrite>();
-
 function clearWriteIntent(
   evidence: OfflineVerifierEvidence,
   event: Pick<AgentTraceEvent, 'event'> & { toolCallId?: unknown },

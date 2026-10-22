@@ -166,7 +166,7 @@ TRANSLATION_VERIFIER_RUNNER_E2E=1 TRANSLATION_VERIFIER_RUNNER_DEPS=/path/to/deps
 
 The Host caller supplies a framework chat model. `createTranslationVerifierChatModel` maps the existing DeepSeek/OpenAI-compatible configuration onto `ChatOpenAI` through `configuration.baseURL` and keeps the credential a caller-owned value or late resolver, so it never becomes prompt text, tool arguments, or transcript content. Provider thinking is explicitly disabled and output tokens stay bounded.
 
-HTTP attempts default to three total attempts spaced 750 ms apart, only for transient failures (`408`, `429`, `500`, `502`, `503`, `504` and network errors). Both LangChain and the OpenAI SDK retry layers are disabled, so this single transport loop is the only retry path:
+HTTP attempts default to three total attempts spaced 750 ms apart, only for transient failures (`408`, `429`, `500`, `502`, `503`, `504` and network errors). Both LangChain and the OpenAI SDK retry layers are disabled, so this single transport loop is the only retry path. The framework's `modelRetryMiddleware` is deliberately not used: in the installed version its delay is a plain `await sleep(delay)` without an `AbortSignal`, so it would not react to cancellation during a retry wait. Keep the fetch wrapper as long as that holds; it is the only layer that both aborts promptly and applies the 3×750 ms policy:
 
 ```ts
 const model = createTranslationVerifierChatModel({

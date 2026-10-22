@@ -342,7 +342,6 @@ function createRunLimitMiddleware(limits: AgentRunLimits) {
 }
 
 /** Graph supersteps needed to reach the Host-enforced budgets, never a new budget. */
-/** Graph supersteps needed to reach the Host-enforced budgets, never a new budget. */
 function recursionLimitFor(limits: AgentRunLimits): number {
   return 4 * limits.maxTurns + 2 * limits.maxToolCalls + 16;
 }
