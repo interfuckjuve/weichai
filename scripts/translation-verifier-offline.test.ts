@@ -153,15 +153,16 @@ describe('offline verifier trace filter', () => {
     ]) {
       expect(isOfflineVerifierTraceEvent(traceEvent(event, { toolName: 'run_function_group_tests' }))).toBe(true);
     }
+    expect(isOfflineVerifierTraceEvent(traceEvent('tool.started', { toolName: 'write_target_test' }))).toBe(true);
+    expect(isOfflineVerifierTraceEvent(traceEvent('tool.failed', { toolName: 'run_function_group_tests' }))).toBe(true);
     expect(isOfflineVerifierTraceEvent(traceEvent('model.request'))).toBe(false);
     expect(isOfflineVerifierTraceEvent(traceEvent('tool.completed', { toolName: 'finish_function_group' }))).toBe(false);
-    expect(isOfflineVerifierTraceEvent(traceEvent('tool.started', { toolName: 'write_target_test' }))).toBe(false);
-    expect(isOfflineVerifierTraceEvent(traceEvent('tool.completed', { toolName: 'read_target_file' }))).toBe(false);
+    expect(isOfflineVerifierTraceEvent(traceEvent('tool.started', { toolName: 'read_target_file' }))).toBe(false);
   });
 });
 
 describe('offline verifier evidence', () => {
-  it('takes the final observation from the Host revalidation of the last round', () => {
+  it('keeps tool-run observations and takes the authoritative observation from the last Host revalidation', () => {
     const evidence = createOfflineVerifierEvidence();
     expect(recordOfflineVerifierEvent(evidence, traceEvent('tool.completed', {
       toolName: 'run_function_group_tests',
@@ -178,9 +179,78 @@ describe('offline verifier evidence', () => {
       feedback: [],
     }))).toBe(true);
     expect(recordOfflineVerifierEvent(evidence, traceEvent('agent.invocation.completed', { round: 2 }))).toBe(false);
+    // Tool runs stay available for existing consumers of the artifact.
+    expect(evidence.testRuns.map(item => item.tests.executed)).toEqual([2]);
+    // The authoritative observation is the Host revalidation of the last round.
     expect(evidence.finalObservation?.tests.executed).toBe(4);
     expect(evidence.finalObservation?.reportPaths).toEqual(['revalidation-2.xml']);
     expect(evidence.finalObservationRound).toBe(2);
+  });
+
+  it('records tool failures without inventing an observation', () => {
+    const evidence = createOfflineVerifierEvidence();
+    expect(recordOfflineVerifierEvent(evidence, traceEvent('tool.failed', {
+      toolName: 'run_function_group_tests',
+      message: 'authorized test root required',
+    }))).toBe(true);
+    expect(evidence.toolFailures).toEqual([{ toolName: 'run_function_group_tests', message: 'authorized test root required' }]);
+    expect(evidence.finalObservation).toBeUndefined();
+  });
+
+  it('snapshots the written test from the tool payload when it is complete', () => {
+    const evidence = createOfflineVerifierEvidence();
+    const content = 'class OrderTests { }';
+    expect(recordOfflineVerifierEvent(evidence, traceEvent('tool.started', {
+      toolName: 'write_target_test',
+      toolCallId: 'call-1',
+      input: { path: '.translation-verifier-tests/java/OrderTests.java', content },
+    }))).toBe(true);
+    expect(recordOfflineVerifierEvent(evidence, traceEvent('tool.completed', {
+      toolName: 'write_target_test',
+      toolCallId: 'call-1',
+      output: { path: '.translation-verifier-tests/java/OrderTests.java' },
+    }), { readTestFile: () => undefined })).toBe(true);
+    expect(evidence.testVersions).toEqual([{
+      path: '.translation-verifier-tests/java/OrderTests.java',
+      content,
+      source: 'tool-input',
+    }]);
+  });
+
+  it('falls back to the written file when the bounded payload is truncated instead of storing the marker', () => {
+    const evidence = createOfflineVerifierEvidence();
+    const path = '.translation-verifier-tests/java/LargeTests.java';
+    const full = 'class LargeTests {\n' + '  // filler\n'.repeat(4_000) + '}';
+    expect(recordOfflineVerifierEvent(evidence, traceEvent('tool.started', {
+      toolName: 'write_target_test',
+      toolCallId: 'call-2',
+      input: `{"path":"${path}","content":"class LargeTests {  ...(truncated)`,
+    }))).toBe(true);
+    expect(recordOfflineVerifierEvent(evidence, traceEvent('tool.completed', {
+      toolName: 'write_target_test',
+      toolCallId: 'call-2',
+      output: { path },
+    }), { readTestFile: requested => requested === path ? full : undefined })).toBe(true);
+    expect(evidence.testVersions).toHaveLength(1);
+    expect(evidence.testVersions[0]!.content).toBe(full);
+    expect(evidence.testVersions[0]!.source).toBe('written-file');
+    expect(evidence.testVersions[0]!.content).not.toContain('(truncated)');
+  });
+
+  it('records the completed write output path when the start payload could not be parsed', () => {
+    const evidence = createOfflineVerifierEvidence();
+    expect(recordOfflineVerifierEvent(evidence, traceEvent('tool.started', {
+      toolName: 'write_target_test',
+      toolCallId: 'call-3',
+      input: '(unserializable value)',
+    }))).toBe(true);
+    expect(recordOfflineVerifierEvent(evidence, traceEvent('tool.completed', {
+      toolName: 'write_target_test',
+      toolCallId: 'call-3',
+      output: { path: '.translation-verifier-tests/csharp/OrderTests.cs' },
+    }), { readTestFile: () => undefined })).toBe(true);
+    expect(evidence.testVersions[0]?.path).toBe('.translation-verifier-tests/csharp/OrderTests.cs');
+    expect(evidence.testVersions[0]?.content).toBeUndefined();
   });
 });
 
@@ -261,6 +331,10 @@ describe('offline verifier script wiring', () => {
       expect(source, file).not.toMatch(/createAgentHost\b/);
       expect(source, file).not.toContain('SingleAgentFunctionGroupTerminalResult');
     }
+    // Existing consumers of the tool-run array and the new authoritative observation both stay.
+    const completed = read('verify-completed-project.mts');
+    expect(completed).toContain('testRuns: evidence.testRuns');
+    expect(completed).toContain('finalObservation: evidence.finalObservation');
   });
 
   it('keeps the handoff probe on the taskContext business input', () => {

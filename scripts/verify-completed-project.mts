@@ -95,9 +95,30 @@ for (const item of inventory) {
     traceLogger: event => {
       if (!isOfflineVerifierTraceEvent(event)) return;
       appendFileSync(evidencePath, JSON.stringify(event, (_, value) => typeof value === 'string' ? value.split(key).join('[REDACTED]') : value) + '\n');
-      if (!recordOfflineVerifierEvent(evidence, event)) return;
-      // The accepted observation comes from the Host revalidation, never from
-      // the Agent's own tool call or memory of it.
+      // The Host bounds tool payloads, so a truncated write falls back to the
+      // written file instead of storing the truncation marker.
+      if (!recordOfflineVerifierEvent(evidence, event, {
+        readTestFile: path => existsSync(join(project, path)) ? readFileSync(join(project, path), 'utf8') : undefined,
+      })) return;
+      const versions = evidence.testVersions.length;
+      if (event.event === 'tool.completed' && event.toolName === 'write_target_test' && versions > 0) {
+        const version = evidence.testVersions[versions - 1]!;
+        const versionRoot = join(output, 'test-versions', item.moduleId, String(versions));
+        mkdirSync(versionRoot, { recursive: true });
+        if (version.content !== undefined) writeFileSync(join(versionRoot, basename(version.path)), version.content);
+        else writeFileSync(join(versionRoot, 'UNREADABLE-' + basename(version.path)), JSON.stringify({ path: version.path, source: version.source }, null, 2));
+      }
+      if (event.event === 'tool.completed' && event.toolName === 'run_function_group_tests') {
+        const run = evidence.testRuns[evidence.testRuns.length - 1];
+        if (run) console.log(item.moduleId + ': agent run tests=' + run.tests.executed + ' failed=' + run.tests.failed +
+          ' covered=' + run.functions.filter(fn => fn.executed).length + '/' + run.functions.length);
+      }
+      if (event.event === 'tool.failed' && evidence.toolFailures.length > 0) {
+        const failure = evidence.toolFailures[evidence.toolFailures.length - 1]!;
+        console.log(item.moduleId + ': tool failed ' + failure.toolName + ': ' + (failure.message ?? '').slice(0, 200));
+      }
+      // The authoritative observation comes from the Host revalidation, never
+      // from the Agent's own tool call or memory of it.
       const observation = evidence.finalObservation;
       if (event.event === 'host.revalidation.completed' && observation) {
         console.log(item.moduleId + ': revalidation round=' + (evidence.finalObservationRound ?? '-') +
@@ -120,9 +141,17 @@ for (const item of inventory) {
     result = { status: 'failure', error: error instanceof Error ? error.message : String(error) };
   }
   results.push({ moduleId: item.moduleId, result,
+    // Existing consumers read the Agent-side test runs from this array; the
+    // authoritative observation is the Host revalidation below.
+    testRuns: evidence.testRuns,
+    testVersions: evidence.testVersions.map(version => ({
+      path: version.path,
+      source: version.source,
+      ...(version.content === undefined ? {} : { characters: version.content.length }),
+    })),
+    toolFailures: evidence.toolFailures,
     finalObservation: evidence.finalObservation ?? null,
-    finalObservationRound: evidence.finalObservationRound ?? null,
-    toolEventCount: evidence.toolEvents.length });
+    finalObservationRound: evidence.finalObservationRound ?? null });
   writeFileSync(join(output, 'verification.json'), JSON.stringify(results, null, 2));
   console.log(item.moduleId + ': ' + JSON.stringify(result));
 }

@@ -57,12 +57,14 @@ export function createOfflineVerifierChatModel(
 }
 
 /**
- * Events worth keeping in the offline verifier evidence file. Tool payloads
- * are gone in the LangChain Host, so the accepted observation comes from
- * `host.revalidation.completed` instead of `tool.completed`.
+ * Events worth keeping in the offline verifier evidence file. The LangChain
+ * Host bounds tool payloads to 24k characters; the accepted observation still
+ * comes from `host.revalidation.completed`, never from the Agent's own run.
  */
 export const OFFLINE_VERIFIER_LOG_EVENTS: readonly string[] = [
+  'tool.started',
   'tool.completed',
+  'tool.failed',
   'agent.invocation.completed',
   'host.revalidation.completed',
   'agent.feedback.appended',
@@ -123,36 +125,121 @@ export function classifyOfflineVerifierFailure(description: string): OfflineVeri
   return { reason: 'test-environment-failure', kind: 'environment' };
 }
 
+/** One generated test file captured for later review. */
+export type OfflineTestVersion = {
+  path: string;
+  /** Missing when neither the bounded payload nor the written file was readable. */
+  content?: string;
+  source: 'tool-input' | 'written-file';
+};
+
+export type OfflineToolFailure = { toolName: string; message?: string };
+
 export type OfflineVerifierEvidence = {
-  /** Agent-side test tool activity, without payloads in the current Host. */
-  toolEvents: AgentTraceEvent[];
-  /** Fresh Host observation of the last revalidation round; the accepted evidence. */
+  /** Agent-side test-run observations kept for existing artifact consumers. */
+  testRuns: FunctionGroupTestRun[];
+  /** Generated test files, captured from the bounded payload or the written file. */
+  testVersions: OfflineTestVersion[];
+  toolFailures: OfflineToolFailure[];
+  /** Fresh Host observation of the last revalidation round; the authoritative evidence. */
   finalObservation?: FunctionGroupTestRun;
   finalObservationRound?: number;
 };
 
+/** Narrow hooks: the scripts supply filesystem access, the evidence logic stays pure. */
+export type OfflineVerifierEvidenceHooks = {
+  /** Read a written test file by project-relative path; undefined when unavailable. */
+  readTestFile?: (path: string) => string | undefined;
+};
+
 export function createOfflineVerifierEvidence(): OfflineVerifierEvidence {
-  return { toolEvents: [] };
+  return { testRuns: [], testVersions: [], toolFailures: [] };
+}
+
+type PendingWrite = { path?: string; content?: string };
+
+function parseWriteInput(input: unknown): PendingWrite {
+  const value = typeof input === 'string' ? parseJsonObject(input) : input;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return {};
+  const record = value as Record<string, unknown>;
+  return {
+    ...(typeof record.path === 'string' ? { path: record.path } : {}),
+    ...(typeof record.content === 'string' ? { content: record.content } : {}),
+  };
+}
+
+function parseJsonObject(text: string): unknown {
+  // A bounded payload ends with "...(truncated)"; it is not JSON and must never
+  // be stored as the test content.
+  if (text.endsWith('...(truncated)')) return undefined;
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+function completedWritePath(output: unknown): string | undefined {
+  if (typeof output !== 'object' || output === null || Array.isArray(output)) return undefined;
+  const path = (output as Record<string, unknown>).path;
+  return typeof path === 'string' && path.length > 0 ? path : undefined;
 }
 
 /**
  * Record one filtered trace event. Returns true when the event contributed
- * evidence so callers can log or persist selectively.
+ * evidence so callers can persist selectively.
  */
 export function recordOfflineVerifierEvent(
   evidence: OfflineVerifierEvidence,
   event: AgentTraceEvent,
+  hooks: OfflineVerifierEvidenceHooks = {},
 ): boolean {
   if (event.event === 'host.revalidation.completed' && event.observation) {
     evidence.finalObservation = event.observation as FunctionGroupTestRun;
     evidence.finalObservationRound = typeof event.round === 'number' ? event.round : undefined;
     return true;
   }
-  if (event.event.startsWith('tool.')) {
-    evidence.toolEvents.push(event);
+  if (event.event === 'tool.started' && event.toolName === 'write_target_test') {
+    pendingWrites.set(writeKey(event), parseWriteInput(event.input));
+    return true;
+  }
+  if (event.event === 'tool.failed') {
+    evidence.toolFailures.push({
+      toolName: String(event.toolName),
+      ...(typeof event.message === 'string' ? { message: event.message } : {}),
+    });
+    return true;
+  }
+  if (event.event !== 'tool.completed') return false;
+  if (event.toolName === 'run_function_group_tests') {
+    const observation = event.output as FunctionGroupTestRun | undefined;
+    if (observation?.tests) evidence.testRuns.push(observation);
+    return true;
+  }
+  if (event.toolName === 'write_target_test') {
+    const key = writeKey(event);
+    const pending = pendingWrites.get(key) ?? pendingWrites.get('write_target_test');
+    pendingWrites.delete(key);
+    pendingWrites.delete('write_target_test');
+    const path = completedWritePath(event.output) ?? pending?.path;
+    if (path === undefined) return false;
+    const payloadContent = pending?.content;
+    const content = payloadContent ?? hooks.readTestFile?.(path);
+    evidence.testVersions.push({
+      path,
+      ...(content === undefined ? {} : { content }),
+      source: payloadContent === undefined ? 'written-file' : 'tool-input',
+    });
     return true;
   }
   return false;
+}
+
+/** Started write intents, correlated with their completion by tool call id. */
+const pendingWrites = new Map<string, PendingWrite>();
+
+function writeKey(event: Pick<AgentTraceEvent, 'event'> & { toolCallId?: unknown }): string {
+  return typeof event.toolCallId === 'string' ? event.toolCallId : 'write_target_test';
 }
 
 export type OfflineVerifierTaskInputs = {

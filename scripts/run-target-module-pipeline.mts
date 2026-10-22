@@ -1183,8 +1183,9 @@ try {
             maxToolCallsPerTurn: Number(process.env.TRANSLATION_VERIFIER_MAX_TOOL_CALLS_PER_TURN ?? 16),
           },
           traceLogger: event => {
-            // Save generated tests and real Host test facts once, without
-            // duplicating every model request or full historical source read.
+            // Save test tools, Agent invocations, Host revalidations and run
+            // outcomes. The Host bounds tool payloads to 24k characters, and
+            // the accepted observation comes from host.revalidation.completed.
             if (!isOfflineVerifierTraceEvent(event)) return;
             entry.verifierEvidencePath ??= `${outputPath}.${index + 1}-verifier.jsonl`;
             appendFileSync(entry.verifierEvidencePath, `${JSON.stringify(event)}\n`);
