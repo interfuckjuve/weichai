@@ -1,4 +1,4 @@
-import type { BoundTestRunner } from "../test-runner.js";
+import type { BoundTestRunner } from "../testing/test-runner.js";
 import type { StructuredToolInterface } from "@langchain/core/tools";
 import type {
   FunctionGroupVerificationInput,
@@ -9,7 +9,7 @@ import type {
   VerificationReason,
   VerificationTestCase,
 } from "../../types.js";
-import type { AgentRunBudget } from "../run-budget.js";
+import type { AgentRunBudget } from "../agent/run-budget.js";
 import { readFile } from "node:fs/promises";
 import { lstatSync, realpathSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";

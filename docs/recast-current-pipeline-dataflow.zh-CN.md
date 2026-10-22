@@ -1,6 +1,6 @@
 # RECAST 当前项目自动流水线：数据流、提示词与示例输出
 
-> 历史状态说明：本文件是迁移前（自研 Agent 循环 + `finish`/`finish_function_group`/`report_uncertain` 终态工具）的数据流快照。Verifier 相关段落已按当前 LangChain Host 更新；仍保留的旧提示词摘录（附录 A8/A9 等）与已删除的 `runtime.ts`、`finish*.ts`、`test-evidence.ts` 路径仅是历史记录，不是当前实现。当前实现见 [translation-verifier README](../services/translation-verifier/README.md) 与 `src/host/langchain-runtime.ts`、`src/host/revalidation.ts`。
+> 历史状态说明：本文件是迁移前（自研 Agent 循环 + `finish`/`finish_function_group`/`report_uncertain` 终态工具）的数据流快照。Verifier 相关段落已按当前 LangChain Host 更新；仍保留的旧提示词摘录（附录 A8/A9 等）与已删除的 `runtime.ts`、`finish*.ts`、`test-evidence.ts` 路径仅是历史记录，不是当前实现。当前实现见 [translation-verifier README](../services/translation-verifier/README.md) 与 `src/host/agent/langchain-runtime.ts`、`src/host/verification/revalidation.ts`。
 
 
 本文按 **2026-10-21 Windows 工作区源码**整理，核对时 Git HEAD 为 `c7e94daae187bbdd9e77d9a1756d5369a1cf6086`。描述的是 VS Code 前端点击“开始执行”所走的 `ProjectPipelineHost → ProjectPipeline → ProjectPipelineBackend`，不是早期实验驱动或手动波次迁移流程。
@@ -612,7 +612,7 @@ C# 无现成测试工程时，Host 可建立临时 xUnit/Test SDK/Coverlet harne
 
 修复反馈注入 Translator 的内容是实际 Host 观察：`attempt/status/reason/issue/functions`；Translator 没有权限改 Verifier 测试和标准。
 
-源码：[project-module-verifier.ts](../apps/vscode-extension/src/project-module-verifier.ts)、[strategy.ts](../services/translation-verifier/src/strategies/single-agent-function-group/strategy.ts)、[langchain-runtime.ts](../services/translation-verifier/src/host/langchain-runtime.ts)、[revalidation.ts](../services/translation-verifier/src/host/revalidation.ts)、[test-environment.ts](../services/translation-verifier/src/host/test-environment.ts)。
+源码：[project-module-verifier.ts](../apps/vscode-extension/src/project-module-verifier.ts)、[strategy.ts](../services/translation-verifier/src/strategies/single-agent-function-group/strategy.ts)、[langchain-runtime.ts](../services/translation-verifier/src/host/agent/langchain-runtime.ts)、[revalidation.ts](../services/translation-verifier/src/host/verification/revalidation.ts)、[test-environment.ts](../services/translation-verifier/src/host/testing/test-environment.ts)。
 
 <a id="test-correction"></a>
 
@@ -866,7 +866,7 @@ The event identity and final state must appear in the audit record.
 | 建模分支与 ready/projection 状态 | [project-analysis.ts](../services/code-intelligence-service/src/project-analysis.ts) |
 | Codex 实际 prompts、staging、diff、编译 | [codex-workspace-translation-runtime.ts](../services/adaptation-service/src/codex-workspace-translation-runtime.ts) |
 | 函数发现、映射、验证模式 | [project-module-verifier.ts](../apps/vscode-extension/src/project-module-verifier.ts) |
-| 验证循环、工具和预算 | [Verifier Host](../services/translation-verifier/src/host/langchain-runtime.ts) |
+| 验证循环、工具和预算 | [Verifier Host](../services/translation-verifier/src/host/agent/langchain-runtime.ts) |
 | 历史失败与纠错复核（historical，当前无此文件） | 已移除；当前仅保留 Host 复验观察 |
 
 <a id="prompts"></a>

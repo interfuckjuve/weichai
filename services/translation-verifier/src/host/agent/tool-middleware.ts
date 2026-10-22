@@ -5,8 +5,8 @@ import { boundedValue, valueCharacters } from "./messages.js";
 import {
   emitAgentTrace,
   type AgentTraceLogger,
-} from "./trace-log.js";
-import { emitAgentWorkLog, type AgentWorkLogger } from "./work-log.js";
+} from "../logging/trace-log.js";
+import { emitAgentWorkLog, type AgentWorkLogger } from "../logging/work-log.js";
 
 /** Bound only the opt-in trace input payload; tool results stay complete in the trace. */
 const MAX_TRACE_PAYLOAD_CHARS = 24_000;

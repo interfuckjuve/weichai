@@ -1,12 +1,12 @@
 import { MAVEN_COVERAGE_GOALS } from "./test-runner.js";
 import { access, lstat, mkdir, readFile, realpath, stat, readdir, writeFile } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
-import type { VerificationInput } from "../types.js";
+import type { VerificationInput } from "../../types.js";
 import {
   relativePath,
   type TargetTest,
   type TestRunner,
-} from "./tools/common.js";
+} from "../tools/common.js";
 
 export type TestFramework = TestRunner;
 

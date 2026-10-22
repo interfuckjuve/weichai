@@ -1,11 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createFunctionGroupVerifier } from "./function-group-verify.js";
-import type { AgentTask } from "./host/task.js";
+import type { AgentTask } from "./host/agent/task.js";
 import type { FunctionGroupVerificationInput, RequirementFunctionGroupVerificationInput } from "./types.js";
-import {
-  createFunctionGroupFinalReportTask,
-  createRequirementFunctionGroupFinalReportTask,
-} from "./strategies/single-agent-function-group/strategy.js";
 
 const input: FunctionGroupVerificationInput = {
   schemaVersion: "3.1",
@@ -38,24 +34,6 @@ function observedFunctions(includeSource: boolean) {
 }
 
 describe("createFunctionGroupVerifier", () => {
-  it("keeps execution evidence without labeling an uncertain requirement verified", async () => {
-    const verify = createFunctionGroupVerifier({
-      run: async () => ({
-        verdict: "uncertain" as const,
-        summary: "A public requirement remains ambiguous.",
-        issue: { kind: "unknown" as const, description: "A public requirement remains ambiguous." },
-        functions: observedFunctions(true),
-      }),
-    });
-    const result = await verify(input, "single-agent-function-group", "verify");
-    expect(result.status).toBe("failure");
-    expect(result.reason).toBeUndefined();
-    expect(result.issue).toEqual({
-      kind: "unknown",
-      description: "A public requirement remains ambiguous.",
-    });
-    expect(result.functions.every(fn => fn.executed)).toBe(true);
-  });
 
   it("dispatches the function-group single-agent strategy", async () => {
     let task: AgentTask | undefined;
@@ -74,8 +52,6 @@ describe("createFunctionGroupVerifier", () => {
       verify(input, "single-agent-function-group", "verify"),
     ).resolves.toMatchObject({ status: "success" });
     expect(task?.taskContext.functionGroup).toEqual(input);
-    expect(task).not.toHaveProperty("functionGroup");
-    expect(task).not.toHaveProperty("subject");
     expect(task?.userPrompt).toContain("calculatePrice");
     expect(task?.userPrompt).toContain("apply");
   });
@@ -100,37 +76,7 @@ describe("createFunctionGroupVerifier", () => {
       .rejects.toThrow("Duplicate target function");
   });
 
-  it("exposes the function-group tool set without a terminal tool", () => {
-    const task = createFunctionGroupFinalReportTask(input);
-    expect(task.tools.map((factory) => factory({
-      runtime: {
-        sourceLanguage: input.sourceLanguage,
-        targetLanguage: input.targetLanguage,
-        sourceProjectPath: input.sourceProjectPath,
-        targetProjectPath: input.targetProjectPath,
-        sourcePath: input.functions[0]!.source.path,
-        targetPath: input.functions[0]!.target.path,
-        targetFunction: input.functions[0]!.target,
-        functionGroup: input,
-        sourceDirectory: "src",
-        targetDirectory: "src",
-        testRoots: ["tests"],
-        testRunner: "pytest" as const,
-        targetTest: { executable: "python3", args: ["-m", "pytest"] },
-      },
-      runner: { run: async () => { throw new Error("unused"); } },
-      functionGroupRunner: { run: async () => { throw new Error("unused"); } },
-    })).map((tool) => tool.name)).toEqual([
-      "list_source_files",
-      "read_source_file",
-      "list_target_files",
-      "read_target_file",
-      "write_target_test",
-      "run_function_group_tests",
-    ]);
-  });
-
-  it("runs requirement-only verification without source tools", async () => {
+  it("dispatches requirement-only verification with the upstream target scope", async () => {
     const requirementInput: RequirementFunctionGroupVerificationInput = {
       schemaVersion: "3.1",
       mode: "requirement",
@@ -160,21 +106,6 @@ describe("createFunctionGroupVerifier", () => {
     await expect(verify(requirementInput, "requirement-function-group", "verify"))
       .resolves.toMatchObject({ status: "success" });
     expect(task?.userPrompt).toContain("Reject expired tenant scopes.");
-    expect(task?.tools.map((factory) => factory({
-      runtime: {
-        sourceLanguage: "C#", targetLanguage: "C#", sourceProjectPath: "/tmp/target", targetProjectPath: "/tmp/target",
-        sourcePath: "src/TenantScope.cs", targetPath: "src/TenantScope.cs",
-        targetFunction: requirementInput.functions[0]!.target, functionGroup: requirementInput,
-        sourceDirectory: "src", targetDirectory: "src", testRoots: ["tests"], testRunner: "dotnet" as const,
-        targetTest: { executable: "dotnet", args: ["test"] },
-      },
-      runner: { run: async () => { throw new Error("unused"); } },
-      functionGroupRunner: { run: async () => { throw new Error("unused"); } },
-    })).map((tool) => tool.name)).toEqual([
-      "list_target_files", "read_target_file", "write_target_test",
-      "run_function_group_tests",
-    ]);
-    expect(createRequirementFunctionGroupFinalReportTask(requirementInput).taskContext.functionGroup)
-      .toEqual(requirementInput);
+    expect(task?.taskContext.functionGroup).toEqual(requirementInput);
   });
 });

@@ -1,11 +1,11 @@
-import { bindTestRunner } from "../src/host/test-runner.js";
+import { bindTestRunner } from "../src/host/testing/test-runner.js";
 import { mkdtemp, mkdir, rm, writeFile, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, expect } from "vitest";
-import { resolveTestEnvironment } from "../src/host/test-environment.js";
+import { resolveTestEnvironment } from "../src/host/testing/test-environment.js";
 import { createRunTargetTestsTool } from "../src/host/tools/run-target-tests.js";
-import { revalidateTargetReport } from "../src/host/revalidation.js";
+import { revalidateTargetReport } from "../src/host/verification/revalidation.js";
 import type { TargetTestResult, ToolContext, TestRunner } from "../src/host/tools/common.js";
 
 // Runtime dependencies live outside the repository; this suite never installs them.

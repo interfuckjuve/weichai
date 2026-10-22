@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   feedbackMessage,
   functionGroupFeedbackMessage,
-} from "./host-result.js";
-import type { FunctionGroupTestRun, TargetTestResult } from "./tools/common.js";
+} from "./feedback.js";
+import type { FunctionGroupTestRun, TargetTestResult } from "../tools/common.js";
 
 const MAX_FEEDBACK_CHARS = 12_000;
 

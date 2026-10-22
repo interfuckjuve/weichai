@@ -1,4 +1,4 @@
-import { bindTestRunner } from "../test-runner.js";
+import { bindTestRunner } from "../testing/test-runner.js";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,7 +8,7 @@ import { createReadSourceFileTool } from "./read-source-file.js";
 import { createReadTargetFileTool } from "./read-target-file.js";
 import { createRunTargetTestsTool } from "./run-target-tests.js";
 import { createWriteTargetTestTool } from "./write-target-test.js";
-import { revalidateTargetReport } from "../revalidation.js";
+import { revalidateTargetReport } from "../verification/revalidation.js";
 import type {
   TargetTest,
   TargetTestResult,

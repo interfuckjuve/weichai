@@ -1,4 +1,4 @@
-import type { AgentTaskContext, HostToolFactory } from "./tools/common.js";
+import type { AgentTaskContext, HostToolFactory } from "../tools/common.js";
 
 /**
  * One Agent call: the application prompt plus the native LangChain tools the

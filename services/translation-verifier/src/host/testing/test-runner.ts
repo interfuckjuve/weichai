@@ -4,8 +4,8 @@ import { mkdir, readdir, readFile, writeFile, realpath, rm, stat, lstat } from "
 import { dirname, join, relative } from "node:path";
 import { promisify } from "node:util";
 import { parseJacocoReport, parseExecutionErrors, parseSurefireReport, parseCobertura, parseIstanbul, parseJUnit, parseNodeTests, parsePythonCoverage, parseTrx, parseJUnitTestCases, parseNodeTestCases, parseTrxTestCases, jsonReport, type PythonFunction } from "./coverage-reports.js";
-import { MAX_TEST_OUTPUT_CHARS, assertTestPath, relativePath, readProjectFile, resolveSafePath, type FunctionGroupTestRun, type FunctionGroupTestRunner, type ToolContext, type TargetTestResult, type TargetCoverageResult, type TestSummary } from "./tools/common.js";
-import type { TargetFunctionCoverage, VerificationFunction, VerificationReason, VerificationTestCase } from "../types.js";
+import { MAX_TEST_OUTPUT_CHARS, assertTestPath, relativePath, readProjectFile, resolveSafePath, type FunctionGroupTestRun, type FunctionGroupTestRunner, type ToolContext, type TargetTestResult, type TargetCoverageResult, type TestSummary } from "../tools/common.js";
+import type { TargetFunctionCoverage, VerificationFunction, VerificationReason, VerificationTestCase } from "../../types.js";
 
 const JACOCO = "org.jacoco:jacoco-maven-plugin:0.8.13";
 export const MAVEN_COVERAGE_GOALS = [`${JACOCO}:prepare-agent`, "test", `${JACOCO}:report`] as const;

@@ -67,8 +67,8 @@ describe('verifier failure classification', () => {
     expect(classifyVerifierError(new Error('Agent exhausted its 12-turn budget.'))).toMatchObject({ reason: 'agent-timeout' });
     expect(classifyVerifierError(new Error('Model call limits exceeded: thread level call limit reached')))
       .toEqual({ reason: 'agent-timeout', issueKind: 'unknown' });
-    expect(classifyVerifierError(new Error('Agent did not produce an accepted final report within 4 feedback rounds.')))
-      .toEqual({ reason: 'test-environment-failure', issueKind: 'environment' });
+    expect(classifyVerifierError(new Error('Agent run budget exhausted: no accepted final report within 4 feedback rounds.')))
+      .toEqual({ reason: 'agent-timeout', issueKind: 'unknown' });
     expect(classifyVerifierError(new Error('401 Incorrect API key provided'))).toMatchObject({ reason: 'model-failure', issueKind: 'unknown' });
     expect(classifyVerifierError(new Error('Could not find a Maven or Gradle configuration'))).toEqual({ reason: 'test-environment-failure', issueKind: 'environment' });
   });

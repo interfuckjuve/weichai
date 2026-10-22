@@ -3,9 +3,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { resolveTestPaths } from "./test-runner.js";
-import { runFunctionGroupTests } from "./tools/run-function-group-tests.js";
-import { runTargetTests } from "./tools/run-target-tests.js";
-import type { FunctionGroupTestRun, TargetTestResult, TestRunner, ToolContext } from "./tools/common.js";
+import { runFunctionGroupTests } from "../tools/run-function-group-tests.js";
+import { runTargetTests } from "../tools/run-target-tests.js";
+import type { FunctionGroupTestRun, TargetTestResult, TestRunner, ToolContext } from "../tools/common.js";
 
 const roots: string[] = [];
 afterEach(async () => {

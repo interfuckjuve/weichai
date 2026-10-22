@@ -5,15 +5,15 @@ import type {
   RequirementFunctionGroupVerificationFunction,
   VerificationFunction,
   VerificationIssue,
-} from "../types.js";
+} from "../../types.js";
 import type {
   FunctionGroupTestRun,
   TargetTestResult,
   ToolContext,
-} from "./tools/common.js";
-import type { FinalReportClaim } from "./final-report.js";
-import { runFunctionGroupTests } from "./tools/run-function-group-tests.js";
-import { runTargetTests } from "./tools/run-target-tests.js";
+} from "../tools/common.js";
+import type { FinalReportClaim } from "./report.js";
+import { runFunctionGroupTests } from "../tools/run-function-group-tests.js";
+import { runTargetTests } from "../tools/run-target-tests.js";
 
 /**
  * A completion check on the file system: the Host reruns the complete

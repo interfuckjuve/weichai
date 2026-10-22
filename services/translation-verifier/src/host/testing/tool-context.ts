@@ -3,7 +3,7 @@ import { resolveTestEnvironment } from "./test-environment.js";
 import type {
   AgentTaskContext,
   ToolRuntimeContext,
-} from "./tools/common.js";
+} from "../tools/common.js";
 
 /** Resolves the Host-owned test environment for one Agent task. */
 export type ToolContextResolver = (

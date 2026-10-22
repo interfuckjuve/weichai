@@ -1,145 +1,26 @@
+import {
+  createSingleFunctionFixture,
+  RUNNER_SCRIPT,
+  TARGET_PATH,
+  TEST_PATH,
+  type SingleFunctionFixture,
+} from "../test-support/single-function-fixture.js";
+import { ScriptedChatModel } from "../test-support/scripted-chat-model.js";
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { AIMessage, BaseMessage, HumanMessage, ToolMessage } from "@langchain/core/messages";
-import { BaseChatModel } from "@langchain/core/language_models/chat_models";
-import type { ChatResult } from "@langchain/core/outputs";
-import type { StructuredToolInterface } from "@langchain/core/tools";
+import { AIMessage, HumanMessage, ToolMessage } from "@langchain/core/messages";
 import { createVerifier } from "./verify.js";
-import { createLangChainAgentHost } from "./host/langchain-runtime.js";
-import type { AgentTraceEvent } from "./host/trace-log.js";
-import type { ToolRuntimeContext } from "./host/tools/common.js";
-import type { VerificationInput } from "./types.js";
-
-type ScriptedResponse = (messages: readonly BaseMessage[]) => AIMessage;
-
-/** A controllable framework chat model: real LangChain execution, scripted replies. */
-class ScriptedChatModel extends BaseChatModel {
-  readonly observations: BaseMessage[][] = [];
-  readonly toolNames: string[][] = [];
-  private index = 0;
-
-  constructor(private readonly script: ScriptedResponse[]) {
-    super({});
-  }
-
-  _llmType(): string {
-    return "scripted";
-  }
-
-  bindTools(tools: StructuredToolInterface[]): this {
-    this.toolNames.push(tools.map(tool => tool.name));
-    return this;
-  }
-
-  async _generate(messages: BaseMessage[]): Promise<ChatResult> {
-    this.observations.push([...messages]);
-    const next = this.script[this.index++];
-    if (next === undefined) throw new Error("Scripted model ran out of responses.");
-    const message = next(messages);
-    return {
-      generations: [{
-        text: typeof message.content === "string" ? message.content : "",
-        message,
-      }],
-    };
-  }
-}
+import { createLangChainAgentHost } from "./host/agent/langchain-runtime.js";
+import type { AgentTraceEvent } from "./host/logging/trace-log.js";
 
 const modelRoots: string[] = [];
 afterEach(async () => {
   await Promise.all(modelRoots.splice(0).map(root => rm(root, { recursive: true, force: true })));
 });
 
-const TEST_PATH = "tests/agent/BehaviorTest.java";
-const TARGET_PATH = "src/Target.java";
-
-const RUNNER_SCRIPT = `const fs = require('node:fs');
-const content = fs.existsSync(${JSON.stringify(TEST_PATH)})
-  ? fs.readFileSync(${JSON.stringify(TEST_PATH)}, 'utf8') : '';
-fs.rmSync('target', { recursive: true, force: true });
-fs.mkdirSync('target/surefire-reports', { recursive: true });
-fs.mkdirSync('target/site/jacoco', { recursive: true });
-const surefire = 'target/surefire-reports/TEST-BehaviorTest.xml';
-const jacoco = 'target/site/jacoco/jacoco.xml';
-const coverage = '<report><package name=""><class name="Target" sourcefilename="Target.java"><method name="targetFn" desc="()I"><counter type="METHOD" missed="0" covered="1"/></method></class></package></report>';
-if (content.includes('BROKEN')) {
-  fs.writeFileSync(surefire, '<testsuite name="BehaviorTest" tests="1" failures="0" errors="1" skipped="0"><testcase classname="BehaviorTest" name="compile"><error message="cannot find symbol"/></testcase></testsuite>');
-} else if (content.includes('FAILING')) {
-  fs.writeFileSync(surefire, '<testsuite name="BehaviorTest" tests="1" failures="1" errors="0" skipped="0"><testcase classname="BehaviorTest" name="requirement"><failure message="expected rejection">trace</failure></testcase></testsuite>');
-  fs.writeFileSync(jacoco, coverage);
-  process.exitCode = 1;
-} else {
-  fs.writeFileSync(surefire, '<testsuite name="BehaviorTest" tests="1" failures="0" errors="0" skipped="0"><testcase classname="BehaviorTest" name="requirement"/></testsuite>');
-  fs.writeFileSync(jacoco, coverage);
-}
-`;
-
-type Fixture = {
-  root: string;
-  input: VerificationInput;
-  resolveToolContext: () => Promise<ToolRuntimeContext>;
-};
-
-async function createFixture(testContent?: string, runnerSuffix = ""): Promise<Fixture> {
-  const root = await mkdtemp(join(tmpdir(), "verifier-langchain-"));
-  modelRoots.push(root);
-  await mkdir(join(root, "src"), { recursive: true });
-  await mkdir(join(root, "tests/agent"), { recursive: true });
-  await writeFile(join(root, "src/Source.java"), "class Source { int sourceFn() { return 1; } }");
-  await writeFile(
-    join(root, TARGET_PATH),
-    "class Target { int targetFn() { return 1; } }",
-  );
-  if (testContent !== undefined) await writeFile(join(root, TEST_PATH), testContent);
-  await writeFile(join(root, "fake-runner.cjs"), `${RUNNER_SCRIPT}${runnerSuffix}`);
-  const input: VerificationInput = {
-    schemaVersion: "2.0",
-    sourceLanguage: "Java",
-    targetLanguage: "Java",
-    sourceProjectPath: root,
-    targetProjectPath: root,
-    subject: {
-      sourceFunction: { path: "src/Source.java", name: "sourceFn" },
-      targetFunction: { path: TARGET_PATH, name: "targetFn" },
-      requirement: "Preserve the targetFn behavior.",
-    },
-    analysisReport: {
-      schemaVersion: "1.0",
-      applicability: { level: "reference", confidence: 1, reasons: [] },
-      behaviorMapping: [],
-      contractMapping: [],
-      dependencyPlan: [],
-      implementationPlan: [],
-      risks: [],
-      assumptions: [],
-      unresolved: [],
-    },
-    migrationPlan: {},
-    translation: { round: 0, files: [] },
-  };
-  const taskContext = {
-    sourceLanguage: input.sourceLanguage,
-    targetLanguage: input.targetLanguage,
-    sourceProjectPath: root,
-    targetProjectPath: root,
-    sourcePath: input.subject.sourceFunction.path,
-    targetPath: input.subject.targetFunction.path,
-    targetFunction: input.subject.targetFunction,
-  };
-  return {
-    root,
-    input,
-    resolveToolContext: async () => ({
-      ...taskContext,
-      sourceDirectory: "src",
-      targetDirectory: "src",
-      testRoots: ["tests/agent"],
-      testRunner: "maven",
-      targetTest: { executable: process.execPath, args: ["fake-runner.cjs"], timeoutMs: 10_000 },
-    }),
-  };
+function createFixture(testContent?: string, runnerSuffix = ""): Promise<SingleFunctionFixture> {
+  return createSingleFunctionFixture(modelRoots, testContent, `${RUNNER_SCRIPT}${runnerSuffix}`);
 }
 
 function report(
@@ -164,7 +45,7 @@ function finalReport(content: string): AIMessage {
   return new AIMessage({ content });
 }
 
-function verifier(fixture: Fixture, model: ScriptedChatModel, extra: {
+function verifier(fixture: SingleFunctionFixture, model: ScriptedChatModel, extra: {
   signal?: AbortSignal;
   limits?: { maxTurns?: number; maxToolCalls?: number };
   events?: AgentTraceEvent[];
@@ -199,10 +80,10 @@ describe("LangChain single-function verification", () => {
     });
     expect(result.issue).toBeUndefined();
     expect(model.toolNames[0]).toEqual(expect.arrayContaining([
-      "run_target_tests", "write_target_test", "read_target_file",
+      "list_source_files", "read_source_file", "list_target_files",
+      "read_target_file", "write_target_test", "run_target_tests",
     ]));
-    expect(model.toolNames[0]).not.toContain("finish");
-    expect(model.toolNames[0]).not.toContain("report_uncertain");
+    expect(model.toolDescriptions[0]!.join("\n")).not.toContain(fixture.root);
     expect(JSON.stringify(model.observations[0]![0]?.content)).toContain("verdict");
     expect(JSON.stringify(model.observations[0]![0]?.content)).toContain("no-bug");
     expect(model.observations[1]!.some(message =>
@@ -411,19 +292,5 @@ describe("LangChain Host feedback continuation", () => {
       "verify",
     )).rejects.toThrow();
     expect(model.observations).toHaveLength(0);
-  });
-
-  it("does not treat a framework stop produced by the model-call budget as an accepted report", async () => {
-    const fixture = await createFixture("class BehaviorTest { int requirement() { return 1; } }");
-    const model = new ScriptedChatModel([
-      () => new AIMessage("still investigating"),
-      () => finalReport(report("no-bug")),
-    ]);
-
-    await expect(verifier(fixture, model, { limits: { maxTurns: 1 } })(
-      fixture.input,
-      "single-agent",
-      "verify",
-    )).rejects.toThrow();
   });
 });

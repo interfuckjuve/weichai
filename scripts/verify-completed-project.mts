@@ -8,8 +8,8 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 import { spawnSync } from 'node:child_process';
 import { parse } from 'dotenv';
 import { discoverExecutableFunctions } from './module-function-mapping.js';
-import { createLangChainFunctionGroupAgentHost } from '../services/translation-verifier/src/host/langchain-runtime.js';
-import { resolveTestEnvironment } from '../services/translation-verifier/src/host/test-environment.js';
+import { createLangChainFunctionGroupAgentHost } from '../services/translation-verifier/src/host/agent/langchain-runtime.js';
+import { resolveTestEnvironment } from '../services/translation-verifier/src/host/testing/test-environment.js';
 import { createFunctionGroupVerifier } from '../services/translation-verifier/src/function-group-verify.js';
 import {
   createOfflineVerifierChatModel,

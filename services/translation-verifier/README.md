@@ -2,6 +2,20 @@
 
 `translation-verifier` checks whether translated target functions preserve the required behavior, or verifies target functions directly against supplied requirements when no reliable source mapping exists. The Agent first runs all existing tests in its dedicated test folder, repairs stale tests where justified by changed source APIs or declared contracts, and then adds meaningful tests for every upstream target function. The Agent ends a call by answering without a tool call, and the Host then reruns the entire folder and validates the Agent's conclusion before returning a normalized result.
 
+## Host Layout
+
+The Host code is organized by responsibility, with tests beside the implementation:
+
+| Directory | Owns |
+| --- | --- |
+| `src/host/agent` | LangChain execution, model configuration, run budgets, messages and tool middleware |
+| `src/host/testing` | Test environment discovery, fixed runners, fresh coverage reports and tool context resolution |
+| `src/host/verification` | Final report parsing, deterministic revalidation, accepted results and bounded repair feedback |
+| `src/host/logging` | Bounded work metadata and opt-in detailed JSONL traces |
+| `src/host/tools` | Native tools, file authorization and tool context contracts |
+
+Strategies select tasks and tools; the Host binds their execution capabilities. The dependency direction remains `workflow -> strategy -> host`. Shared scripted models and temporary test projects live in `test-support`; production code does not import them.
+
 ## Project Access
 
 The verifier has separate Host-controlled project roots:
@@ -184,7 +198,7 @@ The Host accepts an optional `workLogger`. It emits bounded JSON events for run 
 For local inspection, the live E2E uses a mode `600` JSONL file:
 
 ```ts
-import { createJsonlAgentWorkLogger } from "./src/host/work-log.js";
+import { createJsonlAgentWorkLogger } from "./src/host/logging/work-log.js";
 
 const workLogger = createJsonlAgentWorkLogger("logs/translation-verifier.jsonl");
 const host = createLangChainAgentHost({ model, workLogger });
@@ -195,7 +209,7 @@ const host = createLangChainAgentHost({ model, workLogger });
 For an explicit local debugging run, use the separate detailed trace logger. It records Agent invocation completion, bounded tool-call arguments, complete tool outputs, revalidation observations and failures as mode `600` JSONL. It does not record the HTTP authorization header, and the logger redacts the supplied API key. The current adapter disables provider thinking, so hidden chain-of-thought is not available; the trace contains only visible model content and actions:
 
 ```ts
-import { createJsonlAgentTraceLogger } from "./src/host/trace-log.js";
+import { createJsonlAgentTraceLogger } from "./src/host/logging/trace-log.js";
 
 const traceLogger = createJsonlAgentTraceLogger(
   "logs/translation-verifier-trace.jsonl",

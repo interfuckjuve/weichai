@@ -1,8 +1,8 @@
 import { XMLParser, XMLValidator } from "fast-xml-parser";
 import { realpathSync } from "node:fs";
 import { basename, isAbsolute, resolve } from "node:path";
-import type { TargetFunctionCoverage, VerificationFunction, VerificationTestCase } from "../types.js";
-import type { TestSummary } from "./tools/common.js";
+import type { TargetFunctionCoverage, VerificationFunction, VerificationTestCase } from "../../types.js";
+import type { TestSummary } from "../tools/common.js";
 
 function fileIdentity(root: string, path: string): string {
   const absolute = resolve(root, path);

@@ -9,7 +9,7 @@ import { MemorySaver } from "@langchain/langgraph";
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import type { BaseMessage } from "@langchain/core/messages";
 import type { StructuredToolInterface } from "@langchain/core/tools";
-import type { VerificationTestCase } from "../types.js";
+import type { VerificationTestCase } from "../../types.js";
 import {
   AgentRunFailure,
   createAgentRunBudget,
@@ -18,28 +18,28 @@ import {
   type AgentRunLimits,
 } from "./run-budget.js";
 import type { AgentHost, AgentTask } from "./task.js";
-import { bindFunctionGroupTestRunner, bindTestRunner } from "./test-runner.js";
+import { bindFunctionGroupTestRunner, bindTestRunner } from "../testing/test-runner.js";
 import {
   revalidateFunctionGroupReport,
   revalidateTargetReport,
-} from "./revalidation.js";
-import type { FinalReportClaim } from "./final-report.js";
+} from "../verification/revalidation.js";
 import {
   acceptedFunctionGroupResult,
   acceptedResult,
-  feedbackMessage,
-  functionGroupFeedbackMessage,
+  parseFinalReport,
+  type FinalReportClaim,
+  type ParsedReport,
   type AgentHostResult,
   type FunctionGroupHostResult,
-} from "./host-result.js";
-import { parseFinalReport, type ParsedReport } from "./final-report.js";
+} from "../verification/report.js";
+import { feedbackMessage, functionGroupFeedbackMessage } from "../verification/feedback.js";
 import { messageCharacters, messageText } from "./messages.js";
 import type {
   FunctionGroupTestRun,
   TargetTestResult,
   ToolContext,
   ToolRuntimeContext,
-} from "./tools/common.js";
+} from "../tools/common.js";
 import {
   createToolCallMiddleware,
   createWorkspaceSerializer,
@@ -48,12 +48,12 @@ import {
 import {
   emitAgentTrace,
   type AgentTraceLogger,
-} from "./trace-log.js";
-import { emitAgentWorkLog, type AgentWorkLogger } from "./work-log.js";
+} from "../logging/trace-log.js";
+import { emitAgentWorkLog, type AgentWorkLogger } from "../logging/work-log.js";
 import {
   defaultToolContextResolver,
   type ToolContextResolver,
-} from "./tool-context.js";
+} from "../testing/tool-context.js";
 import { randomUUID } from "node:crypto";
 
 export type LangChainAgentHostOptions = {

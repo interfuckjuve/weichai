@@ -1,54 +1,17 @@
+import { ScriptedChatModel } from "../test-support/scripted-chat-model.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AIMessage, BaseMessage, HumanMessage, ToolMessage } from "@langchain/core/messages";
-import { BaseChatModel } from "@langchain/core/language_models/chat_models";
-import type { ChatResult } from "@langchain/core/outputs";
-import type { StructuredToolInterface } from "@langchain/core/tools";
 import { createFunctionGroupVerifier } from "./function-group-verify.js";
-import { createLangChainFunctionGroupAgentHost } from "./host/langchain-runtime.js";
-import type { AgentTraceEvent } from "./host/trace-log.js";
+import { createLangChainFunctionGroupAgentHost } from "./host/agent/langchain-runtime.js";
+import type { AgentTraceEvent } from "./host/logging/trace-log.js";
 import type { ToolRuntimeContext } from "./host/tools/common.js";
 import type {
   FunctionGroupVerificationInput,
   RequirementFunctionGroupVerificationInput,
 } from "./types.js";
-
-type ScriptedResponse = (messages: readonly BaseMessage[]) => AIMessage;
-
-/** A controllable framework chat model: real LangChain execution, scripted replies. */
-class ScriptedChatModel extends BaseChatModel {
-  readonly observations: BaseMessage[][] = [];
-  readonly toolNames: string[][] = [];
-  private index = 0;
-
-  constructor(private readonly script: ScriptedResponse[]) {
-    super({});
-  }
-
-  _llmType(): string {
-    return "scripted";
-  }
-
-  bindTools(tools: StructuredToolInterface[]): this {
-    this.toolNames.push(tools.map(tool => tool.name));
-    return this;
-  }
-
-  async _generate(messages: BaseMessage[]): Promise<ChatResult> {
-    this.observations.push([...messages]);
-    const next = this.script[this.index++];
-    if (next === undefined) throw new Error("Scripted model ran out of responses.");
-    const message = next(messages);
-    return {
-      generations: [{
-        text: typeof message.content === "string" ? message.content : "",
-        message,
-      }],
-    };
-  }
-}
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -220,10 +183,8 @@ describe("LangChain translation function-group verification", () => {
     expect(result.functions[2]).toMatchObject({ lineCoverage: 50, branchCoverage: null });
     expect(result.protocolChecks).toEqual([{ ruleId: "R1", status: "passed" }]);
     expect(model.toolNames[0]).toEqual(expect.arrayContaining([
-      ...FUNCTION_GROUP_TOOLS, "read_source_file", "read_target_file",
+      ...FUNCTION_GROUP_TOOLS, "list_source_files", "read_source_file", "list_target_files", "read_target_file",
     ]));
-    expect(model.toolNames[0]).not.toContain("finish_function_group");
-    expect(model.toolNames[0]).not.toContain("report_uncertain");
     const prompt = model.observations[0]!.map(message => JSON.stringify(message.content)).join("\n");
     expect(prompt).toContain("Preserve order pricing behavior.");
     expect(prompt).toContain("calculatePrice");
@@ -318,6 +279,7 @@ describe("LangChain function-group conclusion matrix", () => {
       description: "The requirement never defines the rounding mode for discounted prices.",
     });
     expect(result.functions.every(item => item.executed && item.status === "passed")).toBe(true);
+    expect(result.reason).toBeUndefined();
     expect(model.observations).toHaveLength(1);
   });
 

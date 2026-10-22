@@ -1,6 +1,14 @@
 import type { BaseMessage } from "@langchain/core/messages";
-import type { ProtocolCheck, VerificationIssue, VerificationFunction } from "../types.js";
-import { messageText } from "./messages.js";
+import type {
+  FunctionGroupFunctionResult,
+  ProtocolCheck,
+  TargetFunctionCoverage,
+  VerificationFunction,
+  VerificationIssue,
+  VerificationReason,
+} from "../../types.js";
+import type { FunctionGroupTestRun, TargetTestResult } from "../tools/common.js";
+import { messageText } from "../agent/messages.js";
 
 /** The Agent's own conclusion in a plain final assistant message. */
 export type FinalReportClaim = {
@@ -10,6 +18,24 @@ export type FinalReportClaim = {
   /** Target functions the Agent identifies as affected by a reported bug. */
   affectedTargets?: VerificationFunction[];
   /** Up to three bounded module-protocol checks. */
+  protocolChecks?: ProtocolCheck[];
+};
+
+/** Accepted Agent report plus the Host's fresh observation of the target function. */
+export type AgentHostResult = {
+  verdict: FinalReportClaim["verdict"];
+  summary: string;
+  issue?: VerificationIssue;
+  targetFunction?: TargetFunctionCoverage;
+};
+
+/** Accepted function-group report plus the Host's fresh per-function observation. */
+export type FunctionGroupHostResult = {
+  verdict: FinalReportClaim["verdict"];
+  summary: string;
+  issue?: VerificationIssue;
+  functions: FunctionGroupFunctionResult[];
+  reason?: VerificationReason;
   protocolChecks?: ProtocolCheck[];
 };
 
@@ -176,4 +202,48 @@ function parseAffectedTargets(value: unknown):
     });
   }
   return { targets };
+}
+
+export function acceptedResult(
+  report: FinalReportClaim,
+  observation: TargetTestResult,
+): AgentHostResult {
+  const targetFunction = observation.coverage?.status === "available"
+    ? observation.coverage.targetFunction
+    : undefined;
+  return {
+    verdict: report.verdict,
+    summary: report.summary,
+    ...acceptedIssue(report),
+    ...(targetFunction ? { targetFunction: { ...targetFunction } } : {}),
+  };
+}
+
+/** The public issue kind follows the accepted verdict, never the model's self-description. */
+function acceptedIssue(report: FinalReportClaim): { issue?: VerificationIssue } {
+  if (report.verdict === "bug-found" && report.issue) {
+    return { issue: { kind: "translation", description: report.issue.description } };
+  }
+  if (report.verdict === "uncertain" && report.issue) {
+    return { issue: { kind: "unknown", description: report.issue.description } };
+  }
+  return {};
+}
+
+export function acceptedFunctionGroupResult(
+  report: FinalReportClaim,
+  observation: FunctionGroupTestRun,
+): FunctionGroupHostResult {
+  return {
+    verdict: report.verdict,
+    summary: report.summary,
+    ...acceptedIssue(report),
+    functions: observation.functions.map(item => ({
+      ...item,
+      ...(item.source ? { source: { ...item.source } } : {}),
+      target: { ...item.target },
+    })),
+    ...(observation.reason && observation.reason !== "verified" ? { reason: observation.reason } : {}),
+    ...(report.protocolChecks ? { protocolChecks: report.protocolChecks } : {}),
+  };
 }

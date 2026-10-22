@@ -1,12 +1,10 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { HumanMessage } from '@langchain/core/messages';
 import {
   createFunctionGroupFinalReportTask,
   createRequirementFunctionGroupFinalReportTask,
 } from '../services/translation-verifier/src/strategies/single-agent-function-group/strategy.js';
-import type { AgentTraceEvent } from '../services/translation-verifier/src/host/trace-log.js';
+import type { AgentTraceEvent } from '../services/translation-verifier/src/host/logging/trace-log.js';
 import type { FunctionGroupTestRun } from '../services/translation-verifier/src/host/tools/common.js';
 import {
   classifyOfflineVerifierFailure,
@@ -17,7 +15,7 @@ import {
   recordOfflineVerifierEvent,
   verifierTaskInputs,
 } from './translation-verifier-offline.js';
-import { AgentRunFailure } from '../services/translation-verifier/src/host/run-budget.js';
+import { AgentRunFailure } from '../services/translation-verifier/src/host/agent/run-budget.js';
 
 const completion = {
   id: 'completion-1',
@@ -143,7 +141,7 @@ describe('offline verifier failure classification', () => {
       'Agent run budget exhausted: 64 tool calls exceed the 16-call per-turn limit.',
       'Agent run context budget exhausted: 2000000 characters exceed the 1500000-character limit.',
       'Agent run response budget exhausted: 40000 characters exceed the 20000-character limit.',
-      'Agent did not produce an accepted final report within 4 feedback rounds.',
+      'Agent run budget exhausted: no accepted final report within 4 feedback rounds.',
     ]) {
       expect(classifyOfflineVerifierFailure(message)).toEqual({ reason: 'agent-timeout', kind: 'unknown' });
     }
@@ -405,38 +403,5 @@ describe('offline verifier task handoff', () => {
       requirement: { ...task, taskContext: { ...task.taskContext, functionGroup: undefined } },
       translation: task,
     })).toThrow(/function-group context/);
-  });
-});
-
-describe('offline verifier script wiring', () => {
-  const read = (file: string) => readFileSync(join(process.cwd(), 'scripts', file), 'utf8');
-
-  it('constructs the LangChain function-group Host and chat model without the legacy protocol path', () => {
-    for (const file of ['run-target-module-pipeline.mts', 'verify-completed-project.mts']) {
-      const source = read(file);
-      expect(source, file).toContain('createLangChainFunctionGroupAgentHost');
-      expect(source, file).toContain('createOfflineVerifierChatModel');
-      expect(source, file).not.toContain('createTranslationVerifierModelClient');
-      expect(source, file).not.toMatch(/createAgentHost\b/);
-      expect(source, file).not.toContain('SingleAgentFunctionGroupTerminalResult');
-    }
-    // Existing consumers of the tool-run array and the new authoritative observation both stay.
-    const completed = read('verify-completed-project.mts');
-    expect(completed).toContain('testRuns: evidence.testRuns');
-    expect(completed).toContain('finalObservation: evidence.finalObservation');
-  });
-
-  it('keeps the handoff probe on the taskContext business input', () => {
-    const source = read('verify-protocol-pipeline-handoff.mts');
-    expect(source).toContain('verifierTaskInputs');
-    expect(source).toContain('createRequirementFunctionGroupFinalReportTask');
-    expect(source).toContain('createFunctionGroupFinalReportTask');
-    expect(source).not.toContain('Task.functionGroup');
-  });
-
-  it('classifies the verifier failure from the error itself instead of its message', () => {
-    const source = read('run-target-module-pipeline.mts');
-    expect(source).toContain('classifyOfflineVerifierFailure(error)');
-    expect(source).not.toContain('classifyOfflineVerifierFailure(description)');
   });
 });

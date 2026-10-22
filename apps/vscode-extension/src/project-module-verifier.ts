@@ -61,10 +61,10 @@ function requireVerifierRuntime(): {
   createFunctionGroupVerifier(host: unknown): FunctionGroupVerifier;
 } {
   return {
-    createTranslationVerifierChatModel: (require('../../../services/translation-verifier/src/host/chat-model') as {
+    createTranslationVerifierChatModel: (require('../../../services/translation-verifier/src/host/agent/chat-model') as {
       createTranslationVerifierChatModel(options: PipelineModel & { maxOutputTokens: number }): unknown;
     }).createTranslationVerifierChatModel,
-    createLangChainFunctionGroupAgentHost: (require('../../../services/translation-verifier/src/host/langchain-runtime') as {
+    createLangChainFunctionGroupAgentHost: (require('../../../services/translation-verifier/src/host/agent/langchain-runtime') as {
       createLangChainFunctionGroupAgentHost(options: VerifierHostOptions): unknown;
     }).createLangChainFunctionGroupAgentHost,
     createFunctionGroupVerifier: (require('../../../services/translation-verifier/src/function-group-verify') as {

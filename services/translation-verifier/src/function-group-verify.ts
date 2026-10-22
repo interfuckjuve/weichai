@@ -2,8 +2,8 @@ import {
   createRequirementFunctionGroupStrategy,
   createSingleAgentFunctionGroupStrategy,
 } from "./strategies/single-agent-function-group/strategy.js";
-import type { FunctionGroupHostResult } from "./host/host-result.js";
-import type { AgentHost } from "./host/task.js";
+import type { FunctionGroupHostResult } from "./host/verification/report.js";
+import type { AgentHost } from "./host/agent/task.js";
 import type {
   FunctionGroupVerificationInput,
   FunctionGroupVerificationResult,

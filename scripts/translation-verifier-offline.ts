@@ -6,11 +6,11 @@
  * provider or starts a pipeline, so the deterministic script tests exercise
  * the same mapping the real callers use.
  */
-import type { AgentTask } from '../services/translation-verifier/src/host/task.js';
-import type { TranslationVerifierChatModelOptions } from '../services/translation-verifier/src/host/chat-model.js';
-import type { AgentTraceEvent } from '../services/translation-verifier/src/host/trace-log.js';
+import type { AgentTask } from '../services/translation-verifier/src/host/agent/task.js';
+import type { TranslationVerifierChatModelOptions } from '../services/translation-verifier/src/host/agent/chat-model.js';
+import type { AgentTraceEvent } from '../services/translation-verifier/src/host/logging/trace-log.js';
 import type { FunctionGroupTestRun } from '../services/translation-verifier/src/host/tools/common.js';
-import { createTranslationVerifierChatModel } from '../services/translation-verifier/src/host/chat-model.js';
+import { createTranslationVerifierChatModel } from '../services/translation-verifier/src/host/agent/chat-model.js';
 import type {
   FunctionGroupVerificationInput,
   RequirementFunctionGroupVerificationInput,

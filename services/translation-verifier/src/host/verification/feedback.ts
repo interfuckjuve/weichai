@@ -1,78 +1,8 @@
-import type {
-  FunctionGroupFunctionResult,
-  ProtocolCheck,
-  TargetFunctionCoverage,
-  VerificationIssue,
-  VerificationReason,
-  VerificationTestCase,
-} from "../types.js";
-import type { FinalReportClaim } from "./final-report.js";
-import type { FunctionGroupTestRun, TargetTestResult, TestSummary } from "./tools/common.js";
-
-/** Accepted Agent report plus the Host's fresh observation of the target function. */
-export type AgentHostResult = {
-  verdict: FinalReportClaim["verdict"];
-  summary: string;
-  issue?: VerificationIssue;
-  targetFunction?: TargetFunctionCoverage;
-};
-
-/** Accepted function-group report plus the Host's fresh per-function observation. */
-export type FunctionGroupHostResult = {
-  verdict: FinalReportClaim["verdict"];
-  summary: string;
-  issue?: VerificationIssue;
-  functions: FunctionGroupFunctionResult[];
-  reason?: VerificationReason;
-  protocolChecks?: ProtocolCheck[];
-};
+import type { VerificationTestCase } from "../../types.js";
+import type { FunctionGroupTestRun, TargetTestResult, TestSummary } from "../tools/common.js";
 
 /** Keep the model-visible feedback bounded; the full observation stays in the trace. */
 const MAX_FEEDBACK_CHARS = 12_000;
-
-export function acceptedResult(
-  report: FinalReportClaim,
-  observation: TargetTestResult,
-): AgentHostResult {
-  const targetFunction = observation.coverage?.status === "available"
-    ? observation.coverage.targetFunction
-    : undefined;
-  return {
-    verdict: report.verdict,
-    summary: report.summary,
-    ...acceptedIssue(report),
-    ...(targetFunction ? { targetFunction: { ...targetFunction } } : {}),
-  };
-}
-
-/** The public issue kind follows the accepted verdict, never the model's self-description. */
-function acceptedIssue(report: FinalReportClaim): { issue?: VerificationIssue } {
-  if (report.verdict === "bug-found" && report.issue) {
-    return { issue: { kind: "translation", description: report.issue.description } };
-  }
-  if (report.verdict === "uncertain" && report.issue) {
-    return { issue: { kind: "unknown", description: report.issue.description } };
-  }
-  return {};
-}
-
-export function acceptedFunctionGroupResult(
-  report: FinalReportClaim,
-  observation: FunctionGroupTestRun,
-): FunctionGroupHostResult {
-  return {
-    verdict: report.verdict,
-    summary: report.summary,
-    ...acceptedIssue(report),
-    functions: observation.functions.map(item => ({
-      ...item,
-      ...(item.source ? { source: { ...item.source } } : {}),
-      target: { ...item.target },
-    })),
-    ...(observation.reason && observation.reason !== "verified" ? { reason: observation.reason } : {}),
-    ...(report.protocolChecks ? { protocolChecks: report.protocolChecks } : {}),
-  };
-}
 
 /** One Host observation rendered for the model; both task shapes share these lines. */
 type FeedbackObservation = {

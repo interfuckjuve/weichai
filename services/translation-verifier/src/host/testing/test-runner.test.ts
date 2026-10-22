@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { bindTestRunner, bindFunctionGroupTestRunner } from "./test-runner.js";
-import { MAX_TEST_OUTPUT_CHARS, type ToolRuntimeContext } from "./tools/common.js";
+import { MAX_TEST_OUTPUT_CHARS, type ToolRuntimeContext } from "../tools/common.js";
 
 const roots: string[] = [];
 afterEach(async () => {

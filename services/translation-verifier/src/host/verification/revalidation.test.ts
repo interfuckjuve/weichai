@@ -8,8 +8,8 @@ import type {
   FunctionGroupTestRunner,
   ToolContext,
   ToolRuntimeContext,
-} from "./tools/common.js";
-import type { FunctionGroupFunctionResult, FunctionGroupVerificationInput } from "../types.js";
+} from "../tools/common.js";
+import type { FunctionGroupFunctionResult, FunctionGroupVerificationInput } from "../../types.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -109,7 +109,7 @@ describe("function-group report revalidation", () => {
     expect(result.observation.functions.every(item => item.status === "passed")).toBe(true);
   });
 
-  it("rejects no-bug when a target was executed but carries no passed status", async () => {
+  it.each([noBug, uncertain])("rejects $verdict when a target was executed without passing", async (report) => {
     const context = await contextWithRunner(suite({
       functions: [
         groupFunction("calculatePrice", { executed: true, status: "passed" }),
@@ -118,7 +118,7 @@ describe("function-group report revalidation", () => {
       ],
     }));
 
-    const result = await revalidateFunctionGroupReport(context, noBug);
+    const result = await revalidateFunctionGroupReport(context, report);
 
     expect(result.feedback.join("\n")).toContain("pass");
     expect(result.feedback.join("\n")).toContain("applyDiscount");
@@ -223,19 +223,5 @@ describe("function-group report revalidation", () => {
 
     expect(result.feedback).toEqual([]);
     expect(result.observation.functions[1]).toMatchObject({ executed: true, status: "passed" });
-  });
-
-  it("rejects uncertain when a target is executed without a passed status", async () => {
-    const context = await contextWithRunner(suite({
-      functions: [
-        groupFunction("calculatePrice", { executed: true, status: "unverified" }),
-        groupFunction("applyDiscount", { executed: true, status: "passed" }),
-      ],
-    }));
-
-    const result = await revalidateFunctionGroupReport(context, uncertain);
-
-    expect(result.feedback.join("\n")).toContain("calculatePrice");
-    expect(result.feedback.join("\n")).toContain("pass");
   });
 });

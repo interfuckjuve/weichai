@@ -2,12 +2,12 @@ import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createVerifier } from "../src/verify.js";
-import { createLangChainAgentHost } from "../src/host/langchain-runtime.js";
-import { createTranslationVerifierChatModel } from "../src/host/chat-model.js";
-import { createJsonlAgentWorkLogger } from "../src/host/work-log.js";
-import { createJsonlAgentTraceLogger } from "../src/host/trace-log.js";
+import { createLangChainAgentHost } from "../src/host/agent/langchain-runtime.js";
+import { createTranslationVerifierChatModel } from "../src/host/agent/chat-model.js";
+import { createJsonlAgentWorkLogger } from "../src/host/logging/work-log.js";
+import { createJsonlAgentTraceLogger } from "../src/host/logging/trace-log.js";
 import type { VerificationResult } from "../src/types.js";
-import type { AgentWorkLogEvent } from "../src/host/work-log.js";
+import type { AgentWorkLogEvent } from "../src/host/logging/work-log.js";
 import {
   createFixtureWorkspace,
   materializeFixtureInput,

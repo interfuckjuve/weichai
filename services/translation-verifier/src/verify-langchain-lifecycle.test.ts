@@ -1,51 +1,20 @@
+import {
+  createSingleFunctionFixture,
+  RUNNER_SCRIPT,
+  TARGET_PATH,
+  TEST_PATH,
+  type SingleFunctionFixture,
+} from "../test-support/single-function-fixture.js";
+import { ScriptedChatModel } from "../test-support/scripted-chat-model.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { access, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { AIMessage, BaseMessage, HumanMessage, ToolMessage } from "@langchain/core/messages";
-import { BaseChatModel } from "@langchain/core/language_models/chat_models";
-import type { ChatResult } from "@langchain/core/outputs";
-import type { StructuredToolInterface } from "@langchain/core/tools";
+import { AIMessage, HumanMessage, ToolMessage } from "@langchain/core/messages";
 import { createVerifier } from "./verify.js";
-import { createLangChainAgentHost } from "./host/langchain-runtime.js";
-import { AgentRunFailure } from "./host/run-budget.js";
-import type { AgentWorkLogEvent } from "./host/work-log.js";
-import type { AgentTraceEvent } from "./host/trace-log.js";
-import type { ToolRuntimeContext } from "./host/tools/common.js";
-import type { VerificationInput } from "./types.js";
-
-type ScriptedResponse = (messages: readonly BaseMessage[]) => AIMessage | Promise<AIMessage>;
-
-/** Controllable framework model: real LangChain execution, scripted replies. */
-class ScriptedChatModel extends BaseChatModel {
-  readonly observations: BaseMessage[][] = [];
-  private index = 0;
-
-  constructor(private readonly script: ScriptedResponse[]) {
-    super({});
-  }
-
-  _llmType(): string {
-    return "scripted";
-  }
-
-  bindTools(_tools: StructuredToolInterface[]): this {
-    return this;
-  }
-
-  async _generate(messages: BaseMessage[]): Promise<ChatResult> {
-    this.observations.push([...messages]);
-    const next = this.script[this.index++];
-    if (next === undefined) throw new Error("Scripted model ran out of responses.");
-    const message = await next(messages);
-    return {
-      generations: [{
-        text: typeof message.content === "string" ? message.content : "",
-        message,
-      }],
-    };
-  }
-}
+import { createLangChainAgentHost } from "./host/agent/langchain-runtime.js";
+import { AgentRunFailure } from "./host/agent/run-budget.js";
+import type { AgentWorkLogEvent } from "./host/logging/work-log.js";
+import type { AgentTraceEvent } from "./host/logging/trace-log.js";
 
 const modelRoots: string[] = [];
 afterEach(async () => {
@@ -53,97 +22,13 @@ afterEach(async () => {
   await Promise.all(modelRoots.splice(0).map(root => rm(root, { recursive: true, force: true })));
 });
 
-const TEST_PATH = "tests/agent/BehaviorTest.java";
-const TARGET_PATH = "src/Target.java";
-
-const RUNNER_SCRIPT = `const fs = require('node:fs');
-const content = fs.existsSync(${JSON.stringify(TEST_PATH)})
-  ? fs.readFileSync(${JSON.stringify(TEST_PATH)}, 'utf8') : '';
-fs.rmSync('target', { recursive: true, force: true });
-fs.mkdirSync('target/surefire-reports', { recursive: true });
-fs.mkdirSync('target/site/jacoco', { recursive: true });
-const surefire = 'target/surefire-reports/TEST-BehaviorTest.xml';
-const jacoco = 'target/site/jacoco/jacoco.xml';
-const coverage = '<report><package name=""><class name="Target" sourcefilename="Target.java"><method name="targetFn" desc="()I"><counter type="METHOD" missed="0" covered="1"/></method></class></package></report>';
-if (content.includes('BROKEN')) {
-  fs.writeFileSync(surefire, '<testsuite name="BehaviorTest" tests="1" failures="0" errors="1" skipped="0"><testcase classname="BehaviorTest" name="compile"><error message="cannot find symbol"/></testcase></testsuite>');
-} else if (content.includes('FAILING')) {
-  fs.writeFileSync(surefire, '<testsuite name="BehaviorTest" tests="1" failures="1" errors="0" skipped="0"><testcase classname="BehaviorTest" name="requirement"><failure message="expected rejection">trace</failure></testcase></testsuite>');
-  fs.writeFileSync(jacoco, coverage);
-  process.exitCode = 1;
-} else {
-  fs.writeFileSync(surefire, '<testsuite name="BehaviorTest" tests="1" failures="0" errors="0" skipped="0"><testcase classname="BehaviorTest" name="requirement"/></testsuite>');
-  fs.writeFileSync(jacoco, coverage);
-}
-`;
-
 const SLOW_RUNNER_SCRIPT = `const fs = require('node:fs');
 fs.writeFileSync('runner-started.txt', '1');
 setTimeout(() => fs.writeFileSync('runner-finished.txt', '1'), 5000);
 `;
 
-type Fixture = {
-  root: string;
-  input: VerificationInput;
-  resolveToolContext: () => Promise<ToolRuntimeContext>;
-  cleanupCalls: number;
-};
-
-async function createFixture(testContent?: string, runnerScript = RUNNER_SCRIPT): Promise<Fixture> {
-  const root = await mkdtemp(join(tmpdir(), "verifier-langchain-lifecycle-"));
-  modelRoots.push(root);
-  await mkdir(join(root, "src"), { recursive: true });
-  await mkdir(join(root, "tests/agent"), { recursive: true });
-  await writeFile(join(root, "src/Source.java"), "class Source { int sourceFn() { return 1; } }");
-  await writeFile(join(root, TARGET_PATH), "class Target { int targetFn() { return 1; } }");
-  if (testContent !== undefined) await writeFile(join(root, TEST_PATH), testContent);
-  await writeFile(join(root, "fake-runner.cjs"), runnerScript);
-  const input: VerificationInput = {
-    schemaVersion: "2.0",
-    sourceLanguage: "Java",
-    targetLanguage: "Java",
-    sourceProjectPath: root,
-    targetProjectPath: root,
-    subject: {
-      sourceFunction: { path: "src/Source.java", name: "sourceFn" },
-      targetFunction: { path: TARGET_PATH, name: "targetFn" },
-      requirement: "Preserve the targetFn behavior.",
-    },
-    analysisReport: {
-      schemaVersion: "1.0",
-      applicability: { level: "reference", confidence: 1, reasons: [] },
-      behaviorMapping: [],
-      contractMapping: [],
-      dependencyPlan: [],
-      implementationPlan: [],
-      risks: [],
-      assumptions: [],
-      unresolved: [],
-    },
-    migrationPlan: {},
-    translation: { round: 0, files: [] },
-  };
-  const fixture: Fixture = {
-    root,
-    input,
-    cleanupCalls: 0,
-    resolveToolContext: async () => ({
-      sourceLanguage: input.sourceLanguage,
-      targetLanguage: input.targetLanguage,
-      sourceProjectPath: root,
-      targetProjectPath: root,
-      sourcePath: input.subject.sourceFunction.path,
-      targetPath: input.subject.targetFunction.path,
-      targetFunction: input.subject.targetFunction,
-      sourceDirectory: "src",
-      targetDirectory: "src",
-      testRoots: ["tests/agent"],
-      testRunner: "maven",
-      targetTest: { executable: process.execPath, args: ["fake-runner.cjs"], timeoutMs: 10_000 },
-      async cleanup() { fixture.cleanupCalls += 1; },
-    }),
-  };
-  return fixture;
+function createFixture(testContent?: string, runnerScript = RUNNER_SCRIPT): Promise<SingleFunctionFixture> {
+  return createSingleFunctionFixture(modelRoots, testContent, runnerScript);
 }
 
 function report(
@@ -177,7 +62,7 @@ function finalReport(content: string): AIMessage {
   return new AIMessage({ content });
 }
 
-function verifier(fixture: Fixture, model: ScriptedChatModel, extra: {
+function verifier(fixture: SingleFunctionFixture, model: ScriptedChatModel, extra: {
   signal?: AbortSignal;
   limits?: {
     maxTurns?: number;

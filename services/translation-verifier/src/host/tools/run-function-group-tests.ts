@@ -1,6 +1,6 @@
 import { tool } from "langchain";
 import { z } from "zod";
-import { resolveTestPaths } from "../test-runner.js";
+import { resolveTestPaths } from "../testing/test-runner.js";
 import {
   relativePath,
   type FunctionGroupTestRun,

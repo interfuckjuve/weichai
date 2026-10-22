@@ -76,7 +76,7 @@ import { CodexWorkspaceTranslationRuntime } from '../services/adaptation-service
 import { prepareProjectIntegrationContext } from '../services/adaptation-service/src/project-integration-context.js';
 import { prepareDeepSeekCodexHome } from '../services/adaptation-service/src/codex-experiment-home.js';
 import { createHttpServer } from '../services/adaptation-service/src/http-server.js';
-import { createLangChainFunctionGroupAgentHost } from '../services/translation-verifier/src/host/langchain-runtime.js';
+import { createLangChainFunctionGroupAgentHost } from '../services/translation-verifier/src/host/agent/langchain-runtime.js';
 import { createFunctionGroupVerifier } from '../services/translation-verifier/src/function-group-verify.js';
 import {
   classifyOfflineVerifierFailure,
