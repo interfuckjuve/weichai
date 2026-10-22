@@ -165,8 +165,8 @@ export async function verifyPipelineModule(input: {
   const fidelity = mode === 'translation-fidelity';
   const functions = [...mapping.unmatchedFunctions, ...mapping.functions.map(item => item.target)];
   const attempts = [...(input.previous?.attempts ?? [])];
-  if (!functions.length) return { mode, attempts, disposition: mapping.nonExecutableFunctions.length ? 'not-applicable' : 'agent-uncertain' };
   input.signal.throwIfAborted();
+  if (!functions.length) return { mode, attempts, disposition: mapping.nonExecutableFunctions.length ? 'not-applicable' : 'agent-uncertain' };
   const runtime = requireVerifierRuntime();
   const host = runtime.createLangChainFunctionGroupAgentHost({
     model: runtime.createTranslationVerifierChatModel({ ...input.model, maxOutputTokens: 16_384 }),

@@ -144,16 +144,80 @@ function moduleInput(root: string): ProjectPipelineModule {
   } as unknown as ProjectPipelineModule;
 }
 
-function verify(input: { root: string; apiBase: string; signal?: AbortSignal; log?: string[] }) {
+function verify(input: {
+  root: string;
+  apiBase: string;
+  signal?: AbortSignal;
+  log?: string[];
+  candidates?: unknown[];
+  historyView?: unknown;
+}) {
   return verifier.verifyPipelineModule({
     root: input.root,
     module: moduleInput(input.root),
     requirement: 'Discounts must be strictly monotonic.',
     model: { apiKey: 'sk-test-key', apiBase: input.apiBase, model: 'deepseek-test' },
-    candidates: [],
+    candidates: (input.candidates ?? []) as never,
+    ...(input.historyView ? { historyView: input.historyView as never } : {}),
     signal: input.signal ?? new AbortController().signal,
     log: message => { input.log?.push(message); },
   });
+}
+
+/** A direct-read history view whose single selected module sits under `source/candidate-1`. */
+async function createHistoryView(): Promise<{ historyView: unknown; candidates: unknown[] }> {
+  const root = await mkdtemp(path.join(tmpdir(), 'recast-verifier-history-'));
+  roots.push(root);
+  const sourceRoot = path.join(root, 'source');
+  await mkdir(path.join(sourceRoot, 'candidate-1'), { recursive: true });
+  await writeFile(path.join(sourceRoot, 'candidate-1/Order.cs'), [
+    'public class Order {',
+    '  public int calculatePrice(int quantity) { return quantity * 2; }',
+    '  public int applyDiscount(int total) { return total - 1; }',
+    '}',
+  ].join('\n'));
+  const historyView = {
+    root,
+    files: ['candidate-1/Order.cs'],
+    repositoryId: 'repo-1',
+    analysisRevision: 'revision-1',
+    moduleId: 'orders',
+    manifestHash: 'manifest-1',
+    candidates: [{
+      prefix: 'candidate-1',
+      repositoryId: 'repo-1',
+      analysisRevision: 'revision-1',
+      moduleId: 'orders',
+      language: 'Java',
+    }],
+  };
+  const candidates = [{
+    id: 'candidate-1',
+    title: 'Order',
+    repository: 'repo-1',
+    license: 'MIT',
+    language: 'Java',
+    kind: 'module',
+    path: 'candidate-1/Order.cs',
+    signature: 'Order',
+    summary: 'Order pricing',
+    score: {},
+    preview: 'Order pricing',
+    dependencies: [],
+    compatibility: [],
+    risks: [],
+    sourceModule: {
+      repositoryId: 'repo-1',
+      analysisRevision: 'revision-1',
+      projectId: 'project-1',
+      moduleId: 'orders',
+      name: 'Order',
+      projectPath: 'source',
+      sourceFiles: ['Order.cs'],
+      coreApis: ['calculatePrice(int quantity)', 'applyDiscount(int total)'],
+    },
+  }];
+  return { historyView, candidates };
 }
 
 const report = (value: Record<string, unknown>) => JSON.stringify(value);
@@ -263,6 +327,57 @@ describe('extension LangChain verification path', () => {
     try {
       await expect(verify({ root, apiBase: server.apiBase, signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' });
       expect(server.requests).toHaveLength(1);
+    } finally { await server.close(); }
+  });
+
+  it('verifies a selected history module in translation-fidelity mode with real source mapping', async () => {
+    const root = await createProject('pass');
+    const { historyView, candidates } = await createHistoryView();
+    const server = await startModelServer([{
+      content: report({ verdict: 'no-bug', summary: 'The translated pricing behavior matches the source module.' }),
+    }]);
+    try {
+      const verification = await verify({ root, apiBase: server.apiBase, candidates, historyView });
+      // A trusted mapping with a history view selects the fidelity strategy.
+      expect(verification.mode).toBe('translation-fidelity');
+      expect(verification.disposition).toBe('verified');
+      expect(verification.result?.status).toBe('success');
+      // The Host assembles the source project under the view root and keeps the
+      // selected module prefix, so the Agent can read the historical source.
+      expect(verification.result?.functions.map(item => item.source?.path)).toEqual([
+        'candidate-1/Order.cs',
+        'candidate-1/Order.cs',
+      ]);
+      expect(verification.result?.functions.map(item => item.target.name)).toEqual(['calculatePrice', 'applyDiscount']);
+      // The task the framework sent names the historical source file, which only
+      // exists once sourceProjectPath was joined to the view root.
+      expect(JSON.stringify(server.requests[0]!.body.messages)).toContain('candidate-1/Order.cs');
+      expect(verification.attempts).toHaveLength(1);
+    } finally { await server.close(); }
+  });
+
+  it('reports a fidelity-mode production defect for the affected source target', async () => {
+    const root = await createProject('bug');
+    const { historyView, candidates } = await createHistoryView();
+    const server = await startModelServer([{
+      content: report({
+        verdict: 'bug-found',
+        summary: 'The translated discount is not monotonic.',
+        issue: { kind: 'translation', description: 'Discounts must be strictly monotonic, but the failing assertion shows they are not.' },
+        affectedTargets: [{ path: 'src/Order.java', name: 'calculatePrice', signature: 'Order.calculatePrice' }],
+      }),
+    }]);
+    try {
+      const verification = await verify({ root, apiBase: server.apiBase, candidates, historyView });
+      expect(verification.mode).toBe('translation-fidelity');
+      expect(verification.disposition).toBe('production-defect');
+      expect(verification.result?.status).toBe('failure');
+      expect(verification.result?.issue?.kind).toBe('translation');
+      expect(verification.result?.functions[0]).toMatchObject({
+        source: { path: 'candidate-1/Order.cs' },
+        target: { path: 'src/Order.java', name: 'calculatePrice' },
+        executed: true,
+      });
     } finally { await server.close(); }
   });
 
