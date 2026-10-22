@@ -5,6 +5,10 @@
   "type": "module",
   "dependencies": {
     "@forexplore/contracts": "0.1.0",
-    "fast-xml-parser": "^5.0.0"
+    "@langchain/core": "1.2.20",
+    "@langchain/langgraph": "1.5.2",
+    "@langchain/openai": "1.5.7",
+    "fast-xml-parser": "^5.0.0",
+    "langchain": "1.5.19"
   }
 }

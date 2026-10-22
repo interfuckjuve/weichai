@@ -10,6 +10,10 @@ export type AgentWorkLogEventName =
   | "tool.started"
   | "tool.completed"
   | "tool.failed"
+  | "agent.invocation.started"
+  | "agent.invocation.completed"
+  | "host.revalidation.completed"
+  | "agent.feedback.appended"
   | "run.completed"
   | "run.failed";
 

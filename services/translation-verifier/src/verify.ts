@@ -1,6 +1,6 @@
 import {
   createSingleAgentStrategy,
-  type SingleAgentTerminalResult,
+  type SingleAgentHostResult,
 } from "./strategies/single-agent/strategy.js";
 import type { AgentHost } from "./host/agent.js";
 import type {
@@ -18,7 +18,7 @@ export type VerificationRunner = (
 
 /** Build the public runner and keep strategy registration inside the verifier. */
 export function createVerifier(
-  host: AgentHost<SingleAgentTerminalResult>,
+  host: AgentHost<SingleAgentHostResult>,
 ): VerificationRunner {
   const strategies: Readonly<
     Record<string, VerificationStrategy<VerificationResult>>

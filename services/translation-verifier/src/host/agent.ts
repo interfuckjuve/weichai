@@ -10,6 +10,12 @@ export type { AgentTaskContext, ToolRuntimeContext } from "./tools/common.js";
 
 export type AgentToolFactory = HostToolFactory;
 
+/**
+ * `terminal-tools`: the Agent must call finish/report_uncertain.
+ * `final-report`: the Agent ends naturally with a plain JSON report message.
+ */
+export type AgentTaskProtocol = "terminal-tools" | "final-report";
+
 export type AgentTask = {
   subject: VerificationSubject;
   taskContext: AgentTaskContext;
@@ -160,5 +166,7 @@ export function validateAgentRunLimits(limits: AgentRunLimits): void {
 }
 
 export interface AgentHost<Result = unknown> {
+  /** How the Agent ends: a legacy terminal tool or a plain final report message. */
+  readonly taskProtocol?: AgentTaskProtocol;
   run(task: AgentTask): Result | Promise<Result>;
 }

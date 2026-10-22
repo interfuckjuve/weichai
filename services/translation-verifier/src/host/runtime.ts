@@ -51,7 +51,7 @@ export type ToolContextResolver = (
 const DEFAULT_CONTINUE_PROMPT =
   "Continue the verification using the available tools, or finish/report uncertainty when appropriate.";
 
-async function defaultToolContextResolver(
+export async function defaultToolContextResolver(
   taskContext: AgentTaskContext,
 ): Promise<ToolRuntimeContext> {
   const testEnvironment = await resolveTestEnvironment(taskContext);
