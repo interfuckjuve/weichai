@@ -81,6 +81,7 @@ if (content.includes('SIGNATURE_MISMATCH')) {
 }
 fs.writeFileSync(jacoco, '<report><package name="">' + classes.join('') + '</package></report>');
 if (content.includes('BROKEN')) {
+  process.stdout.write('[ERROR] GroupTest.java:[12,5] cannot find symbol: method calculatePrice()');
   fs.writeFileSync(surefire, '<testsuite name="GroupTest" tests="1" failures="0" errors="1" skipped="0"><testcase classname="GroupTest" name="compile"><error message="cannot find symbol"/></testcase></testsuite>');
 } else if (content.includes('FAIL_A')) {
   fs.writeFileSync(surefire, '<testsuite name="GroupTest" tests="1" failures="1" errors="0" skipped="0"><testcase classname="GroupTest" name="requirement"><failure message="expected rejection">trace</failure></testcase></testsuite>');
@@ -431,5 +432,28 @@ describe("LangChain function-group report shape", () => {
     expect(result.protocolChecks?.map(check => check.ruleId)).toEqual(["R1", "R2", "R3"]);
     expect(model.observations[1]!.map(message => JSON.stringify(message.content)).join("\n"))
       .toContain("at most three");
+  });
+});
+
+describe("LangChain function-group Host feedback", () => {
+  it("quotes the failing test case and Maven stdout in the same session's feedback", async () => {
+    const fixture = await createFixture("class GroupTest { BROKEN }");
+    const model = new ScriptedChatModel([
+      () => finalReport(report("no-bug")),
+      () => toolCall("write_target_test", { path: TEST_PATH, content: "class GroupTest { /* COVER_B COVER_C */ }" }, "fix-3"),
+      () => finalReport(report("no-bug")),
+    ]);
+
+    const result = await groupVerifier(fixture, model)(
+      fixture.input,
+      "single-agent-function-group",
+      "verify",
+    );
+
+    expect(result.status).toBe("success");
+    const continuation = model.observations[1]!.map(message => JSON.stringify(message.content)).join("\n");
+    expect(continuation).toContain("GroupTest#compile");
+    expect(continuation).toContain("cannot find symbol");
+    expect(continuation).toContain("- stdout:");
   });
 });

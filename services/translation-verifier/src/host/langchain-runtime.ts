@@ -531,6 +531,7 @@ function functionGroupFeedbackMessage(
   feedback: readonly string[],
   observation: FunctionGroupTestRun,
 ): string {
+  const failedCases = (observation.testCases ?? []).filter(item => item.status === "failed").slice(0, 5);
   return [
     "The Host did not accept your final report. Continue in this same task, fix the same tests in the same working directory, and end with a corrected final JSON report.",
     "",
@@ -539,16 +540,31 @@ function functionGroupFeedbackMessage(
     `- timed out: ${observation.timedOut === true}`,
     `- execution errors: ${observation.executionErrors ?? 0}`,
     `- tests executed: ${observation.tests.executed}, passed: ${observation.tests.passed}, failed: ${observation.tests.failed}, skipped: ${observation.tests.skipped}`,
+    ...(failedCases.length > 0
+      ? [
+        "- failed test cases:",
+        ...failedCases.map(item => `  - ${item.id}${item.message ? `: ${boundedText(item.message, 500)}` : ""}`),
+      ]
+      : []),
     "- target function coverage from this run:",
     ...observation.functions.map(item =>
       `  - ${item.target.path}#${item.target.name}${item.target.signature ? ` (${item.target.signature})` : ""}: executed=${item.executed}, status=${item.status}, line=${item.lineCoverage ?? "null"}, branch=${item.branchCoverage ?? "null"}${item.coverageIssue ? `, issue=${item.coverageIssue}` : ""}`,
     ),
     `- report paths: ${observation.reportPaths?.join(", ") || "(none)"}`,
-    ...(observation.stderr.trim() ? [`- stderr: ${observation.stderr.trim().slice(0, 2_000)}`] : []),
+    // Maven and other JVM runners usually report compilation problems on stdout.
+    ...(observation.stdout.trim() ? [`- stdout: ${boundedText(observation.stdout.trim(), 2_000)}`] : []),
+    ...(observation.stderr.trim() ? [`- stderr: ${boundedText(observation.stderr.trim(), 2_000)}`] : []),
     "",
     "Unmet completion conditions:",
     ...feedback.map(item => `- ${item}`),
   ].join("\n");
+}
+
+/** Bound model-visible diagnostics; the Host trace keeps the complete observation. */
+function boundedText(text: string, limit: number): string {
+  return text.length <= limit
+    ? text
+    : `${text.slice(0, limit)}\n[Host retained ${text.length - limit} additional diagnostic characters]`;
 }
 
 function feedbackMessage(

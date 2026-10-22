@@ -226,10 +226,11 @@ function orderedGroupFunctions(
 
 /**
  * Reruns the complete dedicated test folder after a function-group Agent ended
- * naturally and applies the acceptance matrix to its candidate conclusion:
- * no-bug and uncertain need every target executed; bug-found needs a valid
- * failing assertion plus execution evidence for the targets it names, and may
- * leave other requested targets unverified.
+ * naturally and applies the acceptance matrix to its candidate conclusion.
+ * no-bug and uncertain need a successful suite plus execution and passing
+ * evidence for every target; bug-found needs a valid failing assertion plus
+ * execution evidence for the targets it names, and may leave other requested
+ * targets unverified.
  */
 export async function revalidateFunctionGroupReport(
   context: ToolContext,
@@ -249,9 +250,12 @@ export async function revalidateFunctionGroupReport(
   const result: FunctionGroupTestRun = { ...observation, functions };
   if (report === undefined) return { observation: result, feedback };
 
-  const suitePassed = observation.timedOut !== true && observation.exitCode !== null &&
+  const suitePassed = observation.status === "success" && observation.timedOut !== true && observation.exitCode !== null &&
     (observation.executionErrors ?? 0) === 0 && tests.executed > 0 && tests.failed === 0 && tests.skipped === 0;
   const missing = functions.filter(item => !item.executed).map(item => targetLabel(item.target));
+  // A target the runner reported as executed but not passed has no passing
+  // evidence of its own; execution alone cannot establish a verified target.
+  const notPassed = functions.filter(item => item.executed && item.status !== "passed").map(item => targetLabel(item.target));
   if (report.verdict === "no-bug" || report.verdict === "uncertain") {
     if (!suitePassed) {
       feedback.push(report.verdict === "no-bug"
@@ -260,6 +264,9 @@ export async function revalidateFunctionGroupReport(
     }
     if (functions.length === 0 || missing.length > 0) {
       feedback.push(`This report requires execution evidence for every requested target function. Missing execution evidence: ${missing.join(", ") || "(no requested target functions)"}. Extend the tests or repair coverage setup, then report again.`);
+    }
+    if (notPassed.length > 0) {
+      feedback.push(`This report requires every requested target function to pass in this Host run. Not passed: ${notPassed.join(", ")}. Inspect the current failures and pass the target functions before reporting.`);
     }
   }
   if (report.verdict === "no-bug") {
