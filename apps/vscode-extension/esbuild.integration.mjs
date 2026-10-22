@@ -6,7 +6,7 @@ await esbuild.build({
   outfile: 'dist/test/integration/suite.js',
   format: 'cjs',
   platform: 'node',
-  target: 'node18',
+  target: 'node20',
   external: ['vscode'],
   logLevel: 'info',
 });

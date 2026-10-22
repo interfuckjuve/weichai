@@ -223,6 +223,15 @@ npm run dev:extension:preloaded
 
 编译或集成编译通过仅代表相应工程检查通过；它不证明业务行为、并发、超时、取消或幂等语义正确。
 
+## Runtime requirements
+
+The bundled module Verifier runs on LangChain, whose packages require Node.js 20
+or newer. The declared minimum host, VS Code 1.90, ships Electron 29.4 with
+Node.js 20.9, so `engines.vscode` stays at `^1.90.0` and the extension bundles
+are compiled with esbuild `target: node20`. Raising either value would drop
+supported hosts; lowering the target below node20 would claim Node 18 support the
+framework does not provide.
+
 ## 开发与验证
 
 ```bash

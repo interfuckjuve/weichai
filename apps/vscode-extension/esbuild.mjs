@@ -5,6 +5,9 @@ import { cp, mkdir, readFile, readdir, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+// The bundled verification runtime is LangChain, whose packages require Node
+// >= 20. VS Code 1.90 (the declared engine floor) ships Electron 29 / Node
+// 20.9, so the extension is compiled for node20 rather than node18.
 const extensionDirectory = path.dirname(fileURLToPath(import.meta.url));
 const workspaceDirectory = path.resolve(extensionDirectory, '..', '..');
 const extensionOutputDirectory = process.env.FOREXPLORE_EXTENSION_OUTPUT_DIRECTORY
@@ -31,7 +34,7 @@ await esbuild.build({
   outfile: path.join(extensionOutputDirectory, 'extension.js'),
   format: 'cjs',
   platform: 'node',
-  target: 'node18',
+  target: 'node20',
   // Tree-sitter's grammar bindings locate platform-native .node files from
   // their own package directory.  Keep those imports external and copy their
   // packages beside the extension bundle below; bundling them would collapse
@@ -47,7 +50,7 @@ for (const worker of ['structural-parse-worker', 'structural-assembly-worker']) 
   outfile: path.join(extensionOutputDirectory, `${worker}.cjs`),
   format: 'cjs',
   platform: 'node',
-  target: 'node18',
+  target: 'node20',
   external: nativeRuntimePackages,
   sourcemap: true,
   logLevel: 'info',
@@ -58,7 +61,7 @@ for (const [source, output] of [
   [path.join(workspaceDirectory, 'services/adaptation-service/src/server.ts'), 'adaptation-server.cjs'],
   [path.join(extensionDirectory, 'src/workspace-compile.ts'), 'workspace-compile.cjs'],
 ]) await esbuild.build({ entryPoints: [source], bundle: true, outfile: path.join(extensionOutputDirectory, output),
-  format: 'cjs', platform: 'node', target: 'node18', external: nativeRuntimePackages, logLevel: 'info' });
+  format: 'cjs', platform: 'node', target: 'node20', external: nativeRuntimePackages, logLevel: 'info' });
 const indexerRequire = createRequire(path.join(workspaceDirectory, 'services', 'code-indexer', 'package.json'));
 
 /**
