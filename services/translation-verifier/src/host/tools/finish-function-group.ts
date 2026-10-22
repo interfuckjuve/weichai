@@ -1,5 +1,5 @@
 import type { ProtocolCheck, VerificationIssue } from "../../types.js";
-import { runFunctionGroupTests } from "./run-function-group-tests.js";
+import { revalidateFunctionGroup } from "../revalidation.js";
 import {
   type FinishFeedback,
   type FunctionGroupTestRun,
@@ -119,38 +119,7 @@ export function createFinishFunctionGroupTool(): HostToolFactory {
     parse: parseFinishFunctionGroupInput,
     isTerminal: output => !("outcome" in output),
     async execute(input) {
-      const result = await runFunctionGroupTests(context);
-      const feedback: string[] = [];
-      if (result.timedOut || result.exitCode === null || (result.executionErrors ?? 0) > 0 || result.tests.executed < 1 ||
-          (result.status === "failure" && result.tests.failed < 1)) {
-        feedback.push("The complete test folder must compile and execute before finish_function_group. Repair compilation/setup errors and rerun, or report_uncertain if blocked.");
-      }
-      if (result.tests.skipped > 0) {
-        feedback.push("The complete test folder must execute without skipped tests before finish_function_group.");
-      }
-      const requested = context.runtime.functionGroup?.functions ?? [];
-      const unverified = requested.filter(({ target }) => !result.functions.some(item =>
-        item.target.path === target.path && item.target.name === target.name &&
-        item.target.signature === target.signature && item.executed &&
-        (result.status === "failure" || item.status === "passed"),
-      ));
-      if (requested.length === 0 || unverified.length > 0) {
-        feedback.push(`The complete test folder must execute every requested target function before finishing. Missing execution evidence: ${unverified.map(item => `${item.target.path}#${item.target.name}${item.target.signature ? ` (${item.target.signature})` : ""}`).join(", ")}. Inspect function coverage and reportPaths, then extend the tests or repair coverage setup.`);
-      }
-      if (input.testExecutionStatus !== result.status) {
-        feedback.push(`finish_function_group.testExecutionStatus does not match the Host result: expected ${result.status}. Investigate the current result before resubmitting.`);
-      }
-      if (input.translationStatus !== result.status) {
-        feedback.push(`finish_function_group.translationStatus does not match the Host result: expected ${result.status}. Debug test-authoring errors or report a real production bug with a concrete issue.`);
-      }
-      if (input.translationStatus === "success") {
-        if (input.protocolChecks?.some(check => check.status === "failed" || check.status === "ambiguous")) {
-          feedback.push("Cannot claim verification success with failed or ambiguous requirement checks. Retain the failing assertion or report_uncertain.");
-        }
-        if (result.tests.failed > 0) {
-          feedback.push("Successful function-group verification requires every test in the dedicated folder to pass. Diagnose the failed tests before claiming success; preserve valid failing requirement assertions.");
-        }
-      }
+      const { observation: result, feedback } = await revalidateFunctionGroup(context, input);
       if (feedback.length > 0) return { outcome: "continue" as const, feedback, functionGroupTest: result };
       return {
         ...input,

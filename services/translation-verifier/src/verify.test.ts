@@ -143,7 +143,10 @@ describe("createVerifier", () => {
     expect(targetList.description).toContain("Python target files");
     expect(task.tools[1]!(context).description).toContain("Python source project");
     expect(task.tools[3]!(context).description).toContain("Python target worktree");
-    expect(task.tools[4]!(context).description).toContain("focused Python target test");
+    const writeTest = task.tools[4]!(context).description;
+    expect(writeTest).toContain("Python test or fixture");
+    expect(writeTest).toContain("dedicated project-relative test folder: tests");
+    expect(writeTest).toContain("not writable");
     expect(task.tools[5]!(context).description).toContain("fixed Host-selected pytest");
     expect(task.tools[6]!(context).description).toContain("Python to Python verification");
     for (const factory of task.tools) {

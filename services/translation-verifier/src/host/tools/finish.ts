@@ -1,5 +1,5 @@
 import type { VerificationIssue, VerificationIssueKind } from "../../types.js";
-import { runTargetTests } from "./run-target-tests.js";
+import { revalidateTargetFunction } from "../revalidation.js";
 import {
   type FinishFeedback,
   type HostTool,
@@ -161,27 +161,7 @@ export function createFinishTool(): HostToolFactory {
     parse: parseFinishInput,
     isTerminal: output => !("outcome" in output),
     async execute(input) {
-      const targetTest = await runTargetTests(context);
-      const feedback: string[] = [];
-      if (targetTest.timedOut || targetTest.exitCode === null || (targetTest.executionErrors ?? 0) > 0 || !targetTest.tests || targetTest.tests.executed < 1 ||
-          (targetTest.status === "failure" && targetTest.tests.failed < 1)) {
-        feedback.push("The complete test folder must compile and execute before finish. Repair compilation/setup errors and rerun, or report_uncertain if blocked.");
-      }
-      if ((targetTest.tests?.skipped ?? 0) > 0) {
-        feedback.push("The complete test folder must execute without skipped tests before finish.");
-      }
-      if (targetTest.coverage?.status !== "available" || !targetTest.coverage.targetFunction.executed) {
-        feedback.push("The complete test folder must execute the requested target function before finish. Inspect the coverage result and reportPaths, then repair the tests or coverage setup.");
-      }
-      if (input.testExecutionStatus !== targetTest.status) {
-        feedback.push(`finish.testExecutionStatus does not match the Host result: expected ${targetTest.status}. Investigate the current result before resubmitting.`);
-      }
-      if (input.translationStatus !== targetTest.status) {
-        feedback.push(`finish.translationStatus does not match the Host result: expected ${targetTest.status}. Debug test-authoring errors or report a real production bug with a concrete issue.`);
-      }
-      if (input.translationStatus === "success" && (targetTest.tests?.failed ?? 0) > 0) {
-        feedback.push("Successful verification requires every test in the dedicated folder to pass. Diagnose the failed tests before claiming success; preserve valid failing requirement assertions.");
-      }
+      const { observation: targetTest, feedback } = await revalidateTargetFunction(context, input);
       if (feedback.length > 0) return { outcome: "continue" as const, feedback, targetTest };
       return {
         testExecutionStatus: targetTest.status,
