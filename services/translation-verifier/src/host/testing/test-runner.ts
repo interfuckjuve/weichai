@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { spawn, execFile } from "node:child_process";
-import { mkdir, readdir, readFile, writeFile, realpath, rm, stat, lstat } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile, rm, stat, lstat } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { promisify } from "node:util";
+import { targetProcessCommand } from "./process-command.js";
 import { parseJacocoReport, parseExecutionErrors, parseSurefireReport, parseCobertura, parseIstanbul, parseJUnit, parseNodeTests, parsePythonCoverage, parseTrx, parseJUnitTestCases, parseNodeTestCases, parseTrxTestCases, jsonReport, type PythonFunction } from "./coverage-reports.js";
 import { MAX_TEST_OUTPUT_CHARS, assertTestPath, relativePath, readProjectFile, resolveSafePath, type FunctionGroupTestRun, type FunctionGroupTestRunner, type ToolContext, type TargetTestResult, type TargetCoverageResult, type TestSummary } from "../tools/common.js";
 import type { TargetFunctionCoverage, VerificationFunction, VerificationReason, VerificationTestCase } from "../../types.js";
@@ -209,8 +211,9 @@ async function runTestsForSubjects(
     context.budget?.assertActive();
     const startedAt = Date.now();
     const signal = context.budget?.signal;
+    const command = targetProcessCommand(executable, args);
     const processResult = await new Promise<{ exitCode: number | null; signal?: string; stdout: string; stderr: string; timedOut: boolean }>((resolve) => {
-      const child = spawn(executable, args, { cwd: context.runtime.targetProjectPath, shell: false, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
+      const child = spawn(command.executable, command.args, { cwd: context.runtime.targetProjectPath, shell: false, windowsHide: true, windowsVerbatimArguments: command.windowsVerbatimArguments, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
       let stdout = "", stderr = "", timedOut = false, settled = false;
       let timer: ReturnType<typeof setTimeout> | undefined;
       let killTimer: ReturnType<typeof setTimeout> | undefined;
@@ -219,6 +222,11 @@ async function runTestsForSubjects(
         return next.length <= MAX_TEST_OUTPUT_CHARS ? next : next.slice(0, MAX_TEST_OUTPUT_CHARS);
       };
       const terminate = () => {
+        if (command.windowsVerbatimArguments && child.pid !== undefined) {
+          const killer = spawn(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe"), ["/pid", String(child.pid), "/t", "/f"], { shell: false, stdio: "ignore", windowsHide: true });
+          killer.once("error", () => child.kill("SIGKILL"));
+          return;
+        }
         child.kill("SIGTERM");
         // Guarantee cancellation even when the test process ignores SIGTERM.
         killTimer ??= setTimeout(() => child.kill("SIGKILL"), 2_000);
@@ -369,7 +377,7 @@ async function configureRunnerCoverage(context: RunnerContext, testPaths: readon
     // determine failure, while compiler/setup errors remain process failures.
     return { ...run, args: ["-Djacoco.append=false", "-Dmaven.test.failure.ignore=true", "-DfailIfNoTests=true", `-Dtest=${classNames.join(",")}`] };
   }
-  if (runner === "jest") return { ...run, args: ["--runTestsByPath", ...testPaths, `--roots=${await realpath(root)}`, "--coverage", ...subjects.map((subject) => `--collectCoverageFrom=${subject.path}`), "--coverageReporters=json", "--json", "--outputFile=tests.json"] };
+  if (runner === "jest") return { ...run, args: ["--runTestsByPath", ...testPaths, `--roots=${realpathSync(root)}`, "--coverage", ...subjects.map((subject) => `--collectCoverageFrom=${subject.path}`), "--coverageReporters=json", "--json", "--outputFile=tests.json"] };
   if (runner === "vitest") return { ...run, args: ["--run", ...testPaths, "--coverage", `--coverage.include=${subjects.map((subject) => subject.path).join(",")}`, "--coverage.reporter=json", "--reporter=json", "--outputFile=tests.json"] };
   if (runner === "pytest") {
     const pythonFunctions: Array<{ path: string; functions: PythonFunction[] }> = [];
@@ -445,7 +453,7 @@ async function collectCoverage(context: RunnerContext, run: CoverageRun, subject
   const testCases: VerificationTestCase[] = [];
   const collectedReportPaths: string[] = [];
   const { testRunner: runner, targetProjectPath: root } = context.runtime;
-  const canonicalRoot = await realpath(root);
+  const canonicalRoot = realpathSync(root);
   const read = async (path: string) => {
     const absolute = resolveSafePath(run.reportRoot, path);
     const identity = await reportIdentity(absolute);

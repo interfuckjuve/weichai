@@ -256,6 +256,39 @@ describe("LangChain run budgets", () => {
 });
 
 describe("LangChain model-visible tool diagnostics", () => {
+  it.each([false, true])("bounds large test inventories while preserving a trailing failure: %s", async failed => {
+    const runner = `${RUNNER_SCRIPT}
+const cases = Array.from({ length: 1000 }, (_, index) => '<testcase classname="BehaviorTest" name="requirement-' + index + '"/>').join('');
+fs.writeFileSync(surefire, '<testsuite name="BehaviorTest" tests="1001" failures="${failed ? 1 : 0}" errors="0" skipped="0">' + cases + '<testcase classname="BehaviorTest" name="last-requirement">${failed ? '<failure message="expected rejection">trace</failure>' : ''}</testcase></testsuite>');
+process.exitCode = ${failed ? 1 : 0};
+`;
+    const fixture = await createFixture(passingTest, runner);
+    const trace: AgentTraceEvent[] = [];
+    const model = new ScriptedChatModel([
+      () => toolCall("run_target_tests", {}, "run-large-suite"),
+      () => finalReport(failed ? report("bug-found", {
+        issue: { kind: "translation", description: "The last requirement rejects the result." },
+        affectedTargets: [{ path: TARGET_PATH, name: "targetFn" }],
+      }) : report("no-bug")),
+    ]);
+
+    const result = await verifier(fixture, model, {
+      limits: { maxContextCharacters: 40_000 }, trace,
+    })(fixture.input, "single-agent", "verify");
+
+    expect(result.status).toBe(failed ? "failure" : "success");
+    const message = model.observations[1]!.find((item): item is ToolMessage => item instanceof ToolMessage)!;
+    const visible = JSON.parse(String(message.content));
+    expect(JSON.stringify(visible).length).toBeLessThan(20_000);
+    expect(visible.tests).toEqual({ executed: 1001, passed: failed ? 1000 : 1001, failed: failed ? 1 : 0, skipped: 0 });
+    expect(visible.omittedTestCaseCount).toBeGreaterThan(980);
+    expect(visible.testCases.length).toBeLessThanOrEqual(16);
+    if (failed) expect(visible.testCases).toContainEqual({ id: "BehaviorTest#last-requirement", status: "failed", message: "expected rejection\ntrace" });
+    expect((message.artifact as { testCases: unknown[] }).testCases).toHaveLength(1001);
+    const completed = trace.find(event => event.event === "tool.completed")!;
+    expect((completed.output as { testCases: unknown[] }).testCases).toHaveLength(1001);
+  });
+
   it("bounds model-visible diagnostics while the trace keeps the complete observation", async () => {
     const fixture = await createFixture(
       passingTest,
@@ -331,11 +364,12 @@ describe("LangChain cancellation and cleanup", () => {
 
     const pending = verifier(fixture, model, {
       signal: controller.signal,
-      onEvent: (event) => {
-        if (event.event === "tool.started") setTimeout(() => controller.abort(reason), 100);
-      },
     })(fixture.input, "single-agent", "verify").catch((error: unknown) => error);
 
+    await vi.waitFor(async () => {
+      await access(join(fixture.root, "runner-started.txt"));
+    }, { timeout: 4_000, interval: 20 });
+    controller.abort(reason);
     const failure = await pending;
     expect(failure).toBe(reason);
     await expect(access(join(fixture.root, "runner-started.txt"))).resolves.toBeUndefined();

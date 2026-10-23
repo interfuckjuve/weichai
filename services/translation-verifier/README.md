@@ -1,5 +1,9 @@
 # Translation Verifier
 
+Windows 全环境加载、安装说明和 experiments 现有资产实测入口见 [Windows 环境说明](WINDOWS-ENVIRONMENT.md)。
+
+真实复杂模块的覆盖率、独立验收差异和当前限制见 [实测结果](REAL-WORKFLOW-RESULTS.md)。
+
 `translation-verifier` checks whether translated target functions preserve the required behavior, or verifies target functions directly against supplied requirements when no reliable source mapping exists. The Agent first runs all existing tests in its dedicated test folder, repairs stale tests where justified by changed source APIs or declared contracts, and then adds meaningful tests for every upstream target function. The Agent ends a call by answering without a tool call, and the Host then reruns the entire folder and validates the Agent's conclusion before returning a normalized result.
 
 ## Host Layout
@@ -235,3 +239,48 @@ Optional settings are `DEEPSEEK_API_BASE`, `DEEPSEEK_MODEL`, `TRANSLATION_VERIFI
 ## Responsibility Boundary
 
 The upstream workflow owns source and target project preparation, including creation of the target Git worktree. The verifier owns only the verification run: strategy selection, Agent prompts, Host-enforced tool binding, target test execution, and result normalization. Tool descriptions and filesystem/test permissions are Host responsibilities.
+
+## Complete Existing Projects
+
+The full-project experiment drivers use the existing `experiments/asset-upgrade-test-materials-20261014` skeletons and public requirements, plus excerpts from all seven reference repositories. They create external detached worktrees, translate modules in dependency order with real model calls, run the real Host verifier, and independently execute the frozen Java 35 / C# 24 acceptance cases after translation. Hidden tests and their feedback never enter model prompts. Java includes executable default interface methods; C# uses a compiled reflection inspector and source declarations to identify executable methods, constructors and properties.
+
+Run from the configured Windows workspace:
+
+```powershell
+. ./services/translation-verifier/environment.ps1 -LiveModel
+$env:TRANSLATION_VERIFIER_ASSETS_ROOT = Join-Path (Get-Location) 'experiments'
+$env:TRANSLATION_VERIFIER_EXPERIMENT_DIR = Join-Path $env:TRANSLATION_VERIFIER_RUNNER_DEPS 'experiments/full-java-new-run'
+node --import tsx services/translation-verifier/e2e/full-project-workflow.ts --prepare-only
+$env:TRANSLATION_VERIFIER_FULL_PROJECT_E2E = '1'
+node --import tsx services/translation-verifier/e2e/full-project-workflow.ts --credential-stdin
+```
+
+Use `full-csharp-workflow.ts` and a different experiment directory for C#. Supply the credential only after the terminal reports that echo is disabled, or use an existing process-only `DEEPSEEK_API_KEY`. Preparation makes no model requests. Both drivers keep a resumable `full-project-report.json` and redacted traces outside the repository. Reuse the same directory to resume unchanged inputs; preserve historical runs when requirements or protocol versions change. Never run two drivers against the same experiment directory concurrently.
+
+Each module gets at most three translation/compile/verification rounds using public feedback. A recoverable `rolling-back` state protects incomplete writes. Once all generation ends, one fresh Host run verifies the final complete test set against all executable targets, requiring zero skips, no execution errors and per-function coverage. `passed=false` / exit 1 preserves incomplete or failed evidence. C# adds an explicit local composition requirement for `Program.Main`; its original library project configuration remains intact and the external inspector invokes `Main` for the smoke check. See `REAL-WORKFLOW-RESULTS.md` for actual results and limitations.
+
+## Extension Backend Capability Probe
+
+`e2e/backend-capabilities.ts` uses the extension's actual `BackendProcess` and built backend bundle. It starts an isolated backend on a dynamic port, verifies real module-generation tool calling, and runs Codex against the existing C# skeleton. A protected console harness checks 16 tenant-scope behaviors inside the backend verification phase and again independently. Success requires the advertised, configured and observed agent to be Codex, a successful compilation, `behavior-verified` acceptance, unchanged protected test files, and preserved source files outside the declared write path. This bounded environment probe does not replace full-project acceptance or the verifier coverage experiments.
+
+Run from a Windows workspace with the extension bundle already built:
+
+```powershell
+npm run workspace:check
+. ./services/translation-verifier/environment.ps1 -LiveModel
+$env:TRANSLATION_VERIFIER_ASSETS_ROOT = Join-Path (Get-Location) 'experiments'
+$env:TRANSLATION_VERIFIER_EXPERIMENT_DIR = Join-Path $env:TRANSLATION_VERIFIER_RUNNER_DEPS ('experiments/backend-behavior-' + [guid]::NewGuid().ToString('N'))
+$env:TRANSLATION_VERIFIER_BACKEND_E2E = '1'
+$env:ADAPTATION_WORKSPACE_AGENT = 'codex'
+$env:ADAPTATION_CODEX_COMMAND = (Get-Command codex).Source
+$env:ADAPTATION_CODEX_MODEL = $env:DEEPSEEK_MODEL
+node --import tsx services/translation-verifier/e2e/backend-capabilities.ts --credential-stdin
+```
+
+Enter the credential only after the terminal reports echo disabled. Reports remain outside the repository. The planning bootstrap on port 8788 can legitimately advertise workspace translation disabled; an actual imported target uses its own authenticated backend. A bootstrap health response alone does not establish translation, model tool calling or behavioral verification capability.
+
+Add `--analyzer-translator` and choose a fresh experiment directory to test both Codex stages. This requires the existing Keycloak index and module model to be ready in the configured database. The production `CodeIntelligenceHost` materializes two existing reference files into a manifest-checked history view. The probe requires an accepted read-only Analyzer plan, a successful workspace-write Translator, unchanged original history files, and the same behavioral acceptance checks. An Analyzer fallback to direct translation does not pass this probe.
+
+Large test-run tool responses show at most 16 individual cases, prioritizing failures and skips and declaring the omitted count. Test totals, target coverage and report paths remain visible; the complete case inventory remains in the Host artifact and trace, and final acceptance uses the complete fresh observation. This bounds test feedback size but does not prevent a model from exhausting its budget through repeated file reads.
+
+The Host also states explicit completion conditions: existing meaningful tests can satisfy the task, an evidenced requirement failure must be preserved and reported, and the final assistant message must contain only the JSON report. This guidance does not automatically accept passing tests, extract a report from surrounding prose, or replace the complete Host rerun.

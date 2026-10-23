@@ -7,7 +7,7 @@ import {
 } from "langchain";
 import { MemorySaver } from "@langchain/langgraph";
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
-import type { BaseMessage } from "@langchain/core/messages";
+import { AIMessage, ToolMessage, type BaseMessage } from "@langchain/core/messages";
 import type { StructuredToolInterface } from "@langchain/core/tools";
 import type { VerificationTestCase } from "../../types.js";
 import {
@@ -169,6 +169,7 @@ async function runLangChainTask<Observation extends ObservationSummary, Result>(
       systemPrompt: withRuntimeInstructions(task.systemPrompt, runtime, acceptance.setup),
       checkpointer: new MemorySaver(),
       middleware: [
+        createInvalidToolCallMiddleware(),
         createRunLimitMiddleware(limits),
         modelCallLimitMiddleware({
           threadLimit: limits.maxTurns,
@@ -330,13 +331,47 @@ function createRunLimitMiddleware(limits: AgentRunLimits) {
         );
       }
       const calls = (last as unknown as { tool_calls?: unknown[] }).tool_calls;
-      const toolCalls = Array.isArray(calls) ? calls.length : 0;
+      const invalidCalls = (last as unknown as { invalid_tool_calls?: unknown[] }).invalid_tool_calls;
+      const toolCalls = (Array.isArray(calls) ? calls.length : 0)
+        + (Array.isArray(invalidCalls) ? invalidCalls.length : 0);
       if (toolCalls > limits.maxToolCallsPerTurn) {
         throw new AgentRunFailure(
           "budget",
           `Agent run budget exhausted: ${toolCalls} tool calls exceed the ${limits.maxToolCallsPerTurn}-call per-turn limit.`,
         );
       }
+    },
+  });
+}
+
+function createInvalidToolCallMiddleware() {
+  return createMiddleware({
+    name: "TranslationVerifierInvalidToolCall",
+    afterModel: {
+      canJumpTo: ["end"],
+      hook: (state: { messages?: BaseMessage[] }) => {
+        const last = state.messages?.at(-1);
+        if (!last || !AIMessage.isInstance(last) || !last.invalid_tool_calls?.length) return;
+        const rawCalls = last.additional_kwargs.tool_calls;
+        const identifiers: unknown[] = Array.isArray(rawCalls)
+          ? rawCalls.map(call => typeof call === "object" && call !== null && "id" in call ? call.id : undefined)
+          : [];
+        if (identifiers.length === 0 || identifiers.some(identifier => typeof identifier !== "string" || !identifier)
+          || new Set(identifiers).size !== identifiers.length) {
+          throw new AgentRunFailure("model", "Agent returned invalid tool calls without unique IDs; no tool calls executed.");
+        }
+        return {
+          messages: [
+            new AIMessage({ ...last, tool_calls: [] }),
+            ...identifiers.map(identifier => new ToolMessage({
+              tool_call_id: identifier as string,
+              status: "error",
+              content: "This entire tool-call batch was not executed because it contains invalid JSON arguments. Repeat the intended calls with valid JSON arguments.",
+            })),
+          ],
+          jumpTo: "end" as const,
+        };
+      },
     },
   });
 }
@@ -392,6 +427,13 @@ function withRuntimeInstructions(
     `- Authorized test roots: ${runtime.testRoots.join(", ")}`,
     ...setup,
     "- After your final report the Host reruns the complete dedicated folder itself and may append feedback; your report is a candidate conclusion, not an accepted result.",
+    "",
+    "Completion policy: Existing meaningful tests can satisfy the task; do not rewrite or rerun unchanged tests after a passing observation solely to repeat the workflow.",
+    "Once you have inspected the requested functions and observed meaningful passing tests with execution evidence for every target, end the current call immediately with a no-bug report, or uncertain if you can name a concrete requirement ambiguity. Do not keep exploring speculative requirements.",
+    "Once a valid requirement-backed assertion reproduces a production defect, preserve that failing test and end immediately with a bug-found report; a passing baseline is not required to report a reproduced defect.",
+    "The final assistant content must start with { and end with }. No introduction, analysis, Markdown fences, or text outside the JSON. Omit optional fields when unused.",
+    'Valid success example: {"verdict":"no-bug","summary":"The inspected functions satisfy the declared requirement and meaningful tests pass."}',
+    'For a reproduced defect use verdict bug-found, issue {"kind":"translation","description":"the concrete defect"}, and affectedTargets containing the exact requested path, name, and signature.',
   ].join("\n");
 }
 

@@ -1,17 +1,18 @@
-import { mkdtemp, mkdir, readFile, readdir, writeFile, rm, utimes } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, writeFile, rm, symlink, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { bindTestRunner, bindFunctionGroupTestRunner } from "./test-runner.js";
 import { MAX_TEST_OUTPUT_CHARS, type ToolRuntimeContext } from "../tools/common.js";
+import { createAgentRunBudget } from "../agent/run-budget.js";
 
 const roots: string[] = [];
 afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })));
 });
 
-async function fixture(script: string, timeoutMs = 5_000) {
-  const root = await mkdtemp(join(tmpdir(), "verifier-runner-"));
+async function fixture(script: string, timeoutMs = 5_000, directory = tmpdir()) {
+  const root = await mkdtemp(join(directory, "verifier-runner-"));
   roots.push(root);
   await writeFile(join(root, "fake-runner.cjs"), script);
   const runtime: ToolRuntimeContext = {
@@ -31,6 +32,89 @@ async function expectNoTemporaryReports(root: string) {
 }
 
 describe("bound test runner", () => {
+  it("returns project-relative report paths when the project root is a directory alias", async () => {
+    const { root, runtime } = await fixture(`const fs = require('node:fs');
+fs.mkdirSync('target/surefire-reports', {recursive: true}); fs.mkdirSync('target/site/jacoco', {recursive: true});
+fs.writeFileSync('target/surefire-reports/TEST-Order.xml', '<testsuite tests="1" failures="0" errors="0" skipped="0"/>');
+fs.writeFileSync('target/site/jacoco/jacoco.xml', '<report><package name=""><class name="Order" sourcefilename="Order.java"><method name="calculatePrice" desc="()I"><counter type="METHOD" missed="0" covered="1"/></method></class></package></report>');`, 5_000, process.env.LOCALAPPDATA ?? tmpdir());
+    const aliasParent = await mkdtemp(join(tmpdir(), "verifier-runner-alias-"));
+    roots.unshift(aliasParent);
+    const alias = join(aliasParent, "project");
+    await symlink(root, alias, process.platform === "win32" ? "junction" : "dir");
+    await mkdir(join(root, "src"));
+    await writeFile(join(root, "src/Order.java"), "public class Order { public int calculatePrice() { return 1; } }");
+    runtime.sourceProjectPath = alias;
+    runtime.targetProjectPath = alias;
+    const result = await bindTestRunner({ runtime }).run("tests/OrderTest.java");
+    expect(result).toMatchObject({ status: "success", coverage: { status: "available" } });
+    expect(result.reportPaths?.slice().sort()).toEqual([
+      "target/site/jacoco/jacoco.xml", "target/surefire-reports/TEST-Order.xml",
+    ]);
+  });
+
+  it.skipIf(process.platform !== "win32")("runs Windows batch commands with literal arguments and coverage evidence", async () => {
+    const { root, runtime } = await fixture(`const fs = require('node:fs');
+fs.mkdirSync('target/surefire-reports', {recursive: true}); fs.mkdirSync('target/site/jacoco', {recursive: true});
+fs.writeFileSync('target/surefire-reports/TEST-Order.xml', '<testsuite tests="1" failures="0" errors="0" skipped="0"/>');
+fs.writeFileSync('target/site/jacoco/jacoco.xml', '<report><package name=""><class name="Order" sourcefilename="Order.java"><method name="calculatePrice" desc="()I"><counter type="METHOD" missed="0" covered="1"/></method></class></package></report>');
+process.stdout.write(JSON.stringify(process.argv.slice(2)));`);
+    await mkdir(join(root, "src"));
+    await writeFile(join(root, "src/Order.java"), "public class Order { public int calculatePrice() { return 1; } }");
+    const directory = join(root, "tools ' & (local) ! %PATH%");
+    await mkdir(directory);
+    const command = join(directory, "fake runner.cmd");
+    await writeFile(command, `@"${process.execPath}" "%~dp0..\\fake-runner.cjs" %*\r\n@exit /b %errorlevel%\r\n`);
+    const args = ["space separated", "single'quote", "semi;colon", "$env:PATH", "ampersand&value", "pipe|value", "less<value", "greater>value", "paren(value)", "caret^value", "%PATH%", "bang!value", 'double"quote', "trailing space ", "", "trailing\\", 'quote"&echo INJECTED>injected&rem "'];
+    runtime.targetTest = { executable: command, args };
+    const result = await bindTestRunner({ runtime }).run("tests/OrderTest.java");
+    expect(result).toMatchObject({ status: "success", exitCode: 0, tests: { executed: 1, passed: 1 },
+      coverage: { status: "available", targetFunction: { executed: true } } });
+    expect(JSON.parse(result.stdout).slice(0, args.length)).toEqual(args);
+  });
+
+  it.skipIf(process.platform !== "win32")("preserves Windows batch failure exit codes and output", async () => {
+    const { root, runtime } = await fixture("process.stderr.write('batch assertion failed'); process.exitCode = 7");
+    const command = join(root, "failed.cmd");
+    await writeFile(command, `@"${process.execPath}" "%~dp0fake-runner.cjs" %*\r\n@exit /b %errorlevel%\r\n`);
+    runtime.targetTest = { executable: command, args: [] };
+    expect(await bindTestRunner({ runtime }).run("tests/OrderTest.java")).toMatchObject({
+      status: "failure", timedOut: false, exitCode: 7, stderr: "batch assertion failed",
+    });
+  });
+
+  it.skipIf(process.platform !== "win32")("times out Windows batch descendants without retaining their output pipes", async () => {
+    const { root, runtime } = await fixture("process.stdout.write('x'.repeat(100000)); setInterval(() => {}, 1000)");
+    const command = join(root, "waiting.cmd");
+    await writeFile(command, `@"${process.execPath}" "%~dp0fake-runner.cjs" %*\r\n@exit /b %errorlevel%\r\n`);
+    runtime.targetTest = { executable: command, args: [], timeoutMs: 500 };
+    const result = await bindTestRunner({ runtime }).run("tests/OrderTest.java");
+    expect(result).toMatchObject({ status: "failure", timedOut: true });
+    expect(result.stdout).toHaveLength(MAX_TEST_OUTPUT_CHARS);
+    expect(result.durationMs).toBeLessThan(4_000);
+  });
+
+  it.skipIf(process.platform !== "win32")("cancels Windows batch descendants when the agent run is aborted", async () => {
+    const { root, runtime } = await fixture("require('node:fs').writeFileSync('ready', 'ready'); setInterval(() => {}, 1000)");
+    const command = join(root, "waiting.cmd");
+    await writeFile(command, `@"${process.execPath}" "%~dp0fake-runner.cjs" %*\r\n@exit /b %errorlevel%\r\n`);
+    runtime.targetTest = { executable: command, args: [], timeoutMs: 10_000 };
+    const controller = new AbortController();
+    const budget = createAgentRunBudget({ maxDurationMs: 10_000 }, Date.now(), controller.signal);
+    try {
+      const run = bindTestRunner({ runtime, budget }).run("tests/OrderTest.java");
+      for (let attempt = 0; ; attempt++) {
+        try { await readFile(join(root, "ready")); break; } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT" || attempt > 100) throw error;
+        }
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      controller.abort(new Error("Requested cancellation"));
+      await expect(run).rejects.toThrow("Requested cancellation");
+    } finally {
+      budget.dispose();
+    }
+  });
+
   it("executes all selected suite files together and returns their combined evidence", async () => {
     const { root, runner } = await fixture(`const fs = require('node:fs');
 fs.mkdirSync('target/surefire-reports', {recursive: true}); fs.mkdirSync('target/site/jacoco', {recursive: true});

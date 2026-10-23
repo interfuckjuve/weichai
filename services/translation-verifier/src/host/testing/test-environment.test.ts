@@ -97,6 +97,19 @@ describe("resolveTestEnvironment", () => {
     await expect(access(join(root, environment.testRoots[0]!))).resolves.toBeUndefined();
   });
 
+  it.skipIf(process.platform !== "win32")("selects Windows build wrappers instead of their Unix siblings", async () => {
+    const root = await project();
+    await writeFile(join(root, "pom.xml"), "<project />");
+    await writeFile(join(root, "mvnw"), "#!/bin/sh\n");
+    await writeFile(join(root, "mvnw.cmd"), "@echo off\r\n");
+    expect((await resolveTestEnvironment({ targetLanguage: "Java", targetProjectPath: root })).targetTest.executable).toBe("./mvnw.cmd");
+    await rm(join(root, "pom.xml"));
+    await writeFile(join(root, "build.gradle"), "plugins {}\n");
+    await writeFile(join(root, "gradlew"), "#!/bin/sh\n");
+    await writeFile(join(root, "gradlew.bat"), "@echo off\r\n");
+    expect((await resolveTestEnvironment({ targetLanguage: "Java", targetProjectPath: root })).targetTest.executable).toBe("./gradlew.bat");
+  });
+
   it("uses pytest testpaths from project configuration", async () => {
     const root = await project();
     await mkdir(join(root, "checks"), { recursive: true });

@@ -89,13 +89,20 @@ describe("shared test execution", () => {
     expect(await resolveTestPaths(context)).toEqual([path]);
   });
 
-  it.each(["symbolic", "hard"] as const)("rejects %s links even for fixture files", async kind => {
+  it.for(["symbolic", "hard"] as const)("rejects %s links even for fixture files", async (kind, test) => {
     const context = await fixture();
     const root = context.runtime.targetProjectPath;
     await file(context, "external.ts", "fixture");
     const linked = join(root, "tests/translation-verifier/helper.ts");
-    if (kind === "symbolic") await symlink(join(root, "external.ts"), linked);
-    else await link(join(root, "external.ts"), linked);
+    try {
+      if (kind === "symbolic") await symlink(join(root, "external.ts"), linked);
+      else await link(join(root, "external.ts"), linked);
+    } catch (error) {
+      if (kind === "symbolic" && process.platform === "win32" && (error as NodeJS.ErrnoException).code === "EPERM") {
+        test.skip("Windows file symlink privilege is unavailable; hard-link rejection still runs.");
+      }
+      throw error;
+    }
     await expect(resolveTestPaths(context)).rejects.toThrow(/Linked|Hard-linked/);
   });
 

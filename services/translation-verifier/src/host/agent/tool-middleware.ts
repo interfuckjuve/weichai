@@ -14,6 +14,7 @@ const MAX_STDOUT_CHARS = 8_000;
 const MAX_STDERR_CHARS = 4_000;
 const MAX_FAILURE_MESSAGE_CHARS = 2_000;
 const MAX_REPORTED_FAILURES = 8;
+const MAX_REPORTED_TEST_CASES = 16;
 
 /**
  * Host tools that touch the target working directory run one at a time, so a
@@ -216,8 +217,21 @@ function boundedObservation(output: Record<string, unknown>): Record<string, unk
     const half = Math.floor(limit / 2);
     return `${text.slice(0, half)}\n[Host retained ${text.length - limit} additional diagnostic characters]\n${text.slice(-half)}`;
   };
+  const testCases = Array.isArray(output.testCases) ? output.testCases : undefined;
+  const selectedCases = testCases && [
+    ...testCases.filter(test => test?.status === "failed"),
+    ...testCases.filter(test => test?.status === "skipped"),
+    ...testCases.filter(test => test?.status !== "failed" && test?.status !== "skipped"),
+  ].slice(0, MAX_REPORTED_TEST_CASES);
   return {
     ...output,
+    ...(selectedCases ? {
+      testCases: selectedCases.map(test => typeof test === "object" && test !== null
+        ? { ...test, id: bounded(test.id, MAX_FAILURE_MESSAGE_CHARS),
+          ...(typeof test.message === "string" ? { message: bounded(test.message, MAX_FAILURE_MESSAGE_CHARS) } : {}) }
+        : test),
+      ...(testCases!.length > selectedCases.length ? { omittedTestCaseCount: testCases!.length - selectedCases.length } : {}),
+    } : {}),
     ...(typeof output.stdout === "string" ? { stdout: bounded(output.stdout, MAX_STDOUT_CHARS) } : {}),
     ...(typeof output.stderr === "string" ? { stderr: bounded(output.stderr, MAX_STDERR_CHARS) } : {}),
     ...(Array.isArray(output.failures) ? {

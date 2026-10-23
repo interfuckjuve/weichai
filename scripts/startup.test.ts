@@ -35,7 +35,9 @@ beforeEach(() => {
   vi.stubEnv('FOREXPLORE_RERANK_PORT', '4022');
   vi.stubEnv('FOREXPLORE_EMBEDDING_MODEL', 'embedding-test');
   vi.stubEnv('FOREXPLORE_EMBEDDING_REVISION', 'revision');
-  vi.stubEnv('FOREXPLORE_RERANK_MODEL', 'rerank-test');
+  vi.stubEnv('FOREXPLORE_EMBEDDING_DEVICE', undefined);
+  vi.stubEnv('FOREXPLORE_EMBEDDING_DTYPE', undefined);
+  vi.stubEnv('FOREXPLORE_RERANK_MODEL', undefined);
   process.argv = ['node', 'script'];
   mocks.connect.mockImplementation(() => {
     const socket = Object.assign(new EventEmitter(), { destroy: vi.fn(), setTimeout: vi.fn() });
@@ -48,7 +50,8 @@ beforeEach(() => {
     queueMicrotask(() => {
       const response = Object.assign(new EventEmitter(), { statusCode: 200, setEncoding: vi.fn() });
       callback(response);
-      response.emit('data', JSON.stringify({ ready: true, model: new URL(url).port === '4021' ? 'embedding-test@revision' : 'rerank-test' }));
+      response.emit('data', JSON.stringify({ ready: true, model: new URL(url).port === '4021'
+        ? 'embedding-test@revision' : 'Xenova/bge-reranker-base@280bcc27a84e0b898c251e06fddb25171bd9b101' }));
       response.emit('end');
     });
     return request;
@@ -87,6 +90,71 @@ it('honors skip-seek-db while waiting for an externally managed local database',
   expect(mocks.spawnSync).not.toHaveBeenCalled();
 });
 
+it('starts the reranker that implements the module search HTTP contract', async () => {
+  let rerankProbes = 0;
+  mocks.connect.mockImplementation(({ port }) => {
+    const socket = Object.assign(new EventEmitter(), { destroy: vi.fn(), setTimeout: vi.fn() });
+    if (port === 4022) rerankProbes++;
+    const missing = port === 4022 && rerankProbes === 2;
+    queueMicrotask(() => socket.emit(missing ? 'error' : 'connect', missing ? new Error('not listening') : undefined));
+    return socket;
+  });
+  mocks.spawn.mockImplementation(() => Object.assign(new EventEmitter(), {
+    exitCode: null, signalCode: null, unref: vi.fn(),
+  }));
+  await import('./start-recast-services.mjs');
+  expect(mocks.spawn).toHaveBeenCalledWith(process.execPath,
+    [expect.stringMatching(/serve-local-reranker\.mjs$/)], expect.objectContaining({ windowsHide: true }));
+});
+
+it.each([undefined, '', 'Xenova/bge-reranker-base', 'Xenova/bge-reranker-base@280bcc27a84e0b898c251e06fddb25171bd9b101'])(
+  'reuses the pinned production reranker for configured model %s', async configuredModel => {
+    vi.stubEnv('FOREXPLORE_RERANK_MODEL', configuredModel);
+    const previousExitCode = process.exitCode;
+    try {
+      await import('./start-recast-services.mjs');
+      expect(process.exitCode).toBe(previousExitCode);
+      expect(mocks.spawn).not.toHaveBeenCalled();
+    } finally { process.exitCode = previousExitCode; }
+  });
+
+it('reuses an externally managed custom reranker with its configured identity', async () => {
+  vi.stubEnv('FOREXPLORE_RERANK_MODEL', 'custom-reranker@revision');
+  mocks.get.mockImplementation((url, _options, callback) => {
+    const request = new EventEmitter();
+    queueMicrotask(() => {
+      const response = Object.assign(new EventEmitter(), { statusCode: 200, setEncoding: vi.fn() });
+      callback(response);
+      response.emit('data', JSON.stringify({ ready: true, model: new URL(url).port === '4021'
+        ? 'embedding-test@revision' : 'custom-reranker@revision' }));
+      response.emit('end');
+    });
+    return request;
+  });
+  const previousExitCode = process.exitCode;
+  try {
+    await import('./start-recast-services.mjs');
+    expect(process.exitCode).toBe(previousExitCode);
+    expect(mocks.spawn).not.toHaveBeenCalled();
+  } finally { process.exitCode = previousExitCode; }
+});
+
+it('fails immediately when a custom reranker is not externally running', async () => {
+  vi.stubEnv('FOREXPLORE_RERANK_MODEL', 'custom-reranker@revision');
+  mocks.connect.mockImplementation(({ port }) => {
+    const socket = Object.assign(new EventEmitter(), { destroy: vi.fn(), setTimeout: vi.fn() });
+    queueMicrotask(() => socket.emit(port === 4022 ? 'error' : 'connect', port === 4022 ? new Error('not listening') : undefined));
+    return socket;
+  });
+  const previousExitCode = process.exitCode;
+  try {
+    await import('./start-recast-services.mjs');
+    expect(process.exitCode).toBe(1);
+    expect(mocks.spawn).not.toHaveBeenCalled();
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Start a compatible custom service'));
+  } finally { process.exitCode = previousExitCode; }
+});
+
 it('rejects an occupied CPU service when CUDA was explicitly requested', async () => {
   vi.stubEnv('FOREXPLORE_EMBEDDING_DEVICE', 'cuda');
   const previousExitCode = process.exitCode;
@@ -105,6 +173,30 @@ it('forwards skip-seek-db through the launcher npm separator', async () => {
   expect(mocks.spawnSync).toHaveBeenCalledWith(expect.stringMatching(/^npm/),
     ['run', 'services:up', '--', '--skip-seek-db'], expect.anything());
   expect(mocks.spawnSync.mock.calls.some(([command]) => command === 'docker')).toBe(false);
+});
+
+it.each([
+  [undefined, 'Xenova/bge-reranker-base@280bcc27a84e0b898c251e06fddb25171bd9b101'],
+  ['Xenova/bge-reranker-base', 'Xenova/bge-reranker-base@280bcc27a84e0b898c251e06fddb25171bd9b101'],
+  ['custom-reranker@revision', 'custom-reranker@revision'],
+])('configures extension reranker model %s as %s', async (configuredModel, expectedModel) => {
+  vi.stubEnv('FOREXPLORE_RERANK_MODEL', configuredModel);
+  vi.stubEnv('CODE_INTELLIGENCE_RERANK_URL', '');
+  vi.stubEnv('CODE_INTELLIGENCE_RERANK_MODEL', '');
+  await import('./run-vscode-extension.mjs');
+  await vi.waitFor(() => expect(mocks.spawn).toHaveBeenCalled());
+  expect(process.env.CODE_INTELLIGENCE_RERANK_URL).toBe('http://127.0.0.1:4022/v1/rerank');
+  expect(process.env.CODE_INTELLIGENCE_RERANK_MODEL).toBe(expectedModel);
+});
+
+it('preserves explicit extension reranker endpoint and identity', async () => {
+  vi.stubEnv('FOREXPLORE_RERANK_MODEL', 'launcher-reranker@revision');
+  vi.stubEnv('CODE_INTELLIGENCE_RERANK_URL', 'http://127.0.0.1:4039/v1/rerank');
+  vi.stubEnv('CODE_INTELLIGENCE_RERANK_MODEL', 'external-reranker@revision');
+  await import('./run-vscode-extension.mjs');
+  await vi.waitFor(() => expect(mocks.spawn).toHaveBeenCalled());
+  expect(process.env.CODE_INTELLIGENCE_RERANK_URL).toBe('http://127.0.0.1:4039/v1/rerank');
+  expect(process.env.CODE_INTELLIGENCE_RERANK_MODEL).toBe('external-reranker@revision');
 });
 
 it('does not launch local Docker for a configured remote database', async () => {

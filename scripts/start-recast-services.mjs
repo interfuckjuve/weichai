@@ -37,6 +37,10 @@ const runtimePackage = '@huggingface/transformers';
 // `env.allowRemoteModels` and `dtype: 'q8'`.
 const runtimeVersion = '3.8.1';
 const tokenizerVersion = '0.23.2';
+const defaultRerankModel = 'Xenova/bge-reranker-base@280bcc27a84e0b898c251e06fddb25171bd9b101';
+const configuredRerankModel = process.env.FOREXPLORE_RERANK_MODEL?.trim();
+const rerankModel = !configuredRerankModel || configuredRerankModel === 'Xenova/bge-reranker-base'
+  ? defaultRerankModel : configuredRerankModel;
 const defaultModelHost = 'https://hf-mirror.com';
 const embeddingPort = Number(process.env.FOREXPLORE_EMBEDDING_PORT ?? 4021);
 const rerankPort = Number(process.env.FOREXPLORE_RERANK_PORT ?? 4022);
@@ -178,7 +182,7 @@ async function serviceReady(label, port) {
       });
       const model = label === 'embedding'
         ? `${process.env.FOREXPLORE_EMBEDDING_MODEL ?? 'Xenova/multilingual-e5-small'}@${process.env.FOREXPLORE_EMBEDDING_REVISION ?? '761b726dd34fb83930e26aab4e9ac3899aa1fa78'}`
-        : process.env.FOREXPLORE_RERANK_MODEL ?? 'Xenova/bge-reranker-base';
+        : rerankModel;
       if (health.model !== model || (label === 'embedding' && health.ready !== true)) {
         throw new Error(`port ${port} is not serving the configured ${label} model ${model}`);
       }
@@ -268,8 +272,14 @@ const modelHost = modelHostEnvironment();
 const embedding = await step('embedding', embeddingPort, () => runtimeReady && launch('embedding', path.join('scripts', 'serve-local-embeddings.mjs'),
   { FOREXPLORE_EMBEDDING_TOOLS: tools, FOREXPLORE_MODEL_CACHE: cache, FOREXPLORE_EMBEDDING_PORT: String(embeddingPort), ...modelHost }));
 
-const rerank = await step('rerank', rerankPort, () => runtimeReady && launch('rerank', path.join('scripts', 'serve-local-rerank.mjs'),
-  { FOREXPLORE_EMBEDDING_TOOLS: tools, FOREXPLORE_MODEL_CACHE: cache, FOREXPLORE_RERANK_PORT: String(rerankPort), ...modelHost }));
+const rerank = await step('rerank', rerankPort, () => {
+  if (rerankModel !== defaultRerankModel) {
+    console.error(`The managed reranker serves only ${defaultRerankModel}. Start a compatible custom service for ${rerankModel} on 127.0.0.1:${rerankPort} with /health and /v1/rerank, or unset FOREXPLORE_RERANK_MODEL to use the managed model.`);
+    return false;
+  }
+  return runtimeReady && launch('rerank', path.join('scripts', 'serve-local-reranker.mjs'),
+    { FOREXPLORE_EMBEDDING_TOOLS: tools, FOREXPLORE_MODEL_CACHE: cache, FOREXPLORE_RERANK_PORT: String(rerankPort), ...modelHost });
+});
 
 console.log('\nservice    port   status');
 for (const [label, port, status] of results) console.log(`${label.padEnd(10)} ${String(port).padEnd(6)} ${status}`);

@@ -219,6 +219,20 @@ describe("C# Cobertura identities", () => {
     expect(() => parseCobertura(report(state(37, [5, 6])), { ...generic, signature: "App.Service.RunAsync(Other.Box<string> value, string separator)" }, undefined, genericSource)).toThrow("0 matches");
   });
 
+  it("attributes async generic methods inside generic declaring types", () => {
+    const genericSource = [
+      "namespace App; public class Service<T> {",
+      " public async Task<(U Value, bool Ok)> RunAsync<U>(U value) {",
+      "  await Task.Yield();",
+      "  return value;",
+      " }",
+      "}",
+    ].join("\n");
+    const target = { ...subject, signature: "App.Service`1.RunAsync" };
+    expect(parseCobertura(report(state(1, [3, 4], 1, "App.Service`1")), target, undefined, genericSource).executed).toBe(true);
+    expect(parseCobertura(report(state(1, [3, 4], 0, "App.Service`1")), target, undefined, genericSource).executed).toBe(false);
+  });
+
   it("uses full declaring types and keeps duplicate short type names ambiguous", () => {
     const xml = report(cls("First.Service", method("Evaluate", "()", [2])) + cls("Second.Service", method("Evaluate", "()", [8], 0)));
     const target = { path: "Service.cs", name: "Evaluate", signature: "Second.Service.Evaluate" };
@@ -262,6 +276,13 @@ function report(methods = method()): string {
 }
 
 describe("JaCoCo and Surefire reports", () => {
+  it("matches real XML-escaped constructor names without enabling entity expansion", () => {
+    const constructor = (desc: string, covered: number) => `<method name="&lt;init&gt;" desc="${desc}"><counter type="METHOD" missed="${1 - covered}" covered="${covered}"/><counter type="LINE" missed="${1 - covered}" covered="${covered}"/></method>`;
+    const xml = report(constructor("(Ljava/lang/String;)V", 1) + constructor("(I)V", 0));
+    expect(parseJacocoReport(xml, { path: "Order.java", name: "<init>", signature: "(Ljava/lang/String;)V" }, source)).toMatchObject({ executed: true, lineCoverage: 100 });
+    expect(parseJacocoReport(xml, { path: "Order.java", name: "<init>", signature: "(I)V" }, source)).toMatchObject({ executed: false, lineCoverage: 0 });
+    expect(() => parseJacocoReport(xml, { path: "Order.java", name: "<init>" }, source)).toThrow("2 matches");
+  });
   it("extracts method counters, not the class-wide counters", () => {
     expect(parseJacocoReport(report(), subject, source)).toEqual({
       name: "calculatePrice", executed: true, lineCoverage: 75, branchCoverage: 75,

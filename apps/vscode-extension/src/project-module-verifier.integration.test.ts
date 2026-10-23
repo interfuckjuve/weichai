@@ -100,7 +100,11 @@ async function createMavenShim() {
   const directory = await mkdtemp(path.join(tmpdir(), 'recast-verifier-bin-'));
   shimDirectory = directory;
   const runner = path.join(bundleDirectory, 'fake-runner.cjs');
-  await writeFile(path.join(directory, 'mvn'), `#!${process.execPath}\nrequire(${JSON.stringify(runner)});\nif (process.exitCode) process.exit(process.exitCode);\n`, { mode: 0o755 });
+  if (process.platform === 'win32') {
+    await writeFile(path.join(directory, 'mvn.cmd'), `@echo off\r\n"${process.execPath.replace(/%/g, '%%')}" "${runner.replace(/%/g, '%%')}" %*\r\nexit /b %errorlevel%\r\n`);
+  } else {
+    await writeFile(path.join(directory, 'mvn'), `#!${process.execPath}\nrequire(${JSON.stringify(runner)});\nif (process.exitCode) process.exit(process.exitCode);\n`, { mode: 0o755 });
+  }
   await writeFile(runner, RUNNER);
   return directory;
 }

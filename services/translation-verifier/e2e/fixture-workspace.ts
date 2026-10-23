@@ -48,6 +48,7 @@ export async function createFixtureWorkspace(): Promise<FixtureWorkspace> {
   try {
     await cp(TARGET_AFTER_ROOT, repositoryRoot, { recursive: true });
     await runGit(repositoryRoot, ["init", "--quiet"]);
+    await runGit(repositoryRoot, ["config", "core.autocrlf", "false"]);
     await runGit(repositoryRoot, [
       "config",
       "user.email",
@@ -150,9 +151,9 @@ async function verifyTranslationPatch(
   const beforePath = resolveProjectPath(workspace.targetBeforeRoot, patch.path);
   const afterPath = resolveProjectPath(workspace.targetAfterRoot, patch.path);
   const worktreePath = resolveProjectPath(workspace.targetRoot, patch.path);
-  const before = await readFile(beforePath, "utf8");
-  const after = await readFile(afterPath, "utf8");
-  const staged = await readFile(worktreePath, "utf8");
+  const before = (await readFile(beforePath, "utf8")).replaceAll("\r\n", "\n");
+  const after = (await readFile(afterPath, "utf8")).replaceAll("\r\n", "\n");
+  const staged = (await readFile(worktreePath, "utf8")).replaceAll("\r\n", "\n");
 
   const actualHash = createHash("sha256").update(before).digest("hex");
   if (patch.status !== "modified" || patch.expectedOriginalSha256 !== actualHash) {

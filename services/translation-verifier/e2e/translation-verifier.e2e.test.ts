@@ -140,6 +140,35 @@ function groupInput(input: VerificationInput): FunctionGroupVerificationInput {
 }
 
 describe("translation verifier E2E fixture through the LangChain Host", () => {
+  it("reports an executed requirement assertion failure as a translation defect", async () => {
+    const workspace = await createFixtureWorkspace();
+    workspaces.push(workspace);
+    const input = await materializeFixtureInput(workspace);
+    const { writeFile } = await import("node:fs/promises");
+    const target = join(workspace.targetRoot, TARGET_FUNCTION_PATH);
+    const production = await readFile(target, "utf8");
+    expect(production).toContain("return (int) Streams.copy(newInputStream(), output, false);");
+    await writeFile(target, production.replace(
+      "return (int) Streams.copy(newInputStream(), output, false);",
+      "Streams.copy(newInputStream(), output, false); return 0;",
+    ));
+    const model = new ScriptedChatModel([
+      () => toolCall("write_target_test", { path: GENERATED_TEST_PATH, content: GENERATED_TEST }, "write-defect"),
+      () => toolCall("run_target_tests", {}, "run-defect"),
+      () => finalReport("bug-found", {
+        issue: { kind: "translation", description: "readBodyData consumes seven body bytes but returns zero, violating the byte-count requirement." },
+        affectedTargets: [input.subject.targetFunction],
+      }),
+    ]);
+    const result = await createVerifier(createLangChainAgentHost({ model, limits: { maxDurationMs: 180_000 } }))(
+      input, "single-agent", "verify",
+    );
+    expect(result).toMatchObject({ status: "failure", issue: { kind: "translation" }, targetFunction: { executed: true } });
+    expect(JSON.parse(String(lastToolMessage(model.observations[2]!)!.content))).toMatchObject({
+      tests: { failed: 2, skipped: 0 }, executionErrors: 0,
+    });
+  }, 180_000);
+
   it("rejects passing tests that never execute the target function", async () => {
     const workspace = await createFixtureWorkspace();
     workspaces.push(workspace);

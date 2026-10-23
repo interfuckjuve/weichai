@@ -448,8 +448,8 @@ async function existingDirectory(path: string, label: string): Promise<string> {
 }
 
 async function wrapperOrCommand(root: string, wrapper: string): Promise<string> {
-  const wrapperPath = join(root, wrapper);
-  if (await fileExists(wrapperPath)) return `./${wrapper}`;
+  const filename = process.platform === "win32" ? `${wrapper}.${wrapper === "mvnw" ? "cmd" : "bat"}` : wrapper;
+  if (await fileExists(join(root, filename))) return `./${filename}`;
   return wrapper === "mvnw" ? "mvn" : "gradle";
 }
 

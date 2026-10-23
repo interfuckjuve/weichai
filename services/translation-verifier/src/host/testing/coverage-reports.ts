@@ -288,7 +288,7 @@ type CsharpMethodRange = { owner: string; parameters: string; start: number; end
 // This is a conservative declaration locator, not a C# compiler. It only
 // associates member bodies whose delimiters and parameter identities are known.
 // Unsupported syntax and remapped line numbers leave coverage unavailable.
-function csharpMethodRanges(source: string, name: string): CsharpMethodRange[] | undefined {
+export function csharpMethodRanges(source: string, name: string, memberKind: "method" | "property" = "method"): CsharpMethodRange[] | undefined {
   const masked = maskCsharpSource(source);
   if (masked === undefined || /^\s*#\s*line\b/m.test(masked)) return undefined;
   const pairs = new Map<number, number>(), braces: { open: number; close: number }[] = [], stack: number[] = [];
@@ -311,7 +311,8 @@ function csharpMethodRanges(source: string, name: string): CsharpMethodRange[] |
     for (; index < masked.length && !"{};=".includes(masked[index]!); index++) {
       if (pairs.has(index) && masked[index] !== "{") index = pairs.get(index)!;
     }
-    const scopeName = match[2]!.replace(/\s|@/g, "");
+    const genericParameters = match[1] !== "namespace" ? masked.slice(match.index + match[0].length).match(/^\s*<([^<>]+)>/) : undefined;
+    const scopeName = match[2]!.replace(/\s|@/g, "") + (genericParameters ? `\`${genericParameters[1]!.split(",").length}` : "");
     if (masked[index] === "{" && pairs.has(index)) scopes.push({ open: index, close: pairs.get(index)!, name: scopeName, type: match[1] !== "namespace" });
     else if (masked[index] === ";" && match[1] === "namespace") {
       if (fileNamespace) return undefined;
@@ -322,7 +323,8 @@ function csharpMethodRanges(source: string, name: string): CsharpMethodRange[] |
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const ranges: CsharpMethodRange[] = [];
   const lineAt = (offset: number) => source.slice(0, offset).split("\n").length;
-  for (const match of masked.matchAll(new RegExp(`\\b@?${escaped}\\s*\\(`, "g"))) {
+  const pattern = memberKind === "method" ? `\\b@?${escaped}(?:\\s*<[^;{}()<>]+>)?\\s*\\(` : `\\b@?${escaped}\\s*(?==>|\\{)`;
+  for (const match of masked.matchAll(new RegExp(pattern, "g"))) {
     const containing = scopes.filter(scope => scope.open < match.index && scope.close > match.index);
     const parent = containing.at(-1);
     if (!parent?.type || braces.some(brace => brace.open > parent.open && brace.open < match.index && brace.close > match.index)) continue;
@@ -330,15 +332,28 @@ function csharpMethodRanges(source: string, name: string): CsharpMethodRange[] |
     while (boundary > parent.open && !";{}".includes(masked[boundary]!)) boundary--;
     const prefix = masked.slice(boundary + 1, match.index).replace(/\[[^\]]*\]/g, " ").trim();
     // A member invocation in a field initializer is not a declaration.
-    if (!prefix || /[=(){};]/.test(prefix)) continue;
-    const open = match.index + match[0].lastIndexOf("("), close = pairs.get(open);
-    if (close === undefined) return undefined;
-    const params = splitCsharpTypes(source.slice(open + 1, close));
-    if (!params) continue;
-    const types = params.map(csharpParameterType);
-    if (types.some(type => type === undefined)) continue;
-    let body = close + 1;
+    if (!prefix || /[={};]/.test(prefix)) continue;
+    let body = match.index + match[0].length;
+    const types: string[] = [];
+    if (memberKind === "method") {
+      const open = match.index + match[0].lastIndexOf("("), close = pairs.get(open);
+      if (close === undefined) return undefined;
+      const params = splitCsharpTypes(source.slice(open + 1, close));
+      if (!params) continue;
+      const parsed = params.map(csharpParameterType);
+      if (parsed.some(type => type === undefined)) continue;
+      types.push(...parsed as string[]);
+      body = close + 1;
+    }
     while (/\s/.test(masked[body] ?? "") && body < masked.length) body++;
+    if (masked[body] === ":") {
+      const initializer = masked.slice(body).match(/^:\s*(?:base|this)\s*\(/);
+      if (!initializer) continue;
+      const initializerOpen = body + initializer[0].lastIndexOf("("), initializerClose = pairs.get(initializerOpen);
+      if (initializerClose === undefined) return undefined;
+      body = initializerClose + 1;
+      while (/\s/.test(masked[body] ?? "") && body < masked.length) body++;
+    }
     if (masked.slice(body, body + 5) === "where") {
       while (body < parent.close && masked[body] !== "{" && masked.slice(body, body + 2) !== "=>" && masked[body] !== ";") body++;
     }
@@ -351,6 +366,7 @@ function csharpMethodRanges(source: string, name: string): CsharpMethodRange[] |
       }
     }
     if (end === undefined) continue;
+    if (memberKind === "property" && masked[body] === "{" && !/\b(?:get|set|init)\s*(?:=>|\{)/.test(masked.slice(body, end))) continue;
     const owner = [fileNamespace, ...containing.map(scope => scope.name)].filter(Boolean).join(".");
     const start = boundary + 1 + masked.slice(boundary + 1, match.index).search(/\S/);
     ranges.push({ owner, parameters: `(${types.join(",")})`, start: lineAt(start), end: lineAt(end),
@@ -444,7 +460,7 @@ function functionDeclaringType(subject: VerificationFunction): string | undefine
   return signature.slice(0, separator).trim().split(/[.:]/).filter(Boolean).at(-1);
 }
 
-function matchesCsharpSignature(actual: string, requested: string, name: string): boolean {
+export function matchesCsharpSignature(actual: string, requested: string, name: string): boolean {
   if (actual === requested) return true;
   if (!requested.includes("(")) return true;
   const start = requested.indexOf(`${name}(`);
@@ -544,7 +560,8 @@ export function parseJacocoReport(
       const owner = functionDeclaringType(subject);
       if (owner && String(cls.name).split(/[/$]/).at(-1) !== owner) continue;
       for (const method of cls.method ?? []) {
-        if (method.name === subject.name) candidates.push(method);
+        const name = method.name === "&lt;init&gt;" ? "<init>" : method.name === "&lt;clinit&gt;" ? "<clinit>" : method.name;
+        if (name === subject.name) candidates.push(method);
       }
     }
   }

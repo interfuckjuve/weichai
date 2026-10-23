@@ -240,6 +240,10 @@ function configureEnvironment(options) {
   setDefault('CODE_INTELLIGENCE_EMBEDDING_QUERY_PREFIX', 'query: ');
   setDefault('CODE_INTELLIGENCE_EMBEDDING_DOCUMENT_PREFIX', 'passage: ');
   setDefault('CODE_INTELLIGENCE_SEEKDB_VECTOR_DIMENSION', '384');
+  setDefault('CODE_INTELLIGENCE_RERANK_URL', `http://127.0.0.1:${process.env.FOREXPLORE_RERANK_PORT || '4022'}/v1/rerank`);
+  const rerankModel = process.env.FOREXPLORE_RERANK_MODEL?.trim();
+  setDefault('CODE_INTELLIGENCE_RERANK_MODEL', !rerankModel || rerankModel === 'Xenova/bge-reranker-base'
+    ? 'Xenova/bge-reranker-base@280bcc27a84e0b898c251e06fddb25171bd9b101' : rerankModel);
   // Device and precision change the produced vectors, so the workbench must declare
   // the same embedding variant as the offline ingestion: the store scopes embedding
   // reuse by model identity, and a mismatch would mix providers inside one index.
